@@ -1,0 +1,12 @@
+{
+  "pluginId": "com.norishell.api-demo",
+  "name": "NoriShell API Demo",
+  "publisher": "NoriShell example package (self-reported)",
+  "version": "1.0.1",
+  "protocolMajor": 1,
+  "protocolMinor": 13,
+  "platform": "desktop",
+  "architectures": ["universal"],
+  "capabilities": ["uiPanel", "clipboardWrite"],
+  "minimumAppVersion": "0.1.0"
+}

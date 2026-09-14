@@ -1,0 +1,19 @@
+[package]
+name = "norishell-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal Rust guest SDK for NoriShell protocol 13 plugins"
+
+[dependencies]
+norishell-core-api = { path = "../core-api" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+norishell-plugin-platform = { path = "../plugin-platform" }
+semver.workspace = true
+sha2.workspace = true
+zip.workspace = true

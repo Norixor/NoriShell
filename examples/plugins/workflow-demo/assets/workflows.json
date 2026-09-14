@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "workflows": [{
+    "id": "inspect-delay-inspect",
+    "label": {"en": "Inspect, wait, inspect", "zh-CN": "检查、等待、再检查"},
+    "steps": [
+      {"id": "inspect-first", "label": {"en": "Inspect API", "zh-CN": "检查 API"}},
+      {"id": "start-timer", "label": {"en": "Start timer", "zh-CN": "启动定时器"}},
+      {"id": "inspect-last", "label": {"en": "Inspect again", "zh-CN": "再次检查"}}
+    ]
+  }]
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "secure-ssh-sync-capability",
+  "description": "Allows only the Core-owned SSH sync data-exchange decision window.",
+  "windows": ["secure-ssh-sync-*"],
+  "permissions": [
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-start-dragging",
+    "secure-ssh-sync-commands"
+  ]
+}

@@ -1,0 +1,233 @@
+[
+  {
+    "file": "cron-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 1017300,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 36.82,
+    "sha256": "081aa56800126c434b32f39cac11e08798bd3ac94c8b9f40fe82ec9551d27b3b"
+  },
+  {
+    "file": "disk-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 934420,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 36.97,
+    "sha256": "953585dd93636f6eb938a48835e614ff45b7556c39487ad8e18a8318a3fd5214"
+  },
+  {
+    "file": "docker-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 931970,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 33.52,
+    "sha256": "de91a84dce6a010ca5adbb7d64773e84b9103c8ad5784fd93cf1d3b42a0e5128"
+  },
+  {
+    "file": "logs-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 882466,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 39.04,
+    "sha256": "9b53929d3fcd83e40b1df5c8f9372ca2504fcceeb77f544325dba3b75c3249b5"
+  },
+  {
+    "file": "network-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 955991,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 37.93,
+    "sha256": "f3f01dd6276e18a136764115b2b84509693247fc971e98601973bb2fd0de86c9"
+  },
+  {
+    "file": "nginx-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 941050,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 36.42,
+    "sha256": "a9d22884d5907049010ab8d142adb1442b65f1bbf4dfa825db7f419d113bc3d7"
+  },
+  {
+    "file": "norixor-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 871845,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 40.01,
+    "sha256": "b1c20c8cb73b048db789739bfd24c9af59edbc773e5444c9b63db400a22e9b6b"
+  },
+  {
+    "file": "processes-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 990636,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 32.47,
+    "sha256": "66d10300cbdd140d55a5b763103fc4ee9a2ff07e182254d5cfb8062697dd6758"
+  },
+  {
+    "file": "systemd-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 921563,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 37.5,
+    "sha256": "6e94fac31df8cda21de8fa5c60abcd3a1b3a8ee86fc97034f69824efa9a9539b"
+  },
+  {
+    "file": "tasks-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 898225,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 37.87,
+    "sha256": "f5035ce9c7e95d5e059aefe6423b0566ff18177da7443a845e4edfd9ab0f8ed9"
+  },
+  {
+    "file": "tunnels-icon.png",
+    "size": [
+      1254,
+      1254
+    ],
+    "mode": "RGBA",
+    "bytes": 959785,
+    "alphaExtrema": [
+      0,
+      255
+    ],
+    "cornerAlpha": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "transparentPercent": 36.04,
+    "sha256": "656d57309f43d5cc9ef6e4e7aea33e2dcfbefdb34ae5b53d0c223950ff23a69c"
+  }
+]

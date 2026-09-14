@@ -1,0 +1,68 @@
+{
+  "name": "norishell",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "pnpm check:core-api && vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "generate:core-api": "cargo run --quiet -p norishell-core-api --bin export-core-api -- src/core-api/generated/core-api.ts",
+    "check:core-api": "cargo run --quiet -p norishell-core-api --bin export-core-api -- --check src/core-api/generated/core-api.ts",
+    "typecheck": "vue-tsc -b",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "pnpm check:core-api && pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/language-data": "^6.5.2",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.9",
+    "@lezer/highlight": "^1.2.3",
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-clipboard-manager": "2.3.3",
+    "@tauri-apps/plugin-dialog": "2.7.2",
+    "@tauri-apps/plugin-opener": "2.5.3",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/xterm": "^6.0.0",
+    "codemirror": "^6.0.2",
+    "lucide-vue-next": "0.544.0",
+    "pinia": "4.0.3",
+    "vue": "3.5.41",
+    "vue-i18n": "11.4.10",
+    "vue-router": "5.2.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@tauri-apps/cli": "2.11.4",
+    "@types/node": "26.4.0",
+    "@vitejs/plugin-vue": "6.0.8",
+    "@vitest/coverage-v8": "4.1.11",
+    "@vue/test-utils": "2.4.11",
+    "esbuild": "0.28.2",
+    "eslint": "10.9.1",
+    "eslint-plugin-vue": "10.10.0",
+    "happy-dom": "20.11.8",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.68.0",
+    "vite": "8.2.2",
+    "vitest": "4.1.11",
+    "vue-eslint-parser": "10.4.1",
+    "vue-tsc": "3.3.11"
+  },
+  "license": "GPL-3.0-only"
+}

@@ -1,0 +1,12 @@
+{
+  "pluginId": "com.norishell.app-demo",
+  "name": "NoriShell App Integration Demo",
+  "publisher": "NoriShell example package (self-reported)",
+  "version": "1.0.0",
+  "protocolMajor": 1,
+  "protocolMinor": 13,
+  "platform": "desktop",
+  "architectures": ["universal"],
+  "capabilities": ["uiPanel", "localFiles"],
+  "minimumAppVersion": "0.1.0"
+}

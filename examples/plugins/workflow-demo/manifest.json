@@ -1,0 +1,12 @@
+{
+  "pluginId": "com.norishell.workflow-demo",
+  "name": "NoriShell Workflow Demo",
+  "publisher": "NoriShell example package (self-reported)",
+  "version": "1.0.0",
+  "protocolMajor": 1,
+  "protocolMinor": 13,
+  "platform": "desktop",
+  "architectures": ["universal"],
+  "capabilities": ["uiPanel"],
+  "minimumAppVersion": "0.1.0"
+}

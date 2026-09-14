@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "plugin-isolated-capability",
+  "description": "Plugin-owned sandbox window with access only to its exact package-bound HTML surface.",
+  "windows": ["plugin-isolated-*"],
+  "permissions": [
+    "core:window:allow-close",
+    "plugin-isolated-surface-commands"
+  ]
+}

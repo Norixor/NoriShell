@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en" class="plugin-isolated-document">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: blob:; font-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-src norishell-plugin: http://norishell-plugin.localhost https://norishell-plugin.localhost; base-uri 'none'; form-action 'none'">
+    <meta name="color-scheme" content="light dark">
+    <title>NoriShell Plugin</title>
+    <style>
+      .plugin-isolated-document { min-width: 0; min-height: 0; }
+      html, body, #isolated-root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+      #isolated-root { display: grid; place-items: stretch; background: var(--nvx-color-bg-canvas); color: var(--nvx-color-text-primary); }
+      #isolated-root > iframe { width: 100%; height: 100%; border: 0; background: transparent; }
+    </style>
+  </head>
+  <body class="plugin-isolated-document">
+    <main id="isolated-root" data-plugin-protected></main>
+    <script type="module" src="/src/plugin-isolated.ts"></script>
+  </body>
+</html>

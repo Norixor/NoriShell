@@ -1,0 +1,164 @@
+/* NoriShell runtime semantic design tokens. */
+:root,
+[data-theme-protected] {
+  --nvx-brand-mark-primary: #1f5fd2;
+  --nvx-brand-mark-secondary: #6e9bff;
+  --nvx-window-control-macos-native-inset-fallback: 80px;
+  --nvx-window-control-macos-brand-gap: 16px;
+  --nvx-window-control-windows-button-width: 46px;
+  --nvx-window-control-windows-group-width: 138px;
+  --nvx-window-control-windows-icon-size: 16px;
+  --nvx-window-control-windows-close-hover: #c42b1c;
+  --nvx-window-control-inactive-opacity: 0.55;
+  --nvx-font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --nvx-font-mono: "SFMono-Regular", "Cascadia Mono", "Segoe UI Mono",
+    Consolas, monospace;
+  --nvx-font-size-xs: 12px;
+  --nvx-font-size-sm: 13px;
+  --nvx-font-size-body: 14px;
+  --nvx-font-size-md: 16px;
+  --nvx-font-size-lg: 20px;
+  --nvx-font-size-xl: 24px;
+  --nvx-line-height-xs: 18px;
+  --nvx-line-height-sm: 20px;
+  --nvx-line-height-body: 22px;
+  --nvx-line-height-md: 24px;
+  --nvx-line-height-lg: 28px;
+  --nvx-line-height-xl: 32px;
+  --nvx-font-weight-regular: 400;
+  --nvx-font-weight-medium: 500;
+  --nvx-font-weight-semibold: 600;
+  --nvx-space-1: 4px;
+  --nvx-space-2: 8px;
+  --nvx-space-3: 12px;
+  --nvx-space-4: 16px;
+  --nvx-space-5: 20px;
+  --nvx-space-6: 24px;
+  --nvx-space-8: 32px;
+  --nvx-space-10: 40px;
+  --nvx-control-height-sm: 32px;
+  --nvx-control-height-md: 40px;
+  --nvx-control-height-touch: 44px;
+  --nvx-radius-sm: 4px;
+  --nvx-radius-md: 6px;
+  --nvx-border-width: 1px;
+  --nvx-focus-ring-width: 2px;
+  --nvx-shadow-toast: 0 4px 12px rgb(16 24 40 / 8%);
+  --nvx-shadow-overlay: 0 12px 32px rgb(16 24 40 / 16%);
+  --nvx-motion-fast: 120ms;
+  --nvx-motion-normal: 180ms;
+  --nvx-motion-overlay: 240ms;
+  --nvx-z-base: 0;
+  --nvx-z-sticky: 10;
+  --nvx-z-popover: 30;
+  --nvx-z-dialog: 40;
+  --nvx-z-toast: 50;
+  --nvx-layout-header-height: 56px;
+  --nvx-layout-navigation-rail-width: 72px;
+  --nvx-layout-inspector-width: 280px;
+  --nvx-layout-chat-composer-min-height: 56px;
+  --nvx-layout-action-bar-height: 64px;
+}
+
+:root,
+[data-theme="light"],
+:root[data-theme="light"] [data-theme-protected] {
+  color-scheme: light;
+  --nvx-color-bg-canvas: #f7f8fa;
+  --nvx-color-bg-surface: #ffffff;
+  --nvx-color-bg-subtle: #f1f3f6;
+  --nvx-color-bg-hover: #eaeef4;
+  --nvx-color-border: #dce1e8;
+  --nvx-color-border-strong: #c4cbd6;
+  --nvx-color-text-primary: #171a21;
+  --nvx-color-text-secondary: #525866;
+  --nvx-color-text-tertiary: #747e8e;
+  --nvx-color-accent: #1f5fd2;
+  --nvx-color-accent-hover: #184faf;
+  --nvx-color-on-accent: #ffffff;
+  --nvx-color-accent-soft: #edf3ff;
+  --nvx-color-selection: #c9dafe;
+  --nvx-color-selection-text: #171a21;
+  --nvx-color-success: #25834b;
+  --nvx-color-success-soft: #edf8f1;
+  --nvx-color-warning: #a96416;
+  --nvx-color-warning-soft: #fff6e8;
+  --nvx-color-danger: #be3d47;
+  --nvx-color-on-danger: #ffffff;
+  --nvx-color-danger-soft: #fff0f1;
+  --nvx-color-focus-ring: #2f6fed;
+  --nvx-color-terminal-bg: #f7f8fa;
+  --nvx-color-terminal-fg: #171a21;
+  --nvx-color-terminal-muted: #525866;
+  --nvx-color-terminal-cursor: #1f5fd2;
+  --nvx-color-terminal-selection: #c9dafe;
+  --nvx-color-terminal-pane-active-border: #c7ccd5;
+  --nvx-color-terminal-ansi-black: #1f2430;
+  --nvx-color-terminal-ansi-red: #b4232d;
+  --nvx-color-terminal-ansi-green: #18723c;
+  --nvx-color-terminal-ansi-yellow: #8b5b00;
+  --nvx-color-terminal-ansi-blue: #1f5fd2;
+  --nvx-color-terminal-ansi-magenta: #7a3eb1;
+  --nvx-color-terminal-ansi-cyan: #0b6f7a;
+  --nvx-color-terminal-ansi-white: #dce1e8;
+  --nvx-color-terminal-ansi-bright-black: #5b6472;
+  --nvx-color-terminal-ansi-bright-red: #d13a45;
+  --nvx-color-terminal-ansi-bright-green: #25834b;
+  --nvx-color-terminal-ansi-bright-yellow: #a96416;
+  --nvx-color-terminal-ansi-bright-blue: #3b75e8;
+  --nvx-color-terminal-ansi-bright-magenta: #9858d0;
+  --nvx-color-terminal-ansi-bright-cyan: #168595;
+  --nvx-color-terminal-ansi-bright-white: #ffffff;
+}
+
+[data-theme="dark"],
+:root[data-theme="dark"] [data-theme-protected] {
+  --nvx-shadow-toast: 0 4px 12px rgb(0 0 0 / 24%);
+  color-scheme: dark;
+  --nvx-color-bg-canvas: #101217;
+  --nvx-color-bg-surface: #171a20;
+  --nvx-color-bg-subtle: #1e222a;
+  --nvx-color-bg-hover: #252b35;
+  --nvx-color-border: #2c323d;
+  --nvx-color-border-strong: #414958;
+  --nvx-color-text-primary: #f2f4f7;
+  --nvx-color-text-secondary: #b6bfcc;
+  --nvx-color-text-tertiary: #8c97a8;
+  --nvx-color-accent: #6e9bff;
+  --nvx-color-accent-hover: #8baeff;
+  --nvx-color-on-accent: #101217;
+  --nvx-color-accent-soft: #1b2b4a;
+  --nvx-color-selection: #33415f;
+  --nvx-color-selection-text: #f2f4f7;
+  --nvx-color-success: #55b978;
+  --nvx-color-success-soft: #193425;
+  --nvx-color-warning: #e3a04e;
+  --nvx-color-warning-soft: #3a2a16;
+  --nvx-color-danger: #f07880;
+  --nvx-color-on-danger: #101217;
+  --nvx-color-danger-soft: #3a1f23;
+  --nvx-color-focus-ring: #8aaeff;
+  --nvx-color-terminal-bg: #101217;
+  --nvx-color-terminal-fg: #f2f4f7;
+  --nvx-color-terminal-muted: #b6bfcc;
+  --nvx-color-terminal-cursor: #8aaeff;
+  --nvx-color-terminal-selection: #33415f;
+  --nvx-color-terminal-pane-active-border: #303744;
+  --nvx-color-terminal-ansi-black: #1b1f27;
+  --nvx-color-terminal-ansi-red: #e06c75;
+  --nvx-color-terminal-ansi-green: #98c379;
+  --nvx-color-terminal-ansi-yellow: #e5c07b;
+  --nvx-color-terminal-ansi-blue: #61afef;
+  --nvx-color-terminal-ansi-magenta: #c678dd;
+  --nvx-color-terminal-ansi-cyan: #56b6c2;
+  --nvx-color-terminal-ansi-white: #d7dae0;
+  --nvx-color-terminal-ansi-bright-black: #5c6370;
+  --nvx-color-terminal-ansi-bright-red: #ff7b86;
+  --nvx-color-terminal-ansi-bright-green: #b3df8f;
+  --nvx-color-terminal-ansi-bright-yellow: #ffd58a;
+  --nvx-color-terminal-ansi-bright-blue: #7cc4ff;
+  --nvx-color-terminal-ansi-bright-magenta: #db91f0;
+  --nvx-color-terminal-ansi-bright-cyan: #73d4df;
+  --nvx-color-terminal-ansi-bright-white: #ffffff;
+}

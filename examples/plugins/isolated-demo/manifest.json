@@ -1,0 +1,12 @@
+{
+  "pluginId": "com.norishell.isolated-demo",
+  "name": "NoriShell Isolated API Demo",
+  "publisher": "NoriShell example package (self-reported)",
+  "version": "1.0.2",
+  "protocolMajor": 1,
+  "protocolMinor": 13,
+  "platform": "desktop",
+  "architectures": ["universal"],
+  "capabilities": ["uiPanel", "uiWebviewIsolated", "storagePlugin", "networkDomain"],
+  "minimumAppVersion": "0.1.0"
+}

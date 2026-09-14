@@ -1,0 +1,16 @@
+[workspace]
+members = ["guest", "harness"]
+resolver = "2"
+
+[workspace.dependencies]
+base64 = "0.22.1"
+norishell-core-api = { path = "../../../crates/core-api" }
+norishell-plugin-platform = { path = "../../../crates/plugin-platform" }
+norishell-plugin-sdk = { path = "../../../crates/plugin-sdk" }
+serde_json = "1.0.149"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

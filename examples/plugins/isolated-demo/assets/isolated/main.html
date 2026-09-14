@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NoriShell Isolated API Demo</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f7f8fb; --panel:#fff; --text:#172033; --muted:#667085; --line:#dce1ea; --accent:#2563eb; --ok:#087443; --warn:#a05a00; --danger:#b42318; --code:#172033; }
+  :root[data-theme="dark"] { --bg:#11141a; --panel:#191e27; --text:#edf2fa; --muted:#a8b3c7; --line:#303949; --accent:#78a9ff; --ok:#5dd39e; --warn:#f8bd62; --danger:#ff8a82; --code:#0d1016; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  main { max-width:920px; margin:0 auto; padding:16px; } header { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; } h1 { font-size:17px; margin:0; } p { margin:3px 0 0; color:var(--muted); } .state { color:var(--muted); font-size:12px; text-align:right; max-width:280px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:10px; } section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; min-width:0; } h2 { font-size:13px; margin:0 0 8px; } .help { font-size:12px; color:var(--muted); min-height:34px; } button,input { font:inherit; } button { border:0; border-radius:7px; padding:7px 10px; color:white; background:var(--accent); cursor:pointer; } button.secondary { color:var(--text); background:transparent; border:1px solid var(--line); } button:disabled { opacity:.45; cursor:not-allowed; } input { width:100%; border:1px solid var(--line); border-radius:7px; padding:7px 8px; background:transparent; color:var(--text); margin:7px 0; }
+  pre { background:var(--code); color:#d9e3f5; border-radius:7px; padding:8px; margin:8px 0 0; min-height:52px; max-height:180px; overflow:auto; white-space:pre-wrap; word-break:break-word; font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .notice { margin:10px 0; padding:8px 10px; border:1px solid var(--line); border-radius:8px; color:var(--muted); } .notice[data-tone="pending"] { color:var(--warn); } .notice[data-tone="error"] { color:var(--danger); } .notice[data-tone="ok"] { color:var(--ok); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; } .row small { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header><div><h1 id="title">Isolated API demo</h1><p id="subtitle">A Core-owned MessagePort is required before any action is enabled.</p></div><div class="state" id="environment">waiting for Core bridge</div></header>
+  <div class="notice" id="notice" data-tone="pending">Waiting for <code>norishell.bridge.ready</code> from the parent window.</div>
+  <div class="grid">
+    <section><h2 id="describe-title">Describe Core API</h2><div class="help" id="describe-help">Reads the typed API description exposed by Core.</div><button id="describe" disabled>Query API</button><pre id="describe-output">—</pre></section>
+    <section><h2 id="storage-title">Private non-secret KV</h2><div class="help" id="storage-help">Writes and reads one demo value in the plugin's private store.</div><button id="storage" disabled>Write then read</button><pre id="storage-output">—</pre></section>
+    <section><h2 id="network-title">Protected HTTP GET</h2><div class="help" id="network-help">Core reviews the endpoint before opening a bounded HTTP resource.</div><input id="endpoint" type="url" spellcheck="false" value="https://example.com/"><div class="row"><button id="network" disabled>Request GET</button><button class="secondary" id="close" disabled>Close resource</button></div><pre id="network-output">—</pre></section>
+    <section><h2 id="terminal-title">Terminal permission boundary</h2><div class="help" id="terminal-help">This plugin has no terminal permission; the request must return InteractionRequired.</div><button class="secondary" id="terminal" disabled>Test denied request</button><pre id="terminal-output">—</pre></section>
+  </div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const BRIDGE_PROTOCOL = 13;
+  const qs = id => document.getElementById(id);
+  const ui = { describe:qs('describe'), storage:qs('storage'), network:qs('network'), close:qs('close'), terminal:qs('terminal'), endpoint:qs('endpoint'), notice:qs('notice'), environment:qs('environment') };
+  let port = null, callSequence = 0, networkHandle = null, pollTimer = null;
+  const pending = new Map();
+  let locale = 'en', theme = 'light';
+  const messages = {
+    en: { title:'Isolated API demo', subtitle:'A Core-owned MessagePort is required before any action is enabled.', waiting:'Waiting for norishell.bridge.ready from the parent window.', ready:'Core bridge ready. Requests stay inside the constrained MessagePort.', pending:'Core is waiting for a protected review.', api:'Describe Core API', apiHelp:'Reads the typed API description exposed by Core.', query:'Query API', storage:'Private non-secret KV', storageHelp:"Writes and reads one demo value in the plugin's private store.", writeRead:'Write then read', network:'Protected HTTP GET', networkHelp:'Core reviews the endpoint before opening a bounded HTTP resource.', get:'Request GET', close:'Close resource', terminal:'Terminal permission boundary', terminalHelp:'This plugin has no terminal permission; the request must return InteractionRequired.', denied:'Test denied request', interaction:'Core correctly returned InteractionRequired.', invalidEndpoint:'Enter an HTTPS endpoint first.' },
+    'zh-CN': { title:'隔离 API 示例', subtitle:'在 Core 交付 MessagePort 前，所有操作保持禁用。', waiting:'正在等待父窗口发送 norishell.bridge.ready。', ready:'Core 桥接已就绪；请求只会通过受限 MessagePort。', pending:'Core 正等待受保护操作的用户审阅。', api:'查看 Core API', apiHelp:'读取 Core 提供的类型化 API 描述。', query:'查询 API', storage:'私有非秘密 KV', storageHelp:'按顺序写入并读取插件私有存储中的示例值。', writeRead:'写入后读取', network:'受保护 HTTP GET', networkHelp:'Core 会在打开有界 HTTP 资源前审阅 endpoint。', get:'请求 GET', close:'关闭资源', terminal:'终端权限边界', terminalHelp:'此插件没有终端权限；请求必须返回 InteractionRequired。', denied:'测试被拒绝请求', interaction:'Core 正确返回 InteractionRequired。', invalidEndpoint:'请先输入 HTTPS endpoint。' }
+  };
+  const text = key => (messages[locale] || messages.en)[key];
+  function show(value, tone='ok') { ui.notice.textContent = value; ui.notice.dataset.tone = tone; }
+  function print(id, value) { qs(id).textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
+  function setEnabled(value) { [ui.describe,ui.storage,ui.network,ui.terminal].forEach(button => button.disabled = !value); ui.close.disabled = !value || !networkHandle; }
+  function applyEnvironment(value) {
+    if (!value || typeof value !== 'object') return;
+    if (value.locale === 'zh-CN' || value.locale === 'en') locale = value.locale;
+    if (value.theme === 'dark' || value.theme === 'light') theme = value.theme;
+    document.documentElement.lang = locale; document.documentElement.dataset.theme = theme;
+    qs('title').textContent = text('title'); qs('subtitle').textContent = text('subtitle'); qs('describe-title').textContent = text('api'); qs('describe-help').textContent = text('apiHelp'); ui.describe.textContent = text('query'); qs('storage-title').textContent = text('storage'); qs('storage-help').textContent = text('storageHelp'); ui.storage.textContent = text('writeRead'); qs('network-title').textContent = text('network'); qs('network-help').textContent = text('networkHelp'); ui.network.textContent = text('get'); ui.close.textContent = text('close'); qs('terminal-title').textContent = text('terminal'); qs('terminal-help').textContent = text('terminalHelp'); ui.terminal.textContent = text('denied'); ui.environment.textContent = `${locale} · ${theme} · ${port ? 'bridge ready' : 'waiting'}`;
+  }
+  function nextCallId(label) { callSequence += 1; return `isolated-demo.${label}.${callSequence}`; }
+  function request(label, operation) {
+    if (!port) return Promise.reject(new Error('bridge unavailable'));
+    const callId = nextCallId(label);
+    return new Promise((resolve, reject) => { pending.set(callId, {resolve, reject, label}); port.postMessage({ type:'norishell.api.request', call:{callId, operation} }); });
+  }
+  function replyFor(data) { return data && (data.reply || data); }
+  function receivePortMessage(event) {
+    const data = event.data || {};
+    if (data.type === 'norishell.environment') return applyEnvironment(data.environment || data);
+    if (data.type === 'norishell.api.pending') { show(text('pending'), 'pending'); return; }
+    if (data.type !== 'norishell.api.reply') return;
+    const reply = replyFor(data), record = pending.get(reply && reply.callId);
+    if (!record) return;
+    pending.delete(reply.callId); record.resolve(reply);
+  }
+  function completed(reply) { return reply && reply.outcome && reply.outcome.kind === 'completed' ? reply.outcome.value : null; }
+  function failure(reply) { return reply && reply.outcome && reply.outcome.kind === 'failed' ? reply.outcome.code : null; }
+  async function describe() { const reply = await request('describe', {kind:'describe'}); print('describe-output', completed(reply) || {error:failure(reply)}); }
+  async function storage() {
+    const key = 'isolated-demo.value'; const initial = await request('storage.get', {kind:'storage', operation:{kind:'kvGet', key}}); const result = completed(initial)?.result; const existing = result && result.entry; const expectedRevision = existing ? existing.revision : 0;
+    const valueBase64 = btoa(unescape(encodeURIComponent(`demo-${new Date().toISOString()}`)));
+    const written = await request('storage.set', {kind:'storage', operation:{kind:'kvSet', key, valueBase64, expectedRevision}});
+    if (!completed(written)) { print('storage-output', {error:failure(written)}); return; }
+    const read = await request('storage.read', {kind:'storage', operation:{kind:'kvGet', key}});
+    print('storage-output', completed(read)?.result || {error:failure(read)});
+  }
+  function decode(data) { try { return new TextDecoder().decode(Uint8Array.from(atob(data), c => c.charCodeAt(0))); } catch (_) { return '[binary chunk]'; } }
+  async function pollResource() {
+    if (!networkHandle) return;
+    const reply = await request('network.events', {kind:'resourceEvents', handle:networkHandle, limit:16}); const value = completed(reply);
+    if (!value) { print('network-output', {error:failure(reply)}); return; }
+    const lines = [];
+    for (const item of value.events || []) { const event = item.kind?.event; if (event?.kind === 'httpResponse') lines.push(`HTTP ${event.status}`); else if (event?.kind === 'data') lines.push(decode(event.dataBase64)); else if (event?.kind === 'closed') { lines.push('closed'); clearInterval(pollTimer); pollTimer = null; await closeResource(); } else if (event?.kind === 'error') lines.push(`error: ${event.code}`); }
+    if (lines.length) print('network-output', lines.join('\n').slice(0, 4096));
+  }
+  async function startNetwork() {
+    const endpoint = ui.endpoint.value.trim(); if (!/^https:\/\//i.test(endpoint)) { show(text('invalidEndpoint'), 'error'); return; }
+    const reply = await request('network.start', {kind:'networkStart', endpoint:{endpoint}, request:{timeoutMs:15000, operation:{kind:'http', method:'get', headers:[], bodyBase64:''}}}); const value = completed(reply);
+    if (!value) { print('network-output', {error:failure(reply)}); return; }
+    networkHandle = value.handle; ui.close.disabled = false; print('network-output', `resource ${networkHandle} opened; polling events…`); if (pollTimer) clearInterval(pollTimer); pollTimer = setInterval(() => pollResource().catch(error => print('network-output', String(error))), 700); await pollResource();
+  }
+  async function closeResource() { if (!networkHandle) return; const handle = networkHandle; networkHandle = null; ui.close.disabled = true; if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } const reply = await request('network.close', {kind:'resourceClose', handle}); print('network-output', completed(reply) || {error:failure(reply)}); }
+  async function terminalBoundary() { const reply = await request('terminal.denied', {kind:'terminalRequestInput', terminalHandle:'no-terminal', payload:'echo isolated-demo', appendEnter:false}); print('terminal-output', failure(reply) === 'interactionRequired' ? text('interaction') : (completed(reply) || {error:failure(reply)})); }
+  ui.describe.onclick = () => describe().catch(error => print('describe-output', String(error))); ui.storage.onclick = () => storage().catch(error => print('storage-output', String(error))); ui.network.onclick = () => startNetwork().catch(error => print('network-output', String(error))); ui.close.onclick = () => closeResource().catch(error => print('network-output', String(error))); ui.terminal.onclick = () => terminalBoundary().catch(error => print('terminal-output', String(error)));
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent) return;
+    const data = event.data || {};
+    if (data.type === 'norishell.environment') { applyEnvironment(data.environment || data); return; }
+    if (data.type !== 'norishell.bridge.ready' || data.protocol !== BRIDGE_PROTOCOL || !event.ports || event.ports.length !== 1 || port) return;
+    port = event.ports[0]; port.onmessage = receivePortMessage; port.start?.(); applyEnvironment(data.environment || data); setEnabled(true); show(text('ready')); 
+  });
+  applyEnvironment({locale:'en', theme:'light'});
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "secure-desktop",
+  "description": "Desktop credentials and server identity decisions are restricted to their exact Core-created prompt window.",
+  "windows": ["desktop-auth-*"],
+  "permissions": ["core:window:allow-start-dragging", "desktop-secure-commands"]
+}

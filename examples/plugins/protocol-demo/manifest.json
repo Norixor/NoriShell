@@ -1,0 +1,12 @@
+{
+  "pluginId": "com.norishell.protocol-demo",
+  "name": "NoriShell Framed TCP Protocol Demo",
+  "publisher": "NoriShell example package (self-reported)",
+  "version": "1.0.3",
+  "protocolMajor": 1,
+  "protocolMinor": 13,
+  "platform": "desktop",
+  "architectures": ["universal"],
+  "capabilities": ["uiPanel", "terminalProvider", "networkDomain"],
+  "minimumAppVersion": "0.1.0"
+}
