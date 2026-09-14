@@ -1,0 +1,14 @@
+[package]
+name = "norishell-vnc-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+norishell-desktop-protocol = { path = "../desktop-protocol" }
+tokio.workspace = true
+zeroize.workspace = true
+jpeg-decoder = "=0.3.2"
+vnc = { package = "vnc-rs", path = "../../vendor/vnc-rs" }

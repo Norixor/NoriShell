@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "secure-plugin-terminal-input-capability",
+  "description": "Protected one-time terminal input approval window with no access to the main command surface.",
+  "windows": ["secure-plugin-input-*"],
+  "permissions": [
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "secure-plugin-terminal-input-commands"
+  ]
+}

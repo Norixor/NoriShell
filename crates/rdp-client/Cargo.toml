@@ -1,0 +1,21 @@
+[package]
+name = "norishell-rdp-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+norishell-desktop-protocol = { path = "../desktop-protocol" }
+ironrdp = { version = "=0.17.0", features = ["connector", "session", "graphics", "input", "cliprdr", "displaycontrol", "dvc", "rdpsnd", "svc"] }
+cpal = "=0.17.3"
+tokio.workspace = true
+zeroize.workspace = true
+sha2.workspace = true
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+rustls-native-certs = "0.8"
+x509-cert = "0.2"
+
+[dev-dependencies]
+rcgen = "0.14"

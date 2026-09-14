@@ -1,0 +1,12 @@
+[package]
+name = "norishell-protocol-demo-harness"
+version = "1.0.3"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+base64.workspace = true
+norishell-core-api.workspace = true
+norishell-plugin-platform.workspace = true
+serde_json.workspace = true

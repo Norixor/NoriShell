@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "secure-plugin-remote-approval-capability",
+  "description": "Protected remote operation decisions, isolated from all plugin content.",
+  "windows": ["secure-plugin-remote-*"],
+  "permissions": [
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "secure-plugin-remote-approval-commands"
+  ]
+}

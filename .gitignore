@@ -1,0 +1,49 @@
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Editor and local workspace files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local project guidance and design documents
+/AGENTS.md
+/.build
+/docs/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Rust and Tauri build output
+target/
+src-tauri/target/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.cache/
+
+# Local QA captures, previews and accidental command output
+/output/
+/.playwright-cli/
+/design-qa.md
+/--help
+/2[}]
+/qa/
+
+# Official plugins are maintained separately from the client source release
+/examples/plugins/official-operations/
+/examples/plugins/norixor-account/
+__pycache__/
+*.pyc

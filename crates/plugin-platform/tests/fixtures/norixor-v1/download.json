@@ -1,0 +1,12 @@
+{
+    "data": {
+        "url": "https://r2.norishell-plugin-fixtures.invalid/packages/org.norixor.fixture.ssh-sync/1.0.0/plugin.zip?fixture=v1",
+        "expires_in": 300,
+        "sha256": "92810bfaf423485a2dd236119c8fae701a68f9efdcd3723a1744f9838a388f61",
+        "size": 689,
+        "capabilities": [
+            "sshSync",
+            "storagePlugin"
+        ]
+    }
+}

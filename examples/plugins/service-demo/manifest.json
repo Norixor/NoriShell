@@ -1,0 +1,12 @@
+{
+  "pluginId": "com.norishell.service-demo",
+  "name": "NoriShell Service Demo",
+  "publisher": "NoriShell example package (self-reported)",
+  "version": "1.0.1",
+  "protocolMajor": 1,
+  "protocolMinor": 13,
+  "platform": "desktop",
+  "architectures": ["universal"],
+  "capabilities": ["uiPanel", "networkDomain"],
+  "minimumAppVersion": "0.1.0"
+}

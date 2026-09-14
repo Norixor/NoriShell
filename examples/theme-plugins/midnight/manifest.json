@@ -1,0 +1,12 @@
+{
+  "pluginId": "com.norishell.theme.midnight",
+  "name": "NoriShell Midnight Theme",
+  "publisher": "NoriShell example package (self-reported)",
+  "version": "1.0.0",
+  "protocolMajor": 1,
+  "protocolMinor": 14,
+  "platform": "desktop",
+  "architectures": ["universal"],
+  "capabilities": [],
+  "minimumAppVersion": "0.1.0"
+}

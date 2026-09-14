@@ -1,0 +1,25 @@
+[package]
+name = "norishell-service-demo"
+version = "1.0.1"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64 = "0.22.1"
+norishell-plugin-sdk = { path = "../../../crates/plugin-sdk" }
+serde_json = "1.0.149"
+
+[dev-dependencies]
+norishell-core-api = { path = "../../../crates/core-api" }
+norishell-plugin-platform = { path = "../../../crates/plugin-platform" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

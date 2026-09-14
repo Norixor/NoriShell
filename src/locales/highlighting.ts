@@ -1,0 +1,26 @@
+export const highlightingEn = {
+  title: "Output highlighting", description: "Highlight matching terminal text on this device. Rules only change its appearance.",
+  scope: "Apply to", global: "All terminals", hostMode: "Host behavior", inherit: "Inherit global rules", custom: "Custom rules", disabled: "Disable for this host",
+  enabled: "Enable highlighting", ruleEnabled: "Enable rule", add: "Add rule", edit: "Edit", remove: "Delete", restore: "Restore preset rules", empty: "No rules. Add a rule or restore the presets.",
+  rules: "Rules", ruleCount: "{count} / {max}", name: "Rule name", pattern: "Text or pattern", mode: "Match type", literal: "Literal text", regex: "Regular expression", caseSensitive: "Case sensitive",
+  foreground: "Text color", background: "Background color", colorHint: "Use #RRGGBB, for example #FFFFFF.",
+  save: "Save changes", cancel: "Cancel changes", close: "Close", applyRule: "Keep rule", cancelRule: "Cancel", newRule: "New rule", editRule: "Edit rule",
+  saved: "Highlight settings saved", saveFailed: "Could not save highlight settings. Previous settings are unchanged; your draft is kept.",
+  invalid: "Provide a name (1–48 characters), valid text or regular expression (1–256 characters), and two #RRGGBB colors. Control characters are not allowed.",
+  contrast: "Text contrast is {ratio}:1. Aim for at least 4.5:1 for readable text.", preview: "Test preview", previewHint: "Uses fixed sample text only. Preview stops after 500 ms; terminal output is never sent here.",
+  previewIdle: "Test the rule against the sample below.", previewRunning: "Testing…", previewDone: "{count} matches in sample text", previewUnavailable: "Preview is unavailable. Valid rules can still be saved.", previewTimeout: "Preview timed out and was stopped. Simplify the expression before using it.", previewFailed: "Preview could not evaluate this rule. Check the expression.",
+  unsaved: "Save or cancel these changes before choosing another scope.", inheritHint: "This host uses the current global rules. Choose Custom rules to change them here.", disabledHint: "Highlighting is disabled for this host, regardless of global settings.", orderHint: "Rules are evaluated in list order; the first matching rule takes priority where matches overlap.",
+};
+export const highlightingZhCN = {
+  title: "输出高亮", description: "在本机突出显示匹配的终端文字。规则只改变显示效果。",
+  scope: "应用范围", global: "所有终端", hostMode: "此主机的行为", inherit: "继承全局规则", custom: "自定义规则", disabled: "对此主机禁用",
+  enabled: "启用高亮", ruleEnabled: "启用规则", add: "新增规则", edit: "编辑", remove: "删除", restore: "恢复预设规则", empty: "暂无规则，请新增规则或恢复预设。",
+  rules: "规则", ruleCount: "{count} / {max}", name: "规则名称", pattern: "文字或表达式", mode: "匹配方式", literal: "字面文字", regex: "正则表达式", caseSensitive: "区分大小写",
+  foreground: "文字颜色", background: "背景颜色", colorHint: "使用 #RRGGBB，例如 #FFFFFF。",
+  save: "保存更改", cancel: "取消更改", close: "关闭", applyRule: "保留规则", cancelRule: "取消", newRule: "新增规则", editRule: "编辑规则",
+  saved: "高亮设置已保存", saveFailed: "高亮设置保存失败。原设置未改变，草稿已保留。",
+  invalid: "请填写名称（1–48 字符）、合法文字或正则（1–256 字符）和两项 #RRGGBB 颜色，不得包含控制字符。",
+  contrast: "文字对比度为 {ratio}:1，建议至少达到 4.5:1，确保清晰可读。", preview: "测试预览", previewHint: "仅使用固定示例文字，500 毫秒后停止预览；不会读取终端输出。",
+  previewIdle: "可使用下方示例测试规则。", previewRunning: "正在测试…", previewDone: "示例中匹配 {count} 处", previewUnavailable: "预览不可用，仍可保存语法有效的规则。", previewTimeout: "预览超时并已停止，请简化表达式后再使用。", previewFailed: "无法完成规则预览，请检查表达式。",
+  unsaved: "请先保存或取消更改，再选择其他范围。", inheritHint: "此主机使用当前全局规则。选择“自定义规则”可单独调整。", disabledHint: "此主机已禁用高亮，不受全局开关影响。", orderHint: "规则按列表顺序匹配，重叠位置采用第一条匹配规则。",
+};

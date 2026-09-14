@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tray-panel",
+  "description": "Restricted tray panel; no general Core, window or network permissions.",
+  "windows": ["tray-panel"],
+  "permissions": ["tray-panel-commands"]
+}

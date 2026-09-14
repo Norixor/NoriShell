@@ -1,0 +1,31 @@
+export const preferenceTransferZhCN = {
+  title: "偏好迁移与重置",
+  description: "按组导出全局偏好，或预览后导入、恢复默认设置。",
+  exclusions: "文件不包含主机绑定设置、记忆目录、Vault、凭据、账号、会话或历史正文。命令历史的记录与加密策略保留在本机，不随文件迁移。",
+  groupsTitle: "选择范围",
+  groups: { application: "应用偏好", appearance: "终端外观", interaction: "终端交互与粘贴保护", highlights: "全局关键词高亮", shortcuts: "快捷键", files: "文件浏览偏好", desktop: "窗口、托盘与通知规则", commandNotifications: "命令通知开关与时长" },
+  export: "导出所选偏好", chooseFile: "选择偏好文件", previewImport: "预览所选导入", previewReset: "预览恢复默认",
+  exported: "已生成偏好文件。", loaded: "文件已读取。选择需要的组，再预览更改。",
+  importPreview: "导入预览", resetPreview: "恢复默认预览",
+  previewHint: "确认后只应用所选组。修改粘贴保护会影响下一次粘贴；关闭目录记忆会清除已记忆路径。失败或冲突后请重新预览，已成功的组不会重复应用。",
+  compare: "查看配置差异", before: "当前配置", after: "将应用的配置", noChanges: "与当前设置相同。",
+  applyImport: "确认导入所选组", applyReset: "确认恢复所选组默认设置",
+  results: { pending: "待确认", applying: "应用中", applied: "已应用", unchanged: "无需更改", conflict: "设置已变化，请重新预览", failed: "应用失败，请重新预览" },
+  errors: { tooLarge: "文件超过 256 KiB 限制。", emptySelection: "请至少选择一个可用组。", invalidFile: "不是受支持的 NoriShell 偏好文件。", invalidGroup: "文件含未知设置或无效数据，未应用任何更改。", unavailableGroup: "部分所选设置当前不可读取。取消选择该组后重试。", failed: "操作未完成。请检查文件和桌面服务状态后重试。" },
+};
+
+export const preferenceTransferEn = {
+  title: "Transfer and reset preferences",
+  description: "Export global preference groups, or preview an import or reset before applying it.",
+  exclusions: "Files exclude host-specific settings, remembered paths, Vault data, credentials, accounts, sessions, and history contents. History recording and encryption policies stay on this device.",
+  groupsTitle: "Choose groups",
+  groups: { application: "Application", appearance: "Terminal appearance", interaction: "Terminal interaction and paste protection", highlights: "Global keyword highlighting", shortcuts: "Keyboard shortcuts", files: "File browsing", desktop: "Window, tray, and notification rules", commandNotifications: "Command notification switch and duration" },
+  export: "Export selected preferences", chooseFile: "Choose preference file", previewImport: "Preview selected import", previewReset: "Preview reset to defaults",
+  exported: "Preference file created.", loaded: "File loaded. Select groups, then preview changes.",
+  importPreview: "Import preview", resetPreview: "Reset preview",
+  previewHint: "Only selected groups will be applied. Paste protection changes affect the next paste; disabling directory memory clears remembered paths. Preview again after a failure or conflict. Successful groups are never replayed.",
+  compare: "Compare configuration", before: "Current configuration", after: "Configuration to apply", noChanges: "Already matches the current settings.",
+  applyImport: "Confirm import of selected groups", applyReset: "Confirm reset of selected groups",
+  results: { pending: "Awaiting confirmation", applying: "Applying", applied: "Applied", unchanged: "No change needed", conflict: "Settings changed; preview again", failed: "Failed; preview again" },
+  errors: { tooLarge: "The file exceeds the 256 KiB limit.", emptySelection: "Select at least one available group.", invalidFile: "This is not a supported NoriShell preference file.", invalidGroup: "The file contains unknown settings or invalid data. Nothing was applied.", unavailableGroup: "Some selected settings cannot be read. Deselect those groups and try again.", failed: "The operation did not complete. Check the file and desktop service, then try again." },
+};

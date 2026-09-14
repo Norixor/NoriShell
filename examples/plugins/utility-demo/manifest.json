@@ -1,0 +1,12 @@
+{
+  "pluginId": "com.norishell.utility-demo",
+  "name": "NoriShell UUID Generator",
+  "publisher": "NoriShell",
+  "version": "1.3.0",
+  "protocolMajor": 1,
+  "protocolMinor": 13,
+  "platform": "desktop",
+  "architectures": ["universal"],
+  "capabilities": ["uiPanel", "clipboardWrite"],
+  "minimumAppVersion": "0.1.0"
+}

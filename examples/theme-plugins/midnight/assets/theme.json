@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "midnight",
+  "name": { "zhCN": "午夜", "en": "Midnight" },
+  "appearance": "dark",
+  "colors": {
+    "bgCanvas": "#0b1220", "bgSurface": "#111c2e", "bgSubtle": "#17243a", "bgHover": "#1e2e48",
+    "border": "#2a3b56", "borderStrong": "#405575", "textPrimary": "#edf4ff", "textSecondary": "#bdcbe0",
+    "textTertiary": "#92a4bf", "accent": "#7cb5ff", "accentHover": "#a2caff", "onAccent": "#08111f",
+    "accentSoft": "#142d52", "success": "#69ce99", "successSoft": "#153d32", "warning": "#f4bd5a",
+    "warningSoft": "#473313", "danger": "#ff98a4", "onDanger": "#17111a", "dangerSoft": "#48232c",
+    "focusRing": "#91c5ff", "terminalPaneActiveBorder": "#36506f", "brandMarkPrimary": "#5d9bf0",
+    "brandMarkSecondary": "#91c5ff", "selection": "#2c4770", "selectionText": "#edf4ff"
+  },
+  "fontFamily": "sans",
+  "fontSize": 14,
+  "radius": 6,
+  "borderWidth": 1,
+  "density": "standard",
+  "shadow": "standard",
+  "terminalPalette": {
+    "background": "#0b1220", "foreground": "#edf4ff", "muted": "#bdcbe0", "cursor": "#91c5ff", "selection": "#2c4770",
+    "black": "#111c2e", "red": "#ef7282", "green": "#72cb9c", "yellow": "#eab05a", "blue": "#78aff5", "magenta": "#b69aef", "cyan": "#75c5d5", "white": "#d8e4f5",
+    "brightBlack": "#7185a4", "brightRed": "#ff98a4", "brightGreen": "#9ee2b9", "brightYellow": "#ffd27a", "brightBlue": "#a4ccff", "brightMagenta": "#d0baff", "brightCyan": "#9ee4ef", "brightWhite": "#ffffff"
+  }
+}

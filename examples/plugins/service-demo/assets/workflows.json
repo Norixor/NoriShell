@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "workflows": [{
+    "id": "github.repository.read",
+    "label": {"en": "Read GitHub repository metadata", "zh-CN": "读取 GitHub 仓库元数据"},
+    "steps": [
+      {"id": "github.repository.request", "label": {"en": "Request repository metadata", "zh-CN": "请求仓库元数据"}}
+    ]
+  }]
+}

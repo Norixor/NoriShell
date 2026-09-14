@@ -1,0 +1,11 @@
+[package]
+name = "norishell-desktop-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+

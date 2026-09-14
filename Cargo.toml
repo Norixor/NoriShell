@@ -1,0 +1,72 @@
+[workspace]
+members = [
+  "crates/app-persistence",
+  "crates/core-api",
+  "crates/desktop-protocol",
+  "crates/vnc-client",
+  "crates/rdp-client",
+  "crates/plugin-platform",
+  "crates/plugin-sdk",
+  "crates/secret-vault",
+  "crates/server-metrics",
+  "crates/ssh-domain",
+  "crates/ssh-profile-sync",
+  "crates/ssh-transport",
+  "crates/telnet-runtime",
+  "src-tauri",
+]
+exclude = ["vendor/russh", "vendor/russh-sftp", "vendor/vnc-rs", "vendor/picky", "vendor/sspi", "vendor/ironrdp-connector", "vendor/ironrdp-session", "vendor/ironrdp-rdpsnd"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "GPL-3.0-only"
+authors = ["NoriShell"]
+repository = "https://github.com/Norixor/NoriShell"
+
+[workspace.dependencies]
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
+base64 = "0.22.1"
+bytes = "1.10.1"
+cap-std = "4.0.2"
+chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
+fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
+getrandom = "0.3.4"
+hmac = "0.12.1"
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png", "webp"] }
+imagesize = "0.14.0"
+ed25519-dalek = "=2.2.0"
+hex = "0.4.3"
+libc = "0.2.183"
+rand = "0.10.2"
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls"] }
+russh = { version = "=0.63.1", default-features = false, features = ["ring", "rsa", "legacy-pem-3des"] }
+russh-sftp = "=2.4.0"
+rusqlite = { version = "0.40.2", default-features = false, features = ["backup", "bundled", "limits"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+semver = "=1.0.27"
+sha2 = "0.10.9"
+subtle = "2.6.1"
+tauri = "2.11.5"
+tauri-build = "2.6.3"
+thiserror = "2.0.17"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+toml = "0.9.12"
+ts-rs = { version = "12.0.1", features = ["no-serde-warnings", "serde-compat"] }
+uuid = { version = "1.26.0", features = ["serde", "v4", "v7"] }
+wasmi = { version = "=1.1.0", default-features = false, features = ["std"] }
+windows-sys = "0.61.2"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+zeroize = { version = "1.9.0", features = ["derive"] }
+
+[patch.crates-io]
+ironrdp-rdpsnd = { path = "vendor/ironrdp-rdpsnd" }
+ironrdp-session = { path = "vendor/ironrdp-session" }
+ironrdp-connector = { path = "vendor/ironrdp-connector" }
+picky = { path = "vendor/picky" }
+sspi = { path = "vendor/sspi" }
+russh = { path = "vendor/russh" }
+russh-sftp = { path = "vendor/russh-sftp" }

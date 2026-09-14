@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "providers": [
+    {
+      "id": "framedTcp",
+      "label": {
+        "en": "Framed TCP demo",
+        "zh-CN": "Framed TCP 示例"
+      },
+      "configuration": {
+        "schemaVersion": 1,
+        "fields": [
+          {
+            "type": "string",
+            "key": "endpoint",
+            "label": {
+              "en": "TCP endpoint",
+              "zh-CN": "TCP 端点"
+            },
+            "default": "tcp://127.0.0.1:19071",
+            "maxLength": 255
+          }
+        ]
+      },
+      "features": {
+        "terminal": true,
+        "resize": "supported",
+        "reconnect": true
+      },
+      "resources": ["tcp"]
+    }
+  ]
+}

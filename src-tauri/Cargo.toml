@@ -1,0 +1,101 @@
+[package]
+name = "norishell-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "norishell_desktop"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[[bin]]
+name = "norishell"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+norishell-app-persistence = { path = "../crates/app-persistence" }
+norishell-core-api = { path = "../crates/core-api" }
+norishell-secret-vault = { path = "../crates/secret-vault" }
+norishell-ssh-profile-sync = { path = "../crates/ssh-profile-sync" }
+norishell-server-metrics = { path = "../crates/server-metrics" }
+norishell-plugin-platform = { path = "../crates/plugin-platform" }
+norishell-ssh-domain = { path = "../crates/ssh-domain" }
+norishell-ssh-transport = { path = "../crates/ssh-transport" }
+norishell-telnet-runtime = { path = "../crates/telnet-runtime" }
+norishell-desktop-protocol = { path = "../crates/desktop-protocol" }
+norishell-rdp-client = { path = "../crates/rdp-client" }
+norishell-vnc-client = { path = "../crates/vnc-client" }
+reqwest = { workspace = true, features = ["blocking", "form"] }
+futures-util = "0.3.31"
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12"] }
+rustls-native-certs = "0.8.4"
+webpki-roots = "1.0.9"
+tokio-tungstenite = { version = "0.28.0", default-features = false, features = ["handshake"] }
+russh-sftp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+cap-std.workspace = true
+hex.workspace = true
+getrandom.workspace = true
+image.workspace = true
+imagesize.workspace = true
+sha2.workspace = true
+semver.workspace = true
+serialport = "4.9.0"
+subtle.workspace = true
+tauri = { workspace = true, features = ["tray-icon"] }
+tauri-plugin-clipboard-manager = "2.3.3"
+tauri-plugin-dialog = "2.7.0"
+tauri-plugin-opener = "2.5.3"
+tempfile = "3.23.0"
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+rusqlite.workspace = true
+russh.workspace = true
+serde_json.workspace = true
+tauri = { workspace = true, features = ["test"] }
+wat = "=1.245.1"
+rcgen = "=0.14.10"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSError", "NSString"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger"] }
+apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain", "protected"] }
+keyring-core = "1.0.0"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSButton", "NSControl", "NSView", "NSWindow"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_System_WinRT"] }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_FileSystem",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_System_Console",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
