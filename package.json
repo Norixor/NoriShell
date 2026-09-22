@@ -1,7 +1,7 @@
 {
   "name": "norishell",
   "private": true,
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta",
   "type": "module",
   "packageManager": "pnpm@10.32.1",
   "engines": {

@@ -1,12 +1,41 @@
-# 插件开发指南
+# NoriShell 插件开发指南
 
-- [快速入门与示例选择](quickstart.zh-CN.md)
-- [包与 manifest](package.zh-CN.md)
-- [Protocol 13 Wasm ABI](wasm-abi.zh-CN.md)
-- [Broker 调用、资源、存储、凭据与订阅](broker.zh-CN.md)
-- [声明式 UI 与扩展目标](ui.zh-CN.md)
-- [安全与发布前检查](security.zh-CN.md)
+从第一个可见插件开始，学习如何调用 Core 能力、构建界面、管理权限与资源，再打包为本地 ZIP。
 
-guest 代码只能使用[插件 API 参考](../plugin-api/README.zh-CN.md)。[Core API 目录](../core-api/README.zh-CN.md)记录应用 renderer IPC，绝不是插件 API。SDK 与本地 CLI 面向稳定常驻 ABI 基线 **1.13**，同 major 宿主后续升级保留基线插件兼容；源码接线或 ABI harness 成功都不代表已完成 native 验收。
+## 入门
 
+- [插件模型与阅读路径](start/overview.zh-CN.md)
+- [快速开始：第一个可见插件](start/quickstart.zh-CN.md)
+- [语言、Wasm 与隔离 UI](start/languages.zh-CN.md)
+
+## 开发插件
+
+- [调用 API 与处理结果](development/calling-api.zh-CN.md)
+- [声明式 UI 与动作回调](development/ui.zh-CN.md)
+- [权限与资源生命周期](development/resources.zh-CN.md)
+- [打包、安装与升级](development/packaging.zh-CN.md)
+- [错误处理与用户继续操作](development/errors.zh-CN.md)
+
+## API 参考
+
+- [35 个方法，按能力分类](../plugin-api/README.zh-CN.md)
+- [请求、结果与嵌套类型](../plugin-api/types.zh-CN.md)
+
+## 示例
+
+- [示例选择与源码目录](examples/README.zh-CN.md)
+- [API Demo：查询、展示与复制](examples/api-demo.zh-CN.md)
+- [Service Demo：网络服务集成](examples/service-demo.zh-CN.md)
+- [Workflow Demo：多步骤任务](examples/workflow.zh-CN.md)
+- [应用集成：命令、通知、导航与文件](examples/app-integration.zh-CN.md)
+- [隔离 UI：HTML、CSS 与 JavaScript](examples/isolated-ui.zh-CN.md)
+- [Protocol Demo：终端协议 Provider](examples/protocol.zh-CN.md)
+
+## 专题参考
+
+- [Protocol 1.13 Wasm ABI](wasm-abi.zh-CN.md)
 - [声明式主题插件](themes.zh-CN.md)
+- [安全与发布前检查](security.zh-CN.md)
+- [SDK 工具与开发循环](../../../examples/plugins/sdk-tooling/README.md)
+
+插件只能使用公开的 Plugin API。应用维护者使用的 [Core 内部 API 目录](../core-api/README.zh-CN.md)不是插件可调用接口。
