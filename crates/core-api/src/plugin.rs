@@ -157,6 +157,7 @@ pub enum PluginCompatibility {
 pub enum PluginInstallState {
     Enabled,
     Disabled,
+    #[ts(skip)]
     UpdateAvailable,
     Crashed,
     Quarantined,
@@ -174,6 +175,8 @@ pub enum PluginPackageKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum PluginOperationKind {
+    /// Legacy operation retained only so existing local audit rows remain decodable.
+    #[ts(skip)]
     CatalogRefresh,
     Install,
     Update,
@@ -195,14 +198,8 @@ pub enum PluginOperationState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum PluginErrorCode {
-    TrustRootsUnavailable,
-    CatalogUnavailable,
-    CatalogEnvelopeInvalid,
-    CatalogSignatureInvalid,
-    CatalogPayloadInvalid,
     PackageTooLarge,
     PackageHashMismatch,
-    PublisherSignatureInvalid,
     PackageArchiveInvalid,
     PackagePathRejected,
     PackageLimitsExceeded,
@@ -222,15 +219,15 @@ pub enum PluginErrorCode {
 #[serde(rename_all = "camelCase")]
 pub struct PluginReadiness {
     pub ready: bool,
-    pub trusted_root_count: u32,
     pub protocol_major: u16,
     pub protocol_minor: u16,
     pub safe_mode_active: bool,
     pub safe_mode_next_start: bool,
 }
 
-/// Reviewed release information bound to an immutable package by the catalog signature.
-/// These display-only values never grant capabilities or register extension targets.
+/// Persisted metadata from older marketplace-enabled installations. It is no
+/// longer exposed by the application, but remains decodable so the local
+/// plugin database does not need a destructive migration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginCatalogReleaseDetails {
@@ -239,46 +236,6 @@ pub struct PluginCatalogReleaseDetails {
     pub extension_targets: Vec<String>,
     #[ts(type = "number | null")]
     pub release_published_at_unix_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginCatalogEntry {
-    pub plugin_id: PluginId,
-    pub name: String,
-    pub publisher: String,
-    pub version: String,
-    pub protocol_major: u16,
-    pub protocol_minor: u16,
-    pub platform: String,
-    pub architectures: Vec<String>,
-    pub package_url: String,
-    pub package_size: u64,
-    pub package_sha256: String,
-    pub publisher_key_base64: String,
-    pub publisher_signature_base64: String,
-    pub capabilities: Vec<PluginCapability>,
-    pub minimum_app_version: String,
-    pub published_at_unix_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub details: Option<PluginCatalogReleaseDetails>,
-    pub compatibility: PluginCompatibility,
-    /// Core-computed current decisions that can be rebound to this exact
-    /// verified update artifact without another approval.
-    #[serde(default)]
-    pub retained_capability_grants: Vec<PluginCapabilityGrant>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub unsupported_capabilities: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginCatalogSnapshot {
-    pub catalog_revision: String,
-    pub verified_at_unix_ms: i64,
-    pub entries: Vec<PluginCatalogEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -329,46 +286,6 @@ pub struct PluginReadinessGetRequest {
     pub meta: RequestMeta,
 }
 
-/// Host-owned display source for a plugin icon. This does not grant a plugin
-/// any marketplace, publisher, or capability authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub enum PluginIconReadScope {
-    Catalog,
-    Installed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub enum PluginIconSource {
-    Network,
-    Cache,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginIconReadRequest {
-    pub meta: RequestMeta,
-    pub plugin_id: PluginId,
-    pub scope: PluginIconReadScope,
-    pub refresh: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginIconReadResponse {
-    pub plugin_id: PluginId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub data_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub source: Option<PluginIconSource>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginAuditListRequest {
@@ -398,35 +315,8 @@ pub struct PluginSafeModeNextStartRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginCatalogRefreshRequest {
-    pub meta: RequestMeta,
-    pub operation_id: PluginOperationId,
-    pub idempotency_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginCatalogListRequest {
-    pub meta: RequestMeta,
-    pub search: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
 pub struct PluginInstalledListRequest {
     pub meta: RequestMeta,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginInstallRequest {
-    pub meta: RequestMeta,
-    pub operation_id: PluginOperationId,
-    pub idempotency_key: String,
-    pub plugin_id: PluginId,
-    pub version: String,
-    pub expected_state_version: Option<WireSequence>,
-    pub capability_grants: Vec<PluginCapabilityGrant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -445,15 +335,6 @@ pub struct PluginLocalInstallRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PluginLocalPackagePrepareRequest {
     pub meta: RequestMeta,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginCatalogPackagePrepareRequest {
-    pub meta: RequestMeta,
-    pub plugin_id: PluginId,
-    pub version: String,
-    pub expected_state_version: Option<WireSequence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

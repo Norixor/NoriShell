@@ -1,4 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
+import { resolveLocale } from "./locales";
 
 import { setPluginLocale } from "./core-api/client";
 import { getDesktopPreferences, replaceDesktopPreferences } from "./core-api/desktop-preferences";
@@ -73,9 +74,9 @@ export function createPreferenceAdapters(): PreferenceGroupAdapter[] {
         if (!validateApplicationPreferences(value) || !validateApplicationPreferences(expected)
           || !preferenceValuesEqual(ui.applicationPreferences(), expected)) return false;
         const localeChanged = value.locale !== expected.locale && isTauri();
-        if (localeChanged) await setPluginLocale(value.locale);
+        if (localeChanged) await setPluginLocale(resolveLocale(value.locale));
         const success = await ui.replaceApplicationPreferences(value, expected as ApplicationPreferences);
-        if (!success && localeChanged) await setPluginLocale(expected.locale);
+        if (!success && localeChanged) await setPluginLocale(resolveLocale(expected.locale));
         return success;
       },
     },

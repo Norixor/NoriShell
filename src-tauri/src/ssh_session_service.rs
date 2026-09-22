@@ -976,10 +976,22 @@ async fn run_shell(
             },
             event = shell.next_event() => match event {
                 Ok(ShellEvent::Data(bytes)) | Ok(ShellEvent::ExtendedData { data: bytes, .. }) => {
-                    if tx.send(Message::ShellOutput {
+                    let output = Message::ShellOutput {
                         session_id: session_id.clone(), generation, bytes: bytes.to_vec(),
-                    }).await.is_err() {
-                        break;
+                    };
+                    tokio::select! {
+                        biased;
+                        changed = stop.changed() => {
+                            if let ShellStopSignal::Disconnect(reason) = shell_stop_signal(&stop, changed) {
+                                close_reason = Some(reason);
+                            }
+                            break;
+                        }
+                        result = tx.send(output) => {
+                            if result.is_err() {
+                                break;
+                            }
+                        }
                     }
                 }
                 Ok(ShellEvent::ExitStatus(exit_status)) => {
@@ -6260,11 +6272,30 @@ impl Actor {
         );
         let next_attachment_revision = record.summary.attachment_revision.get().saturating_add(1);
         record.summary.attachment_revision = WireSequence::new(next_attachment_revision);
-        for attachment in record.attachments.values_mut() {
-            attachment.summary.channel_id = Some(channel_id.clone());
-            attachment.summary.state_revision =
-                WireSequence::new(record.summary.state_revision.get().saturating_add(1));
-            attachment.summary.attachment_revision = WireSequence::new(next_attachment_revision);
+        let updated_attachments = record
+            .attachments
+            .values_mut()
+            .map(|attachment| {
+                attachment.summary.channel_id = Some(channel_id.clone());
+                attachment.summary.state_revision =
+                    WireSequence::new(record.summary.state_revision.get().saturating_add(1));
+                attachment.summary.attachment_revision =
+                    WireSequence::new(next_attachment_revision);
+                attachment.summary.clone()
+            })
+            .collect::<Vec<_>>();
+        for attachment in updated_attachments {
+            // Reconnect rotates attachments before a replacement Channel exists.
+            // Publish the same attachment identity again once its Channel fence is
+            // ready so renderers cannot show Running with a stale null channel.
+            emit_payload(
+                record,
+                SshSessionEventPayload::AttachmentChanged {
+                    change: SshSessionAttachmentChange::Attached,
+                    attachment_revision: WireSequence::new(next_attachment_revision),
+                    attachment,
+                },
+            );
         }
         transition_record(
             record,

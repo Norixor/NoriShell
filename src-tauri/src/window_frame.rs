@@ -1,3 +1,7 @@
+#[cfg(target_os = "macos")]
+#[path = "window_frame_macos.rs"]
+mod macos;
+
 use serde::Deserialize;
 use tauri::WebviewWindow;
 
@@ -309,6 +313,41 @@ fn set_windows_maximize_hit_region(
     } else {
         Err("window.caption_hit_test_unsupported".to_owned())
     }
+}
+
+/// Updates the native main-window header using logical AppKit points.
+#[tauri::command]
+pub async fn window_set_native_header_height(
+    window: WebviewWindow,
+    height: f64,
+) -> Result<(), String> {
+    if window.label() != "main" || !height.is_finite() || !(32.0..=160.0).contains(&height) {
+        return Err("window.native_header_invalid".to_owned());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        window
+            .run_on_main_thread(move || {
+                let _ = sender.send(macos::set_height(height));
+            })
+            .map_err(|_| "window.native_header_unavailable".to_owned())?;
+        receiver
+            .await
+            .map_err(|_| "window.native_header_unavailable".to_owned())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn install_macos_header_bridge(window: &WebviewWindow) -> Result<(), String> {
+    macos::install(window)
+}
+
+#[cfg(target_os = "macos")]
+pub fn cleanup_macos_header_bridge() {
+    macos::cleanup();
 }
 
 #[cfg(test)]

@@ -4,16 +4,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 
-import { usePluginIconsStore } from "../stores/pluginIcons";
 import NvxPluginAppIntegrations from "../components/plugins/NvxPluginAppIntegrations.vue";
 import NvxPluginSettingsDialog from "../components/plugins/NvxPluginSettingsDialog.vue";
 import NvxPluginCapabilityChoice from "../components/plugins/NvxPluginCapabilityChoice.vue";
-import { NvxPluginExtensionTarget, NvxPluginManageActions, NvxPluginMarketplace, NvxPluginOperationPermissionsDialog } from "../components/plugins";
-import { latestCompatiblePluginUpdate } from "../components/plugins/pluginCatalogVersion";
+import { NvxPluginExtensionTarget, NvxPluginManageActions, NvxPluginOperationPermissionsDialog } from "../components/plugins";
 import { isSpecialPluginCapability as isSpecialCapability } from "../components/plugins/pluginCapabilities";
-import { usePluginBatchUpdate } from "../components/plugins/usePluginBatchUpdate";
 import { NvxButton, NvxCard, NvxCheckbox, NvxDialog, NvxIcon, NvxInlineNotice, NvxProgress, NvxStatusLabel, NvxTextAction } from "../components/ui";
-import { openPluginSpecialPermission, type PluginCatalogEntryDto } from "../core-api/client";
+import { openPluginSpecialPermission } from "../core-api/client";
 import type { InstalledPluginSummary, PluginCapability, PluginCapabilityGrant, PluginOperationSummary, PluginSpecialPermissionOutcome } from "../core-api/generated/core-api";
 import { pluginFailureCode, usePluginsStore } from "../stores/plugins";
 import { useTipsStore } from "../stores/tips";
@@ -21,19 +18,8 @@ import { useTipsStore } from "../stores/tips";
 const { locale, t } = useI18n();
 const router = useRouter();
 const plugins = usePluginsStore();
-const pluginIcons = usePluginIconsStore();
 const tips = useTipsStore();
-const batchUpdate = usePluginBatchUpdate(plugins);
-const batchUpdateActive = batchUpdate.isActive;
-const batchUpdateAwaitingCapabilities = batchUpdate.isAwaitingCapabilities;
-const batchUpdateCurrent = batchUpdate.current;
-const batchUpdateResults = batchUpdate.results;
-const batchUpdateTotal = batchUpdate.total;
-const batchUpdateProcessed = batchUpdate.processed;
-const batchUpdatePhase = batchUpdate.phase;
-const batchUpdateHasStarted = batchUpdate.hasStarted;
 const feedbackScope = "plugins-operation";
-const activeView = ref<"marketplace" | "installed">("marketplace");
 const permissionTarget = ref<InstalledPluginSummary | null>(null);
 const operationPermissionTarget = ref<InstalledPluginSummary | null>(null);
 const settingsTarget = ref<InstalledPluginSummary | null>(null);
@@ -43,7 +29,6 @@ const dangerTarget = ref<InstalledPluginSummary | null>(null);
 const dangerAction = ref<"disable" | "uninstall">("disable");
 const deleteData = ref(false);
 const actionPending = ref(false);
-const preparingCatalogPluginId = ref<string | null>(null);
 const specialPermissionPending = ref<string | null>(null);
 const preparedApprovalExpired = ref(false);
 const visualFixtureMode = ref(false);
@@ -52,8 +37,7 @@ const operationList = computed(() => Object.values(plugins.operations)
   .sort((a, b) => Number(b.updatedAtUnixMs - a.updatedAtUnixMs)));
 const pluginsPageContributions = computed(() => plugins.contributions.filter((panel) => panel.slot === "pluginsPage"));
 const enabledPluginCount = computed(() => plugins.installed.filter((plugin) => plugin.state === "enabled").length);
-const attentionPluginCount = computed(() => plugins.installed.filter((plugin) => ["crashed", "quarantined", "incompatible", "updateAvailable"].includes(plugin.state)).length);
-const availableBatchUpdateCount = computed(() => plugins.installed.filter((plugin) => catalogUpdateFor(plugin) !== null).length);
+const attentionPluginCount = computed(() => plugins.installed.filter((plugin) => ["crashed", "quarantined", "incompatible"].includes(plugin.state)).length);
 const installedPlugins = computed(() => [...plugins.installed].sort((left, right) => (
   Number(right.pluginId === "org.norixor") - Number(left.pluginId === "org.norixor")
 )));
@@ -82,11 +66,6 @@ const formatAuditTime = (value: bigint) => new Intl.DateTimeFormat(locale.value,
 const capabilityLabel = (capability: PluginCapability) => t(`plugins.capabilities.${capability}.label`);
 const capabilityDescription = (capability: PluginCapability) => t(`plugins.capabilities.${capability}.description`);
 const grantedCapabilityCount = (plugin: InstalledPluginSummary) => plugin.grants.filter((grant) => grant.granted).length;
-const catalogUpdateFor = (plugin: InstalledPluginSummary) => latestCompatiblePluginUpdate(
-  plugins.catalog?.entries ?? [],
-  plugin.pluginId,
-  plugin.activeVersion,
-);
 watch(() => plugins.errorCode, (errorCode) => {
   if (!errorCode) return;
   tips.show({
@@ -108,7 +87,6 @@ watch(() => plugins.success, (success) => {
 function installStateTone(plugin: InstalledPluginSummary) {
   if (plugin.state === "enabled") return "success";
   if (["crashed", "quarantined", "incompatible"].includes(plugin.state)) return "danger";
-  if (plugin.state === "updateAvailable") return "warning";
   return "neutral";
 }
 function operationTone(operation: PluginOperationSummary) {
@@ -128,17 +106,11 @@ function updatePermission(capability: PluginCapability, granted: boolean) {
   permissionDraft.value = permissionDraft.value.map((grant) => grant.capability === capability ? { ...grant, granted } : grant);
 }
 async function choosePackage() {
-  if (batchUpdate.isActive.value) return;
   await plugins.prepareImport();
 }
 async function confirmImport() {
   const preview = plugins.preparedPackage;
   if (!preview || actionPending.value || specialPermissionPending.value || preparedApprovalExpired.value) return;
-  if (batchUpdate.isAwaitingCapabilities.value) {
-    batchUpdate.confirmCapabilities(preview, permissionDraft.value);
-    return;
-  }
-  if (batchUpdate.isActive.value) return;
   actionPending.value = true;
   await plugins.installPrepared(preview, permissionDraft.value);
   actionPending.value = false;
@@ -154,27 +126,8 @@ async function confirmPermissions() {
   actionPending.value = false;
   if (updated) permissionTarget.value = null;
 }
-async function openCatalogUpdate(entry: PluginCatalogEntryDto) {
-  if (actionPending.value || batchUpdate.isActive.value) return;
-  actionPending.value = true;
-  preparingCatalogPluginId.value = entry.pluginId;
-  try { await plugins.prepareCatalog(entry); }
-  finally { actionPending.value = false; preparingCatalogPluginId.value = null; }
-}
-function openInstalledCatalogUpdate(plugin: InstalledPluginSummary) {
-  const entry = catalogUpdateFor(plugin);
-  if (entry) void openCatalogUpdate(entry);
-}
 function closePreparedPackage() {
-  if (batchUpdate.isAwaitingCapabilities.value) {
-    batchUpdate.skipCapabilities();
-    return;
-  }
-  if (batchUpdate.isActive.value) return;
   void plugins.discardPrepared();
-}
-function stopBatchUpdate() {
-  batchUpdate.stop();
 }
 async function openSpecialPermissions(plugin: InstalledPluginSummary | null, capability: PluginCapability | null = null) {
   if (!plugin || actionPending.value) return;
@@ -238,7 +191,6 @@ async function toggleSafeModeNextStart() {
   actionPending.value = false;
 }
 function openDanger(plugin: InstalledPluginSummary, action: "disable" | "uninstall") {
-  if (batchUpdate.isActive.value) return;
   dangerTarget.value = plugin;
   dangerAction.value = action;
   deleteData.value = false;
@@ -325,7 +277,6 @@ function applyVisualFixture() {
   plugins.installed = [utility, account];
   plugins.readiness = {
     ready: true,
-    trustedRootCount: 0,
     protocolMajor: 1,
     protocolMinor: 3,
     safeModeActive: false,
@@ -364,7 +315,6 @@ onMounted(() => {
   window.addEventListener("norishell:plugin-terminal-input-decided", handleTerminalInputDecided);
 });
 onBeforeUnmount(() => {
-  batchUpdate.dispose();
   window.removeEventListener("norishell:plugin-special-permission-changed", handleSpecialPermissionChanged);
   window.removeEventListener("norishell:plugin-terminal-input-decided", handleTerminalInputDecided);
 });
@@ -374,36 +324,11 @@ onBeforeUnmount(() => {
   <section class="plugins-page">
     <NvxPluginAppIntegrations />
     <header class="plugins-page__topbar">
-      <div
-        class="plugins-page__tabs"
-        role="tablist"
-        :aria-label="t('plugins.tabs.label')"
-      >
-        <button
-          type="button"
-          role="tab"
-          :aria-selected="activeView === 'marketplace'"
-          :class="{ 'is-active': activeView === 'marketplace' }"
-          @click="activeView = 'marketplace'"
-        >
-          {{ t("plugins.marketplace.title") }}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          :aria-selected="activeView === 'installed'"
-          :class="{ 'is-active': activeView === 'installed' }"
-          @click="activeView = 'installed'"
-        >
-          {{ t("plugins.installedTitle") }}
-        </button>
-      </div>
       <div class="plugins-page__actions">
         <NvxButton
-          v-if="activeView === 'installed'"
           size="sm"
           variant="secondary"
-          :disabled="actionPending || plugins.loading || batchUpdateActive"
+          :disabled="actionPending || plugins.loading"
           @click="toggleSafeModeNextStart"
         >
           {{ t(plugins.readiness?.safeModeNextStart
@@ -411,18 +336,8 @@ onBeforeUnmount(() => {
             : "plugins.safeMode.enableNextStart") }}
         </NvxButton>
         <NvxButton
-          v-if="activeView === 'installed'"
-          size="sm"
-          variant="secondary"
-          :disabled="actionPending || plugins.loading || batchUpdateActive || batchUpdateHasStarted || plugins.preparedPackage !== null || !availableBatchUpdateCount"
-          @click="batchUpdate.start"
-        >
-          {{ t("plugins.batchUpdate.action", { count: availableBatchUpdateCount }) }}
-        </NvxButton>
-        <NvxButton
           size="sm"
           :loading="plugins.loading"
-          :disabled="batchUpdateActive"
           @click="choosePackage"
         >
           <NvxIcon
@@ -435,18 +350,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <NvxPluginMarketplace
-      v-if="activeView === 'marketplace'"
-      :busy="actionPending || batchUpdateActive"
-      :preparing-plugin-id="preparingCatalogPluginId"
-      @prepare="openCatalogUpdate"
-      @manage="(plugin) => { activeView = 'installed'; detailsTarget = plugin; }"
-    />
-
-    <div
-      v-else
-      class="plugins-management"
-    >
+    <div class="plugins-management">
       <NvxInlineNotice
         v-if="plugins.readiness?.safeModeActive"
         tone="warning"
@@ -460,52 +364,6 @@ onBeforeUnmount(() => {
       >
         {{ t("plugins.safeMode.nextDescription") }}
       </NvxInlineNotice>
-      <section
-        v-if="batchUpdateActive || batchUpdateHasStarted"
-        class="plugin-batch-update"
-        aria-live="polite"
-      >
-        <div class="row-between">
-          <span>
-            <strong>{{ t("plugins.batchUpdate.title") }}</strong>
-            <small>{{ t(`plugins.batchUpdate.phase.${batchUpdatePhase}`, { current: batchUpdateCurrent?.name ?? "", processed: batchUpdateProcessed, total: batchUpdateTotal }) }}</small>
-          </span>
-          <NvxTextAction
-            v-if="batchUpdateActive"
-            tone="danger"
-            @click="stopBatchUpdate"
-          >
-            {{ t("plugins.batchUpdate.stop") }}
-          </NvxTextAction>
-          <NvxTextAction
-            v-else
-            @click="batchUpdate.dismissSummary"
-          >
-            {{ t("plugins.dismiss") }}
-          </NvxTextAction>
-        </div>
-        <NvxProgress
-          v-if="batchUpdateTotal"
-          :label="t('plugins.batchUpdate.progress')"
-          :value="batchUpdateTotal ? (batchUpdateProcessed / batchUpdateTotal) * 100 : 0"
-          :status="batchUpdateResults.some((result) => result.state === 'failed') ? 'error' : 'available'"
-        />
-        <p v-if="!batchUpdateActive && batchUpdateTotal">
-          {{ t("plugins.batchUpdate.summary", {
-            succeeded: batchUpdateResults.filter((result) => result.state === "succeeded").length,
-            failed: batchUpdateResults.filter((result) => result.state === "failed").length,
-            skipped: batchUpdateResults.filter((result) => result.state === "skipped").length,
-          }) }}
-        </p>
-        <ul v-if="batchUpdateResults.some((result) => result.state === 'failed')">
-          <li
-            v-for="result in batchUpdateResults.filter((item) => item.state === 'failed')"
-            :key="result.pluginId"
-          >
-            {{ t("plugins.batchUpdate.failed", { name: result.name, reason: t(`plugins.errors.${result.errorCode ?? 'requestFailed'}`) }) }}
-          </li>
-        </ul>
-      </section>
       <section
         v-if="plugins.pendingInput.length"
         class="plugin-operations"
@@ -656,10 +514,6 @@ onBeforeUnmount(() => {
               :size="16"
               aria-hidden="true"
             />{{ t("plugins.summary.attentionValue", { count: attentionPluginCount }) }}</span>
-            <span
-              v-if="availableBatchUpdateCount"
-              class="plugin-summary__attention"
-            >{{ t("plugins.batchUpdate.available", { count: availableBatchUpdateCount }) }}</span>
           </div>
         </div>
         <p
@@ -702,18 +556,7 @@ onBeforeUnmount(() => {
               class="plugin-table__identity"
               role="cell"
             >
-              <span
-                class="plugin-table__icon"
-                :class="{ 'plugin-table__icon--artwork': pluginIcons.imageFor(plugin.pluginId, 'installed') }"
-              ><img
-                v-if="pluginIcons.imageFor(plugin.pluginId, 'installed')"
-                :key="pluginIcons.imageFor(plugin.pluginId, 'installed')"
-                :src="pluginIcons.imageFor(plugin.pluginId, 'installed')"
-                alt=""
-                aria-hidden="true"
-                @error="pluginIcons.discardImage(plugin.pluginId, 'installed', ($event.target as HTMLImageElement).src)"
-              ><NvxIcon
-                v-else
+              <span class="plugin-table__icon"><NvxIcon
                 :icon="Blocks"
                 :size="20"
                 aria-hidden="true"
@@ -757,13 +600,11 @@ onBeforeUnmount(() => {
               <NvxPluginManageActions
                 :has-settings="plugin.hasSettings"
                 :state="plugin.state"
-                :disabled="actionPending || batchUpdateActive"
-                :update-available="catalogUpdateFor(plugin) !== null"
+                :disabled="actionPending"
                 @settings="settingsTarget = plugin"
                 @details="detailsTarget = plugin"
                 @permissions="openPermissions(plugin)"
                 @operation-permissions="operationPermissionTarget = plugin"
-                @update="openInstalledCatalogUpdate(plugin)"
                 @enable="plugins.setEnabled(plugin, true)"
                 @disable="openDanger(plugin, 'disable')"
                 @uninstall="openDanger(plugin, 'uninstall')"
@@ -899,7 +740,7 @@ onBeforeUnmount(() => {
 
     <NvxDialog
       plugin-protected
-      :model-value="plugins.preparedPackage !== null && (!batchUpdateActive || batchUpdateAwaitingCapabilities)"
+      :model-value="plugins.preparedPackage !== null"
       :title="t(preparedIsUpdate ? 'plugins.permissions.update.title' : 'plugins.permissions.install.title')"
       :description="t(preparedIsUpdate ? 'plugins.permissions.update.description' : 'plugins.permissions.install.description', { name: plugins.preparedPackage?.name ?? '' })"
       :close-label="t('plugins.permissions.close')"
@@ -1058,7 +899,7 @@ onBeforeUnmount(() => {
       plugin-protected
       :model-value="dangerTarget !== null"
       :title="t(`plugins.danger.${dangerAction}.title`)"
-      :description="t(`plugins.danger.${dangerAction}.description`, { name: dangerTarget?.name ?? '' })"
+      :description="t(`plugins.danger.${dangerAction}.${dangerTarget?.packageKind === 'theme' ? 'themeDescription' : 'description'}`, { name: dangerTarget?.name ?? '' })"
       :close-label="t('plugins.danger.close')"
       :dismissible="!actionPending"
       @update:model-value="(open) => { if (!open) dangerTarget = null; }"
@@ -1113,53 +954,10 @@ onBeforeUnmount(() => {
   background: var(--nvx-color-bg-surface);
 }
 
-.plugins-page__tabs,
 .plugins-page__actions {
   display: flex;
   gap: var(--nvx-space-2);
   align-items: center;
-}
-
-.plugins-page__tabs {
-  align-self: stretch;
-}
-
-.plugins-page__tabs button {
-  position: relative;
-  align-self: stretch;
-  padding: 0 var(--nvx-space-3);
-  border: 0;
-  background: transparent;
-  color: var(--nvx-color-text-secondary);
-  font: inherit;
-  font-size: var(--nvx-font-size-sm);
-  font-weight: var(--nvx-font-weight-medium);
-  cursor: pointer;
-}
-
-.plugins-page__tabs button::after {
-  position: absolute;
-  right: var(--nvx-space-3);
-  bottom: 0;
-  left: var(--nvx-space-3);
-  height: 2px;
-  background: transparent;
-  content: "";
-}
-
-.plugins-page__tabs button:hover,
-.plugins-page__tabs button.is-active {
-  color: var(--nvx-color-accent);
-}
-
-.plugins-page__tabs button.is-active::after {
-  background: var(--nvx-color-accent);
-}
-
-.plugins-page__tabs button:focus-visible {
-  border-radius: var(--nvx-radius-sm);
-  outline: var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring);
-  outline-offset: -4px;
 }
 
 .plugins-management {
@@ -1221,36 +1019,6 @@ onBeforeUnmount(() => {
 
 .plugin-summary__attention {
   color: var(--nvx-color-warning);
-}
-
-.plugin-batch-update {
-  display: grid;
-  gap: var(--nvx-space-2);
-  margin-top: var(--nvx-space-4);
-  padding: var(--nvx-space-3) var(--nvx-space-4);
-  border: var(--nvx-border-width) solid var(--nvx-color-border);
-  border-radius: var(--nvx-radius-md);
-  background: var(--nvx-color-bg-subtle);
-}
-
-.plugin-batch-update span {
-  display: grid;
-  gap: 2px;
-}
-
-.plugin-batch-update small,
-.plugin-batch-update p,
-.plugin-batch-update ul {
-  margin: 0;
-  color: var(--nvx-color-text-secondary);
-  font-size: var(--nvx-font-size-sm);
-}
-
-.plugin-batch-update ul {
-  display: grid;
-  gap: var(--nvx-space-1);
-  padding-inline-start: var(--nvx-space-4);
-  color: var(--nvx-color-danger);
 }
 
 .plugin-operations {
@@ -1394,16 +1162,6 @@ onBeforeUnmount(() => {
   border-radius: var(--nvx-radius-sm);
   background: var(--nvx-color-bg-subtle);
   color: var(--nvx-color-text-secondary);
-}
-
-.plugin-table__icon--artwork {
-  background: transparent;
-}
-
-.plugin-table__icon img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
 }
 
 .plugin-table__identity-copy {

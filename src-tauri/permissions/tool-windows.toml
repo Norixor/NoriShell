@@ -1,0 +1,19 @@
+[[permission]]
+identifier = "tool-window-lifecycle"
+description = "Read and close only the calling Core-registered tool window."
+commands.allow = ["tool_window_exit_reply", "tool_window_get", "tool_window_close", "tool_window_changed"]
+
+[[permission]]
+identifier = "tool-sftp-file"
+description = "Access only the file and generation registered for the calling window."
+commands.allow = ["tool_file_preview", "tool_file_tail", "tool_file_save"]
+
+[[permission]]
+identifier = "tool-host-editor"
+description = "Host configuration and credential management without terminal, plugin, or filesystem browsing access."
+commands.allow = ["host_list", "host_catalog_list", "host_group_list", "host_group_create", "host_tag_list", "host_tag_create", "identity_list", "credential_ref_list", "algorithm_policy_catalog_get", "host_connection_config_get", "host_configured_create", "host_update", "host_organization_replace", "route_plan_replace", "algorithm_policy_replace", "heartbeat_policy_replace", "monitoring_policy_replace", "login_automation_replace", "login_automation_confirm", "login_automation_secret_create", "login_automation_secret_cancel", "host_create_password_stage", "host_create_password_cancel", "identity_create", "private_key_file_import", "credential_transient_prepare", "ssh_connection_test", "vault_status", "secure_vault_open"]
+
+[[permission]]
+identifier = "tool-desktop-editor"
+description = "Desktop profile configuration and password staging, without session control."
+commands.allow = ["desktop_profile_list", "desktop_profile_save", "host_list", "identity_list", "credential_ref_list", "host_create_password_stage", "host_create_password_cancel", "vault_status", "secure_vault_open"]

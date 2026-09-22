@@ -6,12 +6,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { i18n } from "../locales";
 
 const client = vi.hoisted(() => ({
+  secureVault: vi.fn(),
   createVault: vi.fn(),
   unlockVault: vi.fn(),
   disableVaultAutoUnlock: vi.fn(),
   enableVaultAutoUnlock: vi.fn(),
   fetchVaultStatus: vi.fn(),
   lockVault: vi.fn(),
+  listCredentialRefs: vi.fn(),
+  listIdentities: vi.fn(),
+  listKnownHosts: vi.fn(),
 }));
 
 vi.mock("../core-api/client", async (importOriginal) => ({
@@ -22,7 +26,11 @@ vi.mock("../core-api/client", async (importOriginal) => ({
   enableVaultAutoUnlock: client.enableVaultAutoUnlock,
   fetchVaultStatus: client.fetchVaultStatus,
   lockVault: client.lockVault,
+  listCredentialRefs: client.listCredentialRefs,
+  listIdentities: client.listIdentities,
+  listKnownHosts: client.listKnownHosts,
 }));
+vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: client.secureVault }));
 vi.mock("../terminal-fonts", () => ({ detectInstalledTerminalFonts: vi.fn(async () => []) }));
 
 import SettingsView from "./SettingsView.vue";
@@ -49,6 +57,7 @@ async function mountSettings() {
 describe("Settings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    client.secureVault.mockReset().mockResolvedValue(true);
     localStorage.clear();
     localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ locale: "en" }));
     i18n.global.locale.value = "en";
@@ -60,6 +69,9 @@ describe("Settings", () => {
       unlockPolicy: "currentSession",
       autoUnlockFailure: null,
     });
+    client.listIdentities.mockResolvedValue([]);
+    client.listCredentialRefs.mockResolvedValue([]);
+    client.listKnownHosts.mockResolvedValue([]);
   });
 
   it("renders only the appearance section when selected", async () => {
@@ -72,57 +84,39 @@ describe("Settings", () => {
     wrapper.unmount();
   });
 
-  it("creates a missing Vault explicitly with matching confirmation", async () => {
+  it("opens the isolated Vault flow without rendering or submitting secrets in Settings", async () => {
     const missing = { state: "missing", vaultId: null, revision: null, entryCount: null, unlockPolicy: "currentSession", autoUnlockFailure: null };
     client.fetchVaultStatus.mockResolvedValue(missing);
-    client.createVault.mockResolvedValue({ ...missing, state: "unlocked" });
     const wrapper = await mountSettings();
     await wrapper.vm.$router.push("/settings?section=vault");
     await flushPromises();
-    const open = wrapper.findAll("button").find((button) => button.text() === "Create Vault")!;
-    await open.trigger("click");
+    client.secureVault.mockImplementation(async () => {
+      client.fetchVaultStatus.mockResolvedValue({ ...missing, state: "unlocked" });
+      return true;
+    });
+    await wrapper.findAll("button").find((button) => button.text() === "Create Vault")!.trigger("click");
     await flushPromises();
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
-    expect(dialog.textContent).toContain("Create encrypted Vault");
-    expect(dialog.textContent).toContain("same Vault password");
-    const password = dialog.querySelector<HTMLInputElement>("#settings-vault-password")!;
-    const confirmation = dialog.querySelector<HTMLInputElement>("#settings-vault-confirmation")!;
-    password.value = "new-vault-password";
-    password.dispatchEvent(new Event("input", { bubbles: true }));
-    confirmation.value = "wrong-password";
-    confirmation.dispatchEvent(new Event("input", { bubbles: true }));
-    await flushPromises();
-    const submit = Array.from(dialog.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Create Vault")!;
-    expect(submit.disabled).toBe(true);
-    confirmation.value = "new-vault-password";
-    confirmation.dispatchEvent(new Event("input", { bubbles: true }));
-    await flushPromises();
-    submit.click();
-    await flushPromises();
-    expect(client.createVault).toHaveBeenCalledWith("new-vault-password", "new-vault-password");
+    expect(client.secureVault).toHaveBeenCalledWith("ensureUnlocked");
+    expect(client.createVault).not.toHaveBeenCalled();
     expect(client.unlockVault).not.toHaveBeenCalled();
-    expect(document.querySelector("#settings-vault-password")).toBeNull();
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(wrapper.text()).toContain("Lock now");
     wrapper.unmount();
   });
 
-  it("does not open an unlock prompt when fresh Vault status is unavailable", async () => {
+  it("reports a rejected secure operation without falling back to a main-window password prompt", async () => {
+    client.fetchVaultStatus.mockResolvedValue({ state: "locked", unlockPolicy: "currentSession" });
+    client.secureVault.mockRejectedValue(new Error("secureVaultStateChanged"));
     const wrapper = await mountSettings();
     await wrapper.vm.$router.push("/settings?section=vault");
     await flushPromises();
-    client.fetchVaultStatus.mockRejectedValue(new Error("unavailable"));
-    // A locked projection may become unavailable before an explicit action.
-    await wrapper.vm.$router.push("/settings?section=application");
-    wrapper.unmount();
-    client.fetchVaultStatus.mockResolvedValueOnce({ state: "locked", unlockPolicy: "currentSession" });
-    const second = await mountSettings();
-    await second.vm.$router.push("/settings?section=vault");
+    await wrapper.findAll("button").find((button) => button.text() === "Unlock Vault")!.trigger("click");
     await flushPromises();
-    await second.findAll("button").find((button) => button.text() === "Unlock Vault")!.trigger("click");
-    await flushPromises();
-    expect(document.querySelector("#settings-vault-password")).toBeNull();
-    expect(second.text()).toContain("temporarily unavailable");
+    expect(client.secureVault).toHaveBeenCalledWith("ensureUnlocked");
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(wrapper.text()).toContain(i18n.global.t("sshHosts.vault.failed"));
     expect(client.unlockVault).not.toHaveBeenCalled();
-    second.unmount();
+    wrapper.unmount();
   });
 
   it("does not duplicate the first-level Plugins entry", async () => {
@@ -148,7 +142,14 @@ describe("Settings", () => {
 
     await identities.trigger("click");
     await flushPromises();
-    expect(wrapper.vm.$router.currentRoute.value.path).toBe("/settings/identities");
+    expect(wrapper.vm.$router.currentRoute.value.path).toBe("/settings");
+    expect(wrapper.text()).toContain("There are no SSH identities yet");
+    expect(identities.attributes("aria-current")).toBe("page");
+
+    await knownHosts.trigger("click");
+    await flushPromises();
+    expect(wrapper.vm.$router.currentRoute.value.path).toBe("/settings");
+    expect(wrapper.text()).toContain("No server host keys have been trusted yet");
     wrapper.unmount();
   });
 
@@ -178,6 +179,21 @@ describe("Settings", () => {
     await terminal!.trigger("click");
 
     expect(wrapper.find('[aria-labelledby="terminal-appearance-title"]').exists()).toBe(true);
+    expect(wrapper.vm.$router.currentRoute.value.path).toBe("/settings");
+    wrapper.unmount();
+  });
+
+  it("shows About inside Settings with the app identity and GitHub address", async () => {
+    const wrapper = await mountSettings();
+    const about = wrapper.findAll("button")
+      .find((button) => button.text() === "About");
+    expect(about).toBeDefined();
+
+    await about!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[aria-labelledby="about-settings-title"]').text()).toContain("NoriShell");
+    expect(wrapper.text()).toContain("github.com/Norixor/NoriShell");
     expect(wrapper.vm.$router.currentRoute.value.path).toBe("/settings");
     wrapper.unmount();
   });

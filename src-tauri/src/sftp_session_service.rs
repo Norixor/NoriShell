@@ -52,8 +52,8 @@ use norishell_core_api::{self as wire, HostId, WireSequence};
 use norishell_ssh_domain::Endpoint;
 use norishell_ssh_transport::{
     AuthenticatedTransport, HostKeyDecision as TransportHostKeyDecision, HostKeyVerifier,
-    ObservedHostKey, SftpTransport, SharedSessionChannels, SharedSftpChannel, TransportCloseHandle,
-    TransportError, VerifyFuture,
+    IngressFailureKind, ObservedHostKey, SftpTransport, SharedSessionChannels, SharedSftpChannel,
+    TransportCloseHandle, TransportError, VerifyFuture,
 };
 use russh_sftp::{
     client::{
@@ -71,6 +71,7 @@ use zeroize::Zeroizing;
 use crate::{
     connection_profile::{
         ConnectionProfileError, ResolvedSshConnectionBase, ResolvedTransportKeepalivePolicy,
+        connection_has_vault_credentials, connection_requires_vault,
         resolve_long_lived_connection_profile,
     },
     host_service::HostService,
@@ -643,6 +644,7 @@ pub(crate) struct SftpSessionSummary {
 
 #[derive(Debug)]
 pub(crate) enum SftpProductionError {
+    VaultUnavailable,
     Profile(ConnectionProfileError),
     Connection {
         error: Box<TransportError>,
@@ -762,6 +764,10 @@ impl<'a> SftpTransportFactory<'a> {
         V: HostKeyVerifier,
         I: SshConnectionInteraction,
     {
+        if connection_requires_vault(&profile.connection) && !self.vault.is_unlocked() {
+            return Err(SftpProductionError::VaultUnavailable);
+        }
+        let has_vault_credentials = connection_has_vault_credentials(&profile.connection);
         let keepalive_interval = profile
             .transport_keepalive
             .as_ref()
@@ -775,9 +781,18 @@ impl<'a> SftpTransportFactory<'a> {
                     keepalive_interval,
                 )
                 .await
-                .map_err(|failure| SftpProductionError::Connection {
-                    error: Box::new(failure.error),
-                    route_stage: failure.route_stage,
+                .map_err(|failure| {
+                    if has_vault_credentials
+                        && !self.vault.is_unlocked()
+                        && vault_locked_after_credential_failure(&failure.error)
+                    {
+                        SftpProductionError::VaultUnavailable
+                    } else {
+                        SftpProductionError::Connection {
+                            error: Box::new(failure.error),
+                            route_stage: failure.route_stage,
+                        }
+                    }
                 })?;
         Ok(AuthenticatedSftpConnection {
             transport: connected.transport,
@@ -10230,8 +10245,22 @@ fn transfer_remaining_seconds(transfer: &TransferRecord) -> Option<u64> {
     )
 }
 
+/// A locked Vault can only explain failures while acquiring or applying a
+/// credential. Host-key and route failures must retain their protocol origin.
+fn vault_locked_after_credential_failure(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::AuthenticationRejected | TransportError::InvalidPrivateKey
+    ) || matches!(
+        error,
+        TransportError::RouteIngress(route)
+            if route.kind == IngressFailureKind::CredentialLocked
+    )
+}
+
 fn map_production_failure(error: &SftpProductionError) -> SftpFailureCode {
     match error {
+        SftpProductionError::VaultUnavailable => SftpFailureCode::VaultLocked,
         SftpProductionError::Profile(ConnectionProfileError::CredentialUnavailable) => {
             SftpFailureCode::CredentialUnavailable
         }
@@ -10259,7 +10288,8 @@ fn map_sftp_core_error(
             wire::ErrorCategory::Conflict,
             wire::RetryStrategy::RefreshSnapshot,
         ),
-        SftpProductionError::Profile(ConnectionProfileError::CredentialUnavailable) => (
+        SftpProductionError::VaultUnavailable
+        | SftpProductionError::Profile(ConnectionProfileError::CredentialUnavailable) => (
             wire::ErrorCategory::Unavailable,
             wire::RetryStrategy::WaitForUser,
         ),
@@ -10347,9 +10377,9 @@ fn map_transfer_execution_failure(error: SftpProductionError) -> TransferFailure
         {
             TransferFailureCode::TransportLost
         }
-        SftpProductionError::Profile(_) | SftpProductionError::Connection { .. } => {
-            TransferFailureCode::TransportLost
-        }
+        SftpProductionError::VaultUnavailable
+        | SftpProductionError::Profile(_)
+        | SftpProductionError::Connection { .. } => TransferFailureCode::TransportLost,
         SftpProductionError::Transport(_) | SftpProductionError::ShutdownIncomplete(_) => {
             TransferFailureCode::Protocol
         }
@@ -10408,6 +10438,28 @@ mod tests {
     use std::os::unix::ffi::OsStrExt as _;
 
     use super::*;
+
+    #[test]
+    fn vault_recovery_classifies_only_credential_failures() {
+        assert!(vault_locked_after_credential_failure(
+            &TransportError::AuthenticationRejected
+        ));
+        assert!(vault_locked_after_credential_failure(
+            &TransportError::InvalidPrivateKey
+        ));
+        assert!(vault_locked_after_credential_failure(
+            &TransportError::RouteIngress(norishell_ssh_transport::RouteIngressError {
+                stage: norishell_ssh_transport::IngressStage::Configuration,
+                kind: IngressFailureKind::CredentialLocked,
+            })
+        ));
+        assert!(!vault_locked_after_credential_failure(
+            &TransportError::HostKeyRejected
+        ));
+        assert!(!vault_locked_after_credential_failure(
+            &TransportError::ConnectFailed
+        ));
+    }
 
     fn actor() -> (SftpSessionActor, SftpGeneration) {
         let mut actor = SftpSessionActor::new(

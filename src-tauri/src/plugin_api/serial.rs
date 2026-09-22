@@ -17,6 +17,8 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+#[cfg(windows)]
+use norishell_core_api::MAX_PLUGIN_SERIAL_LABEL_BYTES;
 use norishell_core_api::{
     FrozenSerialPlan, MAX_PLUGIN_SERIAL_METADATA_BYTES, MAX_PLUGIN_SERIAL_SEND_BYTES,
     PluginApiErrorCode, PluginApiResourceEventKind, PluginSerialDataBits,

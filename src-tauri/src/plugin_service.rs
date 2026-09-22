@@ -38,9 +38,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use norishell_app_persistence::{
     AppPersistenceError, PluginActivationPermissions, PluginCapabilityGrantRecord,
-    PluginCatalogEntryRecord, PluginCatalogTrustRecord, PluginHostScopeSetRecord,
-    PluginInstalledRecord, PluginOperationPhase, PluginOperationRecord, PluginPermissionBinding,
-    PluginPrivateStorageOwner,
+    PluginHostScopeSetRecord, PluginInstalledRecord, PluginOperationPhase, PluginOperationRecord,
+    PluginPermissionBinding, PluginPrivateStorageOwner,
 };
 use norishell_core_api::{
     CoreApiError, EVENT_PLUGIN_SSH_SYNC_BROWSER_INVALIDATED, ErrorCategory, ExitBlocker,
@@ -48,20 +47,18 @@ use norishell_core_api::{
     PLUGIN_PROTOCOL_MAX_MINOR, PLUGIN_PROTOCOL_MINOR, PLUGIN_THEME_PROTOCOL_MINOR,
     PluginApprovalDecision, PluginApprovalId, PluginApprovedHostSessionLaunch, PluginAuditEntry,
     PluginAuditListRequest, PluginCapability, PluginCapabilityGrant,
-    PluginCapabilityGrantsReplaceRequest, PluginCatalogEntry, PluginCatalogPackagePrepareRequest,
-    PluginCatalogRefreshRequest, PluginCatalogSnapshot, PluginCompatibility,
-    PluginContributionCopyRequest, PluginContributionCopyResponse, PluginContributionInvokeRequest,
-    PluginContributionListRequest, PluginContributionNode, PluginContributionPanel,
-    PluginContributionSlot, PluginErrorCode, PluginExtensionTargetContext,
-    PluginExtensionTargetListRequest, PluginHostApprovalDecisionRequest,
-    PluginHostApprovalDecisionResponse, PluginHostApprovalGetRequest, PluginHostApprovalKind,
-    PluginHostApprovalSummary, PluginHostDomOperation, PluginHostDomOperationBatch,
-    PluginHostDomSnapshot, PluginHostHandle, PluginHostMessageKind, PluginHostMetadataProjection,
-    PluginHostMutationPatch, PluginHostRequest, PluginHostScopeListRequest,
-    PluginHostScopeReplaceRequest, PluginHostScopeSnapshot, PluginHostScopeSummary,
-    PluginHostSessionKind, PluginIconReadRequest, PluginIconReadResponse, PluginIconReadScope,
-    PluginId, PluginInputApprovalId, PluginInstallRequest, PluginInstallState,
-    PluginInstalledListRequest, PluginIsolatedSurfaceContent, PluginIsolatedSurfaceContentRequest,
+    PluginCapabilityGrantsReplaceRequest, PluginContributionCopyRequest,
+    PluginContributionCopyResponse, PluginContributionInvokeRequest, PluginContributionListRequest,
+    PluginContributionNode, PluginContributionPanel, PluginContributionSlot, PluginErrorCode,
+    PluginExtensionTargetContext, PluginExtensionTargetListRequest,
+    PluginHostApprovalDecisionRequest, PluginHostApprovalDecisionResponse,
+    PluginHostApprovalGetRequest, PluginHostApprovalKind, PluginHostApprovalSummary,
+    PluginHostDomOperation, PluginHostDomOperationBatch, PluginHostDomSnapshot, PluginHostHandle,
+    PluginHostMessageKind, PluginHostMetadataProjection, PluginHostMutationPatch,
+    PluginHostRequest, PluginHostScopeListRequest, PluginHostScopeReplaceRequest,
+    PluginHostScopeSnapshot, PluginHostScopeSummary, PluginHostSessionKind, PluginId,
+    PluginInputApprovalId, PluginInstallState, PluginInstalledListRequest,
+    PluginIsolatedSurfaceContent, PluginIsolatedSurfaceContentRequest,
     PluginIsolatedSurfaceOpenRequest, PluginLocalInstallRequest, PluginLocalPackageCancelRequest,
     PluginLocalPackagePrepareRequest, PluginLocalPackagePreview, PluginLocale,
     PluginLocaleSetRequest, PluginNavigationContribution, PluginNavigationItem,
@@ -89,16 +86,11 @@ use norishell_core_api::{
     TerminalInputFocusTarget, TerminalInputLease, ThemePackageEntry, WireSequence,
 };
 use norishell_plugin_platform::{
-    CatalogLimits, CatalogTrustRoots, CatalogTrustState, NorixorV1CatalogTrustState,
-    NorixorV1CatalogWire, NorixorV1EmbeddedRoot, NorixorV1RootTrustState, PackageLimits,
-    PluginInstaller, PluginPlatformError, PluginUiActionKind, VerifiedCatalog,
-    VerifiedCatalogEntry, VerifiedNorixorV1Catalog, VerifiedNorixorV1Root, inspect_local_package,
-    inspect_package, inspect_settings_asset_from_package_snapshot,
+    PackageLimits, PluginInstaller, PluginPlatformError, PluginUiActionKind, inspect_local_package,
     validate_plugin_dialog_ui_action, validate_plugin_dom_operations, validate_plugin_dom_snapshot,
-    validate_plugin_page_ui_action, validate_plugin_ui_action, verify_catalog,
-    verify_norixor_v1_catalog, verify_norixor_v1_download, verify_norixor_v1_package,
-    verify_norixor_v1_root,
+    validate_plugin_page_ui_action, validate_plugin_ui_action,
 };
+
 use semver::Version;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -108,7 +100,6 @@ use uuid::Uuid;
 use crate::{
     host_service::HostService,
     lifecycle::LifecycleState,
-    norixor_marketplace::{NorixorMarketplaceClient, production_embedded_root},
     plugin_contribution::{
         ParsedPluginContribution, ParsedPluginUiOutputs, TemplateLifecycleActionAdmission,
         parse_plugin_ui_outputs, parse_ui_panel_outputs, template_lifecycle_action_admission,
@@ -116,7 +107,6 @@ use crate::{
     },
     plugin_extension_registry,
     plugin_host_process::{PluginHostProcess, PluginHostProcessError},
-    plugin_icon::{InstalledIconProvenance, PluginIconCache},
     ssh_session_service::{
         ApprovedPluginInput, ApprovedPluginObservationAttach, PluginTerminalObservation,
         SshSessionService,
@@ -126,7 +116,6 @@ use crate::{
 
 type CoreResult<T> = Result<T, Box<CoreApiError>>;
 
-const PRODUCTION_PLUGIN_RELEASE_GATE: bool = false;
 const PLUGIN_INPUT_APPROVAL_MILLIS: i64 = 30_000;
 const PLUGIN_INPUT_MAX_BYTES: usize = 8 * 1024;
 const PLUGIN_OBSERVATION_QUEUE_CAPACITY: usize = 32;
@@ -142,68 +131,11 @@ const PLUGIN_ISOLATED_SURFACE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const PLUGIN_ISOLATED_SURFACE_GLOBAL_LIMIT: usize = 16;
 const PLUGIN_ISOLATED_SURFACE_PER_PLUGIN_LIMIT: usize = 4;
 const PLUGIN_PERMISSION_SURFACE_CONTRACT_REVISION: u64 = 1;
-#[allow(dead_code)]
-const PLUGIN_CATALOG_MAX_BYTES: usize = 2 * 1024 * 1024;
-#[allow(dead_code)]
-const PLUGIN_PACKAGE_MAX_BYTES: usize = 64 * 1024 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PluginIconScopeAccess {
-    Catalog,
-    InstalledCurrent(InstalledIconProvenance),
-    InstalledHistorical(InstalledIconProvenance),
-}
-
-#[allow(dead_code)]
-trait CatalogSource: Send + Sync {
-    fn fetch(&self, maximum_bytes: usize) -> Result<Vec<u8>, PluginSourceError>;
-}
-
-#[allow(dead_code)]
-trait PackageSource: Send + Sync {
-    fn fetch(&self, package_url: &str, maximum_bytes: usize) -> Result<Vec<u8>, PluginSourceError>;
-}
-
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-struct PluginSourceError;
-
-struct UnavailableCatalogSource;
-
-impl CatalogSource for UnavailableCatalogSource {
-    fn fetch(&self, _maximum_bytes: usize) -> Result<Vec<u8>, PluginSourceError> {
-        Err(PluginSourceError)
-    }
-}
-
-struct UnavailablePackageSource;
-
-impl PackageSource for UnavailablePackageSource {
-    fn fetch(
-        &self,
-        _package_url: &str,
-        _maximum_bytes: usize,
-    ) -> Result<Vec<u8>, PluginSourceError> {
-        Err(PluginSourceError)
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct PluginService {
     hosts: HostService,
     sessions: SshSessionService,
-    #[allow(dead_code)]
-    trust_roots: CatalogTrustRoots,
-    #[allow(dead_code)]
-    release_gate: bool,
     installer: Arc<PluginInstaller>,
-    #[allow(dead_code)]
-    catalog_source: Arc<dyn CatalogSource>,
-    #[allow(dead_code)]
-    package_source: Arc<dyn PackageSource>,
-    norixor_marketplace: NorixorMarketplaceClient,
-    plugin_icon_cache: PluginIconCache,
-    norixor_root: Option<NorixorV1EmbeddedRoot>,
     ssh_sync: Option<crate::ssh_sync_exchange::SshSyncExchangeBroker>,
     operations: Option<crate::plugin_operations::PluginOperationsService>,
     resources: Option<crate::plugin_resources::PluginResourceService>,
@@ -219,8 +151,6 @@ pub(crate) struct PluginService {
     serial_candidates: Arc<Mutex<BTreeMap<String, api_serial::SerialCandidateRecord>>>,
     protocol_launches: Arc<Mutex<BTreeMap<String, protocol_launch::ProtocolLaunch>>>,
     operation_policies: crate::plugin_operation_policy::OperationPolicyService,
-    #[allow(dead_code)]
-    catalog_limits: CatalogLimits,
     package_limits: PackageLimits,
     local_import_root: Arc<PathBuf>,
     app_handle: Arc<Mutex<Option<AppHandle>>>,
@@ -260,28 +190,9 @@ struct PluginRuntimeState {
 struct PreparedLocalPackage {
     path: PathBuf,
     inspected: norishell_plugin_platform::InspectedPackage,
-    authority: PreparedPackageAuthority,
     preview: PluginLocalPackagePreview,
     permission_revision: u64,
     approved_special_permissions: Option<permissions::PreparedSpecialPermissionApproval>,
-}
-
-#[derive(Default)]
-struct RetainedPermissionSnapshot {
-    grants: Vec<PluginCapabilityGrantRecord>,
-    grant_state_version: Option<WireSequence>,
-    scope: Option<PluginHostScopeSetRecord>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum PreparedPackageAuthority {
-    Local,
-    Marketplace {
-        catalog_entry: Box<PluginCatalogEntryRecord>,
-        signer_fingerprint_sha256: String,
-        publisher_key_base64: String,
-        publisher_signature_base64: String,
-    },
 }
 
 impl Drop for PreparedLocalPackage {
@@ -802,11 +713,6 @@ impl PluginService {
             app_data_directory,
             hosts,
             sessions,
-            CatalogTrustRoots::production(),
-            PRODUCTION_PLUGIN_RELEASE_GATE,
-            Arc::new(UnavailableCatalogSource),
-            Arc::new(UnavailablePackageSource),
-            CatalogLimits::default(),
             PackageLimits::default(),
         )
     }
@@ -838,16 +744,10 @@ impl PluginService {
         self
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn start_with_dependencies(
         app_data_directory: impl AsRef<Path>,
         hosts: HostService,
         sessions: SshSessionService,
-        trust_roots: CatalogTrustRoots,
-        release_gate: bool,
-        catalog_source: Arc<dyn CatalogSource>,
-        package_source: Arc<dyn PackageSource>,
-        catalog_limits: CatalogLimits,
         package_limits: PackageLimits,
     ) -> Result<Self, String> {
         let safe_mode_next_marker = app_data_directory
@@ -873,8 +773,6 @@ impl PluginService {
         let installer =
             PluginInstaller::new(app_data_directory.as_ref().join("plugins"), package_limits)
                 .map_err(|_| Uuid::new_v4().to_string())?;
-        let plugin_icon_cache =
-            PluginIconCache::new(&app_data_directory).map_err(|_| Uuid::new_v4().to_string())?;
         let service = Self {
             operation_policies: crate::plugin_operation_policy::OperationPolicyService::new(
                 hosts.clone(),
@@ -885,15 +783,7 @@ impl PluginService {
             ),
             hosts,
             sessions,
-            trust_roots,
-            release_gate,
             installer: Arc::new(installer),
-            catalog_source,
-            package_source,
-            norixor_marketplace: NorixorMarketplaceClient::production()
-                .map_err(|_| Uuid::new_v4().to_string())?,
-            plugin_icon_cache,
-            norixor_root: production_embedded_root(),
             ssh_sync: None,
             operations: None,
             resources: None,
@@ -909,7 +799,6 @@ impl PluginService {
             protocol_snapshot_revision: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             serial_candidates: Arc::new(Mutex::new(BTreeMap::new())),
             protocol_launches: Arc::new(Mutex::new(BTreeMap::new())),
-            catalog_limits,
             package_limits,
             local_import_root: Arc::new(local_import_root),
             app_handle: Arc::new(Mutex::new(None)),
@@ -949,6 +838,8 @@ impl PluginService {
             }
             match operation.kind {
                 PluginOperationKind::CatalogRefresh => {
+                    // Online catalogs are no longer supported. Finish legacy
+                    // persisted rows without restoring network authority.
                     self.fail_operation_record(
                         operation,
                         PluginOperationPhase::Completed,
@@ -1486,10 +1377,6 @@ impl PluginService {
     fn readiness(&self) -> PluginReadiness {
         PluginReadiness {
             ready: true,
-            trusted_root_count: u32::try_from(
-                self.trust_roots.len() + usize::from(self.norixor_root.is_some()),
-            )
-            .unwrap_or(u32::MAX),
             protocol_major: PLUGIN_PROTOCOL_MAJOR,
             protocol_minor: PLUGIN_PROTOCOL_MAX_MINOR,
             safe_mode_active: self.safe_mode_active,
@@ -1537,1091 +1424,6 @@ impl PluginService {
     fn require_ready(&self, request_id: RequestId) -> CoreResult<()> {
         let _ = request_id;
         Ok(())
-    }
-
-    fn read_plugin_icon(
-        &self,
-        request: PluginIconReadRequest,
-    ) -> CoreResult<PluginIconReadResponse> {
-        self.require_ready(request.meta.request_id)?;
-        let Some(access) = self.plugin_icon_scope_access(&request.plugin_id, request.scope) else {
-            return Ok(PluginIconReadResponse {
-                plugin_id: request.plugin_id,
-                data_url: None,
-                sha256: None,
-                source: None,
-            });
-        };
-        let installed_provenance = match &access {
-            PluginIconScopeAccess::Catalog => None,
-            PluginIconScopeAccess::InstalledCurrent(provenance)
-            | PluginIconScopeAccess::InstalledHistorical(provenance) => Some(provenance.clone()),
-        };
-        let response = self.plugin_icon_cache.read_or_fetch(
-            request.plugin_id.clone(),
-            request.scope,
-            installed_provenance,
-            !matches!(&access, PluginIconScopeAccess::InstalledHistorical(_)),
-            request.refresh,
-            |etag| {
-                self.norixor_marketplace
-                    .get_plugin_icon(&request.plugin_id, etag, crate::plugin_icon::ICON_MAX_BYTES)
-                    .into()
-            },
-        );
-        // A network request may overlap a plugin update, uninstall, or
-        // source change. Re-read the exact source facts before returning a
-        // display result so an old artifact cannot receive the new response.
-        if self
-            .plugin_icon_scope_access(&request.plugin_id, request.scope)
-            .as_ref()
-            == Some(&access)
-        {
-            Ok(response)
-        } else {
-            Ok(PluginIconReadResponse {
-                plugin_id: request.plugin_id,
-                data_url: None,
-                sha256: None,
-                source: None,
-            })
-        }
-    }
-
-    /// A catalog snapshot is a source fact only. It does not turn an icon into
-    /// package, publisher, capability, or permission authority. Installed
-    /// scope additionally binds the active artifact to that verified source so
-    /// a locally imported package cannot borrow an official icon by reusing an
-    /// identifier.
-    fn plugin_icon_scope_access(
-        &self,
-        plugin_id: &PluginId,
-        scope: PluginIconReadScope,
-    ) -> Option<PluginIconScopeAccess> {
-        self.hosts
-            .with_plugin_repository(|repository| {
-                if repository.plugin_catalog_trust()?.is_none() {
-                    return Ok(None);
-                }
-                let entries = repository.list_plugin_catalog_entries()?;
-                let matching = entries
-                    .iter()
-                    .filter(|entry| entry.plugin_id == *plugin_id)
-                    .collect::<Vec<_>>();
-                if matching.is_empty() && scope == PluginIconReadScope::Catalog {
-                    return Ok(None);
-                }
-                if scope == PluginIconReadScope::Catalog {
-                    return Ok(Some(PluginIconScopeAccess::Catalog));
-                }
-                let installed = match repository.get_plugin_installation(plugin_id) {
-                    Ok(installed) => installed,
-                    Err(AppPersistenceError::NotFound) => return Ok(None),
-                    Err(error) => return Err(error),
-                };
-                let Some(publisher) = repository
-                    .plugin_installed_version_publisher(plugin_id, &installed.active_version)?
-                else {
-                    return Ok(None);
-                };
-                let provenance = InstalledIconProvenance {
-                    version: installed.active_version.clone(),
-                    package_sha256: installed.package_sha256.clone(),
-                    publisher_key_base64: publisher.publisher_key_base64.clone(),
-                    publisher_signature_base64: publisher.publisher_signature_base64.clone(),
-                };
-                let current = matching.iter().any(|entry| {
-                    entry.version == installed.active_version
-                        && entry.package_sha256 == installed.package_sha256
-                        && entry.publisher_key_base64 == publisher.publisher_key_base64
-                        && entry.publisher_signature_base64 == publisher.publisher_signature_base64
-                });
-                Ok(Some(if current {
-                    PluginIconScopeAccess::InstalledCurrent(provenance)
-                } else {
-                    PluginIconScopeAccess::InstalledHistorical(provenance)
-                }))
-            })
-            .ok()
-            .flatten()
-    }
-
-    fn catalog_snapshot(&self, request_id: RequestId) -> CoreResult<PluginCatalogSnapshot> {
-        self.require_ready(request_id.clone())?;
-        let trust = self
-            .hosts
-            .with_plugin_repository(|repository| repository.plugin_catalog_trust())
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?
-            .ok_or_else(|| {
-                plugin_error(
-                    request_id.clone(),
-                    "plugin.catalog_unavailable",
-                    ErrorCategory::Unavailable,
-                    RetryStrategy::RefreshSnapshot,
-                    "errors.plugin.catalogUnavailable",
-                    None,
-                )
-            })?;
-        let entries = self
-            .hosts
-            .with_plugin_repository(|repository| repository.list_plugin_catalog_entries())
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        let installed = self
-            .hosts
-            .with_plugin_repository(|repository| repository.list_plugin_installations())
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        let entries = entries
-            .into_iter()
-            .map(|record| {
-                let signer = BASE64
-                    .decode(&record.publisher_key_base64)
-                    .map(|key| hex::encode(Sha256::digest(key)))
-                    .map_err(|_| {
-                        map_persistence_error(
-                            request_id.clone(),
-                            AppPersistenceError::InvalidStoredData,
-                        )
-                    })?;
-                let retained = self.retained_permissions_for_verified_candidate(
-                    request_id.clone(),
-                    installed
-                        .iter()
-                        .find(|candidate| candidate.plugin_id == record.plugin_id),
-                    &signer,
-                    record.protocol_major,
-                    &record.capabilities,
-                )?;
-                Ok(catalog_to_wire(record, retained.grants))
-            })
-            .collect::<CoreResult<Vec<_>>>()?;
-        Ok(PluginCatalogSnapshot {
-            catalog_revision: trust.catalog_revision,
-            verified_at_unix_ms: trust.verified_at_unix_ms,
-            entries,
-        })
-    }
-
-    fn fetch_verified_norixor_catalog(
-        &self,
-        request_id: RequestId,
-    ) -> CoreResult<(
-        VerifiedNorixorV1Root,
-        VerifiedNorixorV1Catalog,
-        NorixorV1CatalogWire,
-    )> {
-        let embedded_root = self.norixor_root.as_ref().ok_or_else(|| {
-            platform_request_error(
-                request_id.clone(),
-                &PluginPlatformError::TrustRootsUnavailable,
-            )
-        })?;
-        let previous = self
-            .hosts
-            .with_plugin_repository(|repository| repository.plugin_catalog_trust())
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        let (previous_root, previous_catalog) = previous
-            .as_ref()
-            .and_then(norixor_trust_states)
-            .map_or((None, None), |(root, catalog)| (Some(root), Some(catalog)));
-        let root_wire = self
-            .norixor_marketplace
-            .get_api_path(
-                "/apps/norishell/plugin-trust-root",
-                PLUGIN_CATALOG_MAX_BYTES,
-            )
-            .map_err(|_| plugin_catalog_network_error(request_id.clone()))?;
-        let now_seconds = unix_time_ms().div_euclid(1_000);
-        let root = verify_norixor_v1_root(
-            &root_wire,
-            embedded_root,
-            now_seconds,
-            previous_root.as_ref(),
-        )
-        .map_err(|error| platform_request_error(request_id.clone(), &error))?;
-        let catalog_bytes = self
-            .norixor_marketplace
-            .get_api_path("/apps/norishell/plugin-catalog", PLUGIN_CATALOG_MAX_BYTES)
-            .map_err(|_| plugin_catalog_network_error(request_id.clone()))?;
-        let catalog_wire =
-            serde_json::from_slice::<NorixorV1CatalogWire>(&catalog_bytes).map_err(|_| {
-                platform_request_error(request_id.clone(), &PluginPlatformError::InvalidNorixorWire)
-            })?;
-        let catalog = verify_norixor_v1_catalog(
-            &catalog_bytes,
-            &root,
-            &current_app_version(),
-            std::env::consts::ARCH,
-            now_seconds,
-            previous_catalog.as_ref(),
-        )
-        .map_err(|error| platform_request_error(request_id, &error))?;
-        Ok((root, catalog, catalog_wire))
-    }
-
-    fn refresh_norixor_catalog(
-        &self,
-        request: PluginCatalogRefreshRequest,
-    ) -> CoreResult<PluginOperationSummary> {
-        let request_id = request.meta.request_id.clone();
-        self.require_ready(request_id.clone())?;
-        if request.idempotency_key.trim().is_empty() {
-            return Err(plugin_validation_error(request_id));
-        }
-        let fingerprint = request_fingerprint(&"norixor-v1", request_id.clone())?;
-        let operation = self
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.begin_plugin_operation(
-                    &request.operation_id,
-                    None,
-                    PluginOperationKind::CatalogRefresh,
-                    &request.idempotency_key,
-                    &fingerprint,
-                    None,
-                    None,
-                )
-            })
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        if matches!(
-            operation.state,
-            PluginOperationState::Succeeded | PluginOperationState::Failed
-        ) {
-            return Ok(operation_to_wire(operation));
-        }
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::Download,
-            None,
-            request_id.clone(),
-        )?;
-        let (root, catalog, wire) = match self.fetch_verified_norixor_catalog(request_id.clone()) {
-            Ok(verified) => verified,
-            Err(error) => {
-                let code = error
-                    .code
-                    .strip_prefix("plugin.")
-                    .filter(|code| parse_plugin_error_code(code).is_some())
-                    .unwrap_or("catalog_payload_invalid");
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    code,
-                    request_id,
-                );
-            }
-        };
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::VerifyCatalog,
-            None,
-            request_id.clone(),
-        )?;
-        let expected = self
-            .hosts
-            .with_plugin_repository(|repository| repository.plugin_catalog_trust())
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        let (mut trust, entries) = norixor_catalog_records(&root, &catalog, &wire)
-            .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        if expected.as_ref().is_some_and(|current| {
-            current.root_key_id == trust.root_key_id
-                && current.sequence == trust.sequence
-                && current.payload_sha256 == trust.payload_sha256
-        }) {
-            trust = expected.clone().expect("matching Norixor trust exists");
-        }
-        if let Err(error) = self.hosts.with_plugin_repository(|repository| {
-            repository.replace_plugin_catalog(expected.as_ref(), &trust, &entries)
-        }) {
-            return self.fail_operation(
-                operation,
-                PluginOperationPhase::Completed,
-                persistence_error_code(&error),
-                request_id,
-            );
-        }
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::DatabaseCommitted,
-            None,
-            request_id.clone(),
-        )?;
-        self.advance_operation(
-            operation,
-            PluginOperationState::Succeeded,
-            PluginOperationPhase::Completed,
-            None,
-            request_id,
-        )
-        .map(operation_to_wire)
-    }
-
-    fn install_norixor_plugin(
-        &self,
-        request: PluginInstallRequest,
-    ) -> CoreResult<PluginOperationSummary> {
-        if request.idempotency_key.trim().is_empty() {
-            return Err(plugin_validation_error(request.meta.request_id));
-        }
-        let preview = self.prepare_catalog_package(PluginCatalogPackagePrepareRequest {
-            meta: request.meta.clone(),
-            plugin_id: request.plugin_id,
-            version: request.version,
-            expected_state_version: request.expected_state_version,
-        })?;
-        self.install_local_plugin(PluginLocalInstallRequest {
-            meta: request.meta,
-            operation_id: request.operation_id,
-            idempotency_key: request.idempotency_key,
-            preparation_id: preview.preparation_id,
-            expected_package_sha256: preview.package_sha256,
-            expected_state_version: request.expected_state_version,
-            capability_grants: request.capability_grants,
-        })
-    }
-
-    fn prepare_catalog_package(
-        &self,
-        request: PluginCatalogPackagePrepareRequest,
-    ) -> CoreResult<PluginLocalPackagePreview> {
-        let request_id = request.meta.request_id.clone();
-        self.require_ready(request_id.clone())?;
-        if Version::parse(&request.version).is_err() {
-            return Err(plugin_validation_error(request_id));
-        }
-        let persisted = self
-            .resolve_catalog_entry_for_online_revalidation(&request.plugin_id, &request.version)
-            .map_err(|code| {
-                plugin_error(
-                    request_id.clone(),
-                    &format!("plugin.{code}"),
-                    ErrorCategory::Unavailable,
-                    RetryStrategy::RefreshSnapshot,
-                    "errors.plugin.catalogUnavailable",
-                    None,
-                )
-            })?;
-        let (root, catalog, _) = self.fetch_verified_norixor_catalog(request_id.clone())?;
-        let item = catalog
-            .item(&request.plugin_id, &request.version)
-            .ok_or_else(|| plugin_validation_error(request_id.clone()))?;
-        let fresh_record = norixor_catalog_entry_record(&root, &catalog, item)
-            .ok_or_else(|| plugin_validation_error(request_id.clone()))?;
-        if !catalog_install_candidate_is_unchanged(&persisted, &fresh_record) {
-            return Err(plugin_conflict_error(
-                request_id,
-                request.expected_state_version,
-            ));
-        }
-        let download_wire = self
-            .norixor_marketplace
-            .get_api_path(&item.download, PLUGIN_CATALOG_MAX_BYTES)
-            .map_err(|_| plugin_catalog_network_error(request_id.clone()))?;
-        let download = verify_norixor_v1_download(&download_wire, item)
-            .map_err(|error| platform_request_error(request_id.clone(), &error))?;
-        let maximum_bytes = usize::try_from(download.size)
-            .unwrap_or(usize::MAX)
-            .min(PLUGIN_PACKAGE_MAX_BYTES);
-        let package_bytes = self
-            .norixor_marketplace
-            .get_download_url(&download.url, maximum_bytes)
-            .map_err(|_| plugin_catalog_network_error(request_id.clone()))?;
-        let verified =
-            verify_norixor_v1_package(&package_bytes, item, &download, self.package_limits)
-                .map_err(|error| platform_request_error(request_id.clone(), &error))?;
-        let mut inspected = verified
-            .into_inspected_package()
-            .map_err(|error| platform_request_error(request_id.clone(), &error))?;
-        inspected.settings = inspect_settings_asset_from_package_snapshot(&package_bytes)
-            .map_err(|error| platform_request_error(request_id.clone(), &error))?;
-        if !capabilities_match_protocol(
-            &inspected.manifest.capabilities,
-            inspected.manifest.protocol_minor,
-        ) {
-            return Err(plugin_error(
-                request_id,
-                "plugin.protocol_incompatible",
-                ErrorCategory::Incompatible,
-                RetryStrategy::Never,
-                "errors.plugin.protocolIncompatible",
-                None,
-            ));
-        }
-        let publisher_key_base64 = root
-            .publisher_key_base64(&item.publisher_key_id)
-            .ok_or_else(|| plugin_validation_error(request_id.clone()))?;
-        let publisher_key = BASE64
-            .decode(&publisher_key_base64)
-            .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        let signer_fingerprint_sha256 = hex::encode(Sha256::digest(&publisher_key));
-        let preparation_id = Uuid::new_v4().to_string();
-        let package_path = self.local_import_root.join(format!("{preparation_id}.zip"));
-        let package_sha256 = hex::encode(inspected.package_sha256);
-        let existing = self
-            .plugin_installation_fact(&inspected.manifest.plugin_id)
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        if existing.as_ref().map(|record| record.state_version) != request.expected_state_version
-            || existing.as_ref().is_some_and(|record| {
-                Version::parse(&inspected.manifest.version).ok()
-                    <= Version::parse(&record.active_version).ok()
-            })
-        {
-            let _ = fs::remove_file(&package_path);
-            return Err(plugin_conflict_error(
-                request_id,
-                existing.as_ref().map(|record| record.state_version),
-            ));
-        }
-        if existing
-            .as_ref()
-            .is_some_and(|record| record.signer_fingerprint_sha256 != signer_fingerprint_sha256)
-        {
-            return Err(plugin_error(
-                request_id,
-                "plugin.publisher_signature_invalid",
-                ErrorCategory::Permission,
-                RetryStrategy::Never,
-                "errors.plugin.publisherChanged",
-                existing.as_ref().map(|record| record.state_version),
-            ));
-        }
-        let retained = self.retained_permissions_for_verified_candidate(
-            request_id.clone(),
-            existing.as_ref(),
-            &signer_fingerprint_sha256,
-            inspected.manifest.protocol_major,
-            &inspected.manifest.capabilities,
-        )?;
-        let preview = PluginLocalPackagePreview {
-            preparation_id: preparation_id.clone(),
-            plugin_id: inspected.manifest.plugin_id.clone(),
-            name: inspected.manifest.name.clone(),
-            author: inspected.manifest.publisher.clone(),
-            version: inspected.manifest.version.clone(),
-            package_size: inspected.package_size,
-            package_sha256,
-            capabilities: inspected.manifest.capabilities.clone(),
-            current_version: existing
-                .as_ref()
-                .map(|record| record.active_version.clone()),
-            current_state_version: existing.as_ref().map(|record| record.state_version),
-            retained_capability_grants: retained
-                .grants
-                .iter()
-                .map(|grant| PluginCapabilityGrant {
-                    capability: grant.capability,
-                    granted: grant.granted,
-                })
-                .collect(),
-            approved_special_grants: Vec::new(),
-            special_permission_expires_at_unix_ms: None,
-            publisher_verified: true,
-        };
-        write_private_plugin_package(&package_path, &package_bytes)
-            .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        self.runtime
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .prepared_local_packages
-            .insert(
-                preparation_id,
-                PreparedLocalPackage {
-                    path: package_path,
-                    inspected,
-                    authority: PreparedPackageAuthority::Marketplace {
-                        catalog_entry: Box::new(fresh_record),
-                        signer_fingerprint_sha256,
-                        publisher_key_base64,
-                        publisher_signature_base64: item.publisher_signature.clone(),
-                    },
-                    preview: preview.clone(),
-                    permission_revision: 0,
-                    approved_special_permissions: None,
-                },
-            );
-        Ok(preview)
-    }
-
-    #[allow(dead_code)]
-    fn refresh_catalog(
-        &self,
-        request: PluginCatalogRefreshRequest,
-    ) -> CoreResult<PluginOperationSummary> {
-        let request_id = request.meta.request_id.clone();
-        self.require_ready(request_id.clone())?;
-        if request.idempotency_key.trim().is_empty() {
-            return Err(plugin_validation_error(request_id));
-        }
-        let fingerprint = request_fingerprint(&(), request_id.clone())?;
-        let operation = self
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.begin_plugin_operation(
-                    &request.operation_id,
-                    None,
-                    PluginOperationKind::CatalogRefresh,
-                    &request.idempotency_key,
-                    &fingerprint,
-                    None,
-                    None,
-                )
-            })
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        if operation.state == PluginOperationState::Succeeded
-            || operation.state == PluginOperationState::Failed
-        {
-            return Ok(operation_to_wire(operation));
-        }
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::Download,
-            None,
-            request_id.clone(),
-        )?;
-        let envelope = match self.catalog_source.fetch(PLUGIN_CATALOG_MAX_BYTES) {
-            Ok(bytes) if bytes.len() <= PLUGIN_CATALOG_MAX_BYTES => bytes,
-            Ok(_) => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    "catalog_payload_invalid",
-                    request_id,
-                );
-            }
-            Err(PluginSourceError) => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    "catalog_envelope_invalid",
-                    request_id,
-                );
-            }
-        };
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::VerifyCatalog,
-            None,
-            request_id.clone(),
-        )?;
-        let previous = self.current_catalog_trust(request_id.clone())?;
-        let verified = match verify_catalog(
-            &envelope,
-            &self.trust_roots,
-            &current_app_version(),
-            unix_time_ms(),
-            previous.as_ref(),
-            self.catalog_limits,
-        ) {
-            Ok(verified) => verified,
-            Err(error) => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    platform_error_code(&error),
-                    request_id,
-                );
-            }
-        };
-        let expected = self
-            .hosts
-            .with_plugin_repository(|repository| repository.plugin_catalog_trust())
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        let (mut trust, entries) = catalog_records(&verified);
-        if expected.as_ref().is_some_and(|current| {
-            current.root_key_id == trust.root_key_id
-                && current.sequence == trust.sequence
-                && current.payload_sha256 == trust.payload_sha256
-        }) {
-            trust = expected.clone().expect("matching catalog trust exists");
-        }
-        if let Err(error) = self.hosts.with_plugin_repository(|repository| {
-            repository.replace_plugin_catalog(expected.as_ref(), &trust, &entries)
-        }) {
-            return self.fail_operation(
-                operation,
-                PluginOperationPhase::Completed,
-                persistence_error_code(&error),
-                request_id,
-            );
-        }
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::DatabaseCommitted,
-            None,
-            request_id.clone(),
-        )?;
-        self.advance_operation(
-            operation,
-            PluginOperationState::Succeeded,
-            PluginOperationPhase::Completed,
-            None,
-            request_id,
-        )
-        .map(operation_to_wire)
-    }
-
-    #[allow(dead_code)]
-    fn install_plugin(&self, request: PluginInstallRequest) -> CoreResult<PluginOperationSummary> {
-        let request_id = request.meta.request_id.clone();
-        self.require_ready(request_id.clone())?;
-        if request.idempotency_key.trim().is_empty() || Version::parse(&request.version).is_err() {
-            return Err(plugin_validation_error(request_id));
-        }
-        let fingerprint = request_fingerprint(
-            &(
-                request.plugin_id.as_str(),
-                request.version.as_str(),
-                request.expected_state_version,
-            ),
-            request_id.clone(),
-        )?;
-        match self.hosts.with_plugin_repository(|repository| {
-            repository.get_plugin_operation(&request.operation_id)
-        }) {
-            Ok(operation) => {
-                if operation.plugin_id.as_ref() != Some(&request.plugin_id)
-                    || operation.idempotency_key != request.idempotency_key
-                    || operation.request_fingerprint_sha256 != fingerprint
-                    || operation.candidate_version.as_deref() != Some(request.version.as_str())
-                {
-                    return Err(plugin_conflict_error(request_id, None));
-                }
-                if matches!(
-                    operation.state,
-                    PluginOperationState::Succeeded | PluginOperationState::Failed
-                ) {
-                    return Ok(operation_to_wire(operation));
-                }
-            }
-            Err(AppPersistenceError::NotFound) => {}
-            Err(error) => return Err(map_persistence_error(request_id, error)),
-        }
-        let mutation_operation = Uuid::parse_str(request.operation_id.as_str())
-            .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        let _mutation_reservation = self
-            .reserve_plugin_mutation(&request.plugin_id, mutation_operation)
-            .ok_or_else(|| plugin_conflict_error(request_id.clone(), None))?;
-        let existing = match self.hosts.with_plugin_repository(|repository| {
-            repository.get_plugin_installation(&request.plugin_id)
-        }) {
-            Ok(existing) => Some(existing),
-            Err(AppPersistenceError::NotFound) => None,
-            Err(error) => return Err(map_persistence_error(request_id, error)),
-        };
-        if existing.as_ref().map(|record| record.state_version) != request.expected_state_version {
-            return Err(plugin_conflict_error(
-                request_id,
-                existing.as_ref().map(|record| record.state_version),
-            ));
-        }
-        if existing
-            .as_ref()
-            .is_some_and(|record| record.state == PluginInstallState::Enabled)
-            || self
-                .runtime
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .active_instances
-                .contains_key(request.plugin_id.as_str())
-        {
-            return Err(plugin_conflict_error(
-                request_id,
-                request.expected_state_version,
-            ));
-        }
-        let kind = if existing.is_some() {
-            PluginOperationKind::Update
-        } else {
-            PluginOperationKind::Install
-        };
-        let operation = self
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.begin_plugin_operation(
-                    &request.operation_id,
-                    Some(&request.plugin_id),
-                    kind,
-                    &request.idempotency_key,
-                    &fingerprint,
-                    Some(&request.version),
-                    existing
-                        .as_ref()
-                        .map(|record| record.active_version.as_str()),
-                )
-            })
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        if matches!(
-            operation.state,
-            PluginOperationState::Succeeded | PluginOperationState::Failed
-        ) {
-            return Ok(operation_to_wire(operation));
-        }
-        let persisted_entry = match self.resolve_catalog_entry(&request.plugin_id, &request.version)
-        {
-            Ok(entry) => entry,
-            Err(code) => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    code,
-                    request_id,
-                );
-            }
-        };
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::Download,
-            None,
-            request_id.clone(),
-        )?;
-        let envelope = match self.catalog_source.fetch(PLUGIN_CATALOG_MAX_BYTES) {
-            Ok(bytes) if bytes.len() <= PLUGIN_CATALOG_MAX_BYTES => bytes,
-            _ => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    "catalog_envelope_invalid",
-                    request_id,
-                );
-            }
-        };
-        let package_maximum = usize::try_from(persisted_entry.package_size)
-            .unwrap_or(usize::MAX)
-            .min(PLUGIN_PACKAGE_MAX_BYTES);
-        let package = match self
-            .package_source
-            .fetch(&persisted_entry.package_url, package_maximum)
-        {
-            Ok(bytes) if bytes.len() <= package_maximum => bytes,
-            _ => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    "package_too_large",
-                    request_id,
-                );
-            }
-        };
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::VerifyCatalog,
-            None,
-            request_id.clone(),
-        )?;
-        let previous = self.current_catalog_trust(request_id.clone())?;
-        let verified = match verify_catalog(
-            &envelope,
-            &self.trust_roots,
-            &current_app_version(),
-            unix_time_ms(),
-            previous.as_ref(),
-            self.catalog_limits,
-        ) {
-            Ok(verified) => verified,
-            Err(error) => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    platform_error_code(&error),
-                    request_id,
-                );
-            }
-        };
-        let Some(entry) = verified
-            .entries
-            .iter()
-            .find(|entry| entry.plugin_id == request.plugin_id && entry.version == request.version)
-        else {
-            return self.fail_operation(
-                operation,
-                PluginOperationPhase::Completed,
-                "catalog_payload_invalid",
-                request_id,
-            );
-        };
-        if catalog_entry_record(entry) != persisted_entry || !entry_matches_current_platform(entry)
-        {
-            return self.fail_operation(
-                operation,
-                PluginOperationPhase::Completed,
-                "catalog_payload_invalid",
-                request_id,
-            );
-        }
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::VerifyPackage,
-            None,
-            request_id.clone(),
-        )?;
-        let mut package_file = tempfile::NamedTempFile::new()
-            .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        package_file
-            .write_all(&package)
-            .and_then(|()| package_file.as_file().sync_all())
-            .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        let inspected = match inspect_package(package_file.path(), entry, self.package_limits) {
-            Ok(inspected) => inspected,
-            Err(error) => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    platform_error_code(&error),
-                    request_id,
-                );
-            }
-        };
-        let reconciled_settings = match self.reconcile_package_settings(
-            request_id.clone(),
-            &request.plugin_id,
-            inspected.settings.as_ref(),
-        ) {
-            Ok(settings) => settings,
-            Err(_) => {
-                return self.fail_operation(
-                    operation,
-                    PluginOperationPhase::Completed,
-                    "install_conflict",
-                    request_id,
-                );
-            }
-        };
-        let signer_bytes = BASE64
-            .decode(&entry.publisher_key_base64)
-            .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        let signer_fingerprint = hex::encode(Sha256::digest(signer_bytes));
-        if existing
-            .as_ref()
-            .is_some_and(|record| record.signer_fingerprint_sha256 != signer_fingerprint)
-        {
-            return self.fail_operation(
-                operation,
-                PluginOperationPhase::Completed,
-                "publisher_signature_invalid",
-                request_id,
-            );
-        }
-        let retained = self.retained_permissions_for_verified_candidate(
-            request_id.clone(),
-            existing.as_ref(),
-            &signer_fingerprint,
-            entry.protocol_major,
-            &entry.capabilities,
-        )?;
-        let Some(resolved_capability_grants) = resolve_install_grants(
-            &entry.capabilities,
-            &request.capability_grants,
-            &retained.grants,
-        ) else {
-            return self
-                .advance_operation(
-                    operation,
-                    PluginOperationState::AwaitingCapabilities,
-                    PluginOperationPhase::AwaitingCapabilities,
-                    Some("capability_rejected"),
-                    request_id,
-                )
-                .map(operation_to_wire);
-        };
-        if !newly_requested_special_capabilities_are_denied(
-            &request.capability_grants,
-            &retained.grants,
-        ) {
-            return self
-                .advance_operation(
-                    operation,
-                    PluginOperationState::AwaitingCapabilities,
-                    PluginOperationPhase::AwaitingCapabilities,
-                    Some("capability_rejected"),
-                    request_id,
-                )
-                .map(operation_to_wire);
-        }
-        let staged =
-            match self
-                .installer
-                .stage(package_file.path(), &inspected, &request.operation_id)
-            {
-                Ok(staged) => staged,
-                Err(error) => {
-                    return self.fail_operation(
-                        operation,
-                        PluginOperationPhase::Completed,
-                        platform_error_code(&error),
-                        request_id,
-                    );
-                }
-            };
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::Staged,
-            None,
-            request_id.clone(),
-        )?;
-        let expected_active = existing
-            .as_ref()
-            .map(|record| record.active_version.as_str());
-        let activation =
-            match self
-                .installer
-                .activate(staged, expected_active, &request.operation_id)
-            {
-                Ok(activation) => activation,
-                Err(error) => {
-                    return self.recover_or_require_reconciliation(
-                        operation,
-                        &request.plugin_id,
-                        &request.version,
-                        expected_active,
-                        platform_error_code(&error),
-                        request_id,
-                    );
-                }
-            };
-        debug_assert_eq!(activation.active_version, request.version);
-        let operation = match self.advance_operation(
-            operation.clone(),
-            PluginOperationState::Running,
-            PluginOperationPhase::FilesystemActivated,
-            None,
-            request_id.clone(),
-        ) {
-            Ok(operation) => operation,
-            Err(_) => {
-                return self.recover_or_require_reconciliation(
-                    operation,
-                    &request.plugin_id,
-                    &request.version,
-                    expected_active,
-                    "install_conflict",
-                    request_id,
-                );
-            }
-        };
-        let now = unix_time_ms();
-        let candidate = PluginInstalledRecord {
-            plugin_id: entry.plugin_id.clone(),
-            name: entry.name.clone(),
-            publisher: entry.publisher.clone(),
-            signer_fingerprint_sha256: signer_fingerprint.clone(),
-            active_version: entry.version.clone(),
-            package_sha256: entry.package_sha256.clone(),
-            capabilities: entry.capabilities.clone(),
-            state: PluginInstallState::Disabled,
-            state_version: WireSequence::new(
-                existing
-                    .as_ref()
-                    .map_or(1, |record| record.state_version.get().saturating_add(1)),
-            ),
-            installed_at_unix_ms: existing
-                .as_ref()
-                .map_or(now, |record| record.installed_at_unix_ms),
-            updated_at_unix_ms: now,
-        };
-        let permission_binding = current_plugin_permission_binding(&entry.package_sha256);
-        let previous_binding = existing
-            .as_ref()
-            .map(|record| current_plugin_permission_binding(&record.package_sha256));
-        let carried_host_scope_capabilities = if retained
-            .scope
-            .as_ref()
-            .and_then(|scope| scope.binding.as_ref())
-            == previous_binding.as_ref()
-        {
-            retained
-                .grants
-                .iter()
-                .filter(|grant| grant.granted && host_scoped_plugin_capability(grant.capability))
-                .map(|grant| grant.capability)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let committed = self.hosts.with_plugin_repository(|repository| {
-            repository.activate_plugin_installation_with_settings(
-                request.expected_state_version,
-                &candidate,
-                entry.package_size,
-                &entry.publisher_key_base64,
-                &entry.publisher_signature_base64,
-                true,
-                Some(PluginActivationPermissions {
-                    protocol_major: u64::from(PLUGIN_PROTOCOL_MAJOR),
-                    binding: &permission_binding,
-                    previous_binding: previous_binding.as_ref(),
-                    expected_previous_grant_state_version: retained.grant_state_version,
-                    expected_previous_scope_state_version: retained
-                        .scope
-                        .as_ref()
-                        .map(|scope| scope.state_version),
-                    grants: &resolved_capability_grants,
-                    carried_host_scope_capabilities: &carried_host_scope_capabilities,
-                    approved_host_scopes: None,
-                }),
-                reconciled_settings
-                    .as_ref()
-                    .map(|settings| settings.install()),
-            )
-        });
-        let committed_record = match committed {
-            Ok(record) => record,
-            Err(error) => match self.plugin_installation_fact(&request.plugin_id) {
-                Ok(Some(record))
-                    if record == candidate
-                        && self.package_settings_commit_matches(
-                            &request.plugin_id,
-                            &candidate.package_sha256,
-                            reconciled_settings.as_ref(),
-                        ) =>
-                {
-                    record
-                }
-                Ok(current) if current.as_ref() == existing.as_ref() => {
-                    return self.recover_or_require_reconciliation(
-                        operation,
-                        &request.plugin_id,
-                        &request.version,
-                        expected_active,
-                        persistence_error_code(&error),
-                        request_id,
-                    );
-                }
-                Ok(_) | Err(_) => {
-                    return self.fail_operation(
-                        operation,
-                        PluginOperationPhase::ReconcileRequired,
-                        persistence_error_code(&error),
-                        request_id,
-                    );
-                }
-            },
-        };
-        debug_assert_eq!(committed_record, candidate);
-        self.publish_plugin_host_scope(&committed_record);
-        let operation = self.advance_operation(
-            operation,
-            PluginOperationState::Running,
-            PluginOperationPhase::DatabaseCommitted,
-            None,
-            request_id.clone(),
-        )?;
-        self.advance_operation(
-            operation,
-            PluginOperationState::Succeeded,
-            PluginOperationPhase::Completed,
-            None,
-            request_id,
-        )
-        .map(operation_to_wire)
     }
 
     fn prepare_local_package(
@@ -2715,8 +1517,7 @@ impl PluginService {
             }
         };
         if existing.as_ref().is_some_and(|current| {
-            Version::parse(&inspected.manifest.version).ok()
-                <= Version::parse(&current.active_version).ok()
+            !plugin_version_is_newer(&inspected.manifest.version, &current.active_version)
         }) {
             let _ = fs::remove_file(&private_path);
             return Err(plugin_error(
@@ -2754,7 +1555,6 @@ impl PluginService {
                 PreparedLocalPackage {
                     path: private_path,
                     inspected,
-                    authority: PreparedPackageAuthority::Local,
                     preview: preview.clone(),
                     permission_revision: 0,
                     approved_special_permissions: None,
@@ -2782,7 +1582,6 @@ impl PluginService {
             .remove(&request.preparation_id)
             .ok_or_else(|| plugin_validation_error(request_id.clone()))?;
         self.cancel_prepared_package(&request.preparation_id);
-        self.revalidate_prepared_marketplace(&prepared, request_id.clone())?;
         let package_path = &prepared.path;
         let inspected = &prepared.inspected;
         let plugin_id = inspected.manifest.plugin_id.clone();
@@ -2800,33 +1599,15 @@ impl PluginService {
             Err(AppPersistenceError::NotFound) => None,
             Err(error) => return Err(map_persistence_error(request_id, error)),
         };
-        let (
-            signer_fingerprint_sha256,
-            publisher_key_base64,
-            publisher_signature_base64,
-            verified_marketplace_authority,
-        ) = match &prepared.authority {
-            PreparedPackageAuthority::Local => (
-                hex::encode(inspected.package_sha256),
-                String::new(),
-                String::new(),
-                false,
-            ),
-            PreparedPackageAuthority::Marketplace {
-                signer_fingerprint_sha256,
-                publisher_key_base64,
-                publisher_signature_base64,
-                ..
-            } => (
-                signer_fingerprint_sha256.clone(),
-                publisher_key_base64.clone(),
-                publisher_signature_base64.clone(),
-                true,
-            ),
-        };
+        let signer_fingerprint_sha256 = hex::encode(inspected.package_sha256);
+        let publisher_key_base64 = String::new();
+        let publisher_signature_base64 = String::new();
         let expected_state_version = existing.as_ref().map(|record| record.state_version);
         if expected_state_version != request.expected_state_version
             || request.expected_package_sha256 != hex::encode(inspected.package_sha256)
+            || existing
+                .as_ref()
+                .is_some_and(|current| !plugin_version_is_newer(&version, &current.active_version))
         {
             return Err(plugin_conflict_error(request_id, expected_state_version));
         }
@@ -2835,32 +1616,10 @@ impl PluginService {
             &plugin_id,
             inspected.settings.as_ref(),
         )?;
-        // Publisher continuity is established before staging. A local ZIP's
-        // self-reported id/author never authorizes replacing another artifact.
-        if existing
-            .as_ref()
-            .is_some_and(|record| record.signer_fingerprint_sha256 != signer_fingerprint_sha256)
-        {
-            return Err(plugin_error(
-                request_id,
-                "plugin.publisher_signature_invalid",
-                ErrorCategory::Permission,
-                RetryStrategy::Never,
-                "errors.plugin.publisherChanged",
-                expected_state_version,
-            ));
-        }
-        let retained = if verified_marketplace_authority {
-            self.retained_permissions_for_verified_candidate(
-                request_id.clone(),
-                existing.as_ref(),
-                &signer_fingerprint_sha256,
-                inspected.manifest.protocol_major,
-                &inspected.manifest.capabilities,
-            )?
-        } else {
-            RetainedPermissionSnapshot::default()
-        };
+        // Re-import is the explicit local update action. A local package has
+        // no verified publisher continuity, so a new artifact never inherits
+        // grants or scoped approvals from the installed version.
+        let retained_grants = Vec::new();
         let baseline = self.prepared_permission_baseline(&prepared, request_id.clone())?;
         let approval = prepared.approved_special_permissions.as_ref();
         if approval.is_some_and(|approval| !approval.valid_for(&prepared, &baseline)) {
@@ -2869,7 +1628,7 @@ impl PluginService {
         let Some(mut resolved_capability_grants) = resolve_install_grants(
             &inspected.manifest.capabilities,
             &request.capability_grants,
-            &retained.grants,
+            &retained_grants,
         ) else {
             return Err(plugin_conflict_error(request_id, expected_state_version));
         };
@@ -2897,7 +1656,7 @@ impl PluginService {
             }
         } else if !newly_requested_special_capabilities_are_denied(
             &request.capability_grants,
-            &retained.grants,
+            &retained_grants,
         ) {
             return Err(plugin_conflict_error(request_id, expected_state_version));
         }
@@ -3082,21 +1841,7 @@ impl PluginService {
         let previous_binding = existing
             .as_ref()
             .map(|record| current_plugin_permission_binding(&record.package_sha256));
-        let carried_host_scope_capabilities = if retained
-            .scope
-            .as_ref()
-            .and_then(|scope| scope.binding.as_ref())
-            == previous_binding.as_ref()
-        {
-            retained
-                .grants
-                .iter()
-                .filter(|grant| grant.granted && host_scoped_plugin_capability(grant.capability))
-                .map(|grant| grant.capability)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let carried_host_scope_capabilities = Vec::new();
         let committed = self.hosts.with_plugin_repository(|repository| {
             repository.activate_plugin_installation_with_settings(
                 expected_state_version,
@@ -3170,78 +1915,6 @@ impl PluginService {
             request_id,
         )
         .map(operation_to_wire)
-    }
-
-    #[allow(dead_code)]
-    fn current_catalog_trust(
-        &self,
-        request_id: RequestId,
-    ) -> CoreResult<Option<CatalogTrustState>> {
-        let invalid_data_request_id = request_id.clone();
-        self.hosts
-            .with_plugin_repository(|repository| repository.plugin_catalog_trust())
-            .map_err(|error| map_persistence_error(request_id, error))?
-            .map(|trust| {
-                let bytes = hex::decode(&trust.payload_sha256)
-                    .map_err(|_| plugin_validation_error(invalid_data_request_id.clone()))?;
-                let digest: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| plugin_validation_error(invalid_data_request_id.clone()))?;
-                Ok(CatalogTrustState {
-                    root_key_id: trust.root_key_id,
-                    sequence: trust.sequence,
-                    payload_sha256: digest,
-                })
-            })
-            .transpose()
-    }
-
-    #[allow(dead_code)]
-    fn resolve_catalog_entry(
-        &self,
-        plugin_id: &PluginId,
-        version: &str,
-    ) -> Result<PluginCatalogEntryRecord, &'static str> {
-        self.resolve_catalog_entry_with_expiry(plugin_id, version, true)
-    }
-
-    /// The Norixor install path immediately downloads and verifies a fresh
-    /// signed catalog before using this cached entry. It may therefore use an
-    /// expired snapshot only as the user's selected candidate for the strict
-    /// persisted-vs-fresh comparison; the expired snapshot is never treated
-    /// as current install authority.
-    fn resolve_catalog_entry_for_online_revalidation(
-        &self,
-        plugin_id: &PluginId,
-        version: &str,
-    ) -> Result<PluginCatalogEntryRecord, &'static str> {
-        self.resolve_catalog_entry_with_expiry(plugin_id, version, false)
-    }
-
-    fn resolve_catalog_entry_with_expiry(
-        &self,
-        plugin_id: &PluginId,
-        version: &str,
-        require_unexpired: bool,
-    ) -> Result<PluginCatalogEntryRecord, &'static str> {
-        let trust = self
-            .hosts
-            .with_plugin_repository(|repository| repository.plugin_catalog_trust())
-            .map_err(|_| "install_conflict")?
-            .ok_or("catalog_payload_invalid")?;
-        if require_unexpired && trust.expires_at_unix_ms <= unix_time_ms() {
-            return Err("catalog_payload_invalid");
-        }
-        self.hosts
-            .with_plugin_repository(|repository| repository.list_plugin_catalog_entries())
-            .map_err(|_| "install_conflict")?
-            .into_iter()
-            .find(|entry| {
-                &entry.plugin_id == plugin_id
-                    && entry.version == version
-                    && catalog_record_matches_current_platform(entry)
-            })
-            .ok_or("protocol_incompatible")
     }
 
     fn advance_operation(
@@ -3741,81 +2414,6 @@ impl PluginService {
         let mut summary = installed_to_wire(record, grants, has_settings);
         summary.package_kind = package_kind;
         Ok(summary)
-    }
-
-    fn retained_permissions_for_verified_candidate(
-        &self,
-        request_id: RequestId,
-        existing: Option<&PluginInstalledRecord>,
-        candidate_signer_fingerprint_sha256: &str,
-        candidate_protocol_major: u16,
-        candidate_capabilities: &[PluginCapability],
-    ) -> CoreResult<RetainedPermissionSnapshot> {
-        let Some(existing) = existing else {
-            return Ok(RetainedPermissionSnapshot::default());
-        };
-        if candidate_protocol_major != PLUGIN_PROTOCOL_MAJOR
-            || existing.signer_fingerprint_sha256 != candidate_signer_fingerprint_sha256
-        {
-            return Ok(RetainedPermissionSnapshot::default());
-        }
-        let (publisher, grants, scope) = self
-            .hosts
-            .with_plugin_repository(|repository| {
-                Ok((
-                    repository.plugin_installed_version_publisher(
-                        &existing.plugin_id,
-                        &existing.active_version,
-                    )?,
-                    repository.list_plugin_capability_grants(
-                        &existing.plugin_id,
-                        &existing.signer_fingerprint_sha256,
-                        u64::from(PLUGIN_PROTOCOL_MAJOR),
-                    )?,
-                    repository.plugin_host_scope_set(
-                        &existing.plugin_id,
-                        &existing.signer_fingerprint_sha256,
-                        u64::from(PLUGIN_PROTOCOL_MAJOR),
-                    )?,
-                ))
-            })
-            .map_err(|error| map_persistence_error(request_id.clone(), error))?;
-        let Some(publisher) = publisher else {
-            return Ok(RetainedPermissionSnapshot::default());
-        };
-        if publisher.publisher_key_base64.is_empty()
-            || publisher.publisher_signature_base64.is_empty()
-            || BASE64
-                .decode(&publisher.publisher_key_base64)
-                .ok()
-                .map(|key| hex::encode(Sha256::digest(key)))
-                .as_deref()
-                != Some(existing.signer_fingerprint_sha256.as_str())
-        {
-            return Ok(RetainedPermissionSnapshot::default());
-        }
-        let grant_state_version = grants.first().map(|grant| grant.state_version);
-        if grants
-            .iter()
-            .any(|grant| Some(grant.state_version) != grant_state_version)
-        {
-            return Err(map_persistence_error(
-                request_id,
-                AppPersistenceError::InvalidStoredData,
-            ));
-        }
-        let binding = current_plugin_permission_binding(&existing.package_sha256);
-        Ok(RetainedPermissionSnapshot {
-            grants: grants
-                .into_iter()
-                .filter(|grant| {
-                    grant.binding.as_ref() == Some(&binding)
-                        && candidate_capabilities.contains(&grant.capability)
-                })
-                .collect(),
-            grant_state_version,
-            scope,
-        })
     }
 
     fn ensure_instance(
@@ -7409,38 +6007,6 @@ fn require_main_plugin_management_window<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub(crate) fn plugin_catalog_snapshot(
-    request: PluginReadinessGetRequest,
-    service: State<'_, PluginService>,
-) -> CoreResult<PluginCatalogSnapshot> {
-    service.catalog_snapshot(request.meta.request_id)
-}
-
-#[tauri::command]
-pub(crate) async fn plugin_catalog_refresh(
-    request: PluginCatalogRefreshRequest,
-    service: State<'_, PluginService>,
-) -> CoreResult<PluginOperationSummary> {
-    let request_id = request.meta.request_id.clone();
-    let service = service.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || service.refresh_norixor_catalog(request))
-        .await
-        .map_err(|_| plugin_runtime_error(request_id, None))?
-}
-
-#[tauri::command]
-pub(crate) async fn plugin_install(
-    request: PluginInstallRequest,
-    service: State<'_, PluginService>,
-) -> CoreResult<PluginOperationSummary> {
-    let request_id = request.meta.request_id.clone();
-    let service = service.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || service.install_norixor_plugin(request))
-        .await
-        .map_err(|_| plugin_runtime_error(request_id, None))?
-}
-
-#[tauri::command]
 pub(crate) fn plugin_installed_list(
     request: PluginInstalledListRequest,
     service: State<'_, PluginService>,
@@ -7465,18 +6031,6 @@ pub(crate) fn plugin_readiness_get(
 ) -> CoreResult<PluginReadiness> {
     service.require_ready(request.meta.request_id)?;
     Ok(service.readiness())
-}
-
-#[tauri::command]
-pub(crate) async fn plugin_icon_read(
-    request: PluginIconReadRequest,
-    service: State<'_, PluginService>,
-) -> CoreResult<PluginIconReadResponse> {
-    let request_id = request.meta.request_id.clone();
-    let service = service.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || service.read_plugin_icon(request))
-        .await
-        .map_err(|_| plugin_runtime_error(request_id, None))?
 }
 
 #[tauri::command]
@@ -7847,18 +6401,6 @@ pub(crate) async fn plugin_local_package_prepare(
 }
 
 #[tauri::command]
-pub(crate) async fn plugin_catalog_package_prepare(
-    request: PluginCatalogPackagePrepareRequest,
-    service: State<'_, PluginService>,
-) -> CoreResult<PluginLocalPackagePreview> {
-    let request_id = request.meta.request_id.clone();
-    let service = service.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || service.prepare_catalog_package(request))
-        .await
-        .map_err(|_| plugin_runtime_error(request_id, None))?
-}
-
-#[tauri::command]
 pub(crate) fn plugin_local_install(
     request: PluginLocalInstallRequest,
     service: State<'_, PluginService>,
@@ -8037,7 +6579,7 @@ pub(crate) async fn plugin_enable(
     {
         return Err(platform_request_error(
             request.meta.request_id,
-            &PluginPlatformError::IncompatibleCatalogEntry,
+            &PluginPlatformError::InvalidProtocolCatalog,
         ));
     }
     let protocol_minor = manifest.protocol_minor;
@@ -9295,6 +7837,13 @@ fn current_app_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("workspace package version must be semver")
 }
 
+fn plugin_version_is_newer(candidate: &str, current: &str) -> bool {
+    match (Version::parse(candidate), Version::parse(current)) {
+        (Ok(candidate), Ok(current)) => candidate > current,
+        _ => false,
+    }
+}
+
 fn current_plugin_permission_binding(package_sha256: &str) -> PluginPermissionBinding {
     let app_version = current_app_version();
     PluginPermissionBinding {
@@ -9303,198 +7852,6 @@ fn current_plugin_permission_binding(package_sha256: &str) -> PluginPermissionBi
         app_version_minor: app_version.minor,
         secure_surface_contract_revision: PLUGIN_PERMISSION_SURFACE_CONTRACT_REVISION,
     }
-}
-
-fn norixor_trust_states(
-    trust: &PluginCatalogTrustRecord,
-) -> Option<(NorixorV1RootTrustState, NorixorV1CatalogTrustState)> {
-    let (_, root_version) = trust.root_key_id.rsplit_once('@')?;
-    let root_version = root_version.parse::<u64>().ok()?;
-    let root_fingerprint_sha256 = trust.catalog_revision.strip_prefix("root:")?.to_owned();
-    if root_fingerprint_sha256.len() != 64
-        || !root_fingerprint_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return None;
-    }
-    Some((
-        NorixorV1RootTrustState {
-            version: root_version,
-            fingerprint_sha256: root_fingerprint_sha256.clone(),
-        },
-        NorixorV1CatalogTrustState {
-            root_version,
-            root_fingerprint_sha256,
-            sequence: trust.sequence,
-            catalog_sha256: trust.payload_sha256.clone(),
-        },
-    ))
-}
-
-fn norixor_catalog_records(
-    root: &VerifiedNorixorV1Root,
-    catalog: &VerifiedNorixorV1Catalog,
-    wire: &NorixorV1CatalogWire,
-) -> Result<(PluginCatalogTrustRecord, Vec<PluginCatalogEntryRecord>), ()> {
-    let expires_at_unix_ms = catalog.payload.expires_at.checked_mul(1_000).ok_or(())?;
-    let verified_at_unix_ms = unix_time_ms();
-    let entries = catalog
-        .payload
-        .items
-        .iter()
-        .map(|item| norixor_catalog_entry_record(root, catalog, item).ok_or(()))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((
-        PluginCatalogTrustRecord {
-            root_key_id: format!("{}@{}", root.metadata.root_key_id, root.metadata.version),
-            sequence: catalog.payload.sequence,
-            payload_sha256: catalog.catalog_sha256.clone(),
-            catalog_signature_base64: wire.data.signature.value.clone(),
-            catalog_revision: format!("root:{}", root.fingerprint_sha256),
-            expires_at_unix_ms,
-            verified_at_unix_ms,
-        },
-        entries,
-    ))
-}
-
-fn norixor_catalog_entry_record(
-    root: &VerifiedNorixorV1Root,
-    catalog: &VerifiedNorixorV1Catalog,
-    item: &norishell_plugin_platform::NorixorV1CatalogItem,
-) -> Option<PluginCatalogEntryRecord> {
-    let manifest = &item.publisher_payload.manifest;
-    Some(PluginCatalogEntryRecord {
-        plugin_id: item.plugin_id.clone(),
-        version: item.version.clone(),
-        name: item.name.clone(),
-        publisher: manifest.publisher.clone(),
-        protocol_major: manifest.protocol_major,
-        protocol_minor: manifest.protocol_minor,
-        platform: manifest.platform.clone(),
-        architectures: item.architectures.clone(),
-        package_url: format!("https://api.norixor.org{}", item.download),
-        package_size: item.package_size,
-        package_sha256: item.package_sha256.clone(),
-        publisher_key_base64: root.publisher_key_base64(&item.publisher_key_id)?,
-        publisher_signature_base64: item.publisher_signature.clone(),
-        capabilities: item
-            .capabilities
-            .iter()
-            .filter_map(norishell_plugin_platform::NorixorV1Capability::core_capability)
-            .collect(),
-        raw_capabilities: serde_json::from_value(serde_json::to_value(&item.capabilities).ok()?)
-            .ok()?,
-        unsupported_manifest: catalog
-            .unsupported_contracts
-            .contains(&(item.plugin_id.clone(), item.version.clone())),
-        minimum_app_version: item.minimum_app_version.clone(),
-        published_at_unix_ms: item
-            .details
-            .as_ref()
-            .and_then(|details| details.release_published_at_unix_ms)
-            .unwrap_or(0),
-        details: item.details.as_ref().map(|details| details.to_core()),
-    })
-}
-
-/// A new signed catalog sequence may carry the same immutable plugin release.
-/// Legacy caches used catalog generation time for `published_at_unix_ms`.
-/// Normalize that historical display field; signed release details, including
-/// the real publication time when supplied, remain part of the comparison. Every package, signer, capability and compatibility fact
-/// remains part of the fail-closed comparison.
-fn catalog_install_candidate_is_unchanged(
-    persisted: &PluginCatalogEntryRecord,
-    fresh: &PluginCatalogEntryRecord,
-) -> bool {
-    let mut normalized_fresh = fresh.clone();
-    normalized_fresh.published_at_unix_ms = persisted.published_at_unix_ms;
-    normalized_fresh == *persisted
-}
-
-fn write_private_plugin_package(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-#[allow(dead_code)]
-fn catalog_records(
-    verified: &VerifiedCatalog,
-) -> (PluginCatalogTrustRecord, Vec<PluginCatalogEntryRecord>) {
-    (
-        PluginCatalogTrustRecord {
-            root_key_id: verified.root_key_id.clone(),
-            sequence: verified.sequence,
-            payload_sha256: hex::encode(verified.payload_sha256),
-            catalog_signature_base64: verified.catalog_signature_base64.clone(),
-            catalog_revision: verified.revision.clone(),
-            expires_at_unix_ms: verified.expires_at_unix_ms,
-            verified_at_unix_ms: unix_time_ms(),
-        },
-        verified.entries.iter().map(catalog_entry_record).collect(),
-    )
-}
-
-#[allow(dead_code)]
-fn catalog_entry_record(entry: &VerifiedCatalogEntry) -> PluginCatalogEntryRecord {
-    PluginCatalogEntryRecord {
-        plugin_id: entry.plugin_id.clone(),
-        version: entry.version.clone(),
-        name: entry.name.clone(),
-        publisher: entry.publisher.clone(),
-        protocol_major: entry.protocol_major,
-        protocol_minor: entry.protocol_minor,
-        platform: entry.platform.clone(),
-        architectures: entry.architectures.clone(),
-        package_url: entry.package_url.clone(),
-        package_size: entry.package_size,
-        package_sha256: entry.package_sha256.clone(),
-        publisher_key_base64: entry.publisher_key_base64.clone(),
-        publisher_signature_base64: entry.publisher_signature_base64.clone(),
-        capabilities: entry.capabilities.clone(),
-        raw_capabilities: entry
-            .capabilities
-            .iter()
-            .map(|capability| {
-                serde_json::to_value(capability)
-                    .expect("capability serialization")
-                    .as_str()
-                    .expect("capability name")
-                    .to_owned()
-            })
-            .collect(),
-        unsupported_manifest: false,
-        minimum_app_version: entry.minimum_app_version.clone(),
-        published_at_unix_ms: entry.published_at_unix_ms,
-        details: None,
-    }
-}
-
-#[allow(dead_code)]
-fn entry_matches_current_platform(entry: &VerifiedCatalogEntry) -> bool {
-    protocol_is_compatible(entry.protocol_major, entry.protocol_minor)
-        && platform_and_architecture_match(&entry.platform, &entry.architectures)
-        && capabilities_match_protocol(&entry.capabilities, entry.protocol_minor)
-}
-
-#[allow(dead_code)]
-fn catalog_record_matches_current_platform(entry: &PluginCatalogEntryRecord) -> bool {
-    !entry.unsupported_manifest
-        && entry.raw_capabilities.len() == entry.capabilities.len()
-        && protocol_is_compatible(entry.protocol_major, entry.protocol_minor)
-        && Version::parse(&entry.minimum_app_version)
-            .is_ok_and(|minimum| current_app_version() >= minimum)
-        && platform_and_architecture_match(&entry.platform, &entry.architectures)
-        && capabilities_match_protocol(&entry.capabilities, entry.protocol_minor)
 }
 
 fn protocol_is_compatible(protocol_major: u16, protocol_minor: u16) -> bool {
@@ -9809,18 +8166,8 @@ fn observer_capacity_available(
 
 fn platform_error_code(error: &PluginPlatformError) -> &'static str {
     match error {
-        PluginPlatformError::TrustRootsUnavailable => "trust_roots_unavailable",
-        PluginPlatformError::InvalidCatalogEnvelope => "catalog_envelope_invalid",
-        PluginPlatformError::InvalidCatalogSignature => "catalog_signature_invalid",
-        PluginPlatformError::InvalidCatalogPayload
-        | PluginPlatformError::CatalogExpired
-        | PluginPlatformError::CatalogRollback => "catalog_payload_invalid",
-        PluginPlatformError::IncompatibleCatalogEntry => "protocol_incompatible",
-        PluginPlatformError::PackageTooLarge | PluginPlatformError::PackageSizeMismatch => {
-            "package_too_large"
-        }
+        PluginPlatformError::PackageTooLarge => "package_too_large",
         PluginPlatformError::PackageHashMismatch => "package_hash_mismatch",
-        PluginPlatformError::InvalidPublisherSignature => "publisher_signature_invalid",
         PluginPlatformError::InvalidArchive | PluginPlatformError::Zip(_) => {
             "package_archive_invalid"
         }
@@ -9839,24 +8186,8 @@ fn platform_error_code(error: &PluginPlatformError) -> &'static str {
         | PluginPlatformError::RuntimeTimedOut
         | PluginPlatformError::RuntimePoisoned
         | PluginPlatformError::InvalidRuntimeOutput => "runtime_rejected",
-        PluginPlatformError::InvalidNorixorWire => "catalog_envelope_invalid",
-        PluginPlatformError::InvalidNorixorRoot => "catalog_signature_invalid",
-        PluginPlatformError::InvalidNorixorCatalog => "catalog_payload_invalid",
-        PluginPlatformError::InvalidNorixorPublisher => "publisher_signature_invalid",
-        PluginPlatformError::InvalidNorixorDownload => "catalog_payload_invalid",
         PluginPlatformError::Io(_) | PluginPlatformError::Json(_) => "install_conflict",
     }
-}
-
-fn plugin_catalog_network_error(request_id: RequestId) -> Box<CoreApiError> {
-    plugin_error(
-        request_id,
-        "plugin.catalog_unavailable",
-        ErrorCategory::Unavailable,
-        RetryStrategy::AfterMilliseconds(2_000),
-        "errors.plugin.catalogUnavailable",
-        None,
-    )
 }
 
 fn platform_request_error(request_id: RequestId, error: &PluginPlatformError) -> Box<CoreApiError> {
@@ -9865,8 +8196,7 @@ fn platform_request_error(request_id: RequestId, error: &PluginPlatformError) ->
         request_id,
         &format!("plugin.{suffix}"),
         match error {
-            PluginPlatformError::ManifestMismatch
-            | PluginPlatformError::IncompatibleCatalogEntry => ErrorCategory::Incompatible,
+            PluginPlatformError::InvalidProtocolCatalog => ErrorCategory::Incompatible,
             PluginPlatformError::InstallConflict | PluginPlatformError::InstallCommitUncertain => {
                 ErrorCategory::Conflict
             }
@@ -9909,73 +8239,14 @@ fn installed_to_wire(
                 granted: grant.granted && grant.binding.as_ref() == Some(&permission_binding),
             })
             .collect(),
-        state: record.state,
+        state: match record.state {
+            PluginInstallState::UpdateAvailable => PluginInstallState::Disabled,
+            state => state,
+        },
         state_version: record.state_version,
         has_settings,
         installed_at_unix_ms: record.installed_at_unix_ms,
         updated_at_unix_ms: record.updated_at_unix_ms,
-    }
-}
-
-#[allow(dead_code)]
-fn catalog_to_wire(
-    record: PluginCatalogEntryRecord,
-    retained: Vec<PluginCapabilityGrantRecord>,
-) -> PluginCatalogEntry {
-    let protocol_compatible = !record.unsupported_manifest
-        && record.raw_capabilities.len() == record.capabilities.len()
-        && protocol_is_compatible(record.protocol_major, record.protocol_minor)
-        && capabilities_match_protocol(&record.capabilities, record.protocol_minor);
-    let app_compatible = Version::parse(&record.minimum_app_version)
-        .is_ok_and(|minimum| current_app_version() >= minimum);
-    let platform_compatible =
-        platform_and_architecture_match(&record.platform, &record.architectures);
-    PluginCatalogEntry {
-        plugin_id: record.plugin_id,
-        name: record.name,
-        publisher: record.publisher,
-        version: record.version,
-        protocol_major: record.protocol_major,
-        protocol_minor: record.protocol_minor,
-        platform: record.platform,
-        architectures: record.architectures,
-        package_url: record.package_url,
-        package_size: record.package_size,
-        package_sha256: record.package_sha256,
-        publisher_key_base64: record.publisher_key_base64,
-        publisher_signature_base64: record.publisher_signature_base64,
-        capabilities: record.capabilities,
-        minimum_app_version: record.minimum_app_version,
-        published_at_unix_ms: record.published_at_unix_ms,
-        details: record.details,
-        compatibility: if !protocol_compatible {
-            PluginCompatibility::ProtocolIncompatible
-        } else if !app_compatible {
-            PluginCompatibility::AppVersionIncompatible
-        } else if !platform_compatible {
-            PluginCompatibility::PlatformIncompatible
-        } else {
-            PluginCompatibility::Compatible
-        },
-        unsupported_capabilities: Some(
-            record
-                .raw_capabilities
-                .into_iter()
-                .filter(|name| {
-                    serde_json::from_value::<PluginCapability>(serde_json::Value::String(
-                        name.clone(),
-                    ))
-                    .is_err()
-                })
-                .collect(),
-        ),
-        retained_capability_grants: retained
-            .into_iter()
-            .map(|grant| PluginCapabilityGrant {
-                capability: grant.capability,
-                granted: grant.granted,
-            })
-            .collect(),
     }
 }
 
@@ -9995,7 +8266,12 @@ fn operation_to_wire(record: PluginOperationRecord) -> PluginOperationSummary {
     PluginOperationSummary {
         operation_id: record.operation_id,
         plugin_id: record.plugin_id,
-        kind: record.kind,
+        // Catalog refresh rows predate the local-only plugin contract. Keep
+        // them decodable in persistence without emitting an invalid TS value.
+        kind: match record.kind {
+            PluginOperationKind::CatalogRefresh => PluginOperationKind::Update,
+            kind => kind,
+        },
         state: record.state,
         progress_percent,
         error_code: record
@@ -10009,14 +8285,8 @@ fn operation_to_wire(record: PluginOperationRecord) -> PluginOperationSummary {
 
 fn parse_plugin_error_code(value: &str) -> Option<PluginErrorCode> {
     Some(match value {
-        "trust_roots_unavailable" => PluginErrorCode::TrustRootsUnavailable,
-        "catalog_unavailable" => PluginErrorCode::CatalogUnavailable,
-        "catalog_envelope_invalid" => PluginErrorCode::CatalogEnvelopeInvalid,
-        "catalog_signature_invalid" => PluginErrorCode::CatalogSignatureInvalid,
-        "catalog_payload_invalid" => PluginErrorCode::CatalogPayloadInvalid,
         "package_too_large" => PluginErrorCode::PackageTooLarge,
         "package_hash_mismatch" => PluginErrorCode::PackageHashMismatch,
-        "publisher_signature_invalid" => PluginErrorCode::PublisherSignatureInvalid,
         "package_archive_invalid" => PluginErrorCode::PackageArchiveInvalid,
         "package_path_rejected" => PluginErrorCode::PackagePathRejected,
         "package_limits_exceeded" => PluginErrorCode::PackageLimitsExceeded,
@@ -10659,143 +8929,6 @@ mod tests {
     }
 
     #[test]
-    fn retained_snapshot_requires_verified_same_signer_and_current_app_contract() {
-        let directory = tempfile::tempdir().expect("plugin service directory");
-        let (service, _, _) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        service
-            .refresh_catalog(refresh_request())
-            .expect("catalog refresh");
-        service
-            .install_plugin(install_request(
-                "1.0.0",
-                None,
-                vec![PluginCapabilityGrant {
-                    capability: PluginCapability::UiPanel,
-                    granted: true,
-                }],
-            ))
-            .expect("signed fixture install");
-        let plugin_id = PluginId::parse("com.norishell.fixture").expect("plugin id");
-        let installed = service
-            .hosts
-            .with_plugin_repository(|repository| repository.get_plugin_installation(&plugin_id))
-            .expect("installed record");
-        let retained = service
-            .retained_permissions_for_verified_candidate(
-                RequestId::new(),
-                Some(&installed),
-                &installed.signer_fingerprint_sha256,
-                PLUGIN_PROTOCOL_MAJOR,
-                &installed.capabilities,
-            )
-            .expect("retained snapshot");
-        assert_eq!(retained.grants.len(), 1);
-        assert!(retained.grants[0].granted);
-        assert!(
-            service
-                .retained_permissions_for_verified_candidate(
-                    RequestId::new(),
-                    Some(&installed),
-                    &"f".repeat(64),
-                    PLUGIN_PROTOCOL_MAJOR,
-                    &installed.capabilities,
-                )
-                .expect("changed signer snapshot")
-                .grants
-                .is_empty()
-        );
-
-        let stale_binding = PluginPermissionBinding {
-            artifact_sha256: installed.package_sha256.clone(),
-            app_version_major: current_app_version().major,
-            app_version_minor: current_app_version().minor.saturating_add(1),
-            secure_surface_contract_revision: PLUGIN_PERMISSION_SURFACE_CONTRACT_REVISION,
-        };
-        service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.replace_plugin_capability_grants(
-                    &plugin_id,
-                    &installed.signer_fingerprint_sha256,
-                    u64::from(PLUGIN_PROTOCOL_MAJOR),
-                    installed.state_version,
-                    Some(WireSequence::new(1)),
-                    &stale_binding,
-                    &[(PluginCapability::UiPanel, true)],
-                )
-            })
-            .expect("stamp stale app contract fixture");
-        assert!(
-            service
-                .retained_permissions_for_verified_candidate(
-                    RequestId::new(),
-                    Some(&installed),
-                    &installed.signer_fingerprint_sha256,
-                    PLUGIN_PROTOCOL_MAJOR,
-                    &installed.capabilities,
-                )
-                .expect("stale contract snapshot")
-                .grants
-                .is_empty()
-        );
-
-        let local_plugin = PluginInstalledRecord {
-            plugin_id: PluginId::parse("com.norishell.unsigned").expect("plugin id"),
-            name: "Unsigned".to_owned(),
-            publisher: "Self reported".to_owned(),
-            signer_fingerprint_sha256: "d".repeat(64),
-            active_version: "1.0.0".to_owned(),
-            package_sha256: "d".repeat(64),
-            capabilities: vec![PluginCapability::UiPanel],
-            state: PluginInstallState::Disabled,
-            state_version: WireSequence::new(1),
-            installed_at_unix_ms: 1,
-            updated_at_unix_ms: 1,
-        };
-        let local_binding = current_plugin_permission_binding(&local_plugin.package_sha256);
-        service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.activate_plugin_installation(
-                    None,
-                    &local_plugin,
-                    100,
-                    "",
-                    "",
-                    true,
-                    Some(PluginActivationPermissions {
-                        protocol_major: u64::from(PLUGIN_PROTOCOL_MAJOR),
-                        binding: &local_binding,
-                        previous_binding: None,
-                        expected_previous_grant_state_version: None,
-                        expected_previous_scope_state_version: None,
-                        grants: &[(PluginCapability::UiPanel, true)],
-                        carried_host_scope_capabilities: &[],
-                        approved_host_scopes: None,
-                    }),
-                )
-            })
-            .expect("unsigned fixture install");
-        assert!(
-            service
-                .retained_permissions_for_verified_candidate(
-                    RequestId::new(),
-                    Some(&local_plugin),
-                    &local_plugin.signer_fingerprint_sha256,
-                    PLUGIN_PROTOCOL_MAJOR,
-                    &local_plugin.capabilities,
-                )
-                .expect("unsigned snapshot")
-                .grants
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn plugin_locale_is_persisted_for_the_next_runtime_restore() {
         let directory = tempfile::tempdir().expect("plugin service directory");
         {
@@ -10881,167 +9014,6 @@ mod tests {
                 .as_str(),
             "zh-CN",
         );
-    }
-
-    #[test]
-    fn catalog_cache_reload_never_launders_unknown_capabilities_or_manifest_contracts() {
-        let directory = tempfile::tempdir().unwrap();
-        let (service, _, _) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        service.refresh_catalog(refresh_request()).unwrap();
-        let mut record = service
-            .hosts
-            .with_plugin_repository(|repository| repository.list_plugin_catalog_entries())
-            .unwrap()
-            .remove(0);
-        record.protocol_minor = PLUGIN_PROTOCOL_MINOR;
-        assert!(catalog_record_matches_current_platform(&record));
-        for mode in [
-            "unknown-capability",
-            "unknown-manifest",
-            "old-abi",
-            "future-abi",
-        ] {
-            let mut candidate = record.clone();
-            match mode {
-                "unknown-capability" => {
-                    candidate.raw_capabilities.push("futureCapability".into());
-                }
-                "unknown-manifest" => candidate.unsupported_manifest = true,
-                "old-abi" => candidate.protocol_minor = 12,
-                "future-abi" => candidate.protocol_minor = PLUGIN_PROTOCOL_MINOR + 1,
-                _ => unreachable!(),
-            }
-            assert!(
-                !catalog_record_matches_current_platform(&candidate),
-                "{mode}"
-            );
-            let wire = catalog_to_wire(candidate.clone(), vec![]);
-            assert_eq!(
-                wire.compatibility,
-                PluginCompatibility::ProtocolIncompatible
-            );
-            if mode == "unknown-capability" {
-                assert_eq!(
-                    wire.unsupported_capabilities,
-                    Some(vec!["futureCapability".into()])
-                );
-                assert_eq!(wire.capabilities, record.capabilities);
-            }
-            let mut trust = service
-                .hosts
-                .with_plugin_repository(|repository| repository.plugin_catalog_trust())
-                .unwrap()
-                .unwrap();
-            let previous = trust.clone();
-            trust.sequence += 1;
-            trust.payload_sha256 = format!("{:064x}", trust.sequence);
-            service
-                .hosts
-                .with_plugin_repository(|repository| {
-                    repository.replace_plugin_catalog(Some(&previous), &trust, &[candidate.clone()])
-                })
-                .unwrap();
-            let reloaded = service
-                .hosts
-                .with_plugin_repository(|repository| repository.list_plugin_catalog_entries())
-                .unwrap()
-                .remove(0);
-            assert_eq!(reloaded, candidate);
-            assert!(!catalog_record_matches_current_platform(&reloaded));
-            assert_eq!(
-                service.resolve_catalog_entry(&reloaded.plugin_id, &reloaded.version),
-                Err("protocol_incompatible")
-            );
-        }
-    }
-
-    #[test]
-    fn plugin_failures_keep_specific_catalog_and_protocol_codes() {
-        for (error, expected) in [
-            (
-                PluginPlatformError::IncompatibleCatalogEntry,
-                "plugin.protocol_incompatible",
-            ),
-            (
-                PluginPlatformError::InvalidNorixorWire,
-                "plugin.catalog_envelope_invalid",
-            ),
-            (
-                PluginPlatformError::InvalidCatalogSignature,
-                "plugin.catalog_signature_invalid",
-            ),
-            (
-                PluginPlatformError::InvalidNorixorCatalog,
-                "plugin.catalog_payload_invalid",
-            ),
-            (
-                PluginPlatformError::CatalogExpired,
-                "plugin.catalog_payload_invalid",
-            ),
-        ] {
-            assert_eq!(
-                platform_request_error(RequestId::new(), &error).code,
-                expected
-            );
-        }
-        assert_eq!(
-            plugin_catalog_network_error(RequestId::new()).code,
-            "plugin.catalog_unavailable"
-        );
-    }
-
-    #[test]
-    fn catalog_rollover_keeps_an_identical_install_candidate_valid() {
-        let directory = tempfile::tempdir().expect("plugin service directory");
-        let (service, _, _) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        service
-            .refresh_catalog(refresh_request())
-            .expect("catalog refresh");
-        let persisted = service
-            .hosts
-            .with_plugin_repository(|repository| repository.list_plugin_catalog_entries())
-            .expect("catalog entries")
-            .into_iter()
-            .next()
-            .expect("fixture entry");
-
-        let mut newer_snapshot = persisted.clone();
-        newer_snapshot.published_at_unix_ms += 1_000;
-        assert!(catalog_install_candidate_is_unchanged(
-            &persisted,
-            &newer_snapshot
-        ));
-
-        let mut changed_package = newer_snapshot.clone();
-        changed_package.package_sha256 = "f".repeat(64);
-        assert!(!catalog_install_candidate_is_unchanged(
-            &persisted,
-            &changed_package
-        ));
-
-        let mut changed_signer = newer_snapshot.clone();
-        changed_signer.publisher_signature_base64 = "A".repeat(88);
-        assert!(!catalog_install_candidate_is_unchanged(
-            &persisted,
-            &changed_signer
-        ));
-
-        let mut changed_capabilities = newer_snapshot;
-        changed_capabilities
-            .capabilities
-            .push(PluginCapability::StoragePlugin);
-        assert!(!catalog_install_candidate_is_unchanged(
-            &persisted,
-            &changed_capabilities
-        ));
     }
 
     #[test]
@@ -11299,483 +9271,6 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "requires the live production marketplace; read-only trust-chain acceptance"]
-    fn production_mixed_catalog_compatibility_verifies_and_persists() {
-        let directory = tempfile::tempdir().unwrap();
-        let hosts = HostService::start(directory.path()).unwrap();
-        let sessions = SshSessionService::start(
-            hosts.clone(),
-            VaultService::start(directory.path()),
-            TransientCredentialService::default(),
-        );
-        let service = PluginService::start(directory.path(), hosts, sessions).unwrap();
-        let (root, catalog, wire) = service
-            .fetch_verified_norixor_catalog(RequestId::new())
-            .expect("live catalog must verify against the client-embedded root");
-        let (trust, entries) = norixor_catalog_records(&root, &catalog, &wire).unwrap();
-        assert!(!entries.is_empty());
-        service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.replace_plugin_catalog(None, &trust, &entries)
-            })
-            .unwrap();
-        let reloaded = service
-            .hosts
-            .with_plugin_repository(|repository| repository.list_plugin_catalog_entries())
-            .unwrap();
-        assert_eq!(reloaded.len(), entries.len());
-        println!(
-            "verified root={} catalog_sequence={} catalog_sha256={} items={}",
-            root.metadata.root_key_id,
-            catalog.payload.sequence,
-            catalog.catalog_sha256,
-            entries.len()
-        );
-        // Frozen protocol-13 rollout acceptance: the eleven latest official packages
-        // must run while all nineteen retained pre-resident releases stay visible and blocked.
-        let mut latest = BTreeMap::new();
-        for entry in &reloaded {
-            let version = Version::parse(&entry.version).unwrap();
-            let candidate = latest
-                .entry(entry.plugin_id.clone())
-                .or_insert((version.clone(), entry));
-            if version > candidate.0 {
-                *candidate = (version, entry);
-            }
-        }
-        assert_eq!(latest.len(), 11);
-        for (_, entry) in latest.values() {
-            assert_eq!(entry.protocol_minor, 13);
-            assert!(
-                catalog_record_matches_current_platform(entry),
-                "latest {} {}",
-                entry.plugin_id,
-                entry.version
-            );
-        }
-        let mut compatible = 0;
-        for entry in reloaded {
-            let wire = catalog_to_wire(entry.clone(), vec![]);
-            let accepted = catalog_record_matches_current_platform(&entry);
-            assert_eq!(
-                accepted,
-                wire.compatibility == PluginCompatibility::Compatible
-            );
-            if accepted {
-                compatible += 1;
-            }
-            println!(
-                "{} {} protocol={}.{} {:?}",
-                entry.plugin_id,
-                entry.version,
-                entry.protocol_major,
-                entry.protocol_minor,
-                wire.compatibility
-            );
-        }
-        assert_eq!(compatible, 11);
-        assert_eq!(entries.len() - compatible, 19);
-        println!(
-            "compatible_items={compatible} incompatible_items={}",
-            entries.len() - compatible
-        );
-    }
-
-    #[test]
-    #[ignore = "requires the deployed api.norixor.org production trust service"]
-    fn production_norixor_catalog_verifies_from_the_embedded_root() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let hosts = HostService::start(directory.path()).expect("host repository");
-        let sessions = SshSessionService::start(
-            hosts.clone(),
-            VaultService::start(directory.path()),
-            TransientCredentialService::default(),
-        );
-        let service = PluginService::start(directory.path(), hosts, sessions).expect("service");
-        let (root, catalog, _) = service
-            .fetch_verified_norixor_catalog(RequestId::new())
-            .expect("production catalog verifies");
-        assert_eq!(
-            root.metadata.root_key_id,
-            "norishell-root-20260901-11f625b9cf29"
-        );
-        assert!(catalog.payload.sequence >= 14);
-        let item = catalog
-            .payload
-            .items
-            .iter()
-            .find(|item| item.plugin_id.as_str() == "org.norixor" && item.version == "1.0.4")
-            .expect("production org.norixor 1.0.4 catalog item");
-        assert_eq!(
-            item.package_sha256,
-            "b8f60833aca40723f27734372f44670a14c631598c9338c863bbe02721628587"
-        );
-        assert_eq!(item.package_size, 141_168);
-        assert_eq!(item.publisher_payload.manifest.protocol_minor, 6);
-        assert!(item.capabilities.iter().any(
-            |capability| capability.core_capability() == Some(PluginCapability::StoragePlugin)
-        ));
-        assert!(
-            item.capabilities
-                .iter()
-                .any(|capability| capability.core_capability() == Some(PluginCapability::SshSync))
-        );
-        let download_wire = service
-            .norixor_marketplace
-            .get_api_path(&item.download, PLUGIN_CATALOG_MAX_BYTES)
-            .expect("production download metadata");
-        let download = verify_norixor_v1_download(&download_wire, item)
-            .expect("production download metadata verifies");
-        let package = service
-            .norixor_marketplace
-            .get_download_url(
-                &download.url,
-                usize::try_from(download.size).expect("package size"),
-            )
-            .expect("production package bytes");
-        let verified = verify_norixor_v1_package(&package, item, &download, service.package_limits)
-            .expect("production package verifies");
-        assert_eq!(
-            verified.manifest.plugin_id.as_str(),
-            item.plugin_id.as_str()
-        );
-        assert_eq!(verified.manifest.version, "1.0.4");
-        assert_eq!(verified.manifest.protocol_minor, 6);
-        let package_protocol_minor = verified.manifest.protocol_minor;
-
-        let refreshed = service
-            .refresh_norixor_catalog(refresh_request())
-            .expect("production catalog refresh persists");
-        assert_eq!(refreshed.state, PluginOperationState::Succeeded);
-        let catalog_database = directory.path().join("ssh").join("norishell.sqlite3");
-        let connection =
-            rusqlite::Connection::open(catalog_database).expect("open fixture catalog");
-        let updated = connection
-            .execute(
-                "UPDATE plugin_catalog_entries
-                 SET published_at_ms = published_at_ms - 1000
-                 WHERE plugin_id = ?1 AND version = ?2",
-                rusqlite::params!["org.norixor", "1.0.4"],
-            )
-            .expect("backdate persisted production entry");
-        assert_eq!(updated, 1);
-        drop(connection);
-        let persisted_after_backdate = service
-            .hosts
-            .with_plugin_repository(|repository| repository.list_plugin_catalog_entries())
-            .expect("read backdated catalog")
-            .into_iter()
-            .find(|entry| entry.plugin_id.as_str() == "org.norixor" && entry.version == "1.0.4")
-            .expect("backdated production entry");
-        let (current_root, current_catalog, _) = service
-            .fetch_verified_norixor_catalog(RequestId::new())
-            .expect("current production catalog verifies after backdate");
-        let current_item = current_catalog
-            .payload
-            .items
-            .iter()
-            .find(|item| item.plugin_id.as_str() == "org.norixor" && item.version == "1.0.4")
-            .expect("current production item");
-        let current_entry =
-            norixor_catalog_entry_record(&current_root, &current_catalog, current_item)
-                .expect("current production entry");
-        assert_ne!(
-            persisted_after_backdate.published_at_unix_ms, current_entry.published_at_unix_ms,
-            "the live install regression must exercise distinct snapshot timestamps"
-        );
-        assert!(catalog_install_candidate_is_unchanged(
-            &persisted_after_backdate,
-            &current_entry
-        ));
-        let expired =
-            rusqlite::Connection::open(directory.path().join("ssh").join("norishell.sqlite3"))
-                .expect("open fixture catalog for expiry");
-        assert_eq!(
-            expired
-                .execute(
-                    "UPDATE plugin_catalog_trust SET expires_at_ms = 1 WHERE singleton = 1",
-                    [],
-                )
-                .expect("expire persisted catalog trust"),
-            1
-        );
-        drop(expired);
-        let expired_trust = service
-            .hosts
-            .with_plugin_repository(|repository| repository.plugin_catalog_trust())
-            .expect("read expired trust")
-            .expect("expired trust exists");
-        assert!(expired_trust.expires_at_unix_ms <= unix_time_ms());
-        let grants = item
-            .capabilities
-            .iter()
-            .filter_map(|capability| capability.core_capability())
-            .map(|capability| PluginCapabilityGrant {
-                capability,
-                granted: !special_plugin_capability(capability),
-            })
-            .collect::<Vec<_>>();
-        let installed = service
-            .install_norixor_plugin(PluginInstallRequest {
-                meta: request_meta(),
-                operation_id: norishell_core_api::PluginOperationId::new(),
-                idempotency_key: Uuid::new_v4().to_string(),
-                plugin_id: PluginId::parse("org.norixor").expect("official plugin id"),
-                version: "1.0.4".to_owned(),
-                expected_state_version: None,
-                capability_grants: grants,
-            })
-            .expect("production plugin install");
-        assert_eq!(
-            installed.state,
-            PluginOperationState::Succeeded,
-            "{installed:?}"
-        );
-        let record = service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.get_plugin_installation(
-                    &PluginId::parse("org.norixor").expect("official plugin id"),
-                )
-            })
-            .expect("installed production plugin");
-        assert_eq!(record.active_version, "1.0.4");
-        assert_eq!(record.state, PluginInstallState::Disabled);
-        let module = service
-            .installer
-            .read_active_module(
-                &record.plugin_id,
-                &record.active_version,
-                &record.package_sha256,
-                16 * 1024 * 1024,
-            )
-            .expect("installed production wasm");
-        let storage = service
-            .plugin_storage_snapshot(RequestId::new(), &record)
-            .expect("initial plugin storage");
-        let plugin_host_executable = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("workspace root")
-            .join("target")
-            .join("debug")
-            .join(format!("norishell{}", std::env::consts::EXE_SUFFIX));
-        assert!(
-            plugin_host_executable.is_file(),
-            "build the current norishell binary before this ignored live test"
-        );
-        let mut host =
-            PluginHostProcess::spawn_with_executable_for_tests(&plugin_host_executable, &module, 1)
-                .expect("production plugin host");
-        let plugin_locale = PluginLocale::parse("zh-CN").expect("production test locale");
-        let initialize_request_id = Uuid::new_v4().to_string();
-        let initialized = host
-            .execute(PluginHostRequest {
-                protocol_major: PLUGIN_PROTOCOL_MAJOR,
-                protocol_minor: package_protocol_minor,
-                request_id: initialize_request_id.clone(),
-                kind: PluginHostMessageKind::Initialize,
-                payload_json: plugin_host_payload(
-                    &plugin_locale,
-                    serde_json::json!({
-                        "pluginId": record.plugin_id.as_str(),
-                        "version": record.active_version,
-                        "storage": storage.clone(),
-                    }),
-                ),
-            })
-            .expect("production plugin initialize");
-        let initialized = parse_plugin_ui_outputs(&initialize_request_id, initialized)
-            .expect("production plugin initialize outputs");
-        assert!(!initialized.navigation.is_empty());
-        assert!(!initialized.pages.is_empty());
-        let localized_pages = serde_json::to_string(&initialized.pages).expect("Chinese pages");
-        assert!(
-            localized_pages
-                .chars()
-                .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character)),
-            "zh-CN initialization must contain a bundled Chinese translation"
-        );
-        let english_request_id = Uuid::new_v4().to_string();
-        let english_locale = PluginLocale::parse("en").expect("English locale");
-        let english = host
-            .execute(PluginHostRequest {
-                protocol_major: PLUGIN_PROTOCOL_MAJOR,
-                protocol_minor: package_protocol_minor,
-                request_id: english_request_id.clone(),
-                kind: PluginHostMessageKind::Initialize,
-                payload_json: plugin_host_payload(
-                    &english_locale,
-                    serde_json::json!({
-                        "pluginId": record.plugin_id.as_str(),
-                        "version": record.active_version,
-                        "storage": storage.clone(),
-                    }),
-                ),
-            })
-            .expect("production plugin English initialize");
-        let english = parse_plugin_ui_outputs(&english_request_id, english)
-            .expect("production plugin English outputs");
-        let english_pages = serde_json::to_string(&english.pages).expect("English pages");
-        assert!(
-            english_pages.contains("Connect") || english_pages.contains("Norixor"),
-            "English initialization must contain a bundled English translation"
-        );
-
-        let mut status_action = None;
-        for page in &initialized.pages {
-            for action_id in page.document.nodes.iter().filter_map(|node| match node {
-                norishell_core_api::PluginUiNode::Button { action_id, .. }
-                | norishell_core_api::PluginUiNode::CopyButton { action_id, .. } => Some(action_id),
-                _ => None,
-            }) {
-                let request_id = Uuid::new_v4().to_string();
-                let outputs = host
-                    .execute(PluginHostRequest {
-                        protocol_major: PLUGIN_PROTOCOL_MAJOR,
-                        protocol_minor: package_protocol_minor,
-                        request_id: request_id.clone(),
-                        kind: PluginHostMessageKind::UiAction,
-                        payload_json: plugin_host_payload(
-                            &plugin_locale,
-                            serde_json::json!({
-                                "targetId": "app.page",
-                                "contextHandle": Uuid::new_v4().to_string(),
-                                "targetRevision": "1",
-                                "actionId": action_id.as_str(),
-                                "fields": [],
-                                "hostMetadata": null,
-                                "hostDomSnapshot": null,
-                                "terminalMetadata": null,
-                                "storage": storage.clone(),
-                            }),
-                        ),
-                    })
-                    .expect("production plugin UI action");
-                let parsed = parse_plugin_ui_outputs(&request_id, outputs)
-                    .expect("production plugin UI action outputs");
-                if matches!(
-                    parsed.ssh_sync_request,
-                    Some(norishell_core_api::PluginSshSyncRequest::Status { ref profile_id, .. })
-                        if profile_id == "primary"
-                ) {
-                    status_action = Some(action_id.clone());
-                    break;
-                }
-            }
-            if status_action.is_some() {
-                break;
-            }
-        }
-        let action_id = status_action.expect("official status action");
-        let callback_request_id = Uuid::new_v4().to_string();
-        let callback = host
-            .execute(PluginHostRequest {
-                protocol_major: PLUGIN_PROTOCOL_MAJOR,
-                protocol_minor: package_protocol_minor,
-                request_id: callback_request_id.clone(),
-                kind: PluginHostMessageKind::SshSyncResult,
-                payload_json: plugin_host_payload(&plugin_locale, serde_json::json!({
-                    "targetId": "app.page",
-                    "contextHandle": Uuid::new_v4().to_string(),
-                    "targetRevision": "1",
-                    "actionId": action_id.as_str(),
-                    "result": norishell_core_api::PluginSshSyncStatus {
-                        desktop_profile_count: 0, local_desktop_profile_count: 0, remote_desktop_profile_count: None,
-                        profile_id: "primary".to_owned(),
-                        account_state: norishell_core_api::PluginSshSyncAccountState::Disconnected,
-                        operation_state: norishell_core_api::PluginSshSyncOperationState::Idle,
-                        last_sync_at_unix_ms: None,
-                        host_count: 0,
-                        credential_count: 0,
-                        conflict_count: 0,
-                        stable_error_code: None,
-                        http_status: None,
-                        remote_revision: None,
-                        etag: None,
-                        preview_id: None,
-                        exchange_sha256: None,
-                        local_host_count: 0,
-                        local_credential_count: 0,
-                        remote_host_count: None,
-                        remote_credential_count: None,
-                        difference_state: None,
-                        scope_mode: None,
-                    },
-                    "storage": storage.clone(),
-                })),
-            })
-            .expect("production sshSyncResult callback");
-        let callback = parse_plugin_ui_outputs(&callback_request_id, callback)
-            .expect("production sshSyncResult outputs");
-        assert_eq!(callback.templates.len(), 1);
-        assert!(callback.ssh_sync_request.is_none());
-        host.shutdown().expect("production plugin host cleanup");
-    }
-
-    const FIXTURE_ROOT_BASE64: &str = "6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=";
-    const FIXTURE_PACKAGE_V1_BASE64: &str = "UEsDBBQAAAAIAKdhLV3SGexlyQAAACwBAAANABwAbWFuaWZlc3QuanNvblVUCQAD2iKmatoipmp1eAsAAQT1AQAABAAAAABNjzFPAzEMhf9LZshdxXZbF6QOICQEC2JwU7dn6sRR4qCKiv+Oc60q1s/ve8k7u8ztQGmzc5MLEn2SQnVGZr+nk7aC7s4liGjnxxvIbcs9VYw+m/DaBePfWCpJMrryox97sohKEH6CL7H06h+htJAHQwy6lxLN22E9qmQzoYSZFEN/srrpw7VEvR/YfZoC4QgHfCts0qya6zQMlynV4wliZvSKVYfrjPvlR/6HeneADFtiUrpW0wskXIojJYotrnN+v40Zvcnu9w9QSwMECgAAAAAAp2EtXc4zSxwIAAAACAAAAAsAHABwbHVnaW4ud2FzbVVUCQAD2iKmatoipmp1eAsAAQT1AQAABAAAAAAAYXNtAQAAAFBLAQIeAxQAAAAIAKdhLV3SGexlyQAAACwBAAANABgAAAAAAAEAAACkgQAAAABtYW5pZmVzdC5qc29uVVQFAAPaIqZqdXgLAAEE9QEAAAQAAAAAUEsBAh4DCgAAAAAAp2EtXc4zSxwIAAAACAAAAAsAGAAAAAAAAAAAAKSBEAEAAHBsdWdpbi53YXNtVVQFAAPaIqZqdXgLAAEE9QEAAAQAAAAAUEsFBgAAAAACAAIApAAAAF0BAAAAAA==";
-    const FIXTURE_CATALOG_V1_BASE64: &str = "eyJrZXlJZCI6ImZpeHR1cmUtcm9vdCIsInBheWxvYWRCYXNlNjQiOiJleUp6WTJobGJXRWlPaUp1YjNKcGMyaGxiR3d1Y0d4MVoybHVMV05oZEdGc2IyY3VkakVpTENKelpYRjFaVzVqWlNJNk1Td2ljbVYyYVhOcGIyNGlPaUptYVhoMGRYSmxMVEVpTENKcGMzTjFaV1JCZEZWdWFYaE5jeUk2TVN3aVpYaHdhWEpsYzBGMFZXNXBlRTF6SWpvME1EQXdNREF3TURBd01EQXdMQ0psYm5SeWFXVnpJanBiZXlKd2JIVm5hVzVKWkNJNkltTnZiUzV1YjNKcGMyaGxiR3d1Wm1sNGRIVnlaU0lzSW01aGJXVWlPaUpHYVhoMGRYSmxJaXdpY0hWaWJHbHphR1Z5SWpvaVRtOXlhVk5vWld4c0lpd2lkbVZ5YzJsdmJpSTZJakV1TUM0d0lpd2ljSEp2ZEc5amIyeE5ZV3B2Y2lJNk1Td2ljSEp2ZEc5amIyeE5hVzV2Y2lJNk1UTXNJbkJzWVhSbWIzSnRJam9pWkdWemEzUnZjQ0lzSW1GeVkyaHBkR1ZqZEhWeVpYTWlPbHNpZFc1cGRtVnljMkZzSWwwc0luQmhZMnRoWjJWVmNtd2lPaUpvZEhSd2N6b3ZMM0JzZFdkcGJuTXVaWGhoYlhCc1pTNTBaWE4wTDJacGVIUjFjbVV0TVM0d0xqQXVlbWx3SWl3aVkyRndZV0pwYkdsMGFXVnpJanBiSW5WcFVHRnVaV3dpWFN3aWJXbHVhVzExYlVGd2NGWmxjbk5wYjI0aU9pSXdMakV1TUNJc0luQmhZMnRoWjJWVGFYcGxJam8xTXpVc0luQmhZMnRoWjJWVGFHRXlOVFlpT2lJNFlUSXdOemM1TnprMk1qRXpZelkwWldRMk9HVTJZVEJtT0RJelptUXlOVEpsTkRjek9UaGpNamMwTmpRelpUZGtZemcxWkRsa1pETmxaVGhtWXpVMklpd2ljSFZpYkdsemFHVnlTMlY1UW1GelpUWTBJam9pTDFKamEwOUdjV2Q0TVhSckt6TnFUbGxESzJneVdrZzVOaTlrY2tVNFYwOHhkMHh4ZVVSWWNEbG9aejBpTENKd2RXSnNhWE5vWlhKVGFXZHVZWFIxY21WQ1lYTmxOalFpT2lKM04wMVNPREpYZUdwT2RVMURXRGN4VjNGSWRFbHdjbEV3Wkc4M1oyOU9PVWhpYkRka2Nub3dUemhCUzNObFUxWTVkbkZzV2s5R2NrZHRMeXRvTWtVeVdUSXphRnBuYTNGMGFtZFdiVFpOUlZwUVlWRkVaejA5SWl3aWNIVmliR2x6YUdWa1FYUlZibWw0VFhNaU9qRjlYWDA9Iiwic2lnbmF0dXJlQmFzZTY0IjoiT1VhMnpoQ0kxWmNXUE8rbmVkS1hBL2p4RjZuNTJTOTljSGdyeFlCZENFNWF6c29ITko5bTh6MEwrZXVzdmcyakVFWTlCQ28wQlJHMVB5dFlXM3NVRGc9PSJ9";
-    const FIXTURE_PACKAGE_V2_BASE64: &str = "UEsDBBQAAAAIAKdhLV0OM/LI1AAAAD8BAAANABwAbWFuaWZlc3QuanNvblVUCQAD2iKmatoipmp1eAsAAQT1AQAABAAAAABNj8tOAzEMRf8la8hM6W52bJBYFCEhukEs3IzbMXUechxUgfh3nFJVbE/uuc79doXbgdLj7CYXcvQpC9UFmf2eTtoE3Y1LENGeH66gtB33lBh9MuGlC8Y/USrlZPTOj37sScmaQ+YNfGRLr/4RSmeyNsSg+yzRvBnrUXMxEyQspBj6yeqmN9cS9X5g924KhCMc8FXYpEW11GkY/qZUjyeIhdErVh0uM27PP/Jf1LsDFNgRk9Klmp4hYV+gKJES8AYVZlDotwxQbPG+lO113+hXtu/nF1BLAwQKAAAAAACnYS1dzjNLHAgAAAAIAAAACwAcAHBsdWdpbi53YXNtVVQJAAPaIqZq2iKmanV4CwABBPUBAAAEAAAAAABhc20BAAAAUEsBAh4DFAAAAAgAp2EtXQ4z8sjUAAAAPwEAAA0AGAAAAAAAAQAAAKSBAAAAAG1hbmlmZXN0Lmpzb25VVAUAA9oipmp1eAsAAQT1AQAABAAAAABQSwECHgMKAAAAAACnYS1dzjNLHAgAAAAIAAAACwAYAAAAAAAAAAAApIEbAQAAcGx1Z2luLndhc21VVAUAA9oipmp1eAsAAQT1AQAABAAAAABQSwUGAAAAAAIAAgCkAAAAaAEAAAAA";
-    const FIXTURE_CATALOG_V2_BASE64: &str = "eyJrZXlJZCI6ImZpeHR1cmUtcm9vdCIsInBheWxvYWRCYXNlNjQiOiJleUp6WTJobGJXRWlPaUp1YjNKcGMyaGxiR3d1Y0d4MVoybHVMV05oZEdGc2IyY3VkakVpTENKelpYRjFaVzVqWlNJNk1pd2ljbVYyYVhOcGIyNGlPaUptYVhoMGRYSmxMVElpTENKcGMzTjFaV1JCZEZWdWFYaE5jeUk2TVN3aVpYaHdhWEpsYzBGMFZXNXBlRTF6SWpvME1EQXdNREF3TURBd01EQXdMQ0psYm5SeWFXVnpJanBiZXlKd2JIVm5hVzVKWkNJNkltTnZiUzV1YjNKcGMyaGxiR3d1Wm1sNGRIVnlaU0lzSW01aGJXVWlPaUpHYVhoMGRYSmxJaXdpY0hWaWJHbHphR1Z5SWpvaVRtOXlhVk5vWld4c0lpd2lkbVZ5YzJsdmJpSTZJakV1TUM0d0lpd2ljSEp2ZEc5amIyeE5ZV3B2Y2lJNk1Td2ljSEp2ZEc5amIyeE5hVzV2Y2lJNk1UTXNJbkJzWVhSbWIzSnRJam9pWkdWemEzUnZjQ0lzSW1GeVkyaHBkR1ZqZEhWeVpYTWlPbHNpZFc1cGRtVnljMkZzSWwwc0luQmhZMnRoWjJWVmNtd2lPaUpvZEhSd2N6b3ZMM0JzZFdkcGJuTXVaWGhoYlhCc1pTNTBaWE4wTDJacGVIUjFjbVV0TVM0d0xqQXVlbWx3SWl3aVkyRndZV0pwYkdsMGFXVnpJanBiSW5WcFVHRnVaV3dpWFN3aWJXbHVhVzExYlVGd2NGWmxjbk5wYjI0aU9pSXdMakV1TUNJc0luQmhZMnRoWjJWVGFYcGxJam8xTXpVc0luQmhZMnRoWjJWVGFHRXlOVFlpT2lJNFlUSXdOemM1TnprMk1qRXpZelkwWldRMk9HVTJZVEJtT0RJelptUXlOVEpsTkRjek9UaGpNamMwTmpRelpUZGtZemcxWkRsa1pETmxaVGhtWXpVMklpd2ljSFZpYkdsemFHVnlTMlY1UW1GelpUWTBJam9pTDFKamEwOUdjV2Q0TVhSckt6TnFUbGxESzJneVdrZzVOaTlrY2tVNFYwOHhkMHh4ZVVSWWNEbG9aejBpTENKd2RXSnNhWE5vWlhKVGFXZHVZWFIxY21WQ1lYTmxOalFpT2lKM04wMVNPREpYZUdwT2RVMURXRGN4VjNGSWRFbHdjbEV3Wkc4M1oyOU9PVWhpYkRka2Nub3dUemhCUzNObFUxWTVkbkZzV2s5R2NrZHRMeXRvTWtVeVdUSXphRnBuYTNGMGFtZFdiVFpOUlZwUVlWRkVaejA5SWl3aWNIVmliR2x6YUdWa1FYUlZibWw0VFhNaU9qRjlMSHNpY0d4MVoybHVTV1FpT2lKamIyMHVibTl5YVhOb1pXeHNMbVpwZUhSMWNtVWlMQ0p1WVcxbElqb2lSbWw0ZEhWeVpTSXNJbkIxWW14cGMyaGxjaUk2SWs1dmNtbFRhR1ZzYkNJc0luWmxjbk5wYjI0aU9pSXlMakF1TUNJc0luQnliM1J2WTI5c1RXRnFiM0lpT2pFc0luQnliM1J2WTI5c1RXbHViM0lpT2pFekxDSndiR0YwWm05eWJTSTZJbVJsYzJ0MGIzQWlMQ0poY21Ob2FYUmxZM1IxY21WeklqcGJJblZ1YVhabGNuTmhiQ0pkTENKd1lXTnJZV2RsVlhKc0lqb2lhSFIwY0hNNkx5OXdiSFZuYVc1ekxtVjRZVzF3YkdVdWRHVnpkQzltYVhoMGRYSmxMVEl1TUM0d0xucHBjQ0lzSW1OaGNHRmlhV3hwZEdsbGN5STZXeUoxYVZCaGJtVnNJaXdpZEdWeWJXbHVZV3hOWlhSaFpHRjBZU0pkTENKdGFXNXBiWFZ0UVhCd1ZtVnljMmx2YmlJNklqQXVNUzR3SWl3aWNHRmphMkZuWlZOcGVtVWlPalUwTml3aWNHRmphMkZuWlZOb1lUSTFOaUk2SWpZNU5UVTRNekExTVRkak5qVmlNMlUxTmpjMllXWTROV1EzTmpoaVpURm1NVEZsTkdNd05qZG1OekV5TmpRM1l6azBZekJrTURjMk9EWTRORFJoWkdZaUxDSndkV0pzYVhOb1pYSkxaWGxDWVhObE5qUWlPaUl2VW1OclQwWnhaM2d4ZEdzck0ycE9XVU1yYURKYVNEazJMMlJ5UlRoWFR6RjNUSEY1UkZod09XaG5QU0lzSW5CMVlteHBjMmhsY2xOcFoyNWhkSFZ5WlVKaGMyVTJOQ0k2SW1sVWMzRkdhbTlvVldwWFZHTnBlakJJYzJWSmRETklNa1JYTW5oS2IwWkJPRWd6Ym1jeVQxbEllbmx4U1VoWU1tbENaR1ZtU2pOeFRrbHpSbkUwU0VKMU5EUTBPVXRvZDJkdVEzUlRPSHBrWlZKMGRFSjNQVDBpTENKd2RXSnNhWE5vWldSQmRGVnVhWGhOY3lJNk1YMWRmUT09Iiwic2lnbmF0dXJlQmFzZTY0IjoiMU15WG5ESHl1SDZrN2lwTGhleGducUpJNTJoNXN5aVJ2T2kxTVVtZjg5ZTJteFF3YUN3ZXNHb0FlMDVMMEtseUJGRU9YcnFybjJoSWMzRFNwd1M2QkE9PSJ9";
-
-    #[derive(Clone)]
-    struct MemoryCatalogSource(Arc<Mutex<Vec<u8>>>);
-
-    impl CatalogSource for MemoryCatalogSource {
-        fn fetch(&self, maximum_bytes: usize) -> Result<Vec<u8>, PluginSourceError> {
-            let bytes = self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            (bytes.len() <= maximum_bytes)
-                .then_some(bytes)
-                .ok_or(PluginSourceError)
-        }
-    }
-
-    #[derive(Clone)]
-    struct MemoryPackageSource(Arc<Mutex<BTreeMap<String, Vec<u8>>>>);
-
-    type FixtureServiceParts = (
-        PluginService,
-        Arc<Mutex<Vec<u8>>>,
-        Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
-    );
-
-    impl PackageSource for MemoryPackageSource {
-        fn fetch(
-            &self,
-            package_url: &str,
-            maximum_bytes: usize,
-        ) -> Result<Vec<u8>, PluginSourceError> {
-            let bytes = self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(package_url)
-                .cloned()
-                .ok_or(PluginSourceError)?;
-            (bytes.len() <= maximum_bytes)
-                .then_some(bytes)
-                .ok_or(PluginSourceError)
-        }
-    }
-
-    fn decode_fixture(value: &str) -> Vec<u8> {
-        BASE64.decode(value).expect("fixture base64")
-    }
-
-    fn fixture_roots() -> CatalogTrustRoots {
-        let bytes: [u8; 32] = decode_fixture(FIXTURE_ROOT_BASE64)
-            .try_into()
-            .expect("fixture root length");
-        CatalogTrustRoots::from_fixture_keys([("fixture-root".to_owned(), bytes)])
-            .expect("fixture root")
-    }
-
     fn request_meta() -> RequestMeta {
         RequestMeta {
             request_id: RequestId::new(),
@@ -11904,68 +9399,6 @@ mod tests {
         }
     }
 
-    fn fixture_catalog_limits() -> CatalogLimits {
-        CatalogLimits {
-            max_catalog_lifetime_ms: i64::MAX,
-            ..CatalogLimits::default()
-        }
-    }
-
-    fn fixture_service(
-        directory: &tempfile::TempDir,
-        catalog: Vec<u8>,
-        package: Vec<u8>,
-    ) -> FixtureServiceParts {
-        let hosts = HostService::start(directory.path()).expect("host repository");
-        let sessions = SshSessionService::start(
-            hosts.clone(),
-            VaultService::start(directory.path()),
-            TransientCredentialService::default(),
-        );
-        let catalog = Arc::new(Mutex::new(catalog));
-        let packages = Arc::new(Mutex::new(BTreeMap::from([(
-            "https://plugins.example.test/fixture-1.0.0.zip".to_owned(),
-            package,
-        )])));
-        let service = PluginService::start_with_dependencies(
-            directory.path(),
-            hosts,
-            sessions,
-            fixture_roots(),
-            true,
-            Arc::new(MemoryCatalogSource(catalog.clone())),
-            Arc::new(MemoryPackageSource(packages.clone())),
-            fixture_catalog_limits(),
-            PackageLimits::default(),
-        )
-        .expect("fixture service");
-        (service, catalog, packages)
-    }
-
-    fn refresh_request() -> PluginCatalogRefreshRequest {
-        PluginCatalogRefreshRequest {
-            meta: request_meta(),
-            operation_id: norishell_core_api::PluginOperationId::new(),
-            idempotency_key: Uuid::new_v4().to_string(),
-        }
-    }
-
-    fn install_request(
-        version: &str,
-        expected_state_version: Option<WireSequence>,
-        grants: Vec<PluginCapabilityGrant>,
-    ) -> PluginInstallRequest {
-        PluginInstallRequest {
-            meta: request_meta(),
-            operation_id: norishell_core_api::PluginOperationId::new(),
-            idempotency_key: Uuid::new_v4().to_string(),
-            plugin_id: PluginId::parse("com.norishell.fixture").expect("plugin id"),
-            version: version.to_owned(),
-            expected_state_version,
-            capability_grants: grants,
-        }
-    }
-
     #[test]
     fn local_zip_prepare_and_commit_bind_artifact_hash_and_explicit_grants() {
         let directory = tempfile::tempdir().expect("plugin service directory");
@@ -11976,8 +9409,13 @@ mod tests {
             TransientCredentialService::default(),
         );
         let service = PluginService::start(directory.path(), hosts, sessions).expect("service");
-        let source = directory.path().join("local-fixture.zip");
-        fs::write(&source, decode_fixture(FIXTURE_PACKAGE_V1_BASE64)).expect("fixture package");
+        let source = write_local_plugin_fixture(
+            &directory,
+            "local-fixture.zip",
+            "com.norishell.fixture",
+            "1.0.0",
+            &[PluginCapability::UiPanel],
+        );
         let preview = service
             .prepare_local_package(&source, RequestId::new())
             .expect("prepare local package");
@@ -12025,6 +9463,94 @@ mod tests {
                 .prepared_local_packages
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn stale_local_preparation_cannot_downgrade_a_newer_installed_version() {
+        let directory = tempfile::tempdir().expect("plugin service directory");
+        let hosts = HostService::start(directory.path()).expect("host repository");
+        let sessions = SshSessionService::start(
+            hosts.clone(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+        );
+        let service = PluginService::start(directory.path(), hosts, sessions).expect("service");
+        let plugin_id = "com.norishell.rollback-fixture";
+
+        let v1 = write_local_plugin_fixture(
+            &directory,
+            "rollback-v1.zip",
+            plugin_id,
+            "1.0.0",
+            &[PluginCapability::UiPanel],
+        );
+        let v1 = service
+            .prepare_local_package(&v1, RequestId::new())
+            .expect("prepare v1");
+        service
+            .install_local_plugin(local_install_request_from_preview(
+                &v1,
+                vec![PluginCapabilityGrant {
+                    capability: PluginCapability::UiPanel,
+                    granted: false,
+                }],
+            ))
+            .expect("install v1");
+
+        let v2 = write_local_plugin_fixture(
+            &directory,
+            "rollback-v2.zip",
+            plugin_id,
+            "2.0.0",
+            &[PluginCapability::UiPanel],
+        );
+        let v2 = service
+            .prepare_local_package(&v2, RequestId::new())
+            .expect("prepare v2");
+        let v3 = write_local_plugin_fixture(
+            &directory,
+            "rollback-v3.zip",
+            plugin_id,
+            "3.0.0",
+            &[PluginCapability::UiPanel],
+        );
+        let v3 = service
+            .prepare_local_package(&v3, RequestId::new())
+            .expect("prepare v3");
+        service
+            .install_local_plugin(local_install_request_from_preview(
+                &v3,
+                vec![PluginCapabilityGrant {
+                    capability: PluginCapability::UiPanel,
+                    granted: false,
+                }],
+            ))
+            .expect("install v3");
+
+        let installed_v3 = service
+            .list_installed(RequestId::new())
+            .expect("list v3")
+            .pop()
+            .expect("installed v3");
+        let mut stale_request = local_install_request_from_preview(
+            &v2,
+            vec![PluginCapabilityGrant {
+                capability: PluginCapability::UiPanel,
+                granted: false,
+            }],
+        );
+        stale_request.expected_state_version = Some(installed_v3.state_version);
+        assert!(
+            service.install_local_plugin(stale_request).is_err(),
+            "a stale prepared package must not downgrade a newer installation"
+        );
+
+        let installed = service
+            .list_installed(RequestId::new())
+            .expect("list after rejected downgrade")
+            .pop()
+            .expect("installed plugin");
+        assert_eq!(installed.active_version, "3.0.0");
     }
 
     #[tokio::test]
@@ -12961,7 +10487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_local_plugin_surface_does_not_require_catalog_roots() {
+    async fn local_plugin_surface_does_not_require_catalog_roots() {
         let directory = tempfile::tempdir().expect("plugin service directory");
         let hosts = HostService::start(directory.path()).expect("host repository");
         let sessions = SshSessionService::start(
@@ -12973,7 +10499,6 @@ mod tests {
             PluginService::start(directory.path(), hosts, sessions).expect("plugin service");
         let readiness = service.readiness();
         assert!(readiness.ready);
-        assert_eq!(readiness.trusted_root_count, 1);
         service
             .require_ready(RequestId::new())
             .expect("local plugin operations are available without catalog roots");
@@ -13721,155 +11246,6 @@ mod tests {
         assert_eq!(error.code, "plugin.conflict");
     }
 
-    #[tokio::test]
-    #[ignore = "requires current real desktop executable and local signed Norixor package"]
-    async fn crashed_plugin_host_cleanup_allows_update_and_preserves_new_generation() {
-        use std::io::Read as _;
-        let directory = tempfile::tempdir().unwrap();
-        let (service, catalog, packages) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        service.refresh_catalog(refresh_request()).unwrap();
-        let installed = service
-            .install_plugin(install_request(
-                "1.0.0",
-                None,
-                vec![PluginCapabilityGrant {
-                    capability: PluginCapability::UiPanel,
-                    granted: true,
-                }],
-            ))
-            .unwrap();
-        assert_eq!(installed.state, PluginOperationState::Succeeded);
-        let plugin_id = PluginId::parse("com.norishell.fixture").unwrap();
-        let record = service
-            .hosts
-            .with_plugin_repository(|repository| {
-                let record = repository.get_plugin_installation(&plugin_id)?;
-                repository.set_plugin_install_state(
-                    &plugin_id,
-                    record.state_version,
-                    PluginInstallState::Enabled,
-                )
-            })
-            .unwrap();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let zip_path = root
-            .join("output/official-plugins/protocol13-20260913-v1.0.12/signed/Norixor-1.0.12.zip");
-        let mut archive = zip::ZipArchive::new(File::open(zip_path).unwrap()).unwrap();
-        let mut module = Vec::new();
-        archive
-            .by_name("plugin.wasm")
-            .unwrap()
-            .read_to_end(&mut module)
-            .unwrap();
-        let host = PluginHostProcess::spawn_with_executable_for_tests(
-            &root.join("target/debug/norishell"),
-            &module,
-            1,
-        )
-        .unwrap();
-        let instance = ActivePluginInstance {
-            plugin_name: record.name.clone(),
-            signer_fingerprint_sha256: record.signer_fingerprint_sha256.clone(),
-            package_sha256: record.package_sha256.clone(),
-            instance_generation: WireSequence::new(1),
-            state_version: record.state_version,
-            previously_crashed: false,
-            protocol_minor: PLUGIN_PROTOCOL_MINOR,
-            locale: PluginLocale::parse("en").unwrap(),
-            contributions: BTreeMap::new(),
-            ui_templates: BTreeMap::new(),
-            scoped_templates: BTreeMap::new(),
-            scoped_states: BTreeMap::new(),
-            navigation: BTreeMap::new(),
-            pages: BTreeMap::new(),
-            contribution_revision: WireSequence::new(1),
-            settings_revision: None,
-            contribution_action_in_flight: true,
-            ui_state_json: "{}".to_owned(),
-            operation_authority_revoked: false,
-            api_authority: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            process: Arc::new(Mutex::new(Some(host))),
-        };
-        service
-            .runtime
-            .lock()
-            .unwrap()
-            .active_instances
-            .insert(plugin_id.to_string(), instance.clone());
-        service.record_runtime_failure(&plugin_id, WireSequence::new(1));
-        let crashed = service
-            .hosts
-            .with_plugin_repository(|repository| repository.get_plugin_installation(&plugin_id))
-            .unwrap();
-        assert_eq!(crashed.state, PluginInstallState::Crashed);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if !service
-                    .runtime
-                    .lock()
-                    .unwrap()
-                    .active_instances
-                    .contains_key(plugin_id.as_str())
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("crashed Host cleanup must converge");
-        assert!(
-            instance.process.lock().unwrap().is_none(),
-            "real child was shutdown and released"
-        );
-        *catalog.lock().unwrap() = decode_fixture(FIXTURE_CATALOG_V2_BASE64);
-        packages.lock().unwrap().insert(
-            "https://plugins.example.test/fixture-2.0.0.zip".to_owned(),
-            decode_fixture(FIXTURE_PACKAGE_V2_BASE64),
-        );
-        service.refresh_catalog(refresh_request()).unwrap();
-        let candidate = service.resolve_catalog_entry(&plugin_id, "2.0.0").unwrap();
-        let grants = candidate
-            .capabilities
-            .iter()
-            .map(|capability| PluginCapabilityGrant {
-                capability: *capability,
-                granted: true,
-            })
-            .collect();
-        let updated = service
-            .install_plugin(install_request(
-                "2.0.0",
-                Some(crashed.state_version),
-                grants,
-            ))
-            .expect("crashed installation enters an explicit update after cleanup");
-        assert_eq!(updated.state, PluginOperationState::Succeeded);
-        assert_eq!(updated.kind, PluginOperationKind::Update);
-        let mut newer = instance.clone();
-        newer.instance_generation = WireSequence::new(2);
-        newer.process = Arc::new(Mutex::new(None));
-        service
-            .runtime
-            .lock()
-            .unwrap()
-            .active_instances
-            .insert(plugin_id.to_string(), newer.clone());
-        assert!(
-            service
-                .stop_plugin_host_generation(&plugin_id, &instance)
-                .await
-        );
-        let runtime = service.runtime.lock().unwrap();
-        let retained = runtime.active_instances.get(plugin_id.as_str()).unwrap();
-        assert_eq!(retained.instance_generation, WireSequence::new(2));
-        assert!(Arc::ptr_eq(&retained.process, &newer.process));
-    }
-
     #[test]
     fn observer_capacity_counts_inflight_reservations() {
         let plugin_id = PluginId::parse("com.norishell.observer").expect("plugin id");
@@ -13896,414 +11272,6 @@ mod tests {
             &PluginId::parse("com.norishell.other").expect("other plugin"),
             &norishell_core_api::SshSessionId::new(),
         ));
-    }
-
-    #[test]
-    fn catalog_refresh_and_install_are_verified_and_idempotent() {
-        let directory = tempfile::tempdir().expect("plugin service directory");
-        let (service, _, _) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        let refresh = refresh_request();
-        let refreshed = service
-            .refresh_catalog(refresh.clone())
-            .expect("catalog refresh");
-        assert_eq!(
-            refreshed.state,
-            PluginOperationState::Succeeded,
-            "{refreshed:?}"
-        );
-        let mut refresh_retry = refresh;
-        refresh_retry.meta = request_meta();
-        assert_eq!(
-            service
-                .refresh_catalog(refresh_retry)
-                .expect("idempotent refresh")
-                .state,
-            PluginOperationState::Succeeded
-        );
-
-        let install = install_request(
-            "1.0.0",
-            None,
-            vec![PluginCapabilityGrant {
-                capability: PluginCapability::UiPanel,
-                granted: true,
-            }],
-        );
-        let installed = service
-            .install_plugin(install.clone())
-            .expect("verified install");
-        assert_eq!(installed.state, PluginOperationState::Succeeded);
-        let mut install_retry = install;
-        install_retry.meta = request_meta();
-        assert_eq!(
-            service
-                .install_plugin(install_retry)
-                .expect("idempotent install")
-                .state,
-            PluginOperationState::Succeeded
-        );
-        assert_eq!(
-            service
-                .installer
-                .read_active_version(&PluginId::parse("com.norishell.fixture").expect("plugin id"))
-                .expect("active pointer")
-                .as_deref(),
-            Some("1.0.0")
-        );
-    }
-
-    #[test]
-    fn bad_catalog_signature_and_bad_package_hash_fail_before_activation() {
-        let bad_catalog_directory = tempfile::tempdir().expect("plugin service directory");
-        let mut bad_catalog: serde_json::Value =
-            serde_json::from_slice(&decode_fixture(FIXTURE_CATALOG_V1_BASE64))
-                .expect("fixture envelope");
-        bad_catalog["signatureBase64"] = BASE64.encode([0_u8; 64]).into();
-        let (bad_catalog_service, _, _) = fixture_service(
-            &bad_catalog_directory,
-            serde_json::to_vec(&bad_catalog).expect("bad catalog"),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        let rejected = bad_catalog_service
-            .refresh_catalog(refresh_request())
-            .expect("durable failed operation");
-        assert_eq!(rejected.state, PluginOperationState::Failed);
-        assert_eq!(
-            rejected.error_code,
-            Some(PluginErrorCode::CatalogSignatureInvalid)
-        );
-
-        let bad_package_directory = tempfile::tempdir().expect("plugin service directory");
-        let mut package = decode_fixture(FIXTURE_PACKAGE_V1_BASE64);
-        package[20] ^= 1;
-        let (bad_package_service, _, _) = fixture_service(
-            &bad_package_directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            package,
-        );
-        let refreshed = bad_package_service
-            .refresh_catalog(refresh_request())
-            .expect("catalog refresh");
-        assert_eq!(
-            refreshed.state,
-            PluginOperationState::Succeeded,
-            "{refreshed:?}"
-        );
-        let rejected = bad_package_service
-            .install_plugin(install_request(
-                "1.0.0",
-                None,
-                vec![PluginCapabilityGrant {
-                    capability: PluginCapability::UiPanel,
-                    granted: true,
-                }],
-            ))
-            .expect("durable failed operation");
-        assert_eq!(rejected.state, PluginOperationState::Failed);
-        assert_eq!(
-            rejected.error_code,
-            Some(PluginErrorCode::PackageHashMismatch)
-        );
-        assert_eq!(
-            bad_package_service
-                .installer
-                .read_active_version(&PluginId::parse("com.norishell.fixture").expect("plugin id"))
-                .expect("active pointer"),
-            None
-        );
-    }
-
-    #[test]
-    fn newly_supported_capability_update_waits_for_explicit_review_before_switching_active() {
-        let directory = tempfile::tempdir().expect("plugin service directory");
-        let (service, catalog, packages) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        service
-            .refresh_catalog(refresh_request())
-            .expect("v1 catalog refresh");
-        service
-            .install_plugin(install_request(
-                "1.0.0",
-                None,
-                vec![PluginCapabilityGrant {
-                    capability: PluginCapability::UiPanel,
-                    granted: true,
-                }],
-            ))
-            .expect("v1 install");
-        *catalog
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            decode_fixture(FIXTURE_CATALOG_V2_BASE64);
-        packages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                "https://plugins.example.test/fixture-2.0.0.zip".to_owned(),
-                decode_fixture(FIXTURE_PACKAGE_V2_BASE64),
-            );
-        assert_eq!(
-            service
-                .refresh_catalog(refresh_request())
-                .expect("v2 catalog refresh")
-                .state,
-            PluginOperationState::Succeeded
-        );
-        let upgrade_request = install_request(
-            "2.0.0",
-            Some(WireSequence::new(1)),
-            vec![PluginCapabilityGrant {
-                capability: PluginCapability::UiPanel,
-                granted: true,
-            }],
-        );
-        let rejected = service
-            .install_plugin(upgrade_request.clone())
-            .expect("capability review checkpoint");
-        assert_eq!(rejected.state, PluginOperationState::AwaitingCapabilities);
-        assert_eq!(
-            rejected.error_code,
-            Some(PluginErrorCode::CapabilityRejected)
-        );
-        assert_eq!(
-            service
-                .installer
-                .read_active_version(&PluginId::parse("com.norishell.fixture").expect("plugin id"))
-                .expect("active pointer")
-                .as_deref(),
-            Some("1.0.0")
-        );
-        assert_eq!(
-            service
-                .installer
-                .read_active_version(&PluginId::parse("com.norishell.fixture").expect("plugin id"))
-                .expect("active pointer")
-                .as_deref(),
-            Some("1.0.0")
-        );
-    }
-
-    #[test]
-    fn startup_reconciliation_restores_the_old_pointer_after_filesystem_only_activation() {
-        let directory = tempfile::tempdir().expect("plugin service directory");
-        let (service, catalog, packages) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        service
-            .refresh_catalog(refresh_request())
-            .expect("v1 catalog refresh");
-        service
-            .install_plugin(install_request(
-                "1.0.0",
-                None,
-                vec![PluginCapabilityGrant {
-                    capability: PluginCapability::UiPanel,
-                    granted: true,
-                }],
-            ))
-            .expect("v1 install");
-        let catalog_v2 = decode_fixture(FIXTURE_CATALOG_V2_BASE64);
-        let package_v2 = decode_fixture(FIXTURE_PACKAGE_V2_BASE64);
-        *catalog
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog_v2.clone();
-        packages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                "https://plugins.example.test/fixture-2.0.0.zip".to_owned(),
-                package_v2.clone(),
-            );
-        service
-            .refresh_catalog(refresh_request())
-            .expect("v2 catalog refresh");
-
-        let previous = service
-            .current_catalog_trust(RequestId::new())
-            .expect("trust state");
-        let verified = verify_catalog(
-            &catalog_v2,
-            &fixture_roots(),
-            &current_app_version(),
-            unix_time_ms(),
-            previous.as_ref(),
-            fixture_catalog_limits(),
-        )
-        .expect("verified v2 catalog");
-        let entry = verified
-            .entries
-            .iter()
-            .find(|entry| entry.version == "2.0.0")
-            .expect("v2 entry");
-        let mut package_file = tempfile::NamedTempFile::new().expect("package fixture");
-        package_file.write_all(&package_v2).expect("package write");
-        package_file.as_file().sync_all().expect("package sync");
-        let inspected = inspect_package(package_file.path(), entry, PackageLimits::default())
-            .expect("v2 package");
-        let operation_id = norishell_core_api::PluginOperationId::new();
-        let plugin_id = PluginId::parse("com.norishell.fixture").expect("plugin id");
-        let operation = service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.begin_plugin_operation(
-                    &operation_id,
-                    Some(&plugin_id),
-                    PluginOperationKind::Update,
-                    "filesystem-only-fixture",
-                    &"a".repeat(64),
-                    Some("2.0.0"),
-                    Some("1.0.0"),
-                )
-            })
-            .expect("operation");
-        service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.advance_plugin_operation(
-                    &operation_id,
-                    operation.state_version,
-                    PluginOperationState::Running,
-                    PluginOperationPhase::Staged,
-                    None,
-                )
-            })
-            .expect("staged phase");
-        let staged = service
-            .installer
-            .stage(package_file.path(), &inspected, &operation_id)
-            .expect("stage v2");
-        service
-            .installer
-            .activate(staged, Some("1.0.0"), &operation_id)
-            .expect("filesystem activation");
-        assert_eq!(
-            service
-                .installer
-                .read_active_version(&plugin_id)
-                .expect("active pointer")
-                .as_deref(),
-            Some("2.0.0")
-        );
-        drop(service);
-
-        let hosts = HostService::start(directory.path()).expect("reopen host repository");
-        let sessions = SshSessionService::start(
-            hosts.clone(),
-            VaultService::start(directory.path()),
-            TransientCredentialService::default(),
-        );
-        let reconciled = PluginService::start_with_dependencies(
-            directory.path(),
-            hosts,
-            sessions,
-            fixture_roots(),
-            true,
-            Arc::new(MemoryCatalogSource(catalog)),
-            Arc::new(MemoryPackageSource(packages)),
-            fixture_catalog_limits(),
-            PackageLimits::default(),
-        )
-        .expect("reconciled service");
-        assert_eq!(
-            reconciled
-                .installer
-                .read_active_version(&plugin_id)
-                .expect("restored active pointer")
-                .as_deref(),
-            Some("1.0.0")
-        );
-        let operation = reconciled
-            .hosts
-            .with_plugin_repository(|repository| repository.get_plugin_operation(&operation_id))
-            .expect("reconciled operation");
-        assert_eq!(operation.state, PluginOperationState::Failed);
-        assert_eq!(operation.phase, PluginOperationPhase::Completed);
-    }
-
-    #[test]
-    fn startup_preserves_enabled_state_for_automatic_host_restore() {
-        let directory = tempfile::tempdir().expect("plugin service directory");
-        let (service, catalog, packages) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        service
-            .refresh_catalog(refresh_request())
-            .expect("catalog refresh");
-        service
-            .install_plugin(install_request(
-                "1.0.0",
-                None,
-                vec![PluginCapabilityGrant {
-                    capability: PluginCapability::UiPanel,
-                    granted: true,
-                }],
-            ))
-            .expect("install fixture");
-        let plugin_id = PluginId::parse("com.norishell.fixture").expect("plugin id");
-        service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.set_plugin_install_state(
-                    &plugin_id,
-                    WireSequence::new(1),
-                    PluginInstallState::Enabled,
-                )
-            })
-            .expect("persist enabled state");
-        drop(service);
-
-        let hosts = HostService::start(directory.path()).expect("reopen host repository");
-        let sessions = SshSessionService::start(
-            hosts.clone(),
-            VaultService::start(directory.path()),
-            TransientCredentialService::default(),
-        );
-        let restarted = PluginService::start_with_dependencies(
-            directory.path(),
-            hosts,
-            sessions,
-            fixture_roots(),
-            true,
-            Arc::new(MemoryCatalogSource(catalog)),
-            Arc::new(MemoryPackageSource(packages)),
-            fixture_catalog_limits(),
-            PackageLimits::default(),
-        )
-        .expect("restart service");
-        let installed = restarted
-            .hosts
-            .with_plugin_repository(|repository| repository.get_plugin_installation(&plugin_id))
-            .expect("reconciled installation");
-        assert_eq!(installed.state, PluginInstallState::Enabled);
-        assert_eq!(installed.state_version, WireSequence::new(2));
-        assert_eq!(
-            restarted
-                .enabled_plugins_for_startup()
-                .expect("startup candidates")
-                .iter()
-                .map(|plugin| plugin.plugin_id.as_str())
-                .collect::<Vec<_>>(),
-            vec![plugin_id.as_str()]
-        );
-        assert!(
-            restarted
-                .runtime
-                .lock()
-                .expect("runtime")
-                .active_instances
-                .is_empty()
-        );
     }
 
     #[test]
@@ -14342,192 +11310,5 @@ mod tests {
             .expect("cancel safe mode");
         assert!(!readiness.safe_mode_next_start);
         assert!(!marker.exists());
-    }
-
-    #[test]
-    fn uninstall_reconciliation_restores_or_finalizes_operation_tombstones() {
-        let directory = tempfile::tempdir().expect("plugin service directory");
-        let (service, _, _) = fixture_service(
-            &directory,
-            decode_fixture(FIXTURE_CATALOG_V1_BASE64),
-            decode_fixture(FIXTURE_PACKAGE_V1_BASE64),
-        );
-        service
-            .refresh_catalog(refresh_request())
-            .expect("catalog refresh");
-        service
-            .install_plugin(install_request(
-                "1.0.0",
-                None,
-                vec![PluginCapabilityGrant {
-                    capability: PluginCapability::UiPanel,
-                    granted: true,
-                }],
-            ))
-            .expect("install fixture");
-        let plugin_id = PluginId::parse("com.norishell.fixture").expect("plugin id");
-        let installed = service
-            .hosts
-            .with_plugin_repository(|repository| repository.get_plugin_installation(&plugin_id))
-            .expect("installed record");
-
-        let restore_operation_id = norishell_core_api::PluginOperationId::new();
-        let restore_operation = service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.begin_plugin_operation(
-                    &restore_operation_id,
-                    Some(&plugin_id),
-                    PluginOperationKind::Uninstall,
-                    "restore-uninstall",
-                    &"a".repeat(64),
-                    None,
-                    Some(&installed.active_version),
-                )
-            })
-            .expect("restore operation");
-        service
-            .installer
-            .prepare_uninstall(&plugin_id, &installed.active_version, &restore_operation_id)
-            .expect("prepare restorable uninstall");
-        service
-            .reconcile_uninstall_operation(restore_operation)
-            .expect("restore filesystem-first uninstall");
-        assert_eq!(
-            service
-                .installer
-                .read_active_version(&plugin_id)
-                .expect("restored pointer")
-                .as_deref(),
-            Some("1.0.0")
-        );
-
-        let finalize_operation_id = norishell_core_api::PluginOperationId::new();
-        let finalize_operation = service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.begin_plugin_operation(
-                    &finalize_operation_id,
-                    Some(&plugin_id),
-                    PluginOperationKind::Uninstall,
-                    "finalize-uninstall",
-                    &"b".repeat(64),
-                    None,
-                    Some(&installed.active_version),
-                )
-            })
-            .expect("finalize operation");
-        service
-            .installer
-            .prepare_uninstall(
-                &plugin_id,
-                &installed.active_version,
-                &finalize_operation_id,
-            )
-            .expect("prepare committed uninstall");
-        let database_committed = service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.uninstall_plugin(
-                    &plugin_id,
-                    installed.state_version,
-                    &finalize_operation_id,
-                    finalize_operation.state_version,
-                    true,
-                )
-            })
-            .expect("commit database uninstall");
-        service
-            .reconcile_uninstall_operation(database_committed)
-            .expect("finalize database-committed uninstall");
-        assert_eq!(
-            service
-                .installer
-                .read_active_version(&plugin_id)
-                .expect("removed pointer"),
-            None
-        );
-        assert!(matches!(
-            service.hosts.with_plugin_repository(|repository| {
-                repository.get_plugin_installation(&plugin_id)
-            }),
-            Err(AppPersistenceError::NotFound)
-        ));
-        service
-            .installer
-            .finalize_uninstall(
-                &plugin_id,
-                &installed.active_version,
-                &finalize_operation_id,
-            )
-            .expect("finalization replay is idempotent");
-
-        service
-            .install_plugin(install_request(
-                "1.0.0",
-                None,
-                vec![PluginCapabilityGrant {
-                    capability: PluginCapability::UiPanel,
-                    granted: true,
-                }],
-            ))
-            .expect("reinstall fixture");
-        let reinstalled = service
-            .hosts
-            .with_plugin_repository(|repository| repository.get_plugin_installation(&plugin_id))
-            .expect("reinstalled record");
-        let restored_after_commit_id = norishell_core_api::PluginOperationId::new();
-        let restored_after_commit = service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.begin_plugin_operation(
-                    &restored_after_commit_id,
-                    Some(&plugin_id),
-                    PluginOperationKind::Uninstall,
-                    "restored-after-commit",
-                    &"c".repeat(64),
-                    None,
-                    Some(&reinstalled.active_version),
-                )
-            })
-            .expect("restored-after-commit operation");
-        service
-            .installer
-            .prepare_uninstall(
-                &plugin_id,
-                &reinstalled.active_version,
-                &restored_after_commit_id,
-            )
-            .expect("prepare restored-after-commit uninstall");
-        let database_committed = service
-            .hosts
-            .with_plugin_repository(|repository| {
-                repository.uninstall_plugin(
-                    &plugin_id,
-                    reinstalled.state_version,
-                    &restored_after_commit_id,
-                    restored_after_commit.state_version,
-                    true,
-                )
-            })
-            .expect("commit restored-after-commit uninstall");
-        service
-            .installer
-            .restore_uninstall(
-                &plugin_id,
-                &reinstalled.active_version,
-                &restored_after_commit_id,
-            )
-            .expect("simulate an obsolete restore after database commit");
-        service
-            .reconcile_uninstall_operation(database_committed)
-            .expect("database absence removes the incorrectly restored filesystem state");
-        assert_eq!(
-            service
-                .installer
-                .read_active_version(&plugin_id)
-                .expect("removed restored pointer"),
-            None
-        );
     }
 }

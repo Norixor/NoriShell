@@ -22,4 +22,26 @@ describe("NvxCodeEditor", () => {
     expect(wrapper.find(".cm-content").attributes("aria-label")).toBe("Edit notes.txt");
     wrapper.unmount();
   });
+
+  it("searches the document through the external file toolbar API", () => {
+    const wrapper = mount(NvxCodeEditor, {
+      props: {
+        modelValue: "alpha beta alpha",
+        filename: "notes.txt",
+        label: "Edit notes.txt",
+      },
+    });
+    const editor = wrapper.vm as unknown as {
+      updateSearch(query: string): boolean;
+      findNext(): boolean;
+      findPrevious(): boolean;
+    };
+
+    expect(editor.updateSearch("alpha")).toBe(true);
+    expect(editor.findNext()).toBe(true);
+    expect(editor.findPrevious()).toBe(true);
+    expect(editor.updateSearch("missing")).toBe(false);
+    expect(editor.updateSearch("")).toBe(true);
+    wrapper.unmount();
+  });
 });

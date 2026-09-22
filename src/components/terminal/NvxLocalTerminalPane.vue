@@ -30,6 +30,7 @@ import {
   registerTerminalInputTarget,
 } from "../../terminal-input-target";
 import { NvxPluginExtensionTarget } from "../plugins";
+import { useTipsStore } from "../../stores/tips";
 import { NvxButton, NvxIcon, NvxInlineNotice, NvxStatusLabel } from "../ui";
 import NvxTerminalPaneControls from "./NvxTerminalPaneControls.vue";
 import NvxTerminalPaneOverflowMenu from "./NvxTerminalPaneOverflowMenu.vue";
@@ -80,6 +81,7 @@ const emit = defineEmits<{
 }>();
 
 const { t, te } = useI18n();
+const tips = useTipsStore();
 const nativeTools = ref<InstanceType<typeof NvxNativeTerminalTools> | null>(null);
 const inputDraft = ref<string | null>(null);
 const shellPromptKey = ref<string | null>(null);
@@ -101,7 +103,6 @@ const failure = ref<LocalSessionFailureReason | null>(props.existingSession?.fai
 const opening = ref(false);
 const openFailed = ref(false);
 const terminating = ref(false);
-const inputSendFailed = ref(false);
 let inputSequence = 0n;
 let promptBoundaryInputSequence: bigint | null = null;
 let leaseTimer: number | null = null;
@@ -374,7 +375,6 @@ async function open() {
   if (opening.value) return;
   opening.value = true;
   openFailed.value = false;
-  inputSendFailed.value = false;
   binding = true;
   released = false;
   try {
@@ -582,13 +582,17 @@ async function send(value: string) {
 async function handleTerminalInput(value: string) {
   try {
     await send(value);
-    inputSendFailed.value = false;
   } catch {
     // The PTY write is non-idempotent. Its IPC rejection may be
     // delivery-uncertain, so stop accepting input until Core grants a fresh
     // focus lease and tell the user to inspect terminal output before retrying.
-    inputSendFailed.value = true;
     applyFocusLease(null);
+    const current = session.value;
+    tips.show({
+      scope: `local-terminal-input:${current?.sessionId ?? props.paneId}:${current?.generation ?? "none"}`,
+      tone: "error",
+      title: t("quickCommands.runFailed"),
+    });
   }
 }
 
@@ -798,13 +802,7 @@ onBeforeUnmount(() => {
       :display-label="shellLabel"
     />
     <NvxInlineNotice
-      v-if="inputSendFailed"
-      class="local-terminal-pane__failure"
-      tone="error"
-      :title="t('quickCommands.runFailed')"
-    />
-    <NvxInlineNotice
-      v-else-if="failureMessage"
+      v-if="failureMessage"
       class="local-terminal-pane__failure"
       tone="error"
       :title="failureMessage"

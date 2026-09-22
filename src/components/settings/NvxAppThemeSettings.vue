@@ -18,6 +18,7 @@ const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const draft = ref<AppThemeProfile>(clone(store.profile));
 const baseline = ref<AppThemeProfile>(clone(store.profile));
 const previewAppearance = ref<"light" | "dark">(ui.theme);
+const pendingMode = ref<ThemePreference | null>(null);
 const previewInput = ref("");
 const previewTab = ref("components");
 const fileInput = ref<HTMLInputElement>();
@@ -26,9 +27,10 @@ const message = ref("");
 const busy = ref(false);
 let alive = true;
 const selectedKey = computed(() => previewAppearance.value === "light" ? draft.value.lightThemeId : draft.value.darkThemeId);
-const choices = computed(() => store.themes.filter((item) => item.definition.appearance === previewAppearance.value));
+const choices = computed(() => [...store.themes].sort((a, b) => Number(b.source === "plugin") - Number(a.source === "plugin")));
 const selected = computed(() => choices.value.find((item) => item.key === selectedKey.value));
-const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(baseline.value));
+const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(baseline.value)
+  || (pendingMode.value !== null && pendingMode.value !== ui.themePreference));
 const missing = computed(() => !selected.value?.enabled);
 const baseDefinition = computed(() => selected.value?.enabled ? selected.value.definition : store.resolveTheme(previewAppearance.value));
 const editedDefinition = computed<ThemeDefinition>(() => {
@@ -62,6 +64,10 @@ function fieldOptions(field: typeof fields[number]) {
   return values.map((value) => ({ value, label: t(`appTheme.${group}.${value}`) }));
 }
 function choose(key: string) {
+  const choice = choices.value.find((item) => item.key === key && item.enabled);
+  if (!choice) return;
+  previewAppearance.value = choice.definition.appearance;
+  pendingMode.value = choice.definition.appearance;
   if (previewAppearance.value === "light") draft.value.lightThemeId = key;
   else draft.value.darkThemeId = key;
   error.value = ""; message.value = "";
@@ -81,6 +87,8 @@ function reset() {
   message.value = "resetHint"; error.value = "";
 }
 function discard() {
+  pendingMode.value = null;
+  previewAppearance.value = ui.theme;
   draft.value = clone(store.profile); baseline.value = clone(store.profile);
   error.value = ""; message.value = "";
 }
@@ -88,10 +96,14 @@ function save() {
   if (!valid.value) { error.value = "invalid"; return; }
   if (!store.saveProfile(clone(draft.value), baseline.value)) { error.value = "saveFailed"; return; }
   draft.value = clone(store.profile); baseline.value = clone(store.profile);
+  // Keep the saved profile as the retry baseline if mode persistence fails.
+  if (pendingMode.value !== null && !ui.setThemePreference(pendingMode.value)) { error.value = "modeSaveFailed"; return; }
+  pendingMode.value = null;
   message.value = "saved"; error.value = "";
 }
 function changeMode(value: string) {
   if (!ui.setThemePreference(value as ThemePreference)) { error.value = "saveFailed"; return; }
+  pendingMode.value = null;
   previewAppearance.value = ui.theme;
 }
 async function readFile(event: Event) {
@@ -178,22 +190,9 @@ onBeforeUnmount(() => { alive = false; });
             {{ t('appTheme.manage') }}
           </NvxButton>
         </div>
-        <div
-          class="theme-settings__appearance"
-          role="group"
-          :aria-label="t('appTheme.theme')"
-        >
-          <NvxButton
-            v-for="appearance in (['light', 'dark'] as const)"
-            :key="appearance"
-            :variant="previewAppearance === appearance ? 'secondary' : 'ghost'"
-            size="sm"
-            :aria-pressed="previewAppearance === appearance"
-            @click="previewAppearance = appearance"
-          >
-            {{ t(appearance === 'light' ? 'appTheme.editLight' : 'appTheme.editDark') }}
-          </NvxButton>
-        </div>
+        <p class="theme-settings__hint">
+          {{ t('appTheme.selectionHint') }}
+        </p>
         <div
           class="theme-settings__choices"
           role="group"
@@ -222,7 +221,7 @@ onBeforeUnmount(() => { alive = false; });
               :icon="Check"
               :size="16"
             /></span>
-            <small>{{ t(!choice.enabled ? 'appTheme.disabled' : choice.source === 'builtin' ? 'appTheme.builtin' : 'appTheme.installed') }}</small>
+            <small>{{ t(`appTheme.${choice.definition.appearance}`) }} · {{ t(!choice.enabled ? 'appTheme.disabled' : choice.source === 'builtin' ? 'appTheme.builtin' : 'appTheme.installed') }}</small>
           </button>
         </div>
         <p
@@ -459,7 +458,6 @@ onBeforeUnmount(() => { alive = false; });
 .theme-settings__mode > :last-child { width: 200px; flex-shrink: 0; }
 .theme-settings__workspace { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(260px, .9fr); gap: var(--nvx-space-6); align-items: start; }
 .theme-settings__editor { min-width: 0; display: grid; gap: var(--nvx-space-4); }
-.theme-settings__appearance { display: flex; gap: var(--nvx-space-2); }
 .theme-settings__choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); gap: var(--nvx-space-3); }
 .theme-choice { display: grid; gap: var(--nvx-space-2); padding: var(--nvx-space-3); text-align: left; border: var(--nvx-border-width) solid var(--nvx-color-border); border-radius: var(--nvx-radius-md); background: var(--nvx-color-bg-surface); color: var(--nvx-color-text-primary); cursor: pointer; min-width: 0; }
 .theme-choice:hover { background: var(--nvx-color-bg-hover); }

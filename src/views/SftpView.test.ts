@@ -4,6 +4,8 @@ import { createMemoryHistory, createRouter } from "vue-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SftpSessionSnapshot, SftpTransferIntentSnapshot } from "../core-api/generated/core-api";
+import { ensureHostVault } from "../core-api/secure-vault-client";
+import { openToolWindow } from "../tool-windows";
 import { i18n } from "../locales";
 import { SFTP_PREFERENCES_KEY } from "../stores/sftpPreferences";
 import { useTipsStore } from "../stores/tips";
@@ -49,6 +51,8 @@ const client = vi.hoisted(() => ({
   tailSftpFile: vi.fn(),
 }));
 
+vi.mock("../core-api/secure-vault-client", () => ({ ensureHostVault: vi.fn() }));
+vi.mock("../tool-windows", () => ({ openToolWindow: vi.fn().mockResolvedValue(undefined), onToolWindowChanged: vi.fn().mockResolvedValue(() => undefined) }));
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 vi.mock("@tauri-apps/api/path", () => pathApi);
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -235,8 +239,34 @@ async function dragEntryToPane(source: DOMWrapper<Element>, target: DOMWrapper<E
 }
 
 describe("SftpView production boundaries", () => {
+  it("positions the measured menu inside the viewport and recomputes after resize", async () => {
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: 216, height: 520 } as DOMRect);
+    const width = vi.spyOn(window, "innerWidth", "get").mockReturnValue(800);
+    const height = vi.spyOn(window, "innerHeight", "get").mockReturnValue(600);
+    const { wrapper } = await mountView(readySnapshot(), { snapshotRevision: "0", transfers: [] }, "notes.txt");
+    try {
+      await wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button')
+        .trigger("contextmenu", { clientX: 790, clientY: 590 });
+      await flushPromises();
+      const menu = wrapper.get<HTMLElement>('[role="menu"]');
+      expect(menu.element.style.left).toBe("576px");
+      expect(menu.element.style.top).toBe("72px");
+      width.mockReturnValue(400);
+      height.mockReturnValue(300);
+      bounds.mockReturnValue({ width: 216, height: 284 } as DOMRect);
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(menu.element.style.left).toBe("176px");
+      expect(menu.element.style.top).toBe("8px");
+    } finally {
+      wrapper.unmount();
+      bounds.mockRestore(); width.mockRestore(); height.mockRestore();
+    }
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(ensureHostVault).mockResolvedValue(true);
     localStorage.clear();
     webview.handler = null;
     pathApi.homeDir.mockRejectedValue(new Error("desktop path API unavailable in this test"));
@@ -260,6 +290,90 @@ describe("SftpView production boundaries", () => {
       path: { bytes: [47] },
     }));
     expect(wrapper.text()).toContain("release.bin");
+    wrapper.unmount();
+  });
+
+  it("waits for an explicit Vault continuation before connecting and ignores cancellation", async () => {
+    let finish!: (allowed: boolean) => void;
+    vi.mocked(ensureHostVault).mockReturnValue(new Promise<boolean>((resolve) => { finish = resolve; }));
+    const { wrapper } = await mountView();
+    expect(ensureHostVault).not.toHaveBeenCalled();
+    const connect = wrapper.findAll("button").find((button) => button.text().includes("Connect SFTP"))!;
+    await connect.trigger("click");
+    await flushPromises();
+    expect(ensureHostVault).toHaveBeenCalledWith(host.hostId, "7", false);
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    finish(false);
+    await flushPromises();
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("does not resume a Vault continuation after leaving the SFTP view", async () => {
+    let finish!: (allowed: boolean) => void;
+    vi.mocked(ensureHostVault).mockReturnValue(new Promise<boolean>((resolve) => { finish = resolve; }));
+    const { wrapper } = await mountView();
+    await wrapper.findAll("button").find((button) => button.text().includes("Connect SFTP"))!.trigger("click");
+    await flushPromises();
+    wrapper.unmount();
+    finish(true);
+    await flushPromises();
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+  });
+
+  it("shows session failure Tips once per failure and keeps the file workspace free of error banners", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const initial = readySnapshot();
+    const { wrapper, tips, setSnapshot } = await mountView(initial);
+    try {
+      const failed: SftpSessionSnapshot = {
+        ...initial, snapshotRevision: "5",
+        sessions: initial.sessions.map((session) => ({
+          ...session, state: "failed", stateRevision: "5",
+          failure: { code: "transportLost", stage: "sftp-session", messageKey: "errors.sftp.sessionFailed" },
+        })),
+      };
+      setSnapshot(failed);
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushPromises();
+      expect(tips.items).toEqual([expect.objectContaining({
+        tone: "error", title: "The independent SSH connection for SFTP was lost.", message: "Files",
+      })]);
+      expect(wrapper.find(".sftp-view > .nvx-inline-notice").exists()).toBe(false);
+      expect(wrapper.text()).not.toContain("sftp.sessionFailed");
+      expect(wrapper.text()).toContain("Connection failed");
+      expect(wrapper.text()).toContain("Connect SFTP");
+      const id = tips.items[0]!.id;
+      setSnapshot({ ...failed, snapshotRevision: "6", sessions: failed.sessions.map((session) => ({ ...session, stateRevision: "6" })) });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(tips.items[0]!.id).toBe(id);
+      tips.clearAll();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(tips.items).toHaveLength(0);
+      setSnapshot({ ...initial, snapshotRevision: "7" });
+      await vi.advanceTimersByTimeAsync(1000);
+      setSnapshot({ ...failed, snapshotRevision: "8", sessions: failed.sessions.map((session) => ({ ...session, generation: "2" })) });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(tips.items).toHaveLength(1);
+      expect(tips.items[0]!.id).not.toBe(id);
+    } finally {
+      wrapper.unmount();
+      tips.clearAll();
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a Vault-blocked session directly without routing to Terminal", async () => {
+    const snapshot = readySnapshot();
+    snapshot.sessions[0]!.state = "failed";
+    snapshot.sessions[0]!.failure = { code: "vaultLocked", stage: "authentication", messageKey: "errors.sftp.vaultLocked" };
+    const { wrapper } = await mountView(snapshot);
+    const retry = wrapper.findAll("button").find((button) => button.text() === "Unlock and retry");
+    expect(retry).toBeDefined();
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(ensureHostVault).toHaveBeenCalledWith(host.hostId, "7", true);
+    expect(client.openSftpSession).toHaveBeenCalledWith({ hostId: host.hostId, expectedHostStateVersion: "7", sessionId: snapshot.sessions[0]!.sessionId });
     wrapper.unmount();
   });
 
@@ -463,17 +577,9 @@ describe("SftpView production boundaries", () => {
     await flushPromises();
     expect(client.openSftpSession).not.toHaveBeenCalled();
     expect(client.listSftpDirectory).toHaveBeenCalledWith(expect.objectContaining({ sessionId: shared.sessionId, expectedGeneration: "1", path: { bytes: [...new TextEncoder().encode("/etc/nginx/sites-available")] } }));
-    expect(client.previewSftpFile).toHaveBeenCalledWith(expect.objectContaining({ sessionId: shared.sessionId, entryRef: "nginx-config" }));
+    expect(openToolWindow).toHaveBeenCalledWith(expect.objectContaining({ kind: "sftpFile", request: expect.objectContaining({ sessionId: shared.sessionId, entryRef: "nginx-config" }), tail: false }));
     expect(wrapper.text()).toContain("ops@quick.example.test:22");
-    const editor = document.body.querySelector<HTMLTextAreaElement>("[data-code-editor]")!;
-    expect(editor.value).toBe("worker_processes auto;");
-    editor.value = "unsaved user draft";
-    editor.dispatchEvent(new Event("input", { bubbles: true }));
-    await flushPromises();
-    expect(acceptSftpPluginNavigation({ ...event, operationId: "019d0000-0000-7000-8000-000000000912" })).toBe(true);
-    await flushPromises();
-    expect(client.previewSftpFile).toHaveBeenCalledTimes(1);
-    expect(editor.value).toBe("unsaved user draft");
+    expect(document.body.querySelector("[data-code-editor]")).toBeNull();
     expect(client.mutateSftpFile).not.toHaveBeenCalled();
     expect(acceptSftpPluginNavigation(event)).toBe(false);
     wrapper.unmount();
@@ -522,73 +628,13 @@ describe("SftpView production boundaries", () => {
     const entry = wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button');
     await entry.trigger("contextmenu", { clientX: 40, clientY: 40 });
     const preview = wrapper.findAll<HTMLButtonElement>('[role="menuitem"]')
-      .find((button) => button.text().trim() === "Preview");
+      .find((button) => button.text().trim() === "Preview / edit");
     expect(preview?.element.disabled).toBe(false);
     await preview?.trigger("click");
     await flushPromises();
 
-    expect(client.previewSftpFile).toHaveBeenCalledWith({
-      sessionId: readySnapshot().sessions[0]!.sessionId,
-      expectedGeneration: "1",
-      directoryRef: "remote-directory-root",
-      entryRef: "remote-entry-release",
-    });
-    expect(document.body.querySelector<HTMLTextAreaElement>("[data-code-editor]")?.value)
-      .toBe("bounded preview content");
-    wrapper.unmount();
-  });
-
-  it("edits preview text and saves through an atomic remote mutation", async () => {
-    client.previewSftpFile.mockResolvedValue({
-      sessionId: readySnapshot().sessions[0]!.sessionId,
-      generation: "1",
-      displayName: "notes.txt",
-      content: {
-        kind: "text",
-        text: "before",
-        endOffset: "6",
-        editable: true,
-        truncated: false,
-        lineEnding: "lf",
-      },
-    });
-    client.mutateSftpFile.mockResolvedValue({
-      sessionId: readySnapshot().sessions[0]!.sessionId,
-      generation: "1",
-    });
-    const { wrapper } = await mountView(
-      readySnapshot(),
-      { snapshotRevision: "0", transfers: [] },
-      "notes.txt",
-    );
-    await wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button')
-      .trigger("contextmenu", { clientX: 40, clientY: 40 });
-    await wrapper.findAll<HTMLButtonElement>('[role="menuitem"]')
-      .find((button) => button.text().trim() === "Preview")?.trigger("click");
-    await flushPromises();
-
-    const editor = document.body.querySelector<HTMLTextAreaElement>("[data-code-editor]");
-    expect(editor).not.toBeNull();
-    if (editor) {
-      editor.value = "after";
-      editor.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    await flushPromises();
-    const saveButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent?.trim() === "Save");
-    saveButton?.click();
-    await flushPromises();
-
-    expect(client.mutateSftpFile).toHaveBeenCalledWith({
-      sessionId: readySnapshot().sessions[0]!.sessionId,
-      expectedGeneration: "1",
-      mutation: {
-        kind: "writeText",
-        path: { bytes: Array.from(new TextEncoder().encode("/notes.txt")) },
-        precondition: { kind: "file", size: 8, modifiedAtUnixMs: 1_788_000_000_000 },
-        text: "after",
-      },
-    });
+    expect(openToolWindow).toHaveBeenCalledWith(expect.objectContaining({ kind: "sftpFile", tail: false, request: expect.objectContaining({ sessionId: readySnapshot().sessions[0]!.sessionId, expectedGeneration: "1", directoryRef: "remote-directory-root", entryRef: "remote-entry-release" }) }));
+    expect(document.body.querySelector("[data-code-editor]")).toBeNull();
     wrapper.unmount();
   });
 
@@ -623,21 +669,13 @@ describe("SftpView production boundaries", () => {
     await wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button')
       .trigger("contextmenu", { clientX: 40, clientY: 40 });
     const contextItems = wrapper.findAll<HTMLButtonElement>('[role="menuitem"]');
-    expect(contextItems.some((button) => button.text().trim() === "Preview")).toBe(true);
+    expect(contextItems.some((button) => button.text().trim() === "Preview / edit")).toBe(true);
     await contextItems
       .find((button) => button.text().trim() === "Follow live")?.trigger("click");
     await flushPromises();
 
-    await vi.waitFor(() => expect(client.tailSftpFile).toHaveBeenCalledWith({
-      sessionId: readySnapshot().sessions[0]!.sessionId,
-      expectedGeneration: "1",
-      directoryRef: "remote-directory-root",
-      entryRef: "remote-entry-release",
-      offset: "5",
-    }));
-    await flushPromises();
-    expect(document.body.querySelector<HTMLTextAreaElement>("[data-code-editor]")?.value)
-      .toBe("first\nsecond");
+    expect(openToolWindow).toHaveBeenCalledWith(expect.objectContaining({ kind: "sftpFile", tail: true, request: expect.objectContaining({ sessionId: readySnapshot().sessions[0]!.sessionId, expectedGeneration: "1", directoryRef: "remote-directory-root", entryRef: "remote-entry-release" }) }));
+    expect(client.tailSftpFile).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -1523,6 +1561,41 @@ describe("SftpView production boundaries", () => {
       expectedBytes: 12,
     }));
     expect(client.enqueueSftpTransferIntent).toHaveBeenCalledWith({ intentToken: "recursive-intent" });
+    wrapper.unmount();
+  });
+
+  it("creates an empty file from the blank-space context menu without requiring a selection", async () => {
+    client.mutateSftpFile.mockResolvedValue({
+      sessionId: readySnapshot().sessions[0]!.sessionId,
+      generation: "1",
+    });
+    const { wrapper } = await mountView(readySnapshot());
+    const entries = wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries');
+    await entries.trigger("contextmenu", { clientX: 40, clientY: 40 });
+    await wrapper.findAll<HTMLButtonElement>('[role="menuitem"]')
+      .find((button) => button.text().trim() === "New empty file")?.trigger("click");
+    await flushPromises();
+
+    const nameInput = document.body.querySelector<HTMLInputElement>("#sftp-mutation-name");
+    expect(nameInput).not.toBeNull();
+    if (nameInput) {
+      nameInput.value = "empty.txt";
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    await flushPromises();
+    const confirm = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "Confirm");
+    confirm?.click();
+    await flushPromises();
+
+    expect(client.mutateSftpFile).toHaveBeenCalledWith({
+      sessionId: readySnapshot().sessions[0]!.sessionId,
+      expectedGeneration: "1",
+      mutation: {
+        kind: "createEmptyFile",
+        path: { bytes: Array.from(new TextEncoder().encode("/empty.txt")) },
+      },
+    });
     wrapper.unmount();
   });
 });

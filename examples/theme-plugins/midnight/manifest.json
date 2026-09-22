@@ -1,12 +1,14 @@
 {
   "pluginId": "com.norishell.theme.midnight",
-  "name": "NoriShell Midnight Theme",
+  "name": "NoriShell Mulberry Theme",
   "publisher": "NoriShell example package (self-reported)",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "protocolMajor": 1,
   "protocolMinor": 14,
   "platform": "desktop",
-  "architectures": ["universal"],
+  "architectures": [
+    "universal"
+  ],
   "capabilities": [],
   "minimumAppVersion": "0.1.0"
 }

@@ -17,6 +17,7 @@ enableAutoUnmount(afterEach);
 
 describe("NvxPluginExtensionTarget", () => {
   beforeEach(() => {
+    i18n.global.locale.value = "zh-CN";
     setActivePinia(createPinia());
   });
 

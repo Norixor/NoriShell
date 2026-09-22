@@ -943,6 +943,7 @@ const fn stable_forward_error(code: ForwardFailureCode) -> &'static str {
         ForwardFailureCode::HostUnavailable => "parentSessionUnavailable",
         ForwardFailureCode::HostKeyReviewRequired
         | ForwardFailureCode::HostKeyMismatch
+        | ForwardFailureCode::VaultLocked
         | ForwardFailureCode::CredentialUnavailable
         | ForwardFailureCode::AuthenticationRejected => "unexpectedAuthenticationPath",
         ForwardFailureCode::TransportConnect | ForwardFailureCode::TransportLost => {

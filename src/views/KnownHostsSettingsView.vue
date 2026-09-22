@@ -1,10 +1,8 @@
 <script setup lang="ts">
-import { ArrowLeft, Fingerprint, RefreshCw, Trash2 } from "lucide-vue-next";
+import { Fingerprint, RefreshCw, Trash2 } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
 
-import { NvxPageHeader } from "../components/layout";
 import {
   NvxButton,
   NvxCard,
@@ -15,14 +13,14 @@ import {
 } from "../components/ui";
 import { deleteKnownHost, listKnownHosts } from "../core-api/client";
 import type { KnownHostSummary } from "../core-api/generated/core-api";
+import { useTipsStore } from "../stores/tips";
 
 const { t, locale } = useI18n();
-const router = useRouter();
+const tips = useTipsStore();
 
 const knownHosts = ref<KnownHostSummary[]>([]);
 const loading = ref(true);
 const loadFailed = ref(false);
-const actionFailed = ref(false);
 const actionPending = ref(false);
 const deleteTarget = ref<KnownHostSummary | null>(null);
 
@@ -49,20 +47,24 @@ async function load() {
 
 function openDelete(knownHost: KnownHostSummary) {
   deleteTarget.value = knownHost;
-  actionFailed.value = false;
+  tips.dismissScope("known-hosts-action");
 }
 
 async function confirmDelete() {
   const target = deleteTarget.value;
   if (!target || actionPending.value) return;
   actionPending.value = true;
-  actionFailed.value = false;
+  tips.dismissScope("known-hosts-action");
   try {
     await deleteKnownHost(target.knownHostId, target.stateVersion);
     deleteTarget.value = null;
     await load();
   } catch {
-    actionFailed.value = true;
+    tips.show({
+      scope: "known-hosts-action",
+      tone: "error",
+      title: t("knownHostsSettings.actionFailed"),
+    });
   } finally {
     actionPending.value = false;
   }
@@ -73,39 +75,25 @@ onMounted(load);
 
 <template>
   <section class="known-hosts-page">
-    <NvxPageHeader
-      :breadcrumb="t('knownHostsSettings.breadcrumb')"
-      :title="t('knownHostsSettings.title')"
-      :description="t('knownHostsSettings.description')"
-    >
-      <template #actions>
-        <NvxButton
-          variant="secondary"
-          size="sm"
-          @click="router.push('/settings')"
-        >
-          <NvxIcon
-            :icon="ArrowLeft"
-            :size="16"
-            aria-hidden="true"
-          />
-          {{ t('knownHostsSettings.back') }}
-        </NvxButton>
-        <NvxButton
-          variant="secondary"
-          size="sm"
-          :loading="loading"
-          @click="load"
-        >
-          <NvxIcon
-            :icon="RefreshCw"
-            :size="16"
-            aria-hidden="true"
-          />
-          {{ t('knownHostsSettings.refresh') }}
-        </NvxButton>
-      </template>
-    </NvxPageHeader>
+    <header class="known-hosts-heading">
+      <div>
+        <h2>{{ t('knownHostsSettings.title') }}</h2>
+        <p>{{ t('knownHostsSettings.description') }}</p>
+      </div>
+      <NvxButton
+        variant="secondary"
+        size="sm"
+        :loading="loading"
+        @click="load"
+      >
+        <NvxIcon
+          :icon="RefreshCw"
+          :size="16"
+          aria-hidden="true"
+        />
+        {{ t('knownHostsSettings.refresh') }}
+      </NvxButton>
+    </header>
 
     <NvxInlineNotice
       v-if="loadFailed"
@@ -127,6 +115,7 @@ onMounted(load);
       <NvxCard
         v-for="knownHost in knownHosts"
         :key="knownHost.knownHostId"
+        class="known-host-card"
       >
         <div class="known-host-card__header">
           <div class="known-host-card__identity">
@@ -136,7 +125,7 @@ onMounted(load);
             >
               <NvxIcon
                 :icon="Fingerprint"
-                :size="20"
+                :size="16"
               />
             </span>
             <div>
@@ -146,7 +135,7 @@ onMounted(load);
           </div>
           <NvxButton
             size="sm"
-            variant="danger"
+            variant="ghost"
             @click="openDelete(knownHost)"
           >
             <NvxIcon
@@ -185,7 +174,6 @@ onMounted(load);
       :close-label="t('knownHostsSettings.close')"
       :dismissible="!actionPending"
       @update:model-value="deleteTarget = $event ? deleteTarget : null"
-      @close="actionFailed = false"
     >
       <NvxInlineNotice
         v-if="deleteTarget"
@@ -195,12 +183,6 @@ onMounted(load);
           address: `${deleteTarget.normalizedAddress}:${deleteTarget.port}`,
           fingerprint: deleteTarget.fingerprintSha256,
         }) }}
-      </NvxInlineNotice>
-      <NvxInlineNotice
-        v-if="actionFailed"
-        tone="error"
-      >
-        {{ t('knownHostsSettings.actionFailed') }}
       </NvxInlineNotice>
       <template #actions>
         <NvxButton
@@ -224,14 +206,39 @@ onMounted(load);
 
 <style scoped>
 .known-hosts-page {
-  height: 100%;
-  overflow: auto;
-  padding: var(--nvx-space-6);
+  display: grid;
+  gap: var(--nvx-space-4);
+}
+
+.known-hosts-heading {
+  display: flex;
+  gap: var(--nvx-space-4);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.known-hosts-heading h2,
+.known-hosts-heading p {
+  margin: 0;
+}
+
+.known-hosts-heading h2 {
+  font-size: var(--nvx-font-size-lg);
+}
+
+.known-hosts-heading p {
+  margin-top: var(--nvx-space-1);
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-sm);
 }
 
 .known-hosts-list {
   display: grid;
-  gap: var(--nvx-space-4);
+  gap: var(--nvx-space-2);
+}
+
+.known-host-card {
+  padding: var(--nvx-space-3);
 }
 
 .known-host-card__header,
@@ -241,18 +248,18 @@ onMounted(load);
 }
 
 .known-host-card__header {
-  gap: var(--nvx-space-4);
+  gap: var(--nvx-space-3);
   justify-content: space-between;
 }
 
 .known-host-card__identity {
-  gap: var(--nvx-space-3);
+  gap: var(--nvx-space-2);
 }
 
 .known-host-card__icon {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   flex: 0 0 auto;
   place-items: center;
   border-radius: var(--nvx-radius-md);
@@ -277,9 +284,9 @@ onMounted(load);
 .known-host-card__details {
   display: grid;
   grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr));
-  gap: var(--nvx-space-4);
-  margin-block: var(--nvx-space-4) !important;
-  padding-block: var(--nvx-space-4);
+  gap: var(--nvx-space-3);
+  margin-block: var(--nvx-space-2) !important;
+  padding-block: var(--nvx-space-2);
   border-block: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
@@ -296,10 +303,7 @@ onMounted(load);
 }
 
 @media (max-width: 760px) {
-  .known-hosts-page {
-    padding: var(--nvx-space-4);
-  }
-
+  .known-hosts-heading,
   .known-host-card__header {
     align-items: flex-start;
     flex-direction: column;

@@ -1,28 +1,25 @@
 <script setup lang="ts">
-import { Check, KeyRound, RotateCcw, Server, ShieldCheck, Unplug, X } from "lucide-vue-next";
+import { KeyRound, RotateCcw, Server, ShieldCheck, Unplug } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import {
   attachSshSession,
-  decideSshHostKey,
   detachSshSession,
   disconnectSshSession,
   getSshSession,
   heartbeatSshAttachment,
   openSshSession,
   parseCoreApiError,
-  prepareSshKeyboardInteractiveAnswer,
   reconnectSshSession,
-  respondSshKeyboardInteractive,
   renewSshInputLease,
   resizeSshTerminal,
   sendSshInput,
   takeoverSshLoginAutomation,
 } from "../../core-api/client";
+import { requestSecureSshChallenge } from "../../core-api/secure-ssh-challenge-client";
 import type {
   SshHostKeyChallenge,
-  SshKeyboardInteractiveAnswerInput,
   SshKeyboardInteractiveChallenge,
   SshLoginAutomationProgress,
   SshSessionAttachment,
@@ -45,7 +42,9 @@ import {
 import { NvxPluginExtensionTarget } from "../plugins";
 import NvxHostMarker from "../hosts/NvxHostMarker.vue";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
-import { NvxButton, NvxDialog, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxStatusLabel } from "../ui";
+import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
+import { useTipsStore } from "../../stores/tips";
+import { NvxButton, NvxDialog, NvxIcon, NvxIconButton, NvxInlineNotice, NvxStatusLabel } from "../ui";
 import NvxTerminalPaneControls from "./NvxTerminalPaneControls.vue";
 import NvxTerminalPaneOverflowMenu from "./NvxTerminalPaneOverflowMenu.vue";
 import NvxTerminalTools from "./NvxTerminalTools.vue";
@@ -107,6 +106,8 @@ const emit = defineEmits<{
 
 const { t, te } = useI18n();
 const hostMarkers = useHostMarkersStore();
+const terminalPreferences = useTerminalPreferencesStore();
+const tips = useTipsStore();
 const nativeTools = ref<InstanceType<typeof NvxNativeTerminalTools> | null>(null);
 const inputDraft = ref<string | null>(null);
 const shellPromptKey = ref<string | null>(null);
@@ -130,9 +131,6 @@ const attachment = ref<SshSessionAttachment | null>(null);
 const lease = ref<SshSessionInputLease | null>(null);
 const challenge = ref<SshHostKeyChallenge | null>(null);
 const keyboardInteractiveChallenge = ref<SshKeyboardInteractiveChallenge | null>(null);
-const keyboardInteractiveAnswers = ref<string[]>([]);
-const keyboardInteractiveResponding = ref(false);
-const keyboardInteractiveFailed = ref(false);
 const loginAutomationProgress = ref<SshLoginAutomationProgress | null>(null);
 const loginAutomationTakingOver = ref(false);
 const loginAutomationTakeoverFailed = ref(false);
@@ -145,11 +143,9 @@ const heartbeat = ref<SshSessionHeartbeatStatus>({
 const failure = ref<SshSessionFailureReason | null>(null);
 const opening = ref(false);
 const openFailed = ref(false);
-const deciding = ref(false);
 const disconnecting = ref(false);
 const reconnecting = ref(false);
 const reconnectErrorKey = ref<string | null>(null);
-const inputSendFailed = ref(false);
 const algorithmDetailsOpen = ref(false);
 let inputSequence = 0n;
 let promptBoundaryInputSequence: bigint | null = null;
@@ -368,6 +364,21 @@ const needsVaultUnlock = computed(
       && props.deferredRecovery === "vaultUnlock"),
 );
 const sessionActionReconnects = computed(() => ["closed", "failed"].includes(state.value));
+const reconnectOnInput = computed(() => terminalPreferences.preferences.interaction.sshReconnectOnInput
+  && props.active && sessionActionReconnects.value
+  && !opening.value && !reconnecting.value && !disconnecting.value);
+let inputReconnectPending = false;
+
+async function requestReconnectFromInput() {
+  if (!reconnectOnInput.value || inputReconnectPending || released
+    || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+  inputReconnectPending = true;
+  try {
+    await reconnect();
+  } finally {
+    inputReconnectPending = false;
+  }
+}
 const sessionActionLabel = computed(() => {
   if (!sessionActionReconnects.value) return t("sshSession.disconnect");
   if (needsVaultUnlock.value) return t("sshSession.unlockVault");
@@ -433,8 +444,6 @@ function reconcileAfterForeground() {
 
 function setKeyboardInteractiveChallenge(next: SshKeyboardInteractiveChallenge | null) {
   keyboardInteractiveChallenge.value = next;
-  keyboardInteractiveAnswers.value = next?.prompts.map(() => "") ?? [];
-  keyboardInteractiveFailed.value = false;
 }
 
 function pendingEventKey(event: SshSessionEvent) {
@@ -584,6 +593,17 @@ function applyEvent(event: SshSessionEvent) {
         && event.payload.attachment.viewId === viewId
       ) {
         attachment.value = event.payload.attachment;
+        if (
+          session.value
+          && event.payload.attachment.sessionId === session.value.sessionId
+          && event.payload.attachment.generation === session.value.generation
+        ) {
+          session.value = {
+            ...session.value,
+            channelId: event.payload.attachment.channelId,
+            attachmentRevision: event.payload.attachmentRevision,
+          };
+        }
       } else if (
         event.payload.change === "detached"
         && event.payload.attachment.attachmentId === attachment.value?.attachmentId
@@ -616,7 +636,6 @@ async function open(credentialRefId = props.credentialRefId) {
   opening.value = true;
   openFailed.value = false;
   reconnectErrorKey.value = null;
-  inputSendFailed.value = false;
   binding = true;
   released = false;
   lastAppliedEventSeq = 0n;
@@ -860,6 +879,7 @@ async function renewLease() {
     ) {
       lease.value = null;
       stopLeaseHeartbeat();
+      if (props.active) void recoverActiveInputLease();
     }
   }
 }
@@ -891,97 +911,64 @@ async function send(value: string) {
 async function handleTerminalInput(value: string) {
   try {
     await send(value);
-    inputSendFailed.value = false;
   } catch {
     // Input is non-idempotent: a rejected IPC result may still have reached
     // the remote Shell. Revoke this renderer's local write path and require an
     // explicit reconnect/focus recovery after the user checks terminal output.
-    inputSendFailed.value = true;
     lease.value = null;
     stopLeaseHeartbeat();
-  }
-}
-
-
-async function decideHostKey(decision: "acceptAndStore" | "reject") {
-  const current = session.value;
-  const currentAttachment = attachment.value;
-  const currentChallenge = challenge.value;
-  if (!current || !currentAttachment || !currentChallenge || deciding.value) return;
-  deciding.value = true;
-  try {
-    const details = await decideSshHostKey({
-      sessionId: current.sessionId,
-      expectedGeneration: current.generation,
-      challengeId: currentChallenge.challengeId,
-      expectedStateRevision: currentChallenge.stateRevision,
-      attachmentId: currentAttachment.attachmentId,
-      viewId,
-      decision,
+    const current = session.value;
+    tips.show({
+      scope: `ssh-terminal-input:${current?.sessionId ?? props.paneId}:${current?.generation ?? "none"}`,
+      tone: "error",
+      title: t("quickCommands.runFailed"),
     });
-    challenge.value = null;
-    heartbeat.value = details.heartbeat;
-    updateSummary(details.session);
-  } finally {
-    deciding.value = false;
   }
 }
 
-async function submitKeyboardInteractiveAnswers() {
+
+let secureChallengePending = false;
+const presentedChallenges = new Set<string>();
+async function presentSecureChallenge() {
   const current = session.value;
-  const currentAttachment = attachment.value;
-  const currentChallenge = keyboardInteractiveChallenge.value;
-  if (!current || !currentAttachment || !currentChallenge || keyboardInteractiveResponding.value) {
-    return;
-  }
-  keyboardInteractiveResponding.value = true;
-  keyboardInteractiveFailed.value = false;
+  const owner = attachment.value;
+  const hostKey = challenge.value;
+  const keyboard = keyboardInteractiveChallenge.value;
+  const currentChallenge = hostKey ?? keyboard;
+  if (!current || !owner || !currentChallenge || secureChallengePending) return;
+  const key = currentChallenge.challengeId;
+  if (presentedChallenges.has(key)) return;
+  presentedChallenges.add(key);
+  secureChallengePending = true;
   try {
-    const answers: SshKeyboardInteractiveAnswerInput[] = [];
-    for (const prompt of currentChallenge.prompts) {
-      const value = keyboardInteractiveAnswers.value[prompt.promptIndex] ?? "";
-      if (prompt.echo && !prompt.sensitive) {
-        answers.push({ kind: "echoText", promptIndex: prompt.promptIndex, value });
-        continue;
-      }
-      const prepared = await prepareSshKeyboardInteractiveAnswer({
-        sessionId: current.sessionId,
-        expectedGeneration: currentChallenge.generation,
-        challengeId: currentChallenge.challengeId,
-        expectedStateRevision: currentChallenge.stateRevision,
-        roundIndex: currentChallenge.roundIndex,
-        promptIndex: prompt.promptIndex,
-        attachmentId: currentAttachment.attachmentId,
-        viewId,
-        answer: value,
-      });
-      keyboardInteractiveAnswers.value[prompt.promptIndex] = "";
-      answers.push({
-        kind: "oneTimeAnswerRef",
-        promptIndex: prompt.promptIndex,
-        answerRefId: prepared.answerRefId,
-      });
-    }
-    const details = await respondSshKeyboardInteractive({
+    const request = {
       sessionId: current.sessionId,
       expectedGeneration: currentChallenge.generation,
       challengeId: currentChallenge.challengeId,
       expectedStateRevision: currentChallenge.stateRevision,
-      roundIndex: currentChallenge.roundIndex,
-      attachmentId: currentAttachment.attachmentId,
+      attachmentId: owner.attachmentId,
       viewId,
-      answers,
-    });
+    };
+    if (hostKey) await requestSecureSshChallenge({ kind: "sshHostKey", request });
+    else if (keyboard) await requestSecureSshChallenge({ kind: "sshKeyboard", request: { ...request, roundIndex: keyboard.roundIndex } });
+    if (session.value?.sessionId !== current.sessionId || session.value?.generation !== current.generation || attachment.value?.attachmentId !== owner.attachmentId) return;
+    const details = await getSshSession(current.sessionId);
+    challenge.value = details.activeHostKeyChallenge;
     setKeyboardInteractiveChallenge(details.activeKeyboardInteractiveChallenge);
-    loginAutomationProgress.value = details.activeLoginAutomation;
     heartbeat.value = details.heartbeat;
+    loginAutomationProgress.value = details.activeLoginAutomation;
     updateSummary(details.session);
-  } catch {
-    keyboardInteractiveFailed.value = true;
+  } catch (error) {
+    // Expired or already owned challenges must not reopen or create a second approval surface.
+    if (error !== "secureChallengeExpired" && error !== "secureChallengeAlreadyOpen") {
+      reconnectErrorKey.value = "sshSession.keyboardInteractive.failed";
+    }
   } finally {
-    keyboardInteractiveResponding.value = false;
+    secureChallengePending = false;
+    void presentSecureChallenge();
   }
 }
+watch([challenge, keyboardInteractiveChallenge, attachment], () => { void presentSecureChallenge(); });
 
 async function performDisconnect(propagateFailure: boolean) {
   const current = session.value;
@@ -1076,7 +1063,6 @@ async function reconnect(
 
   reconnecting.value = true;
   reconnectErrorKey.value = null;
-  inputSendFailed.value = false;
   clearPendingEvents();
   stopLeaseHeartbeat();
   lease.value = null;
@@ -1096,6 +1082,10 @@ async function reconnect(
       rows: size.rows,
       cols: size.cols,
     });
+    if (details.session.generation !== current.generation) {
+      lastAppliedEventSeq = 0n;
+      lastAppliedOutputSeq = 0n;
+    }
     inputSequence = 0n;
     promptBoundaryInputSequence = null;
     fencedResize.reset();
@@ -1219,10 +1209,18 @@ function registerInputTarget() {
   });
 }
 
+function recoverActiveInputLease() {
+  if (!props.active) return Promise.resolve(false);
+  registerInputTarget();
+  // The global broker serializes these requests and fences stale results. A
+  // later call must still enqueue because attach/reconnect may have replaced a
+  // null or old Channel while an earlier focus request was in flight.
+  return focusTerminalInputTarget(props.paneId);
+}
+
 function activateFromTab() {
   if (!props.active) return;
-  registerInputTarget();
-  void focusTerminalInputTarget(props.paneId);
+  void recoverActiveInputLease();
   terminalView.value?.focus();
 }
 
@@ -1398,13 +1396,7 @@ onBeforeUnmount(() => {
     />
 
     <NvxInlineNotice
-      v-if="inputSendFailed"
-      class="ssh-terminal-pane__failure"
-      tone="error"
-      :title="t('quickCommands.runFailed')"
-    />
-    <NvxInlineNotice
-      v-else-if="loginAutomationProgress"
+      v-if="loginAutomationProgress"
       class="ssh-terminal-pane__failure"
       :tone="loginAutomationProgress.status === 'failed' ? 'error' : 'info'"
       :title="loginAutomationTitle ?? undefined"
@@ -1453,9 +1445,11 @@ onBeforeUnmount(() => {
       :host-id="target.kind === 'host' ? target.hostId : null"
       :shell-prompt-key="shellPromptKey"
       :read-only="!writable"
+      :reconnect-on-input="reconnectOnInput"
       :terminal-label="t('sshSession.terminalLabel', { label })"
       :gap-label="t('sshSession.outputGap')"
       @input="handleTerminalInput"
+      @reconnect-request="requestReconnectFromInput"
       @resize="resize"
       @selection-change="hasSelection = $event"
       @search-request="openSearch"
@@ -1501,124 +1495,6 @@ onBeforeUnmount(() => {
         </NvxButton>
       </template>
     </NvxDialog>
-
-    <NvxDialog
-      :model-value="keyboardInteractiveChallenge !== null"
-      plugin-protected
-      :title="t('sshSession.keyboardInteractive.title')"
-      :description="t('sshSession.keyboardInteractive.description')"
-      :close-label="t('sshSession.keyboardInteractive.cancel')"
-      :dismissible="false"
-    >
-      <section
-        v-if="keyboardInteractiveChallenge"
-        class="ssh-keyboard-interactive"
-      >
-        <div class="ssh-keyboard-interactive__context">
-          <NvxIcon
-            :icon="KeyRound"
-            :size="22"
-          />
-          <div>
-            <strong>{{ keyboardInteractiveChallenge.name || t('sshSession.keyboardInteractive.serverPrompt') }}</strong>
-            <p v-if="keyboardInteractiveChallenge.instructions">
-              {{ keyboardInteractiveChallenge.instructions }}
-            </p>
-            <small>
-              {{ t('sshSession.keyboardInteractive.round', { round: keyboardInteractiveChallenge.roundIndex }) }}
-            </small>
-          </div>
-        </div>
-        <div class="ssh-keyboard-interactive__prompts">
-          <NvxField
-            v-for="prompt in keyboardInteractiveChallenge.prompts"
-            :key="prompt.promptIndex"
-            :for-id="`ssh-kbi-${prompt.promptIndex}`"
-            :label="prompt.text || t('sshSession.keyboardInteractive.answer')"
-          >
-            <NvxInput
-              :id="`ssh-kbi-${prompt.promptIndex}`"
-              :model-value="keyboardInteractiveAnswers[prompt.promptIndex] ?? ''"
-              :type="prompt.sensitive || !prompt.echo ? 'password' : 'text'"
-              :maxlength="65536"
-              :disabled="keyboardInteractiveResponding"
-              autocomplete="off"
-              @update:model-value="keyboardInteractiveAnswers[prompt.promptIndex] = $event"
-            />
-          </NvxField>
-        </div>
-        <NvxInlineNotice
-          v-if="keyboardInteractiveFailed"
-          tone="error"
-          :title="t('sshSession.keyboardInteractive.failed')"
-        />
-      </section>
-      <template #actions>
-        <NvxButton
-          variant="ghost"
-          :disabled="keyboardInteractiveResponding || disconnecting"
-          :loading="disconnecting"
-          @click="disconnect"
-        >
-          {{ t('sshSession.keyboardInteractive.cancel') }}
-        </NvxButton>
-        <NvxButton
-          :loading="keyboardInteractiveResponding"
-          :disabled="!attachment || disconnecting"
-          @click="submitKeyboardInteractiveAnswers"
-        >
-          {{ t('sshSession.keyboardInteractive.continue') }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
-
-    <NvxDialog
-      :model-value="challenge !== null"
-      plugin-protected
-      :title="t('sshSession.hostKey.title')"
-      :description="t('sshSession.hostKey.description')"
-      :close-label="t('sshSession.hostKey.reject')"
-      :dismissible="false"
-    >
-      <div
-        v-if="challenge"
-        class="ssh-host-key"
-      >
-        <NvxIcon
-          :icon="KeyRound"
-          :size="22"
-        />
-        <dl>
-          <div><dt>{{ t("sshSession.hostKey.endpoint") }}</dt><dd>{{ challenge.endpoint.address }}:{{ challenge.endpoint.port }}</dd></div>
-          <div><dt>{{ t("sshSession.hostKey.algorithm") }}</dt><dd>{{ challenge.keyAlgorithm }}</dd></div>
-          <div><dt>{{ t("sshSession.hostKey.fingerprint") }}</dt><dd><code>{{ challenge.fingerprintSha256 }}</code></dd></div>
-        </dl>
-      </div>
-      <template #actions>
-        <NvxButton
-          variant="ghost"
-          :disabled="deciding || !attachment"
-          @click="decideHostKey('reject')"
-        >
-          <NvxIcon
-            :icon="X"
-            :size="16"
-          />
-          {{ t("sshSession.hostKey.reject") }}
-        </NvxButton>
-        <NvxButton
-          :loading="deciding"
-          :disabled="!attachment"
-          @click="decideHostKey('acceptAndStore')"
-        >
-          <NvxIcon
-            :icon="Check"
-            :size="16"
-          />
-          {{ t("sshSession.hostKey.accept") }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
   </section>
 </template>
 
@@ -1656,7 +1532,8 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.ssh-terminal-pane__state {
+.ssh-terminal-pane__state,
+.ssh-terminal-pane__heartbeat {
   flex: none;
   white-space: nowrap;
 }

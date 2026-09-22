@@ -12,8 +12,6 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import {
   decidePluginTerminalInput,
-  fetchPluginCatalogSnapshot,
-  installCatalogPlugin,
   installLocalPlugin,
   invokePluginContribution,
   listPluginAudit,
@@ -21,7 +19,6 @@ import {
   listPluginOperationPermissions,
   preparePluginContributionCopy,
   prepareLocalPluginPackage,
-  refreshPluginCatalog,
   revokePluginOperationPermission,
   clearPluginOperationPermissions,
   setPluginLocale,
@@ -68,42 +65,6 @@ describe("plugin Core client boundaries", () => {
     });
     expect(installRequest.idempotencyKey).toBe(`plugin-local-install-${installRequest.operationId}`);
     expect(uninstallRequest.idempotencyKey).toBe(`plugin-uninstall-${uninstallRequest.operationId}`);
-  });
-
-  it("uses the verified catalog snapshot, refresh, and install command contracts", async () => {
-    await fetchPluginCatalogSnapshot();
-    await refreshPluginCatalog();
-    await installCatalogPlugin({
-      pluginId: "org.norixor.fixture.ssh-sync",
-      version: "1.0.0",
-      expectedStateVersion: null,
-      capabilityGrants: [
-        { capability: "storagePlugin", granted: true },
-        { capability: "sshSync", granted: false },
-      ],
-    });
-
-    expect(tauri.invoke.mock.calls.map(([command]) => command)).toEqual([
-      "plugin_catalog_snapshot",
-      "plugin_catalog_refresh",
-      "plugin_install",
-    ]);
-    expect(tauri.invoke.mock.calls[0]?.[1]).toEqual({
-      request: { meta: { requestId: expect.any(String) } },
-    });
-    const refreshRequest = tauri.invoke.mock.calls[1]?.[1].request;
-    const installRequest = tauri.invoke.mock.calls[2]?.[1].request;
-    expect(refreshRequest.idempotencyKey).toBe(`plugin-catalog-refresh-${refreshRequest.operationId}`);
-    expect(installRequest).toMatchObject({
-      pluginId: "org.norixor.fixture.ssh-sync",
-      version: "1.0.0",
-      expectedStateVersion: null,
-      capabilityGrants: [
-        { capability: "storagePlugin", granted: true },
-        { capability: "sshSync", granted: false },
-      ],
-    });
-    expect(installRequest.idempotencyKey).toBe(`plugin-install-${installRequest.operationId}`);
   });
 
   it("reads Core-owned declarative contribution projections", async () => {

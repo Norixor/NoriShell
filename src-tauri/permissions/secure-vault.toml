@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "secure-vault-commands"
+description = "Read, answer or cancel the exact Vault prompt owned by this window."
+commands.allow = ["secure_vault_get", "secure_vault_submit", "secure_vault_cancel"]

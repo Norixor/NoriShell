@@ -22,6 +22,7 @@ import NvxTerminalPasteGuard from "./NvxTerminalPasteGuard.vue";
 
 const props = defineProps<{
   readOnly: boolean;
+  reconnectOnInput?: boolean;
   terminalLabel: string;
   gapLabel: string;
   paneId?: string;
@@ -31,6 +32,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   input: [value: string];
+  reconnectRequest: [];
   resize: [rows: number, cols: number];
   selectionChange: [hasSelection: boolean];
   searchRequest: [];
@@ -195,11 +197,20 @@ function selection() {
 function handlePaste(event: ClipboardEvent) {
   event.preventDefault();
   event.stopImmediatePropagation();
+  if (canRequestReconnect() && event.clipboardData?.getData("text/plain")) {
+    emit("reconnectRequest");
+    return;
+  }
   if (props.readOnly) return;
   void pasteGuard.value?.requestPaste(event.clipboardData?.getData("text/plain") ?? "");
 }
 
 function pasteFromClipboard() {
+  if (canRequestReconnect()) {
+    // A paste shortcut is an explicit recovery gesture; do not read or retain its clipboard payload.
+    emit("reconnectRequest");
+    return;
+  }
   if (props.readOnly) return;
   return pasteGuard.value?.pasteFromClipboard();
 }
@@ -503,6 +514,16 @@ function handleTerminalCustomKeyEvent(event: KeyboardEvent) {
   optionKeyTracker.observe(event);
   if (event.defaultPrevented) return false;
   applyKeyboardOptions(event);
+  if (canRequestReconnect()
+    && event.type === "keydown"
+    && !event.repeat && !event.metaKey && !event.ctrlKey && !event.altKey
+    && (Array.from(event.key).length === 1 || ["Enter", "Dead", "Process"].includes(event.key))) {
+    // Keep xterm read-only: consume the gesture, never replay its bytes into the new Shell.
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    emit("reconnectRequest");
+    return false;
+  }
   if (props.readOnly) return false;
   const keyboard = preferences.resolvedKeyboard(props.hostId);
   if (keyboard.backspaceMode === "bs" && isPlainBackspace(event)) {
@@ -513,6 +534,13 @@ function handleTerminalCustomKeyEvent(event: KeyboardEvent) {
     return false;
   }
   return true;
+}
+
+function canRequestReconnect() {
+  return props.readOnly && props.reconnectOnInput
+    && terminal?.textarea === document.activeElement
+    && terminalHasForegroundFocus()
+    && !document.querySelector('[role="dialog"][aria-modal="true"]');
 }
 
 function invalidateDraft() { emit("draftChange", draftTracker.invalidate()); }

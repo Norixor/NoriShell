@@ -267,7 +267,7 @@ describe("NvxServerCard", () => {
       .toBe("未连接");
     expect(wrapper.text()).toContain("等待解锁 Vault");
     expect(wrapper.text()).not.toContain("前往解锁 Vault");
-    expect(wrapper.find('button[aria-label="加密 Vault"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="解锁并继续监控"]').exists()).toBe(true);
     expect(wrapper.text()).not.toContain("正在采样");
     expect(wrapper.get(".nvx-server-card__network").attributes("data-status")).toBe("disabled");
   });

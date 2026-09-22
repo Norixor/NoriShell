@@ -1,0 +1,11 @@
+# Declarative UI and extension targets
+
+Plugins return versioned declarative documents, not HTML, Vue components, CSS, routes, script, arbitrary DOM events, or Tauri commands. Nodes, fields, action ids, document size, depth, lists, patches, and action concurrency are bounded by Core. Text is untrusted. A contribution is accepted only for the same package, instance, target, context handle, generation, and document revision.
+
+Mount only in a target registered by Core. A target supplies its own allowed node kinds, layout budget, contextual projection, and risk level. Page and navigation contributions stay within their controlled plugin grouping; they do not create system navigation, modify the Global Header, or become Terminal workspace state. Secure routes and secure surfaces are excluded.
+
+Use host localization and shared controls. Password fields are restricted to plugin pages: their value starts empty, is never returned to Wasm, is cleared after submit, and can only be consumed by the protected credential broker for the same action. See the complete node, field, and target directory in [Plugin API reference](../plugin-api/ui.en.md).
+
+An ordinary `UiAction` must return exactly one valid `ui.document` for the same target. This also applies when the action emits `ui.webview.open`: retain or update its document alongside the surface request. Only `api.request`, resource broker, and remote operation broker requests may initially omit the document and supply its replacement through `BrokerResult`. SDK/Wasm verification must cover the complete action output and Core validation, not just individual JSON outputs or successful ABI execution.
+
+Declarative `clipboard.write` results support multiline text up to 16 KiB. LF, CR, and Tab are allowed; other control characters are rejected. Writing still requires an explicit click on a rendered `CopyButton` and Core permission/context checks. Predeclared copyValues in `ui.panel` remain single-line values up to 512 bytes. A surface request with `surfaceId: "toolbox"` requires `assets/isolated/toolbox.html` in the ZIP. The wrapper transfers its MessagePort with the sole `{type: "norishell.bridge.ready", protocol: 13, locale, theme}` handshake.

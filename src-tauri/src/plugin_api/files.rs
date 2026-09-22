@@ -19,9 +19,9 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-#[cfg(unix)]
-use cap_std::fs::MetadataExt as _;
 #[cfg(windows)]
+use cap_fs_ext::MetadataExt as _;
+#[cfg(unix)]
 use cap_std::fs::MetadataExt as _;
 use cap_std::fs::{Dir, File, OpenOptions};
 use norishell_core_api::{
@@ -997,9 +997,22 @@ fn selected_file_identity(
     parent: &Dir,
     file_name: &std::ffi::OsStr,
 ) -> Result<SelectedFileIdentity, PluginApiErrorCode> {
+    #[cfg(not(windows))]
     let metadata = parent
         .symlink_metadata(Path::new(file_name))
         .map_err(map_io)?;
+    #[cfg(windows)]
+    let metadata = {
+        let path = Path::new(file_name);
+        let entry = parent.symlink_metadata(path).map_err(map_io)?;
+        if entry.is_symlink() || !entry.is_file() {
+            return Err(PluginApiErrorCode::Conflict);
+        }
+        parent
+            .open(path)
+            .and_then(|file| file.metadata())
+            .map_err(map_io)?
+    };
     if metadata.is_symlink() || !metadata.is_file() {
         return Err(PluginApiErrorCode::Conflict);
     }
@@ -1015,15 +1028,7 @@ fn object_identity(metadata: &cap_std::fs::Metadata) -> Result<String, PluginApi
 
 #[cfg(windows)]
 fn object_identity(metadata: &cap_std::fs::Metadata) -> Result<String, PluginApiErrorCode> {
-    Ok(format!(
-        "{}:{}",
-        metadata
-            .volume_serial_number()
-            .ok_or(PluginApiErrorCode::Unavailable)?,
-        metadata
-            .file_index()
-            .ok_or(PluginApiErrorCode::Unavailable)?,
-    ))
+    Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
 }
 
 #[cfg(not(any(unix, windows)))]

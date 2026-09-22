@@ -15,7 +15,6 @@ vi.mock("../core-api/client", async (importOriginal) => ({
     state: "succeeded", progressPercent: 100, errorCode: null, startedAtUnixMs: 0n, updatedAtUnixMs: 0n,
   })),
   listInstalledPlugins: vi.fn(async () => []),
-  fetchPluginCatalogSnapshot: vi.fn(async () => null),
   listPluginAudit: vi.fn(async () => []),
   getPluginReadiness: vi.fn(async () => ({ ready: true })),
   enablePlugin: vi.fn(),

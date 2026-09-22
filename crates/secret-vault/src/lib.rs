@@ -136,6 +136,8 @@ pub enum VaultError {
     SecretBatchValueTooLarge { max_bytes: usize },
     #[error("secret reference {0} already exists in the vault or batch")]
     DuplicateSecretRef(SecretRef),
+    #[error("secret reference {0} does not exist in the vault")]
+    SecretNotFound(SecretRef),
     #[error("{kind:?} secret must not be empty")]
     EmptySecret { kind: SecretKind },
     #[error("{kind:?} secret exceeds the limit of {max_bytes} bytes")]
@@ -782,6 +784,61 @@ impl UnlockedVault {
     /// committed entries and this instance requires a reload.
     pub fn insert_secrets_with_refs(&mut self, secrets: &[SecretInsert<'_>]) -> Result<()> {
         self.insert_secrets_with_refs_using(secrets, Self::persist)
+    }
+
+    /// Replaces one existing secret while preserving its stable reference.
+    ///
+    /// The existing and replacement kinds must match. Definite pre-commit failures restore the
+    /// previous value, while an uncertain post-replacement outcome poisons this unlocked instance.
+    pub fn replace_secret_with_ref(&mut self, secret: SecretInsert<'_>) -> Result<()> {
+        self.replace_secret_with_ref_using(secret, Self::persist)
+    }
+
+    fn replace_secret_with_ref_using<F>(
+        &mut self,
+        secret: SecretInsert<'_>,
+        persist: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut Self) -> Result<()>,
+    {
+        self.ensure_usable()?;
+        validate_secret_batch(&BTreeMap::new(), std::slice::from_ref(&secret))?;
+        let previous_revision = self.payload.revision;
+        let next_revision = previous_revision
+            .checked_add(1)
+            .ok_or(VaultError::InvalidEnvelope("revision overflow"))?;
+        let previous = self
+            .payload
+            .entries
+            .remove(&secret.secret_ref)
+            .ok_or(VaultError::SecretNotFound(secret.secret_ref))?;
+        if previous.kind != secret.kind {
+            let previous_kind = previous.kind;
+            self.payload.entries.insert(secret.secret_ref, previous);
+            return Err(VaultError::SecretKindMismatch {
+                expected: previous_kind,
+                actual: secret.kind,
+            });
+        }
+        self.payload.entries.insert(
+            secret.secret_ref,
+            SecretEntry {
+                kind: secret.kind,
+                value: secret.value.to_vec(),
+            },
+        );
+        self.payload.revision = next_revision;
+        if let Err(error) = persist(self) {
+            if matches!(error, VaultError::CommitStateUnknown(_)) {
+                self.poisoned = true;
+            } else {
+                self.payload.entries.insert(secret.secret_ref, previous);
+                self.payload.revision = previous_revision;
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Idempotently deletes a non-empty batch in one payload revision. Missing
@@ -2313,6 +2370,66 @@ mod tests {
                 .expose(),
             b"existing"
         );
+    }
+
+    #[test]
+    fn atomically_replaces_an_existing_secret_without_changing_its_reference() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        let mut vault = UnlockedVault::create(&path, PASSWORD).expect("create vault");
+        let secret_ref = vault
+            .insert_secret(SecretKind::Password, b"old password")
+            .expect("insert password");
+        let previous_revision = vault.revision();
+
+        vault
+            .replace_secret_with_ref(SecretInsert::new(
+                secret_ref,
+                SecretKind::Password,
+                b"new password",
+            ))
+            .expect("replace password");
+
+        assert_eq!(vault.revision(), previous_revision + 1);
+        assert_eq!(vault.entry_count(), 1);
+        assert_eq!(
+            vault
+                .read_secret(secret_ref, SecretKind::Password)
+                .expect("correct kind")
+                .expect("password exists")
+                .expose(),
+            b"new password"
+        );
+    }
+
+    #[test]
+    fn secret_replacement_rolls_back_after_a_definite_commit_failure() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        let mut vault = UnlockedVault::create(&path, PASSWORD).expect("create vault");
+        let secret_ref = vault
+            .insert_secret(SecretKind::Password, b"old password")
+            .expect("insert password");
+        let previous_revision = vault.revision();
+
+        let error = vault
+            .replace_secret_with_ref_using(
+                SecretInsert::new(secret_ref, SecretKind::Password, b"new password"),
+                |_| Err(VaultError::Io(std::io::Error::other("injected failure"))),
+            )
+            .expect_err("definite failure");
+
+        assert!(matches!(error, VaultError::Io(_)));
+        assert_eq!(vault.revision(), previous_revision);
+        assert_eq!(
+            vault
+                .read_secret(secret_ref, SecretKind::Password)
+                .expect("correct kind")
+                .expect("password exists")
+                .expose(),
+            b"old password"
+        );
+        assert!(!vault.requires_reload());
     }
 
     #[test]

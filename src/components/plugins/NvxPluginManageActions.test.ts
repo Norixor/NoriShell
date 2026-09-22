@@ -58,20 +58,17 @@ describe("NvxPluginManageActions", () => {
     expect(wrapper.emitted("enable")).toHaveLength(1);
   });
 
-  it("offers a visible update action and lets a crashed plugin restart", async () => {
+  it("lets a crashed plugin restart without an online update action", async () => {
     i18n.global.locale.value = "en";
     const wrapper = mount(NvxPluginManageActions, {
-      props: { state: "crashed", updateAvailable: true },
+      props: { state: "crashed" },
       global: { plugins: [i18n] },
     });
 
     const buttons = wrapper.findAll("button");
-    expect(buttons[0]?.text()).toContain("Update");
+    expect(buttons[0]?.text()).toContain("Enable");
+    expect(wrapper.text()).not.toContain("Update");
     await buttons[0]?.trigger("click");
-    expect(wrapper.emitted("update")).toHaveLength(1);
-
-    expect(buttons[1]?.text()).toContain("Enable");
-    await buttons[1]?.trigger("click");
     expect(wrapper.emitted("enable")).toHaveLength(1);
   });
   it("offers settings only for a declared schema, including disabled plugins", async () => {

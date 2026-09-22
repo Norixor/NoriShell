@@ -1,10 +1,8 @@
 <script setup lang="ts">
-import { ArrowLeft, KeyRound, Pencil, Plus, Trash2 } from "lucide-vue-next";
+import { KeyRound, Pencil, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
 
-import { NvxPageHeader } from "../components/layout";
 import {
   NvxButton,
   NvxCard,
@@ -28,16 +26,17 @@ import type {
   IdentityDeleteImpact,
   IdentitySummary,
 } from "../core-api/generated/core-api";
+import { requestSecureCredential } from "../core-api/secure-credential-client";
+import { useTipsStore } from "../stores/tips";
 
 const { t } = useI18n();
-const router = useRouter();
+const tips = useTipsStore();
 
 const identities = ref<IdentitySummary[]>([]);
 const credentials = ref<Record<string, CredentialRefSummary[]>>({});
 const loading = ref(true);
 const loadFailed = ref(false);
 const actionPending = ref(false);
-const actionFailed = ref(false);
 const editorOpen = ref(false);
 const editTarget = ref<IdentitySummary | null>(null);
 const labelDraft = ref("");
@@ -58,6 +57,14 @@ function credentialLabel(credential: CredentialRefSummary) {
     label: credential.label,
     method: t(`identitySettings.methods.${credential.method}`),
     priority: credential.priority,
+  });
+}
+
+function showActionFailed() {
+  tips.show({
+    scope: "identity-settings-action",
+    tone: "error",
+    title: t("identitySettings.actionFailed"),
   });
 }
 
@@ -83,7 +90,7 @@ function openCreate() {
   editTarget.value = null;
   labelDraft.value = "";
   usernameDraft.value = "";
-  actionFailed.value = false;
+  tips.dismissScope("identity-settings-action");
   editorOpen.value = true;
 }
 
@@ -91,14 +98,14 @@ function openEdit(identity: IdentitySummary) {
   editTarget.value = identity;
   labelDraft.value = identity.label;
   usernameDraft.value = identity.username ?? "";
-  actionFailed.value = false;
+  tips.dismissScope("identity-settings-action");
   editorOpen.value = true;
 }
 
 async function saveIdentity() {
   if (!canSave.value) return;
   actionPending.value = true;
-  actionFailed.value = false;
+  tips.dismissScope("identity-settings-action");
   try {
     const target = editTarget.value;
     if (target) {
@@ -114,19 +121,19 @@ async function saveIdentity() {
     editorOpen.value = false;
     await load();
   } catch {
-    actionFailed.value = true;
+    showActionFailed();
   } finally {
     actionPending.value = false;
   }
 }
 
 async function openDelete(identity: IdentitySummary) {
-  actionFailed.value = false;
+  tips.dismissScope("identity-settings-action");
   actionPending.value = true;
   try {
     deleteImpact.value = await fetchIdentityDeleteImpact(identity.identityId);
   } catch {
-    actionFailed.value = true;
+    showActionFailed();
   } finally {
     actionPending.value = false;
   }
@@ -136,13 +143,39 @@ async function confirmDelete() {
   const impact = deleteImpact.value;
   if (!impact || deleteBlocked.value || actionPending.value) return;
   actionPending.value = true;
-  actionFailed.value = false;
+  tips.dismissScope("identity-settings-action");
   try {
     await deleteIdentity(impact.identity.identityId, impact.identity.stateVersion);
     deleteImpact.value = null;
     await load();
   } catch {
-    actionFailed.value = true;
+    showActionFailed();
+  } finally {
+    actionPending.value = false;
+  }
+}
+
+async function changePassword(identity: IdentitySummary, credential: CredentialRefSummary) {
+  if (actionPending.value || credential.method !== "password") return;
+  actionPending.value = true;
+  tips.dismissScope("identity-settings-action");
+  try {
+    const replaced = await requestSecureCredential({
+      kind: "password",
+      label: credential.label,
+      identityId: identity.identityId,
+      credentialRefId: credential.credentialRefId,
+      expectedStateVersion: credential.stateVersion,
+    });
+    if (!replaced) return;
+    tips.show({
+      scope: "identity-settings-action",
+      tone: "success",
+      title: t("identitySettings.passwordChanged"),
+    });
+    await load();
+  } catch {
+    showActionFailed();
   } finally {
     actionPending.value = false;
   }
@@ -153,23 +186,24 @@ onMounted(load);
 
 <template>
   <section class="management-page">
-    <NvxPageHeader
-      :breadcrumb="t('identitySettings.breadcrumb')"
-      :title="t('identitySettings.title')"
-      :description="t('identitySettings.description')"
-    >
-      <template #actions>
+    <header class="management-heading">
+      <div>
+        <h2>{{ t('identitySettings.title') }}</h2>
+        <p>{{ t('identitySettings.description') }}</p>
+      </div>
+      <div class="management-heading__actions">
         <NvxButton
           variant="secondary"
           size="sm"
-          @click="router.push('/settings')"
+          :loading="loading"
+          @click="load"
         >
           <NvxIcon
-            :icon="ArrowLeft"
+            :icon="RefreshCw"
             :size="16"
             aria-hidden="true"
           />
-          {{ t('identitySettings.back') }}
+          {{ t('identitySettings.refresh') }}
         </NvxButton>
         <NvxButton
           size="sm"
@@ -182,8 +216,8 @@ onMounted(load);
           />
           {{ t('identitySettings.create') }}
         </NvxButton>
-      </template>
-    </NvxPageHeader>
+      </div>
+    </header>
 
     <NvxInlineNotice
       v-if="loadFailed"
@@ -212,6 +246,7 @@ onMounted(load);
       <NvxCard
         v-for="identity in identities"
         :key="identity.identityId"
+        class="management-card"
       >
         <div class="management-card__header">
           <div class="management-card__identity">
@@ -221,7 +256,7 @@ onMounted(load);
             >
               <NvxIcon
                 :icon="KeyRound"
-                :size="20"
+                :size="16"
               />
             </span>
             <div>
@@ -232,7 +267,7 @@ onMounted(load);
           <div class="management-card__actions">
             <NvxButton
               size="sm"
-              variant="secondary"
+              variant="ghost"
               @click="openEdit(identity)"
             >
               <NvxIcon
@@ -244,7 +279,7 @@ onMounted(load);
             </NvxButton>
             <NvxButton
               size="sm"
-              variant="danger"
+              variant="ghost"
               @click="openDelete(identity)"
             >
               <NvxIcon
@@ -262,12 +297,24 @@ onMounted(load);
               count: credentials[identity.identityId]?.length ?? 0,
             }) }}
           </NvxStatusLabel>
-          <ul v-if="credentials[identity.identityId]?.length">
+          <ul
+            v-if="credentials[identity.identityId]?.length"
+            class="credential-list"
+          >
             <li
               v-for="credential in credentials[identity.identityId]"
               :key="credential.credentialRefId"
             >
-              {{ credentialLabel(credential) }}
+              <span>{{ credentialLabel(credential) }}</span>
+              <NvxButton
+                v-if="credential.method === 'password'"
+                size="sm"
+                variant="secondary"
+                :disabled="actionPending"
+                @click="changePassword(identity, credential)"
+              >
+                {{ t('identitySettings.changePassword') }}
+              </NvxButton>
             </li>
           </ul>
         </div>
@@ -280,7 +327,6 @@ onMounted(load);
       :description="t('identitySettings.editor.description')"
       :close-label="t('identitySettings.close')"
       :dismissible="!actionPending"
-      @close="actionFailed = false"
     >
       <div class="management-form">
         <NvxField
@@ -305,12 +351,6 @@ onMounted(load);
             :maxlength="128"
           />
         </NvxField>
-        <NvxInlineNotice
-          v-if="actionFailed"
-          tone="error"
-        >
-          {{ t('identitySettings.actionFailed') }}
-        </NvxInlineNotice>
       </div>
       <template #actions>
         <NvxButton
@@ -337,7 +377,6 @@ onMounted(load);
       :close-label="t('identitySettings.close')"
       :dismissible="!actionPending"
       @update:model-value="deleteImpact = $event ? deleteImpact : null"
-      @close="actionFailed = false"
     >
       <template v-if="deleteImpact">
         <NvxInlineNotice :tone="deleteBlocked ? 'warning' : 'info'">
@@ -368,12 +407,6 @@ onMounted(load);
             }) }}
           </p>
         </div>
-        <NvxInlineNotice
-          v-if="actionFailed"
-          tone="error"
-        >
-          {{ t('identitySettings.actionFailed') }}
-        </NvxInlineNotice>
       </template>
       <template #actions>
         <NvxButton
@@ -398,14 +431,47 @@ onMounted(load);
 
 <style scoped>
 .management-page {
-  height: 100%;
-  overflow: auto;
-  padding: var(--nvx-space-6);
+  display: grid;
+  gap: var(--nvx-space-4);
+}
+
+.management-heading,
+.management-heading__actions {
+  display: flex;
+  align-items: center;
+}
+
+.management-heading {
+  gap: var(--nvx-space-4);
+  justify-content: space-between;
+}
+
+.management-heading__actions {
+  gap: var(--nvx-space-2);
+}
+
+.management-heading h2,
+.management-heading p {
+  margin: 0;
+}
+
+.management-heading h2 {
+  font-size: var(--nvx-font-size-lg);
+}
+
+.management-heading p {
+  margin-top: var(--nvx-space-1);
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-sm);
 }
 
 .management-list {
   display: grid;
-  gap: var(--nvx-space-4);
+  gap: var(--nvx-space-2);
+}
+
+.management-card {
+  padding: var(--nvx-space-3);
 }
 
 .management-card__header,
@@ -416,19 +482,19 @@ onMounted(load);
 }
 
 .management-card__header {
-  gap: var(--nvx-space-4);
+  gap: var(--nvx-space-3);
   justify-content: space-between;
 }
 
 .management-card__identity,
 .management-card__actions {
-  gap: var(--nvx-space-3);
+  gap: var(--nvx-space-2);
 }
 
 .management-card__icon {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   flex: 0 0 auto;
   place-items: center;
   border-radius: var(--nvx-radius-md);
@@ -457,15 +523,23 @@ onMounted(load);
 .management-card__details {
   display: grid;
   gap: var(--nvx-space-2);
-  margin-top: var(--nvx-space-4);
-  padding-top: var(--nvx-space-4);
+  margin-top: var(--nvx-space-2);
+  padding-top: var(--nvx-space-2);
   border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .management-card__details ul {
-  display: grid;
-  gap: var(--nvx-space-1);
-  padding-left: var(--nvx-space-5);
+  padding: 0;
+  list-style: none;
+}
+
+.credential-list li {
+  display: flex;
+  gap: var(--nvx-space-3);
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+  padding: var(--nvx-space-1) 0;
 }
 
 .management-form,
@@ -475,10 +549,7 @@ onMounted(load);
 }
 
 @media (max-width: 760px) {
-  .management-page {
-    padding: var(--nvx-space-4);
-  }
-
+  .management-heading,
   .management-card__header {
     align-items: flex-start;
     flex-direction: column;

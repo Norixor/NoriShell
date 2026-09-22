@@ -341,6 +341,56 @@ pub(crate) fn resolve_long_lived_connection_profile(
     })
 }
 
+/// Returns whether every available credential route for this connection needs
+/// a Vault-backed secret. Agent and transient credentials keep a route usable
+/// without opening the Vault.
+pub(crate) fn connection_requires_vault(connection: &ResolvedSshConnectionBase) -> bool {
+    let ingress_requires_vault = match &connection.ingress {
+        ResolvedRouteIngress::HttpConnectProxy { authentication, .. }
+        | ResolvedRouteIngress::Socks5Proxy { authentication, .. } => authentication.is_some(),
+        ResolvedRouteIngress::DirectTcp => false,
+    };
+    ingress_requires_vault
+        || credentials_require_vault(&connection.credentials)
+        || connection
+            .jump_hosts
+            .iter()
+            .any(|jump| credentials_require_vault(&jump.credentials))
+}
+
+/// Returns whether any route stage can use a Vault-backed secret. A mixed
+/// credential plan can start through an Agent credential, then use this fact
+/// to offer an explicit Vault recovery action after authentication fails.
+pub(crate) fn connection_has_vault_credentials(connection: &ResolvedSshConnectionBase) -> bool {
+    let ingress_has_vault = match &connection.ingress {
+        ResolvedRouteIngress::HttpConnectProxy { authentication, .. }
+        | ResolvedRouteIngress::Socks5Proxy { authentication, .. } => authentication.is_some(),
+        ResolvedRouteIngress::DirectTcp => false,
+    };
+    ingress_has_vault
+        || connection.credentials.iter().any(credential_requires_vault)
+        || connection
+            .jump_hosts
+            .iter()
+            .any(|jump| jump.credentials.iter().any(credential_requires_vault))
+}
+
+fn credentials_require_vault(credentials: &[ConnectionCredential]) -> bool {
+    !credentials.is_empty() && credentials.iter().all(credential_requires_vault)
+}
+
+fn credential_requires_vault(credential: &ConnectionCredential) -> bool {
+    matches!(
+        credential,
+        ConnectionCredential::Stored(record)
+            if matches!(
+                record.details,
+                CredentialRecordDetails::Password { .. }
+                    | CredentialRecordDetails::PrivateKey { .. }
+            )
+    )
+}
+
 fn resolve_quick_connect(
     hosts: &HostService,
     transient_credentials: &TransientCredentialService,
@@ -543,9 +593,10 @@ fn resolve_saved_host_base(
         .collect::<Vec<_>>()
         .join(";");
     let revision_token = format!(
-        "base-v1:{}:{}:{}:{}:{}:{}:{}:{}",
+        "base-v2:{}:{}:{}:{}:{}:{}:{}:{}:{}",
         snapshot.host.host_id.as_str(),
         snapshot.host.state_version.get(),
+        revision_token_component(&username),
         config.route_plan.revision.get(),
         config.authentication_plan.revision.get(),
         config.algorithm_policy.revision.get(),
@@ -587,11 +638,18 @@ fn ingress_credential_token(ingress: &ResolvedRouteIngress) -> String {
             authentication: Some(authentication),
             ..
         } => format!(
-            "{}:{}",
+            "{}:{}:{}",
             authentication.credential.credential_ref_id.as_str(),
             authentication.credential.state_version.get(),
+            revision_token_component(&authentication.username),
         ),
     }
+}
+
+/// Encodes dynamic text without relying on a delimiter that could occur in a
+/// user name. Tokens are opaque freshness fences and contain no secrets.
+fn revision_token_component(value: &str) -> String {
+    format!("{}:{value}", value.len())
 }
 
 fn validate_jump_host_ids(
@@ -637,6 +695,7 @@ fn resolve_jump_host(
     let credentials = select_stored_credentials(snapshot.credentials)?;
     let algorithm_policy = resolve_algorithm_policy(&config.algorithm_policy)?;
     let credential_token = connection_credentials_token(&credentials);
+    let username_token = revision_token_component(&username);
     Ok(ResolvedJumpHost {
         host_id: snapshot.host.host_id.clone(),
         endpoint: SshSessionEndpoint {
@@ -648,9 +707,10 @@ fn resolve_jump_host(
         credentials,
         algorithm_policy,
         revision_token: format!(
-            "jump-v1:{}:{}:{}:{}:{}:{}",
+            "jump-v2:{}:{}:{}:{}:{}:{}:{}",
             snapshot.host.host_id.as_str(),
             snapshot.host.state_version.get(),
+            username_token,
             config.authentication_plan.revision.get(),
             config.algorithm_policy.revision.get(),
             config.route_plan.revision.get(),
@@ -819,12 +879,14 @@ mod tests {
         ProxyEndpoint, RequestId, ShellHeartbeatLineEnding, SshSessionTarget,
         TransientCredentialPrepareRequest, WireSequence,
     };
+    use norishell_ssh_domain::ssh_sha256_fingerprint;
 
     use super::*;
 
-    fn ready_password(
+    fn ready_vault_credential(
         repository: &mut AppRepository,
         identity_id: &norishell_core_api::IdentityId,
+        kind: CredentialKind,
         priority: u32,
         label: &str,
     ) -> CredentialRecord {
@@ -832,30 +894,47 @@ mod tests {
         let pending = repository
             .begin_credential_import(
                 &operation_id,
-                &format!("resolver-password-{priority}-{}", label.to_lowercase()),
+                &format!("resolver-{kind:?}-{priority}-{}", label.to_lowercase()),
                 identity_id,
-                CredentialKind::Password,
+                kind,
                 priority,
                 label,
                 false,
             )
             .expect("begin credential import");
+        let public_key_metadata =
+            (kind == CredentialKind::PrivateKey).then_some(("ssh-ed25519", "SHA256:public"));
         repository
             .mark_credential_import_ready(
                 &pending.credential_ref_id,
                 &operation_id,
                 pending.state_version,
-                None,
-                None,
+                public_key_metadata.map(|metadata| metadata.0),
+                public_key_metadata.map(|metadata| metadata.1),
             )
             .expect("mark credential ready")
+    }
+
+    fn ready_password(
+        repository: &mut AppRepository,
+        identity_id: &norishell_core_api::IdentityId,
+        priority: u32,
+        label: &str,
+    ) -> CredentialRecord {
+        ready_vault_credential(
+            repository,
+            identity_id,
+            CredentialKind::Password,
+            priority,
+            label,
+        )
     }
 
     #[test]
     fn saved_host_defaults_resolve_through_one_revisioned_profile() {
         let directory = tempfile::tempdir().expect("tempdir");
         let database_path = directory.path().join("ssh/norishell.sqlite3");
-        let mut repository = AppRepository::open(database_path).expect("repository");
+        let mut repository = AppRepository::open(&database_path).expect("repository");
         let identity = repository
             .create_identity("Operations", Some("deploy"))
             .expect("identity");
@@ -883,6 +962,9 @@ mod tests {
             None,
         )
         .expect("resolve saved host");
+        let long_lived =
+            resolve_long_lived_connection_profile(&hosts, &host.host_id, host.state_version)
+                .expect("resolve long-lived saved host");
 
         assert_eq!(profile.endpoint.address, "Example.COM.");
         assert_eq!(profile.username, "deploy");
@@ -891,6 +973,135 @@ mod tests {
             &credential.credential_ref_id
         );
         assert!(profile.revision_token.starts_with("terminal-v1:"));
+        assert!(connection_requires_vault(&long_lived.connection));
+        assert!(connection_has_vault_credentials(&long_lived.connection));
+    }
+
+    #[test]
+    fn private_key_requires_vault_and_agent_only_does_not() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_path = directory.path().join("ssh/norishell.sqlite3");
+        let mut repository = AppRepository::open(&database_path).expect("repository");
+        let private_key_identity = repository
+            .create_identity("Private key", Some("deploy"))
+            .expect("private-key identity");
+        ready_vault_credential(
+            &mut repository,
+            &private_key_identity.identity_id,
+            CredentialKind::PrivateKey,
+            0,
+            "Private key",
+        );
+        let private_key_host = repository
+            .create_host(
+                "Private key host",
+                "private.example",
+                22,
+                None,
+                Some(&private_key_identity.identity_id),
+                false,
+            )
+            .expect("private-key host");
+
+        let agent_identity = repository
+            .create_identity("Agent", Some("deploy"))
+            .expect("agent identity");
+        let agent_public_key = b"resolver-agent-public-key";
+        repository
+            .create_ssh_agent_credential(
+                &OperationId::new(),
+                "resolver-agent-only",
+                &agent_identity.identity_id,
+                0,
+                "Agent key",
+                agent_public_key,
+                "ssh-ed25519",
+                &ssh_sha256_fingerprint(agent_public_key),
+            )
+            .expect("agent credential");
+        let agent_host = repository
+            .create_host(
+                "Agent host",
+                "agent.example",
+                22,
+                None,
+                Some(&agent_identity.identity_id),
+                false,
+            )
+            .expect("agent host");
+        drop(repository);
+
+        let hosts = HostService::start(directory.path()).expect("host service");
+        let private_key_profile = resolve_long_lived_connection_profile(
+            &hosts,
+            &private_key_host.host_id,
+            private_key_host.state_version,
+        )
+        .expect("resolve private-key profile");
+        assert!(connection_requires_vault(&private_key_profile.connection));
+        assert!(connection_has_vault_credentials(
+            &private_key_profile.connection
+        ));
+
+        let agent_profile = resolve_long_lived_connection_profile(
+            &hosts,
+            &agent_host.host_id,
+            agent_host.state_version,
+        )
+        .expect("resolve agent profile");
+        assert!(!connection_requires_vault(&agent_profile.connection));
+        assert!(!connection_has_vault_credentials(&agent_profile.connection));
+    }
+
+    #[test]
+    fn effective_identity_username_changes_connection_revision_token() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let database_path = directory.path().join("ssh/norishell.sqlite3");
+        let mut repository = AppRepository::open(&database_path).expect("repository");
+        let identity = repository
+            .create_identity("Operations", Some("deploy"))
+            .expect("identity");
+        ready_password(&mut repository, &identity.identity_id, 0, "Primary");
+        let host = repository
+            .create_host(
+                "Production",
+                "identity.example",
+                22,
+                None,
+                Some(&identity.identity_id),
+                false,
+            )
+            .expect("host");
+        drop(repository);
+
+        let hosts = HostService::start(directory.path()).expect("host service");
+        let before =
+            resolve_long_lived_connection_profile(&hosts, &host.host_id, host.state_version)
+                .expect("resolve original profile")
+                .connection
+                .revision_token;
+        drop(hosts);
+
+        let mut repository = AppRepository::open(&database_path).expect("repository");
+        repository
+            .update_identity(
+                &identity.identity_id,
+                identity.state_version,
+                "Operations",
+                Some("release"),
+            )
+            .expect("update identity username");
+        drop(repository);
+
+        let after = resolve_long_lived_connection_profile(
+            &HostService::start(directory.path()).expect("host service"),
+            &host.host_id,
+            host.state_version,
+        )
+        .expect("resolve updated profile")
+        .connection
+        .revision_token;
+        assert_ne!(before, after);
     }
 
     #[test]
@@ -1093,7 +1304,7 @@ mod tests {
     fn proxy_authentication_uses_its_credential_identity_username() {
         let directory = tempfile::tempdir().expect("tempdir");
         let database_path = directory.path().join("ssh/norishell.sqlite3");
-        let mut repository = AppRepository::open(database_path).expect("repository");
+        let mut repository = AppRepository::open(&database_path).expect("repository");
         let target_identity = repository
             .create_identity("Target", Some("deploy"))
             .expect("target identity");
@@ -1146,12 +1357,40 @@ mod tests {
             &HostService::start(directory.path()).expect("host service"),
             &TransientCredentialService::default(),
             &SshSessionTarget::Host {
-                host_id: host.host_id,
+                host_id: host.host_id.clone(),
                 expected_host_state_version: host.state_version,
             },
             None,
         )
         .expect("resolve HTTP CONNECT profile");
+        let long_lived = resolve_long_lived_connection_profile(
+            &HostService::start(directory.path()).expect("host service"),
+            &host.host_id,
+            host.state_version,
+        )
+        .expect("resolve long-lived HTTP CONNECT profile");
+        assert!(connection_requires_vault(&long_lived.connection));
+        assert!(connection_has_vault_credentials(&long_lived.connection));
+        let original_revision_token = long_lived.connection.revision_token.clone();
+        let mut repository = AppRepository::open(&database_path).expect("repository");
+        repository
+            .update_identity(
+                &proxy_identity.identity_id,
+                proxy_identity.state_version,
+                "Proxy",
+                Some("proxy-release"),
+            )
+            .expect("update proxy identity username");
+        drop(repository);
+        let updated_revision_token = resolve_long_lived_connection_profile(
+            &HostService::start(directory.path()).expect("host service"),
+            &host.host_id,
+            host.state_version,
+        )
+        .expect("resolve updated HTTP CONNECT profile")
+        .connection
+        .revision_token;
+        assert_ne!(original_revision_token, updated_revision_token);
         let ResolvedRouteIngress::HttpConnectProxy {
             authentication: Some(authentication),
             ..
@@ -1170,18 +1409,32 @@ mod tests {
     fn explicit_jump_chain_resolves_each_hop_with_its_own_authentication() {
         let directory = tempfile::tempdir().expect("tempdir");
         let database_path = directory.path().join("ssh/norishell.sqlite3");
-        let mut repository = AppRepository::open(database_path).expect("repository");
-        let identity = repository
-            .create_identity("Operations", Some("deploy"))
-            .expect("identity");
-        ready_password(&mut repository, &identity.identity_id, 0, "Primary");
+        let mut repository = AppRepository::open(&database_path).expect("repository");
+        let jump_identity = repository
+            .create_identity("Jump", Some("jump-user"))
+            .expect("jump identity");
+        ready_password(
+            &mut repository,
+            &jump_identity.identity_id,
+            0,
+            "Jump password",
+        );
+        let target_identity = repository
+            .create_identity("Target", Some("deploy"))
+            .expect("target identity");
+        ready_password(
+            &mut repository,
+            &target_identity.identity_id,
+            0,
+            "Target password",
+        );
         let jump = repository
             .create_host(
                 "Jump",
                 "jump.example",
                 22,
                 None,
-                Some(&identity.identity_id),
+                Some(&jump_identity.identity_id),
                 false,
             )
             .expect("jump host");
@@ -1191,7 +1444,7 @@ mod tests {
                 "target.example",
                 22,
                 None,
-                Some(&identity.identity_id),
+                Some(&target_identity.identity_id),
                 false,
             )
             .expect("target host");
@@ -1265,16 +1518,44 @@ mod tests {
             &HostService::start(directory.path()).expect("host service"),
             &TransientCredentialService::default(),
             &SshSessionTarget::Host {
-                host_id: target.host_id,
+                host_id: target.host_id.clone(),
                 expected_host_state_version: target.state_version,
             },
             None,
         )
         .expect("resolve jump chain");
+        let long_lived = resolve_long_lived_connection_profile(
+            &HostService::start(directory.path()).expect("host service"),
+            &target.host_id,
+            target.state_version,
+        )
+        .expect("resolve long-lived jump chain");
+        assert!(connection_requires_vault(&long_lived.connection));
+        assert!(connection_has_vault_credentials(&long_lived.connection));
+        let original_revision_token = long_lived.connection.revision_token.clone();
+        let mut repository = AppRepository::open(&database_path).expect("repository");
+        repository
+            .update_identity(
+                &jump_identity.identity_id,
+                jump_identity.state_version,
+                "Jump",
+                Some("jump-release"),
+            )
+            .expect("update jump identity username");
+        drop(repository);
+        let updated_revision_token = resolve_long_lived_connection_profile(
+            &HostService::start(directory.path()).expect("host service"),
+            &target.host_id,
+            target.state_version,
+        )
+        .expect("resolve updated jump chain")
+        .connection
+        .revision_token;
+        assert_ne!(original_revision_token, updated_revision_token);
         assert_eq!(profile.jump_hosts.len(), 1);
         assert_eq!(profile.jump_hosts[0].host_id, jump.host_id);
         assert_eq!(profile.jump_hosts[0].endpoint.address, "jump.example");
-        assert_eq!(profile.jump_hosts[0].username, "deploy");
+        assert_eq!(profile.jump_hosts[0].username, "jump-user");
         assert_eq!(profile.jump_hosts[0].credentials.len(), 1);
         assert_ne!(
             profile.jump_hosts[0].algorithm_policy.transport, profile.algorithm_policy.transport,

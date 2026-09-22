@@ -2,6 +2,7 @@
 import { takeNativeTrayAction, readyNativeTrayActions } from "./core-api/native-tray";
 import { navigateNativeResourceNotification } from "./native-resource-navigation";
 import { navigateNativeTrayAction } from "./native-tray-navigation";
+import { initializeStartupVaultTip } from "./startup-vault-tip";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createPinia, getActivePinia } from "pinia";
@@ -37,6 +38,8 @@ import { useNativeTerminalStore } from "./stores/nativeTerminal";
 import { setNativeNotificationContext, type NativeTerminalNotificationClick, type NativeResourceNotificationClick } from "./core-api/native-notifications";
 import { requestExitAfterTerminalWorkspaceFlush } from "./terminal-workspace-persistence";
 import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./views/sftpPluginNavigation";
+
+function isToolWindowExitCancelled(error: unknown) { return typeof error === "object" && error !== null && "code" in error && error.code === "app.tool_window_exit_cancelled"; }
 
 const ui = useUiStore();
 const appTheme = useAppThemeStore();
@@ -134,6 +137,12 @@ async function refreshTrayReady() {
   } catch { trayUnavailable(); }
 }
 watch(() => ui.locale, () => { if (trayReady) void refreshTrayReady(); });
+watch(() => ui.locale, (locale) => {
+  if (!isTauri()) return;
+  void setPluginLocale(locale).catch(() => {
+    tips.show({ tone: "error", title: t("sshSettings.applicationPreferences.languageChangeFailed") });
+  });
+});
 async function startTrayNavigation() {
   for (const [event, callback] of [
     ["native-tray-action", ({ payload }: { payload: { token: string } }) => { void consumeTrayToken(payload.token); }],
@@ -167,15 +176,18 @@ async function confirmResourceCleanupAndExit() {
   confirmedExitFailed.value = false;
   try {
     await requestExitAfterTerminalWorkspaceFlush(() => requestApplicationExit(true));
-  } catch {
+  } catch (error) {
+    if (isToolWindowExitCancelled(error)) { exitReadiness.value = null; confirmedExitFailed.value = false; return; }
     confirmedExitFailed.value = true;
   } finally {
     confirmedExitInFlight.value = false;
   }
 }
 
+let disposeStartupVaultTip: (() => void) | undefined;
 onMounted(async () => {
   if (!isTauri()) return;
+  disposeStartupVaultTip = initializeStartupVaultTip({ t, tips });
   stopPluginAppNavigation = await startPluginAppNavigation(router);
   unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => { void router.push("/terminal"); });
   nativeTerminal.start();
@@ -203,7 +215,8 @@ onMounted(async () => {
       const readiness = await requestExitAfterTerminalWorkspaceFlush(requestApplicationExit);
       confirmedExitFailed.value = false;
       exitReadiness.value = readiness.canExit ? null : readiness;
-    } catch {
+    } catch (error) {
+      if (isToolWindowExitCancelled(error)) { exitReadiness.value = null; confirmedExitFailed.value = false; return; }
       confirmedExitFailed.value = true;
       exitReadiness.value = exitReadiness.value ?? { canExit: false, blockers: [] };
     } finally {
@@ -283,6 +296,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  disposeStartupVaultTip?.();
   trayDisposed = true;
   trayReady = false;
   trayUnlisteners.splice(0).forEach((unlisten) => unlisten());

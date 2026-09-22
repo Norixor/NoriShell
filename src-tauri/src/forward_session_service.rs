@@ -26,8 +26,8 @@ use norishell_app_persistence::KnownHostObservation;
 use norishell_core_api::{self as wire, HostId};
 use norishell_ssh_domain::Endpoint;
 use norishell_ssh_transport::{
-    ForwardedTcpipChannel, HostKeyDecision, HostKeyVerifier, ObservedHostKey, SharedRemoteForward,
-    SharedSessionChannels, SshForwardTransport, TransportError, VerifyFuture,
+    ForwardedTcpipChannel, HostKeyDecision, HostKeyVerifier, IngressFailureKind, ObservedHostKey,
+    SharedRemoteForward, SharedSessionChannels, SshForwardTransport, TransportError, VerifyFuture,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{State, ipc::Channel};
@@ -42,8 +42,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     connection_profile::{
-        ConnectionProfileError, ResolvedTransportKeepalivePolicy,
-        resolve_long_lived_connection_profile,
+        ConnectionProfileError, ResolvedTransportKeepalivePolicy, connection_has_vault_credentials,
+        connection_requires_vault, resolve_long_lived_connection_profile,
     },
     host_service::HostService,
     ssh_agent_service::SshAgentService,
@@ -182,6 +182,7 @@ pub(crate) enum ForwardFailureCode {
     HostUnavailable,
     HostKeyReviewRequired,
     HostKeyMismatch,
+    VaultLocked,
     CredentialUnavailable,
     AuthenticationRejected,
     TransportConnect,
@@ -718,6 +719,10 @@ impl ForwardTransportFactory for ProductionForwardTransportFactory {
                 snapshot.host.state_version,
             )
             .map_err(profile_failure)?;
+            if connection_requires_vault(&profile.connection) && !self.vault.is_unlocked() {
+                return Err(vault_locked_failure());
+            }
+            let has_vault_credentials = connection_has_vault_credentials(&profile.connection);
             let keepalive_interval = profile
                 .transport_keepalive
                 .as_ref()
@@ -738,7 +743,16 @@ impl ForwardTransportFactory for ProductionForwardTransportFactory {
                 keepalive_interval,
             )
             .await
-            .map_err(|failure| map_transport_error(failure.error))?;
+            .map_err(|failure| {
+                if has_vault_credentials
+                    && !self.vault.is_unlocked()
+                    && vault_locked_after_credential_failure(&failure.error)
+                {
+                    vault_locked_failure()
+                } else {
+                    map_transport_error(failure.error)
+                }
+            })?;
             let heartbeat = ForwardHeartbeatTasks::start(
                 profile.transport_keepalive.as_ref(),
                 connection.transport_heartbeats,
@@ -2518,6 +2532,19 @@ fn incoming_remote_forward(channel: ForwardedTcpipChannel) -> IncomingRemoteForw
     }
 }
 
+/// A locked Vault can only explain failures while acquiring or applying a
+/// credential. Host-key and route failures must retain their protocol origin.
+fn vault_locked_after_credential_failure(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::AuthenticationRejected | TransportError::InvalidPrivateKey
+    ) || matches!(
+        error,
+        TransportError::RouteIngress(route)
+            if route.kind == IngressFailureKind::CredentialLocked
+    )
+}
+
 fn map_transport_error(error: TransportError) -> ForwardRuntimeError {
     let failure = match error {
         TransportError::HostKeyRejected => ForwardFailure::new(
@@ -2584,6 +2611,14 @@ fn map_transport_error(error: TransportError) -> ForwardRuntimeError {
         ),
     };
     ForwardRuntimeError::from_failure(failure)
+}
+
+fn vault_locked_failure() -> ForwardRuntimeError {
+    ForwardRuntimeError::from_failure(ForwardFailure::new(
+        ForwardFailureCode::VaultLocked,
+        "vault",
+        "the saved Host credentials require an unlocked Vault",
+    ))
 }
 
 fn profile_failure(error: ConnectionProfileError) -> ForwardRuntimeError {
@@ -3134,6 +3169,7 @@ fn map_forward_failure(failure: ForwardFailure) -> wire::ForwardFailure {
             wire::ForwardFailureCode::HostKeyReviewRequired
         }
         ForwardFailureCode::HostKeyMismatch => wire::ForwardFailureCode::HostKeyMismatch,
+        ForwardFailureCode::VaultLocked => wire::ForwardFailureCode::VaultLocked,
         ForwardFailureCode::CredentialUnavailable => {
             wire::ForwardFailureCode::CredentialUnavailable
         }
@@ -3177,7 +3213,9 @@ fn map_forward_runtime_error(
         ForwardFailureCode::InvalidRule => {
             (wire::ErrorCategory::Validation, wire::RetryStrategy::Never)
         }
-        ForwardFailureCode::HostKeyReviewRequired | ForwardFailureCode::CredentialUnavailable => (
+        ForwardFailureCode::HostKeyReviewRequired
+        | ForwardFailureCode::VaultLocked
+        | ForwardFailureCode::CredentialUnavailable => (
             wire::ErrorCategory::Unavailable,
             wire::RetryStrategy::WaitForUser,
         ),
@@ -3230,6 +3268,28 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 
     use super::*;
+
+    #[test]
+    fn vault_recovery_classifies_only_credential_failures() {
+        assert!(vault_locked_after_credential_failure(
+            &TransportError::AuthenticationRejected
+        ));
+        assert!(vault_locked_after_credential_failure(
+            &TransportError::InvalidPrivateKey
+        ));
+        assert!(vault_locked_after_credential_failure(
+            &TransportError::RouteIngress(norishell_ssh_transport::RouteIngressError {
+                stage: norishell_ssh_transport::IngressStage::Configuration,
+                kind: IngressFailureKind::CredentialLocked,
+            })
+        ));
+        assert!(!vault_locked_after_credential_failure(
+            &TransportError::HostKeyRejected
+        ));
+        assert!(!vault_locked_after_credential_failure(
+            &TransportError::ConnectFailed
+        ));
+    }
 
     #[derive(Default)]
     struct MockFacts {

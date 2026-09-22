@@ -245,13 +245,21 @@ fn core_user_home() -> Result<PathBuf, PluginApiErrorCode> {
 }
 
 fn snapshot_program(path: &Path) -> Result<ProgramIdentity, PluginApiErrorCode> {
+    #[cfg(windows)]
+    let metadata = cap_std::fs::File::open_ambient(path, cap_std::ambient_authority())
+        .and_then(|file| file.metadata())
+        .map_err(|_| PluginApiErrorCode::Conflict)?;
+    #[cfg(not(windows))]
     let metadata = std::fs::metadata(path).map_err(|_| PluginApiErrorCode::Conflict)?;
     if !metadata.is_file() {
         return Err(PluginApiErrorCode::InvalidRequest);
     }
-    let modified_unix_nanos = metadata
+    let modified = metadata
         .modified()
-        .map_err(|_| PluginApiErrorCode::Unavailable)?
+        .map_err(|_| PluginApiErrorCode::Unavailable)?;
+    #[cfg(windows)]
+    let modified = modified.into_std();
+    let modified_unix_nanos = modified
         .duration_since(UNIX_EPOCH)
         .map_err(|_| PluginApiErrorCode::Unavailable)?
         .as_nanos();
@@ -287,15 +295,7 @@ fn file_identity(metadata: &std::fs::Metadata) -> Result<String, PluginApiErrorC
 }
 
 #[cfg(windows)]
-fn file_identity(metadata: &std::fs::Metadata) -> Result<String, PluginApiErrorCode> {
-    use std::os::windows::fs::MetadataExt as _;
-    Ok(format!(
-        "{}:{}",
-        metadata
-            .volume_serial_number()
-            .ok_or(PluginApiErrorCode::Unavailable)?,
-        metadata
-            .file_index()
-            .ok_or(PluginApiErrorCode::Unavailable)?
-    ))
+fn file_identity(metadata: &cap_std::fs::Metadata) -> Result<String, PluginApiErrorCode> {
+    use cap_fs_ext::MetadataExt as _;
+    Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
 }

@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use norishell_app_persistence::{CredentialRecordDetails, KnownHostObservation};
+use norishell_app_persistence::KnownHostObservation;
 use norishell_core_api::{
     CoreApiError, CpuMetric, DiskMetric, DiskResourceId, ErrorCategory, HostCatalogEntry, HostId,
     IdentityId, MetricByteCount, MetricFieldState, MetricSnapshot, MetricsAuthenticationReason,
@@ -33,8 +33,8 @@ mod metrics_probe;
 use self::metrics_probe::{MetricsProbeOutcome, MetricsProbeRuntime, run_metrics_probe};
 use crate::{
     connection_profile::{
-        ConnectionCredential, ConnectionProfileError, ResolvedMetricsConnectionProfile,
-        ResolvedRouteIngress, resolve_metrics_connection_profile,
+        ConnectionProfileError, ResolvedMetricsConnectionProfile, connection_has_vault_credentials,
+        connection_requires_vault, resolve_metrics_connection_profile,
     },
     core_api_error::core_error,
     host_service::HostService,
@@ -201,6 +201,16 @@ impl MetricsSessionService {
         .await
     }
 
+    pub(crate) async fn cancel_keyboard_challenge(
+        &self,
+        request: MetricsKeyboardInteractiveRespondRequest,
+    ) -> ActorResult<()> {
+        self.request(request.meta.request_id.clone(), |reply| {
+            Message::KeyboardCancel { request, reply }
+        })
+        .await
+    }
+
     pub(crate) async fn shutdown_all(&self, request_id: RequestId) -> ActorResult<()> {
         self.request(request_id.clone(), |reply| Message::ShutdownAll {
             request_id,
@@ -352,6 +362,10 @@ enum Message {
     KeyboardRespond {
         request: MetricsKeyboardInteractiveRespondRequest,
         reply: oneshot::Sender<ActorResult<MetricsSessionSummary>>,
+    },
+    KeyboardCancel {
+        request: MetricsKeyboardInteractiveRespondRequest,
+        reply: oneshot::Sender<ActorResult<()>>,
     },
     ShutdownAll {
         request_id: RequestId,
@@ -677,6 +691,38 @@ impl Actor {
             handle: task,
         });
         Ok(record.summary.clone())
+    }
+
+    async fn cancel_keyboard_challenge(
+        &mut self,
+        request: MetricsKeyboardInteractiveRespondRequest,
+    ) -> ActorResult<()> {
+        let record = self
+            .sessions
+            .get(request.host_id.as_str())
+            .ok_or_else(|| not_found_error(request.meta.request_id.clone()))?;
+        let current = record
+            .active_keyboard_challenge
+            .as_ref()
+            .map(|active| &active.challenge);
+        if record.summary.metrics_session_id != request.metrics_session_id
+            || record.summary.generation != request.expected_generation
+            || current.is_none_or(|challenge| {
+                challenge.challenge_id != request.challenge_id
+                    || challenge.generation != request.expected_generation
+                    || challenge.round_index != request.round_index
+            })
+        {
+            return Err(conflict_error(request.meta.request_id));
+        }
+        // The actor cannot process another response between this exact challenge check and stop.
+        self.stop(MetricsStopRequest {
+            meta: request.meta,
+            host_id: request.host_id,
+            expected_generation: Some(request.expected_generation),
+        })
+        .await?;
+        Ok(())
     }
 
     async fn stop(&mut self, request: MetricsStopRequest) -> ActorResult<MetricsSessionSummary> {
@@ -1261,6 +1307,9 @@ impl Actor {
             Message::KeyboardRespond { request, reply } => {
                 let _ = reply.send(self.respond_keyboard_interactive(request));
             }
+            Message::KeyboardCancel { request, reply } => {
+                let _ = reply.send(self.cancel_keyboard_challenge(request).await);
+            }
             Message::ShutdownAll { request_id, reply } => {
                 let _ = reply.send(self.shutdown_all(request_id).await);
             }
@@ -1568,53 +1617,11 @@ fn validate_supported_selection(policy: &MonitoringPolicy) -> Result<(), ()> {
 }
 
 fn profile_requires_vault(profile: &ResolvedMetricsConnectionProfile) -> bool {
-    let ingress_requires_vault = match &profile.connection.ingress {
-        ResolvedRouteIngress::HttpConnectProxy { authentication, .. }
-        | ResolvedRouteIngress::Socks5Proxy { authentication, .. } => authentication.is_some(),
-        ResolvedRouteIngress::DirectTcp => false,
-    };
-    ingress_requires_vault
-        || credentials_require_vault(&profile.connection.credentials)
-        || profile
-            .connection
-            .jump_hosts
-            .iter()
-            .any(|jump| credentials_require_vault(&jump.credentials))
+    connection_requires_vault(&profile.connection)
 }
 
 fn profile_has_any_vault_credentials(profile: &ResolvedMetricsConnectionProfile) -> bool {
-    let ingress_has_vault = match &profile.connection.ingress {
-        ResolvedRouteIngress::HttpConnectProxy { authentication, .. }
-        | ResolvedRouteIngress::Socks5Proxy { authentication, .. } => authentication.is_some(),
-        ResolvedRouteIngress::DirectTcp => false,
-    };
-    ingress_has_vault
-        || profile
-            .connection
-            .credentials
-            .iter()
-            .any(credential_requires_vault)
-        || profile
-            .connection
-            .jump_hosts
-            .iter()
-            .any(|jump| jump.credentials.iter().any(credential_requires_vault))
-}
-
-fn credentials_require_vault(credentials: &[ConnectionCredential]) -> bool {
-    !credentials.is_empty() && credentials.iter().all(credential_requires_vault)
-}
-
-fn credential_requires_vault(credential: &ConnectionCredential) -> bool {
-    matches!(
-        credential,
-        ConnectionCredential::Stored(record)
-            if matches!(
-                record.details,
-                CredentialRecordDetails::Password { .. }
-                    | CredentialRecordDetails::PrivateKey { .. }
-            )
-    )
+    connection_has_vault_credentials(&profile.connection)
 }
 
 fn map_exec_failure(error: TransportError) -> WorkerFailure {
@@ -1948,9 +1955,10 @@ mod tests {
     use norishell_core_api::{
         CpuMetric, DiskResourceId, HostId, MetricByteCount, MetricFieldState, MetricSnapshot,
         MetricsKeyboardInteractiveAnswerPrepareRequest, MetricsKeyboardInteractiveAnswerRefId,
-        MetricsKeyboardInteractiveChallengeId, MetricsPlatform, MetricsSessionFailureCode,
-        MetricsSessionState, MetricsStopRequest, MonitoringPolicy, NetworkResourceId, RequestId,
-        RequestMeta, SshSessionRouteStage, WireSequence,
+        MetricsKeyboardInteractiveChallengeId, MetricsKeyboardInteractiveRespondRequest,
+        MetricsPlatform, MetricsSessionFailureCode, MetricsSessionState, MetricsStopRequest,
+        MonitoringPolicy, NetworkResourceId, RequestId, RequestMeta, SshSessionRouteStage,
+        WireSequence,
     };
     use norishell_server_metrics::{
         CpuUsage, DiskUsage, LinuxMetricSample, MemoryUsage, MetricValue, NetworkRate,
@@ -2405,6 +2413,84 @@ mod tests {
             value: "x".repeat(KEYBOARD_INTERACTIVE_ANSWER_MAX_BYTES + 1),
         };
         assert!(actor.prepare_answer(oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn secure_keyboard_cancel_rejects_wrong_round_and_preserves_other_sessions() {
+        let (_directory, mut actor) = actor();
+        let host_id = HostId::new();
+        install_active_record(&mut actor, host_id.clone());
+        let (answers, _response) = oneshot::channel();
+        actor.keyboard_challenge_observed(
+            host_id.as_str(),
+            1,
+            KeyboardInteractiveRequest {
+                route_stage: super::ConnectionRouteStage::Target,
+                credential_ref_id: norishell_core_api::CredentialRefId::new(),
+                attempt_index: 0,
+                round_index: 1,
+                challenge: KeyboardInteractiveChallenge {
+                    name: "login".to_owned(),
+                    instructions: "answer".to_owned(),
+                    prompts: vec![KeyboardInteractivePrompt {
+                        text: "Password:".to_owned(),
+                        echo: false,
+                    }],
+                },
+            },
+            answers,
+        );
+        let record = actor.sessions.get(host_id.as_str()).expect("record");
+        let challenge = record
+            .summary
+            .keyboard_interactive_challenge
+            .clone()
+            .expect("challenge");
+        let request = MetricsKeyboardInteractiveRespondRequest {
+            meta: RequestMeta {
+                request_id: RequestId::new(),
+            },
+            operation_id: norishell_core_api::OperationId::new(),
+            idempotency_key: "secure-cancel".into(),
+            metrics_session_id: challenge.metrics_session_id.clone(),
+            host_id: host_id.clone(),
+            expected_generation: challenge.generation,
+            challenge_id: challenge.challenge_id.clone(),
+            round_index: challenge.round_index,
+            answer_ref_ids: vec![],
+        };
+        let other = HostId::new();
+        install_active_record(&mut actor, other.clone());
+        let mut stale = request.clone();
+        stale.round_index += 1;
+        assert!(actor.cancel_keyboard_challenge(stale).await.is_err());
+        assert!(
+            actor.sessions[host_id.as_str()]
+                .active_keyboard_challenge
+                .is_some()
+        );
+        let mut stale = request.clone();
+        stale.expected_generation = WireSequence::new(999);
+        assert!(actor.cancel_keyboard_challenge(stale).await.is_err());
+        let mut stale = request.clone();
+        stale.challenge_id = MetricsKeyboardInteractiveChallengeId::new();
+        assert!(actor.cancel_keyboard_challenge(stale).await.is_err());
+        actor
+            .cancel_keyboard_challenge(request.clone())
+            .await
+            .expect("exact cancel");
+        assert_eq!(
+            actor.sessions[host_id.as_str()].summary.state,
+            MetricsSessionState::Closed
+        );
+        assert!(
+            actor.sessions[host_id.as_str()]
+                .active_keyboard_challenge
+                .is_none()
+        );
+        assert!(actor.sessions[other.as_str()].task.is_some());
+        assert!(actor.cancel_keyboard_challenge(request).await.is_err());
+        actor.shutdown_all(RequestId::new()).await.expect("cleanup");
     }
 
     #[tokio::test]

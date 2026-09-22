@@ -123,7 +123,15 @@ function startDragging(event: PointerEvent) {
   font-weight: var(--nvx-font-weight-semibold); overflow-wrap: anywhere;
 }
 .nvx-secure-window__intro p { margin: var(--nvx-space-1) 0 0; color: var(--nvx-color-text-secondary); }
-.nvx-secure-window__scroll { flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--nvx-space-3); scrollbar-gutter: stable; }
+.nvx-secure-window__scroll {
+  flex: 1;
+  min-height: 0;
+  margin-inline: calc(-1 * var(--nvx-focus-ring-width));
+  padding-inline: var(--nvx-focus-ring-width);
+  padding-bottom: var(--nvx-space-3);
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
 .nvx-secure-window__body { display: grid; align-content: start; gap: var(--nvx-space-3); min-width: 0; }
 .nvx-secure-window__body :deep(h2) { margin: 0; font-size: var(--nvx-font-size-sm); line-height: var(--nvx-line-height-sm); }
 .nvx-secure-window__body :deep(p) { margin: 0; }

@@ -1,6 +1,6 @@
 export const terminalInteractionZhCN = {
   title: "终端交互",
-  description: "调整终端显示、鼠标选择、键盘兼容性、响铃和链接行为，不会保存命令历史或重新连接会话。",
+  description: "调整终端显示、鼠标、键盘、响铃、链接和断线重连行为；更改设置不会中断当前会话或保存命令历史。",
   scrollback: "回看行数",
   scrollbackHint: "保留 1,000–100,000 行显示。缩小此值会丢弃超出上限的旧显示行，不会影响命令历史。",
   scrollSensitivity: "滚动灵敏度",
@@ -40,6 +40,8 @@ export const terminalInteractionZhCN = {
   linksEnabledHint: "默认识别 HTTP(S) 链接。按住 Command（macOS）或 Ctrl（其他平台）点击才会调用系统浏览器。",
   linksOn: "开启（默认）",
   linksOff: "关闭",
+  sshReconnectOnInput: "SSH 断线后输入时重新连接",
+  sshReconnectOnInputHint: "断线的 SSH 终端收到输入时先重新连接；触发重连的这次输入会被丢弃，绝不会重放。",
   hostKeyboardTitle: "每个 Host 的输入兼容性",
   hostKeyboardDescription: "为各主机单独设置输入兼容性；这些覆盖只保存在本机，不包含在偏好导出中。",
   hostScope: "应用到",
@@ -73,7 +75,7 @@ export const terminalInteractionZhCN = {
 
 export const terminalInteractionEn = {
   title: "Terminal interaction",
-  description: "Adjust terminal display, mouse selection, keyboard compatibility, bell and link behavior without recording command history or reconnecting sessions.",
+  description: "Adjust terminal display, mouse, keyboard, bell, links and reconnect behavior. Saving settings does not interrupt current sessions or record command history.",
   scrollback: "Scrollback lines",
   scrollbackHint: "Keep 1,000–100,000 display lines. Lowering this discards older display lines over the limit and does not affect command history.",
   scrollSensitivity: "Scroll sensitivity",
@@ -113,6 +115,8 @@ export const terminalInteractionEn = {
   linksEnabledHint: "HTTP(S) links are detected by default. Hold Command on macOS or Ctrl elsewhere while clicking to open the system browser.",
   linksOn: "On (default)",
   linksOff: "Off",
+  sshReconnectOnInput: "Reconnect SSH on input after interruption",
+  sshReconnectOnInputHint: "When an interrupted SSH terminal receives input, reconnect first. The input that triggered reconnection is discarded and never replayed.",
   hostKeyboardTitle: "Per-Host input compatibility",
   hostKeyboardDescription: "Set input compatibility for individual hosts. These overrides stay on this device and are excluded from preference exports.",
   hostScope: "Apply to",

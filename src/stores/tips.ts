@@ -3,12 +3,19 @@ import { ref } from "vue";
 
 export type NvxTipTone = "info" | "success" | "warning" | "error";
 
+export interface NvxTipAction {
+  label: string;
+  onClick: () => void | Promise<void>;
+}
+
 export interface NvxTipItem {
   id: string;
   scope: string | null;
   tone: NvxTipTone;
   title: string;
   message: string | null;
+  action: NvxTipAction | null;
+  actionPending: boolean;
 }
 
 export interface ShowNvxTipInput {
@@ -17,6 +24,7 @@ export interface ShowNvxTipInput {
   title: string;
   message?: string;
   durationMs?: number;
+  action?: NvxTipAction;
 }
 
 const MAX_VISIBLE_TIPS = 3;
@@ -63,6 +71,8 @@ export const useTipsStore = defineStore("tips", () => {
       tone,
       title: input.title,
       message: input.message ?? null,
+      action: input.action ?? null,
+      actionPending: false,
     };
     items.value = [item, ...items.value];
 
@@ -78,10 +88,28 @@ export const useTipsStore = defineStore("tips", () => {
     return item.id;
   }
 
+  async function runAction(id: string) {
+    const item = items.value.find((candidate) => candidate.id === id);
+    if (!item?.action || item.actionPending) return;
+
+    items.value = items.value.map((candidate) => candidate.id === id
+      ? { ...candidate, actionPending: true }
+      : candidate);
+    try {
+      await item.action.onClick();
+    } catch {
+      // Action owners decide whether a failure needs visible feedback.
+    } finally {
+      items.value = items.value.map((candidate) => candidate.id === id
+        ? { ...candidate, actionPending: false }
+        : candidate);
+    }
+  }
+
   function clearAll() {
     for (const item of items.value) clearTimer(item.id);
     items.value = [];
   }
 
-  return { items, show, dismiss, dismissScope, clearAll };
+  return { items, show, runAction, dismiss, dismissScope, clearAll };
 });

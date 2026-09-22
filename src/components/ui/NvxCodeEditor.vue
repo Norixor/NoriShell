@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { HighlightStyle, LanguageDescription, syntaxHighlighting } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
+import { findNext, findPrevious, SearchQuery, search, setSearchQuery } from "@codemirror/search";
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
@@ -29,6 +30,29 @@ const languageCompartment = new Compartment();
 let editor: EditorView | null = null;
 let applyingExternalValue = false;
 let languageLoadRevision = 0;
+
+function updateSearch(query: string): boolean {
+  if (!editor) return false;
+  const searchQuery = new SearchQuery({ search: query, literal: true });
+  editor.dispatch({ effects: setSearchQuery.of(searchQuery) });
+  if (!query) return true;
+  const cursor = searchQuery.getCursor(editor.state, editor.state.selection.main.from);
+  const match = cursor.next();
+  if (match.done) {
+    const wrapped = searchQuery.getCursor(editor.state);
+    const wrappedMatch = wrapped.next();
+    if (wrappedMatch.done) return false;
+    editor.dispatch({ selection: { anchor: wrappedMatch.value.from, head: wrappedMatch.value.to }, scrollIntoView: true });
+  } else {
+    editor.dispatch({ selection: { anchor: match.value.from, head: match.value.to }, scrollIntoView: true });
+  }
+  return true;
+}
+
+function moveSearch(direction: "next" | "previous"): boolean {
+  if (!editor) return false;
+  return (direction === "next" ? findNext : findPrevious)(editor);
+}
 
 const editorTheme = EditorView.theme({
   "&": {
@@ -104,6 +128,7 @@ onMounted(() => {
     doc: props.modelValue,
     extensions: [
       basicSetup,
+      search({ top: true }),
       EditorView.lineWrapping,
       editorTheme,
       syntaxHighlighting(editorHighlightStyle),
@@ -134,7 +159,12 @@ onBeforeUnmount(() => {
   editor = null;
 });
 
-defineExpose({ focus: () => editor?.focus() });
+defineExpose({
+  focus: () => editor?.focus(),
+  updateSearch,
+  findNext: () => moveSearch("next"),
+  findPrevious: () => moveSearch("previous"),
+});
 </script>
 
 <template>

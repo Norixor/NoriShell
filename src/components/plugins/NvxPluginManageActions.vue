@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Ellipsis, History, Info, Power, RefreshCw, Settings, ShieldQuestion, Trash2 } from "lucide-vue-next";
+import { Ellipsis, History, Info, Power, Settings, ShieldQuestion, Trash2 } from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
 
 import type { PluginInstallState } from "../../core-api/generated/core-api";
@@ -9,7 +9,6 @@ import { usePopoverMenu } from "../ui/usePopoverMenu";
 defineProps<{
   state: PluginInstallState;
   disabled?: boolean;
-  updateAvailable?: boolean;
   hasSettings?: boolean;
 }>();
 
@@ -20,7 +19,6 @@ const emit = defineEmits<{
   operationPermissions: [];
   enable: [];
   disable: [];
-  update: [];
   uninstall: [];
 }>();
 
@@ -39,18 +37,6 @@ function run(action: "details" | "settings" | "permissions" | "operationPermissi
 
 <template>
   <div class="plugin-manage-actions">
-    <NvxButton
-      v-if="updateAvailable"
-      size="sm"
-      :disabled="disabled"
-      @click="$emit('update')"
-    >
-      <NvxIcon
-        :icon="RefreshCw"
-        :size="16"
-        aria-hidden="true"
-      />{{ t("plugins.update") }}
-    </NvxButton>
     <NvxButton
       size="sm"
       variant="ghost"

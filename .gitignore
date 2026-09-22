@@ -11,7 +11,9 @@ Thumbs.db
 # Local project guidance and design documents
 /AGENTS.md
 /.build
-/docs/
+/docs/*
+!/docs/guides/
+!/docs/guides/**
 
 # Local environment and secrets
 .env

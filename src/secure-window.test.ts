@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { i18n } from "./locales";
+import { i18n, resolveLocale } from "./locales";
 import { applySecureWindowAppearance } from "./secure-window";
 import { UI_PREFERENCES_KEY } from "./ui-preferences";
 
@@ -22,8 +22,8 @@ describe("secure window appearance", () => {
   it.each(["null", "invalid json", '{"locale":"unknown","theme":"unknown"}'])("falls back safely for %s", (value) => {
     localStorage.setItem(UI_PREFERENCES_KEY, value);
     applySecureWindowAppearance();
-    expect(i18n.global.t("window.protected")).toBe("受保护的窗口");
-    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(i18n.global.locale.value).toBe(resolveLocale("system"));
+    expect(document.documentElement.lang).toBe(resolveLocale("system"));
     expect(document.documentElement.dataset.theme).toBe("light");
   });
 

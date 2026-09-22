@@ -7,7 +7,7 @@ import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
 import { validateInteractionPreferences, type DoubleClickSelection, type InteractionPreferences, type RightClickBehavior, type TerminalBellMode, type TerminalBackspaceMode } from "../../terminal/interaction-preferences";
 import { validateTerminalKeyboardPreferences, type HostKeyboardMode, type TerminalKeyboardPreferences } from "../../terminal/keyboard-compatibility";
 import { useTipsStore } from "../../stores/tips";
-import { NvxButton, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
+import { NvxButton, NvxCheckbox, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
 
 interface InteractionDraft {
   scrollback: string;
@@ -21,6 +21,7 @@ interface InteractionDraft {
   backspaceMode: TerminalBackspaceMode;
   bellMode: TerminalBellMode;
   linksEnabled: boolean;
+  sshReconnectOnInput: boolean;
 }
 
 interface HostOption {
@@ -44,6 +45,7 @@ function createDraft(interaction: InteractionPreferences): InteractionDraft {
     backspaceMode: interaction.backspaceMode,
     bellMode: interaction.bellMode,
     linksEnabled: interaction.linksEnabled,
+    sshReconnectOnInput: interaction.sshReconnectOnInput,
   };
 }
 const draft = ref<InteractionDraft>(createDraft(preferences.preferences.interaction));
@@ -88,6 +90,7 @@ const interaction = computed<InteractionPreferences>(() => ({
   backspaceMode: draft.value.backspaceMode,
   bellMode: draft.value.bellMode,
   linksEnabled: draft.value.linksEnabled,
+  sshReconnectOnInput: draft.value.sshReconnectOnInput,
 }));
 const valid = computed(() => validateInteractionPreferences(interaction.value));
 const scrollbackInvalid = computed(() => !Number.isInteger(interaction.value.scrollback) || interaction.value.scrollback < 1_000 || interaction.value.scrollback > 100_000);
@@ -321,6 +324,12 @@ onMounted(async () => {
           @update:model-value="selectLinks"
         />
       </NvxField>
+      <NvxCheckbox v-model="draft.sshReconnectOnInput">
+        {{ t('terminalInteraction.sshReconnectOnInput') }}
+        <template #hint>
+          {{ t('terminalInteraction.sshReconnectOnInputHint') }}
+        </template>
+      </NvxCheckbox>
     </div>
     <div class="nvx-terminal-interaction-settings__actions">
       <NvxButton

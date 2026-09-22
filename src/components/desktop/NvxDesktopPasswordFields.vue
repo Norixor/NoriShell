@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { NvxButton, NvxDialog, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
-import { cancelHostCreatePassword, createVault, fetchVaultStatus, stageHostCreatePassword, unlockVault } from "../../core-api/client";
+import { NvxButton, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
+import { cancelHostCreatePassword, stageHostCreatePassword } from "../../core-api/client";
 import { createUuidV7 } from "../../core-api/ids";
+import { requestSecureVault } from "../../core-api/secure-vault-client";
 import type { CredentialRefSummary, DesktopPasswordStage } from "../../core-api/generated/core-api";
 
 const props = defineProps<{
@@ -13,17 +14,14 @@ const props = defineProps<{
   label: string;
   busy: boolean;
 }>();
-const emit = defineEmits<{ "update:modelValue": [value: string | null] }>();
+const emit = defineEmits<{ "update:modelValue": [value: string | null]; "dirty-change": [value: boolean] }>();
 const { t } = useI18n();
 const selection = ref(props.newProfile && !props.modelValue ? "new" : props.modelValue ?? "");
 const password = ref("");
 const passwordRequired = ref(false);
 const staged = ref<DesktopPasswordStage | null>(null);
-const failure = ref(false), working = ref(false);
-const vaultMode = ref<"create" | "unlock" | null>(null);
-const vaultPassword = ref(""), vaultConfirmation = ref(""), vaultSubmitting = ref(false), vaultFailed = ref(false);
-let operation = freshOperation(), stageRequested = false, committed = false, disposed = false;
-let finishVault: ((value: boolean) => void) | undefined;
+const failure = ref(false), working = ref(false), stageRequested = ref(false);
+let operation = freshOperation(), committed = false, disposed = false;
 const options = computed(() => [
   ...(props.newProfile ? [{ value: "new", label: t("desktop.enterPassword") }] : []),
   { value: "", label: t("desktop.ask") },
@@ -31,17 +29,11 @@ const options = computed(() => [
   ...(props.modelValue && !props.credentials.some((value) => value.credentialRefId === props.modelValue)
     ? [{ value: props.modelValue, label: t("desktop.credential") }] : []),
 ]);
-const vaultValid = computed(() => vaultPassword.value.length > 0 && (vaultMode.value !== "create"
-  || (Array.from(vaultPassword.value).length >= 12 && new TextEncoder().encode(vaultPassword.value).length >= 12 && vaultPassword.value === vaultConfirmation.value)));
+const dirty = computed(() => selection.value === "new" && (password.value.length > 0 || passwordRequired.value || !!staged.value || stageRequested.value));
 function freshOperation() { return { operationId: createUuidV7(), idempotencyKey: crypto.randomUUID() }; }
-function clearVaultInputs() { vaultPassword.value = ""; vaultConfirmation.value = ""; }
-function closeVault() {
-  clearVaultInputs(); vaultMode.value = null;
-  finishVault?.(false); finishVault = undefined;
-}
 async function cleanup() {
-  if (stageRequested && !committed) await cancelHostCreatePassword(operation);
-  if (!disposed) { staged.value = null; stageRequested = false; operation = freshOperation(); }
+  if (stageRequested.value && !committed) await cancelHostCreatePassword(operation);
+  if (!disposed) { staged.value = null; stageRequested.value = false; operation = freshOperation(); }
 }
 async function changeSelection(value: string) {
   if (props.busy || working.value) return;
@@ -55,33 +47,15 @@ async function changeSelection(value: string) {
   } catch { failure.value = true; } finally { working.value = false; }
 }
 async function ensureVault() {
-  const status = await fetchVaultStatus();
-  if (disposed) return false;
-  if (status.state === "unlocked") return true;
-  if (!["missing", "locked", "requiresReload"].includes(status.state)) throw new Error("Vault unavailable");
-  clearVaultInputs(); vaultFailed.value = false;
-  vaultMode.value = status.state === "missing" ? "create" : "unlock";
-  return new Promise<boolean>((resolve) => { finishVault = resolve; });
-}
-async function submitVault() {
-  if (!vaultValid.value || vaultSubmitting.value || !vaultMode.value) return;
-  const mode = vaultMode.value;
-  const value = vaultPassword.value, confirmation = vaultConfirmation.value;
-  clearVaultInputs(); vaultSubmitting.value = true; vaultFailed.value = false;
-  try {
-    const status = mode === "create" ? await createVault(value, confirmation) : await unlockVault(value);
-    if (disposed) return;
-    if (status.state !== "unlocked") throw new Error("Vault unavailable");
-    vaultMode.value = null;
-    finishVault?.(true); finishVault = undefined;
-  } catch { if (!disposed) vaultFailed.value = true; } finally { vaultSubmitting.value = false; }
+  const unlocked = await requestSecureVault("ensureUnlocked");
+  return !disposed && unlocked;
 }
 async function prepare(): Promise<DesktopPasswordStage | null | false> {
   if (working.value || disposed) return false;
   failure.value = false;
   if (selection.value !== "new") return null;
   if (staged.value) return { ...staged.value };
-  if (stageRequested) {
+  if (stageRequested.value) {
     working.value = true;
     try { await cleanup(); } catch { failure.value = true; return false; } finally { working.value = false; }
     if (disposed) return false;
@@ -99,7 +73,7 @@ async function prepare(): Promise<DesktopPasswordStage | null | false> {
     if (!await ensureVault() || disposed) { password.value = ""; return false; }
     const value = password.value;
     password.value = "";
-    stageRequested = true;
+    stageRequested.value = true;
     const submittedOperation = { ...operation };
     const result = await stageHostCreatePassword({
       ...submittedOperation,
@@ -117,12 +91,27 @@ async function prepare(): Promise<DesktopPasswordStage | null | false> {
     return false;
   } finally { working.value = false; }
 }
-function acceptSaved() { committed = true; staged.value = null; password.value = ""; }
+function acceptSaved() { committed = true; staged.value = null; stageRequested.value = false; passwordRequired.value = false; password.value = ""; }
+async function discard(): Promise<boolean> {
+  if (working.value || disposed) return false;
+  password.value = "";
+  working.value = true;
+  try {
+    await cleanup();
+    passwordRequired.value = false;
+    failure.value = false;
+    return true;
+  } catch {
+    failure.value = true;
+    return false;
+  } finally { working.value = false; }
+}
+watch(dirty, (value) => emit("dirty-change", value), { immediate: true });
 onBeforeUnmount(() => {
-  disposed = true; password.value = ""; closeVault();
+  disposed = true; password.value = "";
   void cleanup().catch(() => { /* Core's expired-staging reconciliation retains cleanup responsibility. */ });
 });
-defineExpose({ prepare, acceptSaved });
+defineExpose({ prepare, acceptSaved, discard });
 </script>
 
 <template>
@@ -172,66 +161,6 @@ defineExpose({ prepare, acceptSaved });
     tone="error"
     :title="t('desktop.passwordSaveFailed')"
   />
-  <NvxDialog
-    :model-value="!!vaultMode"
-    plugin-protected
-    :title="t(vaultMode === 'create' ? 'desktop.createVault' : 'desktop.unlockVault')"
-    :description="t('desktop.passwordVaultHint')"
-    :close-label="t('desktop.cancel')"
-    :dismissible="!vaultSubmitting"
-    @update:model-value="!$event && closeVault()"
-  >
-    <NvxField
-      for-id="desktop-save-vault-password"
-      :label="t('desktop.vaultPassword')"
-    >
-      <NvxInput
-        id="desktop-save-vault-password"
-        v-model="vaultPassword"
-        type="password"
-        :autocomplete="vaultMode === 'create' ? 'new-password' : 'current-password'"
-        :disabled="vaultSubmitting"
-      />
-    </NvxField>
-    <NvxField
-      v-if="vaultMode === 'create'"
-      for-id="desktop-save-vault-confirmation"
-      :label="t('desktop.vaultPasswordConfirmation')"
-    >
-      <NvxInput
-        id="desktop-save-vault-confirmation"
-        v-model="vaultConfirmation"
-        type="password"
-        autocomplete="new-password"
-        :disabled="vaultSubmitting"
-      />
-    </NvxField>
-    <NvxInlineNotice
-      v-if="vaultMode === 'create'"
-      :title="t('desktop.vaultMinimum')"
-    />
-    <NvxInlineNotice
-      v-if="vaultFailed"
-      tone="error"
-      :title="t('desktop.passwordVaultFailed')"
-    />
-    <template #actions>
-      <NvxButton
-        variant="ghost"
-        :disabled="vaultSubmitting"
-        @click="closeVault"
-      >
-        {{ t('desktop.cancel') }}
-      </NvxButton>
-      <NvxButton
-        :loading="vaultSubmitting"
-        :disabled="!vaultValid"
-        @click="submitVault"
-      >
-        {{ t(vaultMode === 'create' ? 'desktop.createVault' : 'desktop.unlockVault') }}
-      </NvxButton>
-    </template>
-  </NvxDialog>
 </template>
 
 <style scoped>

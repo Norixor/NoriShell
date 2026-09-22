@@ -156,7 +156,7 @@ const metricsActionLabel = computed(() => {
   if (!session || !props.card.monitoringPolicy.policy.enabled) return null;
   if (session.hostKeyChallenge) return t("overview.reviewHostKey");
   if (session.keyboardInteractiveChallenge) return t("overview.answerAuthentication");
-  if (session.authenticationReason === "vaultLocked") return t("sshSettings.vault.title");
+  if (session.authenticationReason === "vaultLocked") return t("overview.unlockVault");
   if (session.authenticationReason === "credentialUnavailable") return t("overview.manageCredentials");
   if (session.state === "failed" || session.state === "backoff") {
     return t("overview.retryMonitoring");

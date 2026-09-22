@@ -4,7 +4,6 @@ import { defineComponent, h } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
-  SshHostKeyDecision,
   SshSessionAttachment,
   SshSessionDetails,
   SshSessionEvent,
@@ -15,6 +14,7 @@ import type {
   SshSessionTarget,
 } from "../../core-api/generated/core-api";
 import { i18n } from "../../locales";
+import { useTipsStore } from "../../stores/tips";
 import {
   focusedTerminalLabel,
   resetTerminalInputFocusForTests,
@@ -22,6 +22,7 @@ import {
 } from "../../terminal-input-target";
 
 const client = vi.hoisted(() => ({
+  secureChallenge: vi.fn(),
   attachSshSession: vi.fn(),
   changeTerminalInputFocus: vi.fn(),
   decideSshHostKey: vi.fn(),
@@ -45,7 +46,10 @@ vi.mock("../../core-api/client", async (importOriginal) => {
   return { ...actual, ...client };
 });
 
+vi.mock("../../core-api/secure-ssh-challenge-client", () => ({ requestSecureSshChallenge: client.secureChallenge }));
+
 import NvxSshTerminalPane from "./NvxSshTerminalPane.vue";
+import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
 
 const paneId = "019d0000-0000-7000-8000-000000000401";
 const target: SshSessionTarget = {
@@ -68,10 +72,11 @@ const terminalViewStub = defineComponent({
   name: "NvxTerminalView",
   props: {
     readOnly: Boolean,
+    reconnectOnInput: Boolean,
     terminalLabel: { type: String, required: true },
     gapLabel: { type: String, required: true },
   },
-  emits: ["input", "resize", "searchRequest", "selectionChange"],
+  emits: ["reconnectRequest", "input", "resize", "searchRequest", "selectionChange"],
   setup(props, { expose }) {
     expose({
       writeBytes: writes.bytes,
@@ -227,7 +232,9 @@ function bodyButton(label: string) {
 
 describe("NvxSshTerminalPane Core IPC contract", () => {
   beforeEach(() => {
+    client.secureChallenge.mockReset().mockReturnValue(new Promise(() => undefined));
     vi.clearAllMocks();
+    localStorage.clear();
     resetTerminalInputFocusForTests();
     i18n.global.locale.value = "en";
     client.fetchTerminalInputFocusSnapshot.mockResolvedValue({
@@ -359,13 +366,7 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     wrapper.unmount();
   });
 
-  it.each([
-    ["sshSession.hostKey.accept", "acceptAndStore"],
-    ["sshSession.hostKey.reject", "reject"],
-  ] as const)("opens, renders the host-key challenge, and sends %s with every fence", async (
-    buttonLabelKey,
-    decision: SshHostKeyDecision,
-  ) => {
+  it("opens an isolated host-key challenge with every fence and no local approval button", async () => {
     const awaiting = summary("awaitingHostKeyDecision", { channelId: null });
     const challenge = {
       challengeId: "019d0000-0000-7000-8000-000000000441",
@@ -400,25 +401,20 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
       rows: 28,
       cols: 96,
     }, expect.any(Function));
-    expect(document.body.textContent).toContain("SHA256:test-fingerprint");
-    const decisionButton = bodyButton(i18n.global.t(buttonLabelKey));
-    expect(decisionButton).toBeDefined();
-    decisionButton?.click();
-    await flushPromises();
-
-    expect(client.decideSshHostKey).toHaveBeenCalledWith({
+    expect(document.body.textContent).not.toContain("SHA256:test-fingerprint");
+    expect(client.secureChallenge).toHaveBeenCalledWith({ kind: "sshHostKey", request: {
       sessionId: awaiting.sessionId,
       expectedGeneration: awaiting.generation,
       challengeId: challenge.challengeId,
       expectedStateRevision: challenge.stateRevision,
       attachmentId: attachment().attachmentId,
       viewId: paneId,
-      decision,
-    });
+    } });
+    expect(client.decideSshHostKey).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it("keeps keyboard-interactive answers on the exact challenge and hides non-echo values behind one-time refs", async () => {
+  it("opens keyboard-interactive in the isolated window without receiving answers", async () => {
     const authenticating = summary("authenticating", {
       channelId: null,
       stateRevision: "8",
@@ -464,27 +460,9 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
 
     const wrapper = mountPane();
     await flushPromises();
-    const account = document.querySelector<HTMLInputElement>("#ssh-kbi-0")!;
-    const code = document.querySelector<HTMLInputElement>("#ssh-kbi-1")!;
-    account.value = "deploy";
-    account.dispatchEvent(new Event("input", { bubbles: true }));
-    code.value = "827391";
-    code.dispatchEvent(new Event("input", { bubbles: true }));
-    bodyButton("Continue authentication")?.click();
-    await flushPromises();
-
-    expect(client.prepareSshKeyboardInteractiveAnswer).toHaveBeenCalledWith({
-      sessionId: authenticating.sessionId,
-      expectedGeneration: authenticating.generation,
-      challengeId: keyboardChallenge.challengeId,
-      expectedStateRevision: keyboardChallenge.stateRevision,
-      roundIndex: 1,
-      promptIndex: 1,
-      attachmentId: attachment().attachmentId,
-      viewId: paneId,
-      answer: "827391",
-    });
-    expect(client.respondSshKeyboardInteractive).toHaveBeenCalledWith({
+    expect(document.querySelector("#ssh-kbi-0")).toBeNull();
+    expect(document.querySelector("#ssh-kbi-1")).toBeNull();
+    expect(client.secureChallenge).toHaveBeenCalledWith({ kind: "sshKeyboard", request: {
       sessionId: authenticating.sessionId,
       expectedGeneration: authenticating.generation,
       challengeId: keyboardChallenge.challengeId,
@@ -492,16 +470,9 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
       roundIndex: 1,
       attachmentId: attachment().attachmentId,
       viewId: paneId,
-      answers: [
-        { kind: "echoText", promptIndex: 0, value: "deploy" },
-        {
-          kind: "oneTimeAnswerRef",
-          promptIndex: 1,
-          answerRefId: "019d0000-0000-7000-8000-000000000493",
-        },
-      ],
-    });
-    expect(code.value).toBe("");
+    } });
+    expect(client.prepareSshKeyboardInteractiveAnswer).not.toHaveBeenCalled();
+    expect(client.respondSshKeyboardInteractive).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -577,7 +548,10 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     await flushPromises();
 
     expect(client.sendSshInput).toHaveBeenCalledTimes(1);
-    expect(wrapper.text()).toContain("The send result is uncertain. Check the terminal before retrying.");
+    expect(wrapper.text()).not.toContain("The send result is uncertain. Check the terminal before retrying.");
+    expect(useTipsStore().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tone: "error", title: "The send result is uncertain. Check the terminal before retrying." }),
+    ]));
     expect(wrapper.get(".terminal-view-stub").attributes("data-read-only")).toBe("true");
 
     terminal.vm.$emit("input", "whoami\r");
@@ -831,6 +805,30 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     (wrapper.vm as unknown as { deactivateFromTab(): void }).deactivateFromTab();
     expect(focusedTerminalLabel.value).toBeNull();
     expect(await runInFocusedTerminal("uptime")).toBe("unavailable");
+    wrapper.unmount();
+  });
+
+  it("reacquires an expired input lease while the active SSH Pane remains running", async () => {
+    vi.useFakeTimers();
+    const running = summary("running", { eventSeq: "9" });
+    client.getSshSession.mockResolvedValue(details(running));
+    client.attachSshSession.mockResolvedValue({
+      stateRevision: running.stateRevision,
+      attachmentRevision: running.attachmentRevision,
+      attachment: attachment(),
+      replay: [],
+    });
+    const wrapper = mountPane(running);
+    await flushPromises();
+    expect(wrapper.get(".terminal-view-stub").attributes("data-read-only")).toBe("false");
+    client.changeTerminalInputFocus.mockClear();
+    client.renewSshInputLease.mockRejectedValueOnce(new Error("expired lease"));
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+
+    expect(client.changeTerminalInputFocus).toHaveBeenCalledTimes(1);
+    expect(wrapper.get(".terminal-view-stub").attributes("data-read-only")).toBe("false");
     wrapper.unmount();
   });
 
@@ -1336,6 +1334,60 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     wrapper.unmount();
   });
 
+  it.each(["closed", "failed"] as const)("reconnects %s on input once, honoring active state, dialogs and preference", async (state) => {
+    const closed = summary(state);
+    client.getSshSession.mockResolvedValue(details(closed));
+    client.attachSshSession.mockResolvedValue({ stateRevision: closed.stateRevision, attachmentRevision: "3", attachment: attachment({ channelId: null }), replay: [] });
+    const pending = deferred<SshSessionDetails>();
+    client.reconnectSshSession.mockReturnValue(pending.promise);
+    const wrapper = mountPane(closed);
+    await flushPromises();
+    const view = wrapper.findComponent(terminalViewStub);
+    const preferences = useTerminalPreferencesStore();
+    expect(view.props("reconnectOnInput")).toBe(true);
+    preferences.setInteraction({ ...preferences.preferences.interaction, sshReconnectOnInput: false });
+    view.vm.$emit("reconnectRequest");
+    await flushPromises();
+    expect(client.reconnectSshSession).not.toHaveBeenCalled();
+    preferences.setInteraction({ ...preferences.preferences.interaction, sshReconnectOnInput: true });
+    await wrapper.setProps({ active: false });
+    view.vm.$emit("reconnectRequest");
+    await flushPromises();
+    expect(client.reconnectSshSession).not.toHaveBeenCalled();
+    await wrapper.setProps({ active: true });
+    const modal = document.createElement("div");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    document.body.append(modal);
+    view.vm.$emit("reconnectRequest");
+    await flushPromises();
+    expect(client.reconnectSshSession).not.toHaveBeenCalled();
+    modal.remove();
+    view.vm.$emit("reconnectRequest");
+    view.vm.$emit("reconnectRequest");
+    await flushPromises();
+    expect(client.reconnectSshSession).toHaveBeenCalledTimes(1);
+    expect(view.props("readOnly")).toBe(true);
+    pending.resolve(details(summary("connecting", { generation: "3", stateRevision: "8" })));
+    await flushPromises();
+    view.vm.$emit("reconnectRequest");
+    await flushPromises();
+    expect(client.reconnectSshSession).toHaveBeenCalledTimes(1);
+    expect(client.sendSshInput).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it.each(["credential", "vaultUnlock"] as const)("routes input through existing %s recovery without replay", async (recovery) => {
+    const wrapper = mountPane(null, true, true, recovery, null);
+    await flushPromises();
+    wrapper.findComponent(terminalViewStub).vm.$emit("reconnectRequest");
+    await flushPromises();
+    expect(wrapper.emitted(recovery === "credential" ? "requestCredential" : "requestVaultUnlock")).toEqual([[paneId, target]]);
+    expect(client.reconnectSshSession).not.toHaveBeenCalled();
+    expect(client.sendSshInput).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("reconnects a closed session with a fresh generation and the current terminal size", async () => {
     const closed = summary("closed", { channelId: null });
     const reconnected = summary("connecting", { generation: "3", stateRevision: "8" });
@@ -1364,6 +1416,81 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
       rows: 28,
       cols: 96,
     });
+    wrapper.unmount();
+  });
+
+  it("accepts the replacement Channel before acquiring input after reconnect", async () => {
+    const closed = summary("closed", { channelId: null, eventSeq: "4" });
+    const connecting = summary("connecting", {
+      generation: "3",
+      stateRevision: "8",
+      attachmentRevision: "5",
+      eventSeq: "1",
+      channelId: null,
+    });
+    const running = summary("running", {
+      generation: "3",
+      stateRevision: "9",
+      attachmentRevision: "6",
+      eventSeq: "3",
+      channelId: "019d0000-0000-7000-8000-000000000426",
+    });
+    let onEvent: ((value: SshSessionEvent) => void) | null = null;
+    client.getSshSession.mockResolvedValue(details(closed));
+    client.attachSshSession.mockImplementation(async (_request, listener) => {
+      onEvent = listener;
+      return {
+        stateRevision: closed.stateRevision,
+        attachmentRevision: closed.attachmentRevision,
+        attachment: attachment({ channelId: null }),
+        replay: [],
+      };
+    });
+    client.reconnectSshSession.mockResolvedValue(details(connecting, {
+      attachments: [attachment({
+        generation: connecting.generation,
+        stateRevision: connecting.stateRevision,
+        attachmentRevision: connecting.attachmentRevision,
+        channelId: null,
+      })],
+    }));
+    const wrapper = mountPane(closed);
+    await flushPromises();
+    client.changeTerminalInputFocus.mockClear();
+
+    await wrapper.get(".ssh-terminal-pane__reconnect").trigger("click");
+    await flushPromises();
+    dispatchCapturedEvent(onEvent, event(running, {
+      kind: "attachmentChanged",
+      change: "attached",
+      attachmentRevision: running.attachmentRevision,
+      attachment: attachment({
+        generation: running.generation,
+        stateRevision: running.stateRevision,
+        attachmentRevision: running.attachmentRevision,
+        channelId: running.channelId,
+      }),
+    }, "2"));
+    dispatchCapturedEvent(onEvent, event(running, {
+      kind: "stateChanged",
+      previousState: "connecting",
+      state: "running",
+      closeReason: null,
+      failureReason: null,
+    }, "3"));
+    await flushPromises();
+
+    expect(client.changeTerminalInputFocus).toHaveBeenCalledWith({
+      expectedFocusEpoch: "1",
+      target: expect.objectContaining({
+        kind: "ssh",
+        target: expect.objectContaining({
+          expectedGeneration: "3",
+          channelId: running.channelId,
+        }),
+      }),
+    });
+    expect(wrapper.get(".terminal-view-stub").attributes("data-read-only")).toBe("false");
     wrapper.unmount();
   });
 

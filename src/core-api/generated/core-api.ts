@@ -913,38 +913,13 @@ export type PluginNavigationListRequest = { meta: RequestMeta, };
 
 export type PluginPageContribution = { pageId: PluginPageId, title: string, icon: string | null, onOpenActionId?: PluginUiActionId | null, document: PluginUiDocument, };
 
-export type PluginInstallState = "enabled" | "disabled" | "updateAvailable" | "crashed" | "quarantined" | "incompatible";
+export type PluginInstallState = "enabled" | "disabled" | "crashed" | "quarantined" | "incompatible";
 
 export type PluginPackageKind = "wasm" | "theme";
 
-export type PluginCompatibility = "compatible" | "protocolIncompatible" | "appVersionIncompatible" | "platformIncompatible";
-
-export type PluginCatalogReleaseDetails = { description: string, releaseNotes: Array<string>, extensionTargets: Array<string>, releasePublishedAtUnixMs: number | null, };
-
-export type PluginCatalogEntry = { pluginId: PluginId, name: string, publisher: string, version: string, protocolMajor: number, protocolMinor: number, platform: string, architectures: Array<string>, packageUrl: string, packageSize: bigint, packageSha256: string, publisherKeyBase64: string, publisherSignatureBase64: string, capabilities: Array<PluginCapability>, minimumAppVersion: string, publishedAtUnixMs: bigint, details?: PluginCatalogReleaseDetails, compatibility: PluginCompatibility, 
-/**
- * Core-computed current decisions that can be rebound to this exact
- * verified update artifact without another approval.
- */
-retainedCapabilityGrants: Array<PluginCapabilityGrant>, unsupportedCapabilities?: Array<string>, };
-
-export type PluginCatalogSnapshot = { catalogRevision: string, verifiedAtUnixMs: bigint, entries: Array<PluginCatalogEntry>, };
-
-export type PluginCatalogRefreshRequest = { meta: RequestMeta, operationId: PluginOperationId, idempotencyKey: string, };
-
-export type PluginInstallRequest = { meta: RequestMeta, operationId: PluginOperationId, idempotencyKey: string, pluginId: PluginId, version: string, expectedStateVersion: WireSequence | null, capabilityGrants: Array<PluginCapabilityGrant>, };
-
-export type PluginReadiness = { ready: boolean, trustedRootCount: number, protocolMajor: number, protocolMinor: number, safeModeActive: boolean, safeModeNextStart: boolean, };
+export type PluginReadiness = { ready: boolean, protocolMajor: number, protocolMinor: number, safeModeActive: boolean, safeModeNextStart: boolean, };
 
 export type PluginReadinessGetRequest = { meta: RequestMeta, };
-
-export type PluginIconReadScope = "catalog" | "installed";
-
-export type PluginIconSource = "network" | "cache";
-
-export type PluginIconReadRequest = { meta: RequestMeta, pluginId: PluginId, scope: PluginIconReadScope, refresh: boolean, };
-
-export type PluginIconReadResponse = { pluginId: PluginId, dataUrl?: string, sha256?: string, source?: PluginIconSource, };
 
 export type PluginAuditListRequest = { meta: RequestMeta, limit: number, };
 
@@ -952,11 +927,11 @@ export type PluginAuditEntry = { auditId: bigint, pluginId: string | null, opera
 
 export type PluginSafeModeNextStartRequest = { meta: RequestMeta, enabled: boolean, };
 
-export type PluginOperationKind = "catalogRefresh" | "install" | "update" | "disable" | "uninstall";
+export type PluginOperationKind = "install" | "update" | "disable" | "uninstall";
 
 export type PluginOperationState = "pending" | "running" | "awaitingCapabilities" | "succeeded" | "failed" | "cancelled";
 
-export type PluginErrorCode = "trustRootsUnavailable" | "catalogUnavailable" | "catalogEnvelopeInvalid" | "catalogSignatureInvalid" | "catalogPayloadInvalid" | "packageTooLarge" | "packageHashMismatch" | "publisherSignatureInvalid" | "packageArchiveInvalid" | "packagePathRejected" | "packageLimitsExceeded" | "manifestMismatch" | "capabilityRejected" | "protocolIncompatible" | "appVersionIncompatible" | "installConflict" | "runtimeRejected" | "runtimeQuotaExceeded" | "runtimeTimedOut" | "operationNotFound" | "invalidRequest";
+export type PluginErrorCode = "packageTooLarge" | "packageHashMismatch" | "packageArchiveInvalid" | "packagePathRejected" | "packageLimitsExceeded" | "manifestMismatch" | "capabilityRejected" | "protocolIncompatible" | "appVersionIncompatible" | "installConflict" | "runtimeRejected" | "runtimeQuotaExceeded" | "runtimeTimedOut" | "operationNotFound" | "invalidRequest";
 
 export type PluginCapabilityGrant = { capability: PluginCapability, granted: boolean, };
 
@@ -1013,8 +988,6 @@ export type PluginInstalledListRequest = { meta: RequestMeta, };
 export type PluginLocalInstallRequest = { meta: RequestMeta, operationId: PluginOperationId, idempotencyKey: string, preparationId: string, expectedPackageSha256: string, expectedStateVersion: WireSequence | null, capabilityGrants: Array<PluginCapabilityGrant>, };
 
 export type PluginLocalPackagePrepareRequest = { meta: RequestMeta, };
-
-export type PluginCatalogPackagePrepareRequest = { meta: RequestMeta, pluginId: PluginId, version: string, expectedStateVersion: WireSequence | null, };
 
 export type PluginLocalPackageCancelRequest = { meta: RequestMeta, preparationId: string, };
 
@@ -2139,7 +2112,6 @@ export const coreApiCommands = {
   pluginSafeModeNextStart: "plugin_safe_mode_next_start",
   pluginSafeModeStartupComplete: "plugin_safe_mode_startup_complete",
   pluginLocalPackagePrepare: "plugin_local_package_prepare",
-  pluginCatalogPackagePrepare: "plugin_catalog_package_prepare",
   pluginLocalPackageCancel: "plugin_local_package_cancel",
   pluginLocalInstall: "plugin_local_install",
   pluginCapabilityGrantsReplace: "plugin_capability_grants_replace",
