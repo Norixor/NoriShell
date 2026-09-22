@@ -50,7 +50,7 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@tauri-apps/cli": "2.11.4",
-    "@types/node": "26.4.0",
+    "@types/node": "26.6.2",
     "@vitejs/plugin-vue": "6.0.8",
     "@vitest/coverage-v8": "4.1.11",
     "@vue/test-utils": "2.4.11",
