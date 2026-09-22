@@ -52,7 +52,6 @@ pub(super) struct PreparedSpecialPermissionApproval {
     plugin_id: PluginId,
     version: String,
     protocol_major: u16,
-    authority: PreparedPackageAuthority,
     binding: PluginPermissionBinding,
     baseline: PreparedPermissionBaseline,
     pub(super) grants: Vec<PluginCapabilityGrant>,
@@ -72,7 +71,6 @@ impl PreparedSpecialPermissionApproval {
             && self.plugin_id == prepared.inspected.manifest.plugin_id
             && self.version == prepared.inspected.manifest.version
             && self.protocol_major == prepared.inspected.manifest.protocol_major
-            && self.authority == prepared.authority
             && self.binding
                 == current_plugin_permission_binding(&hex::encode(
                     prepared.inspected.package_sha256,
@@ -108,13 +106,7 @@ impl PreparedLocalPackage {
     }
 
     fn signer_fingerprint(&self) -> String {
-        match &self.authority {
-            PreparedPackageAuthority::Local => hex::encode(self.inspected.package_sha256),
-            PreparedPackageAuthority::Marketplace {
-                signer_fingerprint_sha256,
-                ..
-            } => signer_fingerprint_sha256.clone(),
-        }
+        hex::encode(self.inspected.package_sha256)
     }
 }
 
@@ -404,10 +396,7 @@ impl PluginService {
         let snapshot = PluginSpecialPermissionSnapshot {
             target: request.target.clone(),
             requested_capability: request.requested_capability,
-            publisher_verified: matches!(
-                prepared.authority,
-                PreparedPackageAuthority::Marketplace { .. }
-            ),
+            publisher_verified: false,
             approval_id: PluginApprovalId::new(),
             approval_state_version: WireSequence::new(next_revision),
             expires_at_unix_ms: unix_time_ms().saturating_add(PLUGIN_HOST_APPROVAL_MILLIS),
@@ -502,7 +491,6 @@ impl PluginService {
                 plugin_id: prepared.inspected.manifest.plugin_id.clone(),
                 version: prepared.inspected.manifest.version.clone(),
                 protocol_major: prepared.inspected.manifest.protocol_major,
-                authority: prepared.authority.clone(),
                 binding: current_plugin_permission_binding(expected_package_sha256),
                 baseline,
                 grants,
@@ -577,40 +565,5 @@ impl PluginService {
                 }
             }
         }
-    }
-
-    pub(super) fn revalidate_prepared_marketplace(
-        &self,
-        prepared: &PreparedLocalPackage,
-        request_id: RequestId,
-    ) -> CoreResult<()> {
-        let PreparedPackageAuthority::Marketplace {
-            catalog_entry,
-            signer_fingerprint_sha256,
-            ..
-        } = &prepared.authority
-        else {
-            return Ok(());
-        };
-        let (root, catalog, _) = self.fetch_verified_norixor_catalog(request_id.clone())?;
-        let item = catalog
-            .item(
-                &prepared.inspected.manifest.plugin_id,
-                &prepared.inspected.manifest.version,
-            )
-            .ok_or_else(|| plugin_conflict_error(request_id.clone(), None))?;
-        let fresh = norixor_catalog_entry_record(&root, &catalog, item)
-            .ok_or_else(|| plugin_conflict_error(request_id.clone(), None))?;
-        let signer = root
-            .publisher_key_base64(&item.publisher_key_id)
-            .and_then(|key| BASE64.decode(key).ok())
-            .map(|key| hex::encode(Sha256::digest(key)));
-        if !catalog_install_candidate_is_unchanged(catalog_entry, &fresh)
-            || signer.as_deref() != Some(signer_fingerprint_sha256)
-            || hex::encode(prepared.inspected.package_sha256) != fresh.package_sha256
-        {
-            return Err(plugin_conflict_error(request_id, None));
-        }
-        Ok(())
     }
 }

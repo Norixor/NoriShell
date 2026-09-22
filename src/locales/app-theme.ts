@@ -1,7 +1,7 @@
 export const appThemeZhCN = {
   title: "外观", description: "管理应用主题，为整个工作区调整配色与控件外观。",
-  mode: "外观模式", modeHint: "即时保存。跟随系统时使用下方分别选择的浅色与深色方案。",
-  light: "浅色", dark: "深色", system: "跟随系统", theme: "主题方案", editLight: "编辑浅色方案", editDark: "编辑深色方案",
+  mode: "外观模式", modeHint: "即时保存。跟随系统时使用最近保存的浅色与深色方案。",
+  light: "浅色", dark: "深色", system: "跟随系统", theme: "主题方案", selectionHint: "所有主题均在这里。选择后可预览，保存时自动切换到对应的浅色或深色模式。",
   builtin: "内置", installed: "主题插件", disabled: "已禁用", selected: "已选择", missing: "所选主题不可用，当前使用内置主题。自定义内容仍保留。",
   empty: "安装主题插件后会显示在这里。", manage: "管理插件", refresh: "刷新主题", loading: "正在读取主题…", loadFailed: "无法读取已安装主题，已回退内置外观。",
   customize: "自定义外观", colors: "完整配色", colorHint: "按语义角色调整颜色。文字和控件必须保持足够对比度。",
@@ -19,12 +19,12 @@ export const appThemeZhCN = {
   input: "输入框预览", inputPlaceholder: "输入文本，检查焦点与选区", name: "名称", status: "状态", sampleHost: "示例主机", sampleTask: "示例任务", ready: "就绪", paused: "暂停", warning: "警告", errorState: "操作失败，请重试。",
   previewTab: "组件", previewTabSecondary: "列表", previewNotice: "文字、边框和状态保持清晰可辨。", secureNote: "安全确认窗口使用宿主内置外观。终端固定配色保持独立。",
   save: "保存更改", cancel: "取消更改", reset: "恢复此主题默认", import: "导入配置", export: "导出已保存配置", saved: "外观已保存。", resetHint: "已恢复主题默认草稿，保存后生效。", imported: "已载入配置草稿，核对后保存。", exported: "配置已导出。",
-  unsaved: "尚未保存", errors: { invalid: "颜色格式、对比度或外观参数不符合要求，请修正后保存。", saveFailed: "外观未能保存，请重试。", invalidFile: "主题配置格式无效。", tooLarge: "主题配置文件过大。", exportFailed: "导出失败，请重试。", changed: "主题或设置已变化，请取消更改后重试。" },
+  unsaved: "尚未保存", errors: { modeSaveFailed: "主题配置已保存，但外观模式未能保存。请重试保存。", invalid: "颜色格式、对比度或外观参数不符合要求，请修正后保存。", saveFailed: "外观未能保存，请重试。", invalidFile: "主题配置格式无效。", tooLarge: "主题配置文件过大。", exportFailed: "导出失败，请重试。", changed: "主题或设置已变化，请取消更改后重试。" },
 };
 export const appThemeEn = {
   title: "Appearance", description: "Manage application themes and customize colors and controls throughout your workspace.",
-  mode: "Appearance mode", modeHint: "Saved immediately. System mode uses your separate light and dark selections below.",
-  light: "Light", dark: "Dark", system: "System", theme: "Theme", editLight: "Edit light theme", editDark: "Edit dark theme",
+  mode: "Appearance mode", modeHint: "Saved immediately. System mode uses your most recently saved light and dark selections.",
+  light: "Light", dark: "Dark", system: "System", theme: "Theme", selectionHint: "All themes appear here. Select one to preview; saving switches to its light or dark mode.",
   builtin: "Built in", installed: "Theme plugin", disabled: "Disabled", selected: "Selected", missing: "The selected theme is unavailable. A built-in theme is active; your customizations are retained.",
   empty: "Installed theme plugins will appear here.", manage: "Manage plugins", refresh: "Refresh themes", loading: "Loading themes…", loadFailed: "Installed themes could not be read. Built-in appearance is active.",
   customize: "Customize appearance", colors: "All colors", colorHint: "Edit semantic color roles. Text and controls must retain sufficient contrast.",
@@ -42,5 +42,5 @@ export const appThemeEn = {
   input: "Preview input", inputPlaceholder: "Type to check focus and selection", name: "Name", status: "Status", sampleHost: "Sample host", sampleTask: "Sample task", ready: "Ready", paused: "Paused", warning: "Warning", errorState: "The operation failed. Please retry.",
   previewTab: "Components", previewTabSecondary: "List", previewNotice: "Text, borders and status remain distinguishable.", secureNote: "Security confirmations use built-in appearance. Fixed terminal palettes remain independent.",
   save: "Save changes", cancel: "Discard changes", reset: "Reset this theme", import: "Import profile", export: "Export saved profile", saved: "Appearance saved.", resetHint: "Default theme loaded into the draft. Save to apply.", imported: "Profile loaded into the draft. Review and save to apply.", exported: "Profile exported.",
-  unsaved: "Unsaved changes", errors: { invalid: "Fix invalid colors, contrast or appearance values before saving.", saveFailed: "Appearance could not be saved. Please retry.", invalidFile: "Invalid theme profile.", tooLarge: "The theme profile is too large.", exportFailed: "Export failed. Please retry.", changed: "Themes or preferences have changed. Discard your changes and retry." },
+  unsaved: "Unsaved changes", errors: { modeSaveFailed: "The theme profile was saved, but appearance mode could not be saved. Retry saving.", invalid: "Fix invalid colors, contrast or appearance values before saving.", saveFailed: "Appearance could not be saved. Please retry.", invalidFile: "Invalid theme profile.", tooLarge: "The theme profile is too large.", exportFailed: "Export failed. Please retry.", changed: "Themes or preferences have changed. Discard your changes and retry." },
 };

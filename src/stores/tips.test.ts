@@ -35,4 +35,26 @@ describe("useTipsStore", () => {
 
     expect(tips.items.map((item) => item.title)).toEqual(["Review"]);
   });
+
+  it("runs an action once while it is pending and tolerates dismissal", async () => {
+    const tips = useTipsStore();
+    let resolveAction: (() => void) | undefined;
+    const action = vi.fn(() => new Promise<void>((resolve) => { resolveAction = resolve; }));
+    const id = tips.show({
+      title: "Unlock Vault",
+      durationMs: 0,
+      action: { label: "Unlock now", onClick: action },
+    });
+
+    const first = tips.runAction(id);
+    const duplicate = tips.runAction(id);
+    expect(action).toHaveBeenCalledOnce();
+    expect(tips.items[0]?.actionPending).toBe(true);
+
+    tips.dismiss(id);
+    resolveAction?.();
+    await Promise.all([first, duplicate]);
+
+    expect(tips.items).toEqual([]);
+  });
 });

@@ -1,8 +1,10 @@
 import { flushPromises, mount } from "@vue/test-utils";
+import { createPinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18n } from "../locales";
+import { useTipsStore } from "../stores/tips";
 
 const client = vi.hoisted(() => ({
   deleteKnownHost: vi.fn(),
@@ -35,12 +37,13 @@ async function mountView() {
   });
   await router.push("/known-hosts");
   await router.isReady();
+  const pinia = createPinia();
   const wrapper = mount(KnownHostsSettingsView, {
     attachTo: document.body,
-    global: { plugins: [router, i18n] },
+    global: { plugins: [pinia, router, i18n] },
   });
   await flushPromises();
-  return wrapper;
+  return { tips: useTipsStore(pinia), wrapper };
 }
 
 describe("KnownHostsSettingsView", () => {
@@ -56,7 +59,7 @@ describe("KnownHostsSettingsView", () => {
   });
 
   it("renders the verified fingerprint without exposing the stored public key", async () => {
-    const wrapper = await mountView();
+    const { wrapper } = await mountView();
 
     expect(wrapper.text()).toContain("server.example.com:22");
     expect(wrapper.text()).toContain("SHA256:server-fingerprint");
@@ -65,7 +68,7 @@ describe("KnownHostsSettingsView", () => {
   });
 
   it("requires confirmation and deletes the exact current-version trust record", async () => {
-    const wrapper = await mountView();
+    const { wrapper } = await mountView();
 
     await wrapper.findAll("button").find((button) => button.text() === "Delete trust")!.trigger("click");
     expect(document.body.textContent).toContain("the next connection must confirm the server identity again");
@@ -76,6 +79,27 @@ describe("KnownHostsSettingsView", () => {
     await flushPromises();
 
     expect(client.deleteKnownHost).toHaveBeenCalledWith("known-host-1", "7");
+    wrapper.unmount();
+  });
+
+  it("reports failed trust-record deletion through the shared Tips store", async () => {
+    client.deleteKnownHost.mockRejectedValueOnce(new Error("unavailable"));
+    const { tips, wrapper } = await mountView();
+
+    await wrapper.findAll("button").find((button) => button.text() === "Delete trust")!.trigger("click");
+    const confirm = Array.from(document.body.querySelectorAll("button"))
+      .filter((button) => button.textContent?.trim() === "Delete trust")
+      .at(-1)!;
+    confirm.click();
+    await flushPromises();
+
+    expect(tips.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        scope: "known-hosts-action",
+        tone: "error",
+        title: "Deletion did not complete. The record may have changed; refresh and try again.",
+      }),
+    ]));
     wrapper.unmount();
   });
 });

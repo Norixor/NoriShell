@@ -197,8 +197,8 @@ function executeShortcut(command: ShortcutCommand) {
     case "navigation.tunnels": void router.push("/tunnels"); break;
     case "navigation.plugins": void router.push("/plugins"); break;
     case "navigation.settings": void router.push("/settings"); break;
-    case "navigation.known-hosts": void router.push("/known-hosts"); break;
-    case "navigation.ssh-identities": void router.push("/settings/identities"); break;
+    case "navigation.known-hosts": void router.push("/settings?section=knownHosts"); break;
+    case "navigation.ssh-identities": void router.push("/settings?section=identities"); break;
     case "workspace.new":
       if (!terminalBusy.value) createTerminal();
       break;

@@ -14,12 +14,13 @@ import {
   Type,
   SquareTerminal,
   Highlighter,
+  Info,
   Keyboard,
   SlidersHorizontal,
 } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 import NvxAppThemeSettings from "../components/settings/NvxAppThemeSettings.vue";
 import NvxTerminalInteractionSettings from "../components/settings/NvxTerminalInteractionSettings.vue";
 import NvxPreferenceTransferSettings from "../components/settings/NvxPreferenceTransferSettings.vue";
@@ -30,6 +31,9 @@ import NvxShortcutSettings from "../components/settings/NvxShortcutSettings.vue"
 import NvxTerminalEnhancementSettings from "../components/settings/NvxTerminalEnhancementSettings.vue";
 import NvxNativeShellSettings from "../components/settings/NvxNativeShellSettings.vue";
 import NvxNativeNotificationSettings from "../components/settings/NvxNativeNotificationSettings.vue";
+import NvxReleaseSettings from "../components/settings/NvxReleaseSettings.vue";
+import IdentitiesSettingsView from "./IdentitiesSettingsView.vue";
+import KnownHostsSettingsView from "./KnownHostsSettingsView.vue";
 import { useNativeTerminalStore } from "../stores/nativeTerminal";
 
 import { NvxPluginExtensionTarget } from "../components/plugins";
@@ -45,18 +49,16 @@ import {
   NvxStatusLabel,
 } from "../components/ui";
 import {
-  createVault,
-  unlockVault,
   disableVaultAutoUnlock,
-  enableVaultAutoUnlock,
   fetchVaultStatus,
   lockVault,
   parseCoreApiError,
   setPluginLocale,
   listHostCatalog,
 } from "../core-api/client";
+import { requestSecureVault } from "../core-api/secure-vault-client";
 import type { VaultStatus } from "../core-api/generated/core-api";
-import type { AppLocale } from "../locales";
+import { resolveLocale, type LocalePreference } from "../locales";
 import { useTipsStore } from "../stores/tips";
 import {
   useUiStore,
@@ -88,18 +90,17 @@ import {
 } from "../terminal-theme";
 
 const { t, te } = useI18n();
-const router = useRouter();
 const route = useRoute();
 const ui = useUiStore();
 const tips = useTipsStore();
 const nativeTerminal = useNativeTerminalStore();
 
 const securityLinks = [
-  { key: "hostKeys", icon: ShieldCheck, path: "/known-hosts" },
-  { key: "identities", icon: KeyRound, path: "/settings/identities" },
+  { key: "hostKeys", icon: ShieldCheck, section: "knownHosts" },
+  { key: "identities", icon: KeyRound, section: "identities" },
 ] as const;
 
-type SettingsSection = "appearance" | "transfer" | "desktop" | "interaction" | "files" | "application" | "terminal" | "vault" | "enhancements" | "highlights" | "shortcuts";
+type SettingsSection = "appearance" | "transfer" | "desktop" | "interaction" | "files" | "application" | "terminal" | "vault" | "knownHosts" | "identities" | "enhancements" | "highlights" | "shortcuts" | "about";
 
 const activeSection = ref<SettingsSection>("application");
 const enhancementSections = [
@@ -121,7 +122,7 @@ async function loadHighlightHosts() {
 }
 watch(activeSection, (section) => { if (section === "highlights") void loadHighlightHosts(); });
 watch(() => route.query.section, (section) => {
-  if (typeof section === "string" && ["appearance", "application", "terminal", "vault", "enhancements", "highlights", "shortcuts", "files", "interaction", "desktop", "transfer"].includes(section)) activeSection.value = section as SettingsSection;
+  if (typeof section === "string" && ["appearance", "application", "terminal", "vault", "knownHosts", "identities", "enhancements", "highlights", "shortcuts", "files", "interaction", "desktop", "transfer", "about"].includes(section)) activeSection.value = section as SettingsSection;
 }, { immediate: true });
 
 const uiZoomOptions = UI_ZOOM_LEVELS.map((value) => ({ value: String(value), label: `${value}%` }));
@@ -132,6 +133,7 @@ async function setUiZoom(value: string) {
 }
 
 const localeOptions = computed(() => [
+  { value: "system", label: t("sshSettings.applicationPreferences.locales.system") },
   { value: "zh-CN", label: t("sshSettings.applicationPreferences.locales.zhCN") },
   { value: "en", label: t("sshSettings.applicationPreferences.locales.en") },
 ]);
@@ -219,26 +221,6 @@ const vaultStatus = ref<VaultStatus | null>(null);
 const vaultStatusLoading = ref(true);
 const vaultActionLoading = ref(false);
 const vaultActionError = ref("");
-const vaultAccessDialogOpen = ref(false);
-const vaultAccessMode = ref<"create" | "unlock">("unlock");
-const vaultAccessPassword = ref("");
-const vaultAccessConfirmation = ref("");
-const vaultAccessValid = computed(() => vaultAccessPassword.value.length > 0 && (
-  vaultAccessMode.value === "unlock" || (
-    new TextEncoder().encode(vaultAccessPassword.value).length >= 12
-    && vaultAccessPassword.value === vaultAccessConfirmation.value
-  )
-));
-function clearVaultAccessPasswords() {
-  vaultAccessPassword.value = "";
-  vaultAccessConfirmation.value = "";
-}
-watch(vaultAccessDialogOpen, (open) => { if (!open) clearVaultAccessPasswords(); });
-onBeforeUnmount(clearVaultAccessPasswords);
-const autoUnlockDialogOpen = ref(false);
-const autoUnlockPassword = ref("");
-const autoUnlockConfirmed = ref(false);
-
 const vaultPolicyOptions = computed(() => [
   {
     value: "currentSession",
@@ -334,9 +316,9 @@ const customErrorMessage = computed(() => {
 });
 
 async function setLocale(value: string) {
-  const locale = value as AppLocale;
+  const locale = value as LocalePreference;
   try {
-    await setPluginLocale(locale);
+    await setPluginLocale(resolveLocale(locale));
     ui.setLocale(locale);
   } catch {
     tips.show({
@@ -418,50 +400,21 @@ onMounted(async () => {
 
 async function openVaultAccess() {
   if (vaultActionLoading.value || vaultStatusLoading.value) return;
-  vaultActionError.value = "";
-  vaultStatusLoading.value = true;
-  clearVaultAccessPasswords();
-  try {
-    vaultStatus.value = await fetchVaultStatus();
-    if (vaultStatus.value.state === "unlocked") return;
-    vaultAccessMode.value = vaultStatus.value.state === "missing" ? "create" : "unlock";
-    vaultAccessDialogOpen.value = true;
-  } catch {
-    vaultStatus.value = null;
-    vaultActionError.value = t("sshTerminal.vaultUnavailable");
-  } finally {
-    vaultStatusLoading.value = false;
-  }
+  await runSecureVault("ensureUnlocked");
 }
 
-async function confirmVaultAccess() {
-  if (vaultActionLoading.value || !vaultAccessValid.value) return;
+async function runSecureVault(mode: "ensureUnlocked" | "enableAutoUnlock") {
   vaultActionLoading.value = true;
   vaultActionError.value = "";
-  const mode = vaultAccessMode.value;
-  const password = vaultAccessPassword.value;
-  const confirmation = vaultAccessConfirmation.value;
-  clearVaultAccessPasswords();
   try {
-    vaultStatus.value = mode === "create"
-      ? await createVault(password, confirmation)
-      : await unlockVault(password);
-    if (vaultStatus.value.state !== "unlocked") throw new Error("Vault unavailable");
-    vaultAccessDialogOpen.value = false;
-  } catch (error) {
-    const coreError = parseCoreApiError(error);
-    vaultActionError.value = coreError?.messageKey && te(coreError.messageKey)
-      ? t(coreError.messageKey)
-      : t("sshHosts.vault.failed");
+    await requestSecureVault(mode);
+    vaultStatus.value = await fetchVaultStatus();
+  } catch {
+    vaultActionError.value = t("sshHosts.vault.failed");
+    vaultStatus.value = await fetchVaultStatus().catch(() => null);
   } finally {
     vaultActionLoading.value = false;
   }
-}
-
-function resetAutoUnlockDialog() {
-  autoUnlockPassword.value = "";
-  autoUnlockConfirmed.value = false;
-  vaultActionError.value = "";
 }
 
 async function setVaultPolicy(value: string) {
@@ -473,8 +426,7 @@ async function setVaultPolicy(value: string) {
   ) return;
   vaultActionError.value = "";
   if (value === "automatic") {
-    resetAutoUnlockDialog();
-    autoUnlockDialogOpen.value = true;
+    await runSecureVault("enableAutoUnlock");
     return;
   }
   if (value !== "currentSession") return;
@@ -487,25 +439,6 @@ async function setVaultPolicy(value: string) {
     vaultActionError.value = coreError?.messageKey && te(coreError.messageKey)
       ? t(coreError.messageKey)
       : t("sshSettings.vault.errors.policyUpdate");
-  } finally {
-    vaultActionLoading.value = false;
-  }
-}
-
-async function confirmAutoUnlock() {
-  if (!autoUnlockPassword.value || !autoUnlockConfirmed.value || vaultActionLoading.value) return;
-  vaultActionLoading.value = true;
-  vaultActionError.value = "";
-  try {
-    vaultStatus.value = await enableVaultAutoUnlock(autoUnlockPassword.value);
-    autoUnlockPassword.value = "";
-    autoUnlockConfirmed.value = false;
-    autoUnlockDialogOpen.value = false;
-  } catch (error) {
-    const coreError = parseCoreApiError(error);
-    vaultActionError.value = coreError?.messageKey && te(coreError.messageKey)
-      ? t(coreError.messageKey)
-      : t("sshSettings.vault.errors.enable");
   } finally {
     vaultActionLoading.value = false;
   }
@@ -653,6 +586,24 @@ function saveCustomScheme() {
               /></span>
               <span>{{ t(section.label) }}</span>
             </button>
+            <button
+              class="settings-nav-item"
+              :class="{ 'settings-nav-item--active': activeSection === 'about' }"
+              type="button"
+              :aria-current="activeSection === 'about' ? 'page' : undefined"
+              @click="activeSection = 'about'"
+            >
+              <span
+                class="settings-nav-item__icon"
+                aria-hidden="true"
+              >
+                <NvxIcon
+                  :icon="Info"
+                  :size="16"
+                />
+              </span>
+              <span>{{ t("releases.aboutTitle") }}</span>
+            </button>
           </section>
 
           <section class="settings-sidebar__group settings-sidebar__group--security">
@@ -684,9 +635,11 @@ function saveCustomScheme() {
               v-for="link in securityLinks"
               :key="link.key"
               class="settings-security-item"
+              :class="{ 'settings-security-item--active': activeSection === link.section }"
               type="button"
               :aria-label="t(`sshSettings.${link.key}.open`)"
-              @click="router.push(link.path)"
+              :aria-current="activeSection === link.section ? 'page' : undefined"
+              @click="activeSection = link.section"
             >
               <span
                 class="settings-security-item__icon"
@@ -731,7 +684,7 @@ function saveCustomScheme() {
             </div>
           </div>
           <div class="application-preferences__controls">
-            <label>
+            <div class="application-preference">
               <span class="application-preference__identity">
                 <NvxIcon
                   :icon="Type"
@@ -749,8 +702,8 @@ function saveCustomScheme() {
                 :aria-label="t('sshSettings.applicationPreferences.zoom')"
                 @update:model-value="setUiZoom"
               />
-            </label>
-            <label>
+            </div>
+            <div class="application-preference">
               <span class="application-preference__identity">
                 <NvxIcon
                   :icon="Globe2"
@@ -762,13 +715,13 @@ function saveCustomScheme() {
                 </span>
               </span>
               <NvxSelect
-                :model-value="ui.locale"
+                :model-value="ui.localePreference"
                 :options="localeOptions"
                 :aria-label="t('sshSettings.applicationPreferences.language')"
                 @update:model-value="setLocale"
               />
-            </label>
-            <label>
+            </div>
+            <div class="application-preference">
               <span class="application-preference__identity">
                 <NvxIcon
                   :icon="Power"
@@ -785,8 +738,8 @@ function saveCustomScheme() {
                 :aria-label="t('sshSettings.applicationPreferences.startupBehavior')"
                 @update:model-value="setTerminalStartupBehavior"
               />
-            </label>
-            <label>
+            </div>
+            <div class="application-preference">
               <span class="application-preference__identity">
                 <NvxIcon
                   :icon="SquareTerminal"
@@ -803,8 +756,8 @@ function saveCustomScheme() {
                 :aria-label="t('sshSettings.applicationPreferences.newTerminalBehavior')"
                 @update:model-value="setNewTerminalBehavior"
               />
-            </label>
-            <label>
+            </div>
+            <div class="application-preference">
               <span class="application-preference__identity">
                 <NvxIcon
                   :icon="SquareX"
@@ -821,10 +774,11 @@ function saveCustomScheme() {
                 :aria-label="t('sshSettings.applicationPreferences.singlePaneTabCloseBehavior')"
                 @update:model-value="setSinglePaneTabCloseBehavior"
               />
-            </label>
+            </div>
           </div>
         </section>
 
+        <NvxReleaseSettings v-else-if="activeSection === 'about'" />
         <NvxPreferenceTransferSettings v-else-if="activeSection === 'transfer'" />
         <NvxDesktopPreferencesSettings v-else-if="activeSection === 'desktop'" />
         <NvxTerminalInteractionSettings v-else-if="activeSection === 'interaction'" />
@@ -852,6 +806,8 @@ function saveCustomScheme() {
           <NvxHighlightSettings :hosts="highlightHosts" />
         </section>
         <NvxShortcutSettings v-else-if="activeSection === 'shortcuts'" />
+        <KnownHostsSettingsView v-else-if="activeSection === 'knownHosts'" />
+        <IdentitiesSettingsView v-else-if="activeSection === 'identities'" />
         <section
           v-else-if="activeSection === 'terminal'"
           class="terminal-appearance"
@@ -1108,7 +1064,7 @@ function saveCustomScheme() {
         </section>
 
         <article
-          v-else
+          v-else-if="activeSection === 'vault'"
           class="settings-vault"
         >
           <div class="settings-vault__heading">
@@ -1170,7 +1126,7 @@ function saveCustomScheme() {
               </div>
             </NvxInlineNotice>
             <NvxInlineNotice
-              v-if="vaultActionError && !autoUnlockDialogOpen && !vaultAccessDialogOpen"
+              v-if="vaultActionError"
               tone="error"
             >
               {{ vaultActionError }}
@@ -1179,119 +1135,6 @@ function saveCustomScheme() {
         </article>
       </main>
     </div>
-
-    <NvxDialog
-      v-model="vaultAccessDialogOpen"
-      plugin-protected
-      :title="t(vaultAccessMode === 'create' ? 'sshHosts.vault.createTitle' : 'sshHosts.vault.unlockTitle')"
-      :description="t(vaultAccessMode === 'create' ? 'plugins.sshSync.prompt.createLocalVault.description' : 'sshHosts.vault.description')"
-      :close-label="t('sshHosts.vault.close')"
-      :dismissible="!vaultActionLoading"
-    >
-      <NvxField
-        for-id="settings-vault-password"
-        :label="t('sshHosts.vault.password')"
-      >
-        <NvxInput
-          id="settings-vault-password"
-          v-model="vaultAccessPassword"
-          type="password"
-          :autocomplete="vaultAccessMode === 'create' ? 'new-password' : 'current-password'"
-          data-nvx-dialog-initial-focus
-        />
-      </NvxField>
-      <NvxField
-        v-if="vaultAccessMode === 'create'"
-        for-id="settings-vault-confirmation"
-        :label="t('sshHosts.vault.passwordConfirmation')"
-      >
-        <NvxInput
-          id="settings-vault-confirmation"
-          v-model="vaultAccessConfirmation"
-          type="password"
-          autocomplete="new-password"
-        />
-      </NvxField>
-      <NvxInlineNotice
-        v-if="vaultActionError"
-        tone="error"
-        :title="vaultActionError"
-      />
-      <template #actions>
-        <NvxButton
-          variant="ghost"
-          :disabled="vaultActionLoading"
-          @click="vaultAccessDialogOpen = false"
-        >
-          {{ t('sshSettings.vault.enableDialog.cancel') }}
-        </NvxButton>
-        <NvxButton
-          :loading="vaultActionLoading"
-          :disabled="!vaultAccessValid"
-          @click="confirmVaultAccess"
-        >
-          {{ t(vaultAccessMode === 'create' ? 'sshHosts.vault.createAction' : 'sshHosts.vault.unlockAction') }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
-
-    <NvxDialog
-      v-model="autoUnlockDialogOpen"
-      plugin-protected
-      :title="t('sshSettings.vault.enableDialog.title')"
-      :description="t('sshSettings.vault.enableDialog.description')"
-      :close-label="t('sshSettings.vault.enableDialog.cancel')"
-      :dismissible="!vaultActionLoading"
-      @close="resetAutoUnlockDialog"
-    >
-      <div class="vault-enable-form">
-        <NvxInlineNotice tone="warning">
-          {{ t("sshSettings.vault.enableDialog.securityNotice") }}
-        </NvxInlineNotice>
-        <NvxField
-          for-id="vault-auto-unlock-password"
-          :label="t('sshSettings.vault.enableDialog.password')"
-        >
-          <NvxInput
-            id="vault-auto-unlock-password"
-            v-model="autoUnlockPassword"
-            type="password"
-            autocomplete="current-password"
-            data-nvx-dialog-initial-focus
-            @keydown.enter="confirmAutoUnlock"
-          />
-        </NvxField>
-        <NvxCheckbox
-          v-model="autoUnlockConfirmed"
-          :disabled="vaultActionLoading"
-        >
-          {{ t("sshSettings.vault.enableDialog.confirm") }}
-        </NvxCheckbox>
-        <NvxInlineNotice
-          v-if="vaultActionError"
-          tone="error"
-        >
-          {{ vaultActionError }}
-        </NvxInlineNotice>
-      </div>
-      <template #actions>
-        <NvxButton
-          variant="secondary"
-          :disabled="vaultActionLoading"
-          @click="autoUnlockDialogOpen = false; resetAutoUnlockDialog()"
-        >
-          {{ t("sshSettings.vault.enableDialog.cancel") }}
-        </NvxButton>
-        <NvxButton
-          :loading="vaultActionLoading"
-          :loading-label="t('sshSettings.vault.enableDialog.enabling')"
-          :disabled="!autoUnlockPassword || !autoUnlockConfirmed"
-          @click="confirmAutoUnlock"
-        >
-          {{ t("sshSettings.vault.enableDialog.enable") }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
 
     <NvxDialog
       v-model="customEditorOpen"
@@ -1624,7 +1467,7 @@ function saveCustomScheme() {
   margin-top: var(--nvx-space-2);
 }
 
-.application-preferences__controls label {
+.application-preferences__controls .application-preference {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 260px);
   gap: var(--nvx-space-5);
@@ -2003,7 +1846,7 @@ function saveCustomScheme() {
     padding: var(--nvx-space-5);
   }
 
-  .application-preferences__controls label {
+  .application-preferences__controls .application-preference {
     grid-template-columns: minmax(0, 1fr) minmax(200px, 260px);
   }
 
@@ -2029,7 +1872,7 @@ function saveCustomScheme() {
     padding: var(--nvx-space-4);
   }
 
-  .application-preferences__controls label {
+  .application-preferences__controls .application-preference {
     grid-template-columns: 1fr;
     gap: var(--nvx-space-3);
     padding: var(--nvx-space-4) 0;

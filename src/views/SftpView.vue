@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { ensureHostVault } from "../core-api/secure-vault-client";
+import { openToolWindow, onToolWindowChanged } from "../tool-windows";
 import { takeNativeTransferNavigation, matchesNativeTransferNavigation } from "../native-transfer-navigation";
 import { homeDir, sep } from "@tauri-apps/api/path";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
@@ -81,6 +83,8 @@ interface TransferTargetRefresh {
   directoryRevision: number;
 }
 interface SftpContextMenuState {
+  anchorX: number;
+  anchorY: number;
   paneId: string;
   left: number;
   top: number;
@@ -204,7 +208,6 @@ const sftpLayout = ref<TerminalLayoutNode>({
 });
 
 const activePane = computed(() => paneStates[activeSftpPaneId.value] ?? null);
-const activeSession = computed(() => activePane.value ? sessionForPane(activePane.value) : null);
 const closeRemotePanePending = computed(() => {
   const paneId = closeRemotePaneTargetId.value;
   return paneId ? paneInteractionPending(paneId) : false;
@@ -554,17 +557,56 @@ function stateTone(state: SftpSessionState | SftpTransferState) {
 function sessionFailureLabel(code: SftpFailureCode) {
   return t(`sftp.sessionFailures.${code}`);
 }
+// Snapshot polling must not replay an unchanged failure or steal Pane focus.
+const notifiedSessionFailures = new Map<string, string>();
+watch(() => Object.values(paneStates).map(sessionForPane), (paneSessions) => {
+  const failures = new Map(paneSessions.filter((session) => session?.failure)
+    .map((session) => [session!.sessionId, session!]));
+  for (const sessionId of notifiedSessionFailures.keys()) {
+    if (!failures.has(sessionId)) {
+      notifiedSessionFailures.delete(sessionId);
+      tips.dismissScope(`sftp-session:${sessionId}`);
+    }
+  }
+  for (const [sessionId, session] of failures) {
+    const failure = session.failure!;
+    const signature = `${session.generation}:${failure.code}`;
+    if (notifiedSessionFailures.get(sessionId) === signature) continue;
+    notifiedSessionFailures.set(sessionId, signature);
+    tips.show({
+      scope: `sftp-session:${sessionId}`,
+      tone: "error",
+      title: sessionFailureLabel(failure.code),
+      message: hosts.value.find((host) => host.hostId === session.hostId)?.label,
+    });
+  }
+});
+
+function paneSessionFailure(pane: SftpPaneState) {
+  return sessionForPane(pane)?.failure;
+}
+
 function sessionFailureNeedsTerminal(code: SftpFailureCode) {
   return [
     "hostKeyRejected",
     "hostKeyMismatch",
-    "vaultLocked",
     "credentialUnavailable",
     "authenticationRejected",
   ].includes(code);
 }
-async function openActiveHostInTerminal() {
-  const pane = activePane.value;
+function paneConnectionLabel(pane: SftpPaneState) {
+  const failure = paneSessionFailure(pane);
+  if (failure?.code === "vaultLocked") return t("sftp.unlockVaultAndRetry");
+  if (failure && sessionFailureNeedsTerminal(failure.code)) return t("sftp.openTerminalToResolve");
+  return t("sftp.connect");
+}
+function recoverRemotePane(pane: SftpPaneState) {
+  const failure = paneSessionFailure(pane);
+  return failure && sessionFailureNeedsTerminal(failure.code)
+    ? openHostInTerminal(pane)
+    : connectRemotePane(pane);
+}
+async function openHostInTerminal(pane: SftpPaneState) {
   const host = pane ? paneHost(pane) : null;
   if (!host) return;
   await router.push({
@@ -792,7 +834,19 @@ async function connectRemotePane(pane: SftpPaneState) {
   pendingPaneIds.add(pane.paneId);
   try {
     const reusableSession = pane.endpoint.sessionId ? null : unclaimedSftpSessionForHost(host.hostId);
-    const summary = reusableSession ?? await openSftpSession({ hostId: host.hostId, expectedHostStateVersion: host.stateVersion, ...(pane.endpoint.sessionId ? { sessionId: pane.endpoint.sessionId } : {}) });
+    const endpointRevision = pane.endpointRevision;
+    const sessionId = pane.endpoint.sessionId;
+    const generation = pane.endpoint.generation;
+    const stillCurrent = () => sftpViewMounted && paneStates[pane.paneId] === pane
+      && pane.endpointRevision === endpointRevision && pane.endpoint.kind === "remote"
+      && pane.endpoint.hostId === host.hostId && pane.endpoint.sessionId === sessionId
+      && pane.endpoint.generation === generation;
+    if (!reusableSession) {
+      const recoverVault = sessions.value.find((session) => session.sessionId === sessionId)?.failure?.code === "vaultLocked";
+      if (!await ensureHostVault(host.hostId, host.stateVersion, recoverVault) || !stillCurrent()) return;
+    }
+    const summary = reusableSession ?? await openSftpSession({ hostId: host.hostId, expectedHostStateVersion: host.stateVersion, ...(sessionId ? { sessionId } : {}) });
+    if (!stillCurrent()) return;
     attachSftpSessionToPane(pane, summary);
     await refreshSnapshot();
     if (summary.state === "ready") await loadInitialRemoteDirectory(pane, true);
@@ -1458,6 +1512,17 @@ async function previewSelectedFile(
   if (pane.endpoint.kind !== "remote" || !pane.endpoint.sessionId || !pane.endpoint.generation
     || !pane.directoryRef || !entry || !entry.remotePathBytes || !previewKindForEntry(entry)
     || !paneReady(pane) || (!allowPanePending && paneInteractionPending(pane.paneId))) return;
+  if (canUseDesktopCore()) {
+    const hostId = pane.endpoint.hostId;
+    try {
+      await openToolWindow({
+        kind: "sftpFile", title: `${hosts.value.find((host) => host.hostId === hostId)?.label ?? "SFTP"} · ${entry.displayName}`,
+        request: { meta: { requestId: crypto.randomUUID() }, sessionId: pane.endpoint.sessionId, expectedGeneration: pane.endpoint.generation, directoryRef: pane.directoryRef, entryRef: entry.entryRef },
+        path: remotePath(entry.remotePathBytes), precondition: { ...entry.precondition }, tail: mode === "tail",
+      });
+    } catch { showOperationFailed(); }
+    return;
+  }
   const requestRevision = ++previewRequestRevision;
   const endpointRevision = pane.endpointRevision;
   const directoryRevision = pane.directoryRevision;
@@ -1526,7 +1591,7 @@ function openMutation(kind: "mkdir" | "touch" | "rename" | "delete") {
   if (!pane || pane.endpoint.kind !== "remote" || paneInteractionPending(pane.paneId)) return;
   const selectedEntry = pane.entries.find((entry) => entry.key === pane.selectedEntryKey) ?? null;
   const selectedEntries = pane.entries.filter((entry) => pane.selectedEntryKeys.includes(entry.key));
-  if (kind !== "mkdir" && !selectedEntry) return;
+  if ((kind === "rename" || kind === "delete") && !selectedEntry) return;
   if (kind === "rename" && selectedEntries.length !== 1) return;
   mutationTargetPaneId.value = pane.paneId;
   mutationDialog.value = kind;
@@ -1579,10 +1644,38 @@ function openSftpContextMenu(event: MouseEvent, pane: SftpPaneState, entry?: Sft
   activeSftpPaneId.value = pane.paneId;
   contextMenu.value = {
     paneId: pane.paneId,
-    left: Math.min(event.clientX, window.innerWidth - 224),
-    top: Math.min(event.clientY, window.innerHeight - 364),
+    anchorX: event.clientX,
+    anchorY: event.clientY,
+    left: event.clientX,
+    top: event.clientY,
   };
 }
+
+// Measure the rendered menu, including translated labels and conditional actions.
+// CSS bounds oversized menus; placement then keeps the whole scrollable box visible.
+function positionContextMenu() {
+  const menu = contextMenu.value;
+  const element = contextMenuRoot.value;
+  if (!menu || !element) return;
+  const { width, height } = element.getBoundingClientRect();
+  const inset = 8;
+  const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+  const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
+  menu.left = Math.max(inset, Math.min(menu.anchorX, viewportWidth - width - inset));
+  menu.top = Math.max(inset, Math.min(menu.anchorY, viewportHeight - height - inset));
+}
+watch(contextMenuRoot, (element, _previous, onCleanup) => {
+  if (!element) return;
+  positionContextMenu();
+  const observer = new ResizeObserver(positionContextMenu);
+  observer.observe(element);
+  window.addEventListener("resize", positionContextMenu);
+  onCleanup(() => {
+    observer.disconnect();
+    window.removeEventListener("resize", positionContextMenu);
+  });
+}, { flush: "post" });
+watch(() => [contextMenu.value?.anchorX, contextMenu.value?.anchorY], positionContextMenu, { flush: "post" });
 
 function runSftpContextAction(action: "refresh" | "mkdir" | "touch" | "preview" | "tail" | "download" | "rename" | "delete" | "compress" | "extract" | "downloadUrl") {
   const pane = contextMenu.value ? paneStates[contextMenu.value.paneId] : null;
@@ -2184,7 +2277,11 @@ watch([() => router.currentRoute.value.query.focusOperation, loading], async ([o
   } catch { tips.show({ tone: "error", title: t("errors.tray.actionUnavailable") }); }
 }, { immediate: true });
 
+let removeToolListener: (() => void) | undefined;
 onMounted(async () => {
+  if (canUseDesktopCore()) {
+    try { removeToolListener = await onToolWindowChanged((kind) => { if (kind === "sftpFile") for (const pane of Object.values(paneStates)) refreshPane(pane); }); } catch { showOperationFailed(); }
+  }
   sftpViewMounted = true;
   document.addEventListener("pointerdown", onDocumentPointerDown);
   document.addEventListener("keydown", onDocumentKeyDown);
@@ -2220,6 +2317,7 @@ onMounted(async () => {
   refreshTimer = window.setInterval(() => void refreshSnapshot().catch(() => undefined), 1000);
 });
 onBeforeUnmount(() => {
+  removeToolListener?.();
   sftpViewMounted = false;
   navigationReady = false;
   document.removeEventListener("pointerdown", onDocumentPointerDown);
@@ -2447,21 +2545,6 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </header>
-    <NvxInlineNotice
-      v-if="activeSession?.failure"
-      tone="error"
-      :title="sessionFailureLabel(activeSession.failure.code)"
-    >
-      <p>{{ t('sftp.sessionFailed', { stage: activeSession.failure.stage }) }}</p>
-      <NvxButton
-        v-if="sessionFailureNeedsTerminal(activeSession.failure.code)"
-        size="sm"
-        variant="secondary"
-        @click="openActiveHostInTerminal"
-      >
-        {{ t('sftp.openTerminalToResolve') }}
-      </NvxButton>
-    </NvxInlineNotice>
     <section class="sftp-view__browser">
       <NvxTerminalSplitTree
         class="sftp-view__workspace"
@@ -2506,6 +2589,7 @@ onBeforeUnmount(() => {
                 <NvxStatusLabel
                   v-if="sessionForPane(paneState(pane.paneId))"
                   :tone="stateTone(sessionForPane(paneState(pane.paneId))!.state)"
+                  :title="paneSessionFailure(paneState(pane.paneId)) ? sessionFailureLabel(paneSessionFailure(paneState(pane.paneId))!.code) : undefined"
                 >
                   {{ t(`sftp.states.${sessionForPane(paneState(pane.paneId))!.state}`) }}
                 </NvxStatusLabel>
@@ -2514,12 +2598,12 @@ onBeforeUnmount(() => {
                   size="sm"
                   :loading="paneInteractionPending(pane.paneId)"
                   :disabled="loading || !paneHostId(paneState(pane.paneId)) || paneInteractionPending(pane.paneId)"
-                  @click="connectRemotePane(paneState(pane.paneId))"
+                  @click="recoverRemotePane(paneState(pane.paneId))"
                 >
                   <NvxIcon
                     :icon="PlugZap"
                     :size="16"
-                  />{{ t("sftp.connect") }}
+                  />{{ paneConnectionLabel(paneState(pane.paneId)) }}
                 </NvxButton>
                 <NvxButton
                   v-else
@@ -3220,7 +3304,7 @@ onBeforeUnmount(() => {
 .sftp-view__selection-count { font:inherit; color:var(--nvx-color-accent); }
 .sftp-view__entry-name { display:flex; gap:var(--nvx-space-2); align-items:center; min-width:0; }.sftp-view__entry-name span,.sftp-view__entries small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__entries small { color:var(--nvx-color-text-secondary); font-variant-numeric:tabular-nums; }.sftp-view__entries>p { margin:0; padding:var(--nvx-space-4); color:var(--nvx-color-text-secondary); }
 .sftp-view__pane-error { display:grid; justify-items:start; gap:var(--nvx-space-2); padding:var(--nvx-space-4); color:var(--nvx-color-text-secondary); }.sftp-view__pane-error p { margin:0; }
-.sftp-view__context-menu { position:fixed; z-index:var(--nvx-z-popover); display:grid; width:216px; padding:var(--nvx-space-1); border:var(--nvx-border-width) solid var(--nvx-color-border-strong); border-radius:var(--nvx-radius-md); background:var(--nvx-color-bg-surface); box-shadow:var(--nvx-shadow-overlay); }.sftp-view__context-menu button { display:flex; align-items:center; gap:var(--nvx-space-2); min-height:36px; padding:0 var(--nvx-space-3); border:0; border-radius:var(--nvx-radius-sm); background:transparent; color:var(--nvx-color-text-primary); font:inherit; text-align:start; }.sftp-view__context-menu button:hover,.sftp-view__context-menu button:focus-visible { background:var(--nvx-color-bg-hover); outline:none; }.sftp-view__context-menu span[role="separator"] { height:var(--nvx-border-width); margin:var(--nvx-space-1) var(--nvx-space-2); background:var(--nvx-color-border-subtle); }.sftp-view__context-menu button.sftp-view__context-menu-danger { color:var(--nvx-color-danger); }
+.sftp-view__context-menu { box-sizing:border-box; max-width:calc(100vw - 16px); max-height:calc(100dvh - 16px); overflow-y:auto; overscroll-behavior:contain; grid-auto-rows:max-content; position:fixed; z-index:var(--nvx-z-popover); display:grid; width:216px; padding:var(--nvx-space-1); border:var(--nvx-border-width) solid var(--nvx-color-border-strong); border-radius:var(--nvx-radius-md); background:var(--nvx-color-bg-surface); box-shadow:var(--nvx-shadow-overlay); }.sftp-view__context-menu button { display:flex; align-items:center; gap:var(--nvx-space-2); min-height:36px; padding:0 var(--nvx-space-3); border:0; border-radius:var(--nvx-radius-sm); background:transparent; color:var(--nvx-color-text-primary); font:inherit; text-align:start; }.sftp-view__context-menu button:hover,.sftp-view__context-menu button:focus-visible { background:var(--nvx-color-bg-hover); outline:none; }.sftp-view__context-menu span[role="separator"] { height:var(--nvx-border-width); margin:var(--nvx-space-1) var(--nvx-space-2); background:var(--nvx-color-border-subtle); }.sftp-view__context-menu button.sftp-view__context-menu-danger { color:var(--nvx-color-danger); }
 .sftp-view__context-menu button:disabled { cursor:not-allowed; opacity:.48; }.sftp-view__context-menu button:disabled:hover { background:transparent; }
 .sftp-view__preview { display:grid; place-items:center; min-height:280px; max-height:min(62vh,560px); overflow:auto; border:var(--nvx-border-width) solid var(--nvx-color-border); border-radius:var(--nvx-radius-sm); background:var(--nvx-color-bg-subtle); }.sftp-view__preview>p { margin:0; color:var(--nvx-color-text-secondary); }.sftp-view__preview img { display:block; max-width:100%; max-height:min(62vh,560px); object-fit:contain; }
 .sftp-view__preview.is-text { display:flex; flex-direction:column; align-items:stretch; width:100%; height:min(62vh,500px); overflow:hidden; background:var(--nvx-color-bg-surface); }.sftp-view__preview-toolbar { display:flex; flex:0 0 auto; align-items:center; gap:var(--nvx-space-2); min-height:44px; padding:var(--nvx-space-2) var(--nvx-space-3); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); }.sftp-view__preview-toolbar>span:first-child { margin-inline-end:auto; color:var(--nvx-color-text-secondary); font-size:var(--nvx-font-size-sm); }.sftp-view__preview.is-text>:deep(.nvx-inline-notice) { flex:0 0 auto; margin:var(--nvx-space-2); }.sftp-view__code-editor { flex:1 1 auto; min-height:0; }

@@ -32,10 +32,6 @@ import {
   type PluginAuditEntry,
   type PluginAuditListRequest,
   type PluginCapabilityGrant,
-  type PluginCatalogEntry,
-  type PluginCatalogSnapshot,
-  type PluginIconReadResponse,
-  type PluginIconReadScope,
   type PluginCapabilityGrantsReplaceRequest,
   type PluginContributionCopyRequest,
   type PluginContributionCopyResponse,
@@ -61,7 +57,6 @@ import {
   type PluginSpecialPermissionGetRequest,
   type PluginSpecialPermissionOpenRequest,
   type PluginSpecialPermissionSnapshot,
-  type PluginCatalogPackagePrepareRequest,
   type PluginExtensionTargetContext,
   type PluginExtensionTargetDefinition,
   type PluginTargetContextCloseRequest,
@@ -313,53 +308,6 @@ export async function listInstalledPlugins(): Promise<InstalledPluginSummary[]> 
   });
 }
 
-export type PluginCatalogEntryDto = PluginCatalogEntry;
-export type PluginCatalogSnapshotDto = PluginCatalogSnapshot;
-
-export async function readPluginIcon(
-  pluginId: string,
-  scope: PluginIconReadScope,
-  refresh = false,
-): Promise<PluginIconReadResponse> {
-  return invoke("plugin_icon_read", {
-    request: { meta: requestMeta(), pluginId, scope, refresh },
-  });
-}
-
-export async function fetchPluginCatalogSnapshot(): Promise<PluginCatalogSnapshotDto> {
-  return invoke("plugin_catalog_snapshot", {
-    request: { meta: requestMeta() },
-  });
-}
-
-export async function refreshPluginCatalog(): Promise<PluginOperationSummary> {
-  const operationId = createUuidV7();
-  return invoke("plugin_catalog_refresh", {
-    request: {
-      meta: requestMeta(),
-      operationId,
-      idempotencyKey: `plugin-catalog-refresh-${operationId}`,
-    },
-  });
-}
-
-export async function installCatalogPlugin(input: {
-  pluginId: string;
-  version: string;
-  expectedStateVersion: string | null;
-  capabilityGrants: PluginCapabilityGrant[];
-}): Promise<PluginOperationSummary> {
-  const operationId = createUuidV7();
-  return invoke("plugin_install", {
-    request: {
-      meta: requestMeta(),
-      operationId,
-      idempotencyKey: `plugin-install-${operationId}`,
-      ...input,
-    },
-  });
-}
-
 export async function getSshSyncSecurePrompt(promptId: string): Promise<SshSyncSecurePrompt> {
   return invoke("ssh_sync_secure_prompt_get", {
     request: { meta: requestMeta(), promptId },
@@ -583,14 +531,6 @@ export async function cancelLocalPluginPackage(preparationId: string): Promise<v
       meta: requestMeta(),
       preparationId,
     } satisfies PluginLocalPackageCancelRequest,
-  });
-}
-
-export async function prepareCatalogPluginPackage(
-  input: Omit<PluginCatalogPackagePrepareRequest, "meta">,
-): Promise<PluginLocalPackagePreview> {
-  return invoke(coreApiCommands.pluginCatalogPackagePrepare, {
-    request: { meta: requestMeta(), ...input } satisfies PluginCatalogPackagePrepareRequest,
   });
 }
 

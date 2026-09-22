@@ -4,6 +4,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { useTipsStore, type NvxTipTone } from "../../stores/tips";
+import NvxButton from "./NvxButton.vue";
 import NvxIcon from "./NvxIcon.vue";
 import NvxIconButton from "./NvxIconButton.vue";
 
@@ -35,7 +36,10 @@ function iconFor(tone: NvxTipTone) {
           v-for="tip in visibleTips"
           :key="tip.id"
           class="nvx-tips__item"
-          :class="`nvx-tips__item--${tip.tone}`"
+          :class="[
+            `nvx-tips__item--${tip.tone}`,
+            { 'nvx-tips__item--action': tip.action },
+          ]"
           :role="tip.tone === 'error' || tip.tone === 'warning' ? 'alert' : 'status'"
         >
           <NvxIcon
@@ -49,6 +53,17 @@ function iconFor(tone: NvxTipTone) {
               {{ tip.message }}
             </p>
           </div>
+          <NvxButton
+            v-if="tip.action"
+            class="nvx-tips__action"
+            variant="ghost"
+            size="sm"
+            :loading="tip.actionPending"
+            :loading-label="tip.action.label"
+            @click="void tips.runAction(tip.id)"
+          >
+            {{ tip.action.label }}
+          </NvxButton>
           <NvxIconButton
             class="nvx-tips__dismiss"
             size="sm"
@@ -95,6 +110,10 @@ function iconFor(tone: NvxTipTone) {
   box-shadow: var(--nvx-shadow-toast);
   color: var(--nvx-color-text-primary);
   pointer-events: auto;
+}
+
+.nvx-tips__item--action {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
 }
 
 .nvx-tips__icon,

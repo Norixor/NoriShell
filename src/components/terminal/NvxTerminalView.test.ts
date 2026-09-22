@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const terminalMocks = vi.hoisted(() => ({
   instances: [] as Array<{
     options: Record<string, unknown>;
+    textarea: HTMLTextAreaElement;
+    dataHandler: ((value: string) => void) | null;
     selectAll: ReturnType<typeof vi.fn>;
     customKeyHandler: ((event: KeyboardEvent) => boolean) | null;
     bellHandler: (() => void) | null;
@@ -37,7 +39,9 @@ vi.mock("@xterm/xterm", () => ({
       terminalMocks.instances.push(this);
     }
     loadAddon() {}
-    onData() { return { dispose() {} }; }
+    textarea = document.createElement("textarea");
+    dataHandler: ((value: string) => void) | null = null;
+    onData(callback: (value: string) => void) { this.dataHandler = callback; return { dispose() {} }; }
     onSelectionChange() { return { dispose() {} }; }
     onBell(callback: () => void) {
       this.bellHandler = callback;
@@ -48,7 +52,7 @@ vi.mock("@xterm/xterm", () => ({
       this.linkProvider = provider;
       return { dispose: () => { this.linkProvider = null; } };
     }
-    open() {}
+    open(host: HTMLElement) { host.append(this.textarea); }
     focus() {}
     clear() {}
     write() {}
@@ -104,6 +108,57 @@ describe("NvxTerminalView interaction preferences", () => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
   });
   afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("consumes disconnected typing and paste without forwarding terminal-generated data", async () => {
+    const wrapper = mount(NvxTerminalView, {
+      attachTo: document.body,
+      props: { readOnly: true, reconnectOnInput: true, terminalLabel: "Terminal", gapLabel: "Gap" },
+      global: { plugins: [createPinia(), createI18n({ legacy: false, locale: "en", messages: { en: { terminalEnhancements: { highlightSuspended: "" }, terminalInteraction: terminalInteractionEn } } })] },
+    });
+    await flushPromises();
+    const term = terminalMocks.instances[0]!;
+    term.textarea.focus();
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    expect(term.options.disableStdin).toBe(true);
+    term.dataHandler?.("\x1b[?1;2c");
+    expect(wrapper.emitted("reconnectRequest")).toBeUndefined();
+    for (const key of ["x", "Enter", "Process", "Dead"]) {
+      const event = new KeyboardEvent("keydown", { key, cancelable: true });
+      expect(term.customKeyHandler?.(event)).toBe(false);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(wrapper.emitted("reconnectRequest")).toHaveLength(4);
+    for (const init of [{ key: "ArrowUp" }, { key: "Shift" }, { key: "c", metaKey: true }, { key: "c", ctrlKey: true }, { key: "x", repeat: true }]) {
+      term.customKeyHandler?.(new KeyboardEvent("keydown", init));
+    }
+    term.customKeyHandler?.(new KeyboardEvent("keyup", { key: "x" }));
+    expect(wrapper.emitted("reconnectRequest")).toHaveLength(4);
+    const clipboard = new DataTransfer();
+    clipboard.setData("text/plain", "do not execute\n");
+    term.textarea.dispatchEvent(new ClipboardEvent("paste", { clipboardData: clipboard, bubbles: true, cancelable: true }));
+    expect(wrapper.emitted("reconnectRequest")).toHaveLength(5);
+    const modal = document.createElement("div");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    document.body.append(modal);
+    term.customKeyHandler?.(new KeyboardEvent("keydown", { key: "x" }));
+    modal.remove();
+    term.textarea.blur();
+    term.customKeyHandler?.(new KeyboardEvent("keydown", { key: "x" }));
+    term.textarea.focus();
+    await wrapper.setProps({ reconnectOnInput: false });
+    term.customKeyHandler?.(new KeyboardEvent("keydown", { key: "x" }));
+    expect(wrapper.emitted("reconnectRequest")).toHaveLength(5);
+    await wrapper.setProps({ reconnectOnInput: true });
+    (wrapper.vm as unknown as { pasteFromClipboard(): void }).pasteFromClipboard();
+    expect(wrapper.emitted("reconnectRequest")).toHaveLength(6);
+    expect(wrapper.emitted("input")).toBeUndefined();
+    await wrapper.setProps({ readOnly: false });
+    term.dataHandler?.("new input");
+    expect(wrapper.emitted("input")).toEqual([["new input"]]);
+    hasFocus.mockRestore();
+    wrapper.unmount();
+  });
 
   it("hot-updates public xterm options without recreating the terminal", async () => {
     const pinia = createPinia();

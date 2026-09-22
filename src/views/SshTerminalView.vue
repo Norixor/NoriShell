@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { requestSecureCredential } from "../core-api/secure-credential-client";
+import { requestSecureVault } from "../core-api/secure-vault-client";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   computed,
@@ -48,13 +50,11 @@ import {
   NvxInlineNotice,
   NvxInput,
   NvxSelect,
-  NvxTextarea,
 } from "../components/ui";
 import {
   canUseDesktopCore,
   createHost,
   createIdentity,
-  createVault,
   fetchLocalSessionSnapshot,
   fetchSshSessionSnapshot,
   fetchTelnetSessionSnapshot,
@@ -63,18 +63,14 @@ import {
   getHostConnectionConfig,
   getLocalSession,
   getSshSession,
-  importCredential,
   listHostCatalog,
   listHosts,
   parseCoreApiError,
-  prepareTransientCredential,
   replaceAuthenticationPlan,
   replaceTerminalWorkspaceLayout,
-  unlockVault,
   updateHost,
 } from "../core-api/client";
 import type {
-  CredentialKind,
   HostCatalogEntry,
   HostSummary,
   LocalSessionId,
@@ -213,19 +209,13 @@ const address = ref("");
 const port = ref("22");
 const username = ref("");
 const authentication = ref("password");
-const password = ref("");
-const privateKey = ref("");
-const passphrase = ref("");
 const saveCredential = ref(false);
-const vaultPassword = ref("");
-const vaultPasswordConfirmation = ref("");
 const vaultState = ref<VaultState | null>(null);
 const vaultStatusLoading = ref(false);
 const vaultStatusUnavailable = ref(false);
 const vaultDialogOpen = ref(false);
 const vaultPromptMode = ref<"create" | "unlock" | null>(null);
 const vaultErrorVisible = ref(false);
-const vaultErrorKey = ref("sshTerminal.vaultSaveFailed");
 const vaultPurpose = ref<"saveCredential" | "useSavedCredential">("saveCredential");
 const preparing = ref(false);
 const validationVisible = ref(false);
@@ -261,19 +251,6 @@ let optimisticTabCloseInFlight = false;
 let optimisticTabCloseAttempt = 0;
 let workspaceRevision: string | null = null;
 
-const vaultLoadingLabel = computed(() => {
-  if (vaultPurpose.value === "useSavedCredential") {
-    return t("sshTerminal.unlockingAndConnecting");
-  }
-  return vaultPromptMode.value === "create"
-    ? t("sshTerminal.creatingAndSaving")
-    : t("sshTerminal.unlockingAndSaving");
-});
-const vaultDialogPasswordValid = computed(() => Boolean(vaultPassword.value)
-  && (vaultPromptMode.value !== "create" || (
-    new TextEncoder().encode(vaultPassword.value).byteLength >= 12
-    && vaultPassword.value === vaultPasswordConfirmation.value
-  )));
 let workspaceInitialized = false;
 let workspacePersistenceEnabled = false;
 let lastPersistedProjection = "";
@@ -346,11 +323,7 @@ function openLauncher() {
   connectionErrorVisible.value = false;
   connectionErrorKey.value = "sshTerminal.connectFailedTitle";
   connectionErrorBodyKey.value = "sshTerminal.connectFailedBody";
-  password.value = "";
-  privateKey.value = "";
-  passphrase.value = "";
   saveCredential.value = false;
-  clearVaultInputs();
   vaultPromptMode.value = null;
   vaultDialogOpen.value = false;
   launcherOpen.value = true;
@@ -934,13 +907,7 @@ function terminalLauncherVisualFixture(): HostCatalogEntry[] {
   ];
 }
 
-function clearVaultInputs() {
-  vaultPassword.value = "";
-  vaultPasswordConfirmation.value = "";
-}
-
 function showVaultStatusUnavailable() {
-  clearVaultInputs();
   vaultPromptMode.value = null;
   vaultDialogOpen.value = false;
   connectionErrorKey.value = "sshTerminal.vaultUnavailable";
@@ -958,10 +925,10 @@ function openVaultPrompt(
   }
   vaultPurpose.value = purpose;
   vaultPromptMode.value = state === "missing" ? "create" : "unlock";
-  clearVaultInputs();
   vaultErrorVisible.value = false;
   launcherOpen.value = false;
   vaultDialogOpen.value = true;
+  void saveVaultAndConnect();
   return true;
 }
 
@@ -1010,14 +977,6 @@ function currentLabel() {
   return requestedHost.value?.label ?? `${username.value.trim()}@${address.value.trim()}`;
 }
 
-function currentSecret() {
-  return authentication.value === "password" ? password.value : privateKey.value;
-}
-
-function currentPassphrase() {
-  return authentication.value === "privateKey" && passphrase.value ? passphrase.value : null;
-}
-
 function parsedConnectionPort() {
   return Number(port.value);
 }
@@ -1027,7 +986,6 @@ function connectionFormIsValid() {
   return Boolean(
     address.value.trim()
     && username.value.trim()
-    && currentSecret()
     && Number.isInteger(parsedPort)
     && parsedPort >= 1
     && parsedPort <= 65535,
@@ -1055,11 +1013,6 @@ async function connectWithCredentialRef(credentialRefId: string) {
     const target = findWorkspacePane(reconnectPaneId);
     if (target?.pane.kind === "session") target.pane.credentialRefId = credentialRefId;
     reauthenticationPaneId.value = null;
-    password.value = "";
-    privateKey.value = "";
-    passphrase.value = "";
-    vaultPassword.value = "";
-    vaultPasswordConfirmation.value = "";
     launcherOpen.value = false;
     vaultDialogOpen.value = false;
     return;
@@ -1095,11 +1048,6 @@ async function connectWithCredentialRef(credentialRefId: string) {
     deferredRecovery: "reconnect",
   };
   replaceWorkspacePane(paneId, connectedPane);
-  password.value = "";
-  privateKey.value = "";
-  passphrase.value = "";
-  vaultPassword.value = "";
-  vaultPasswordConfirmation.value = "";
   launcherOpen.value = false;
   vaultDialogOpen.value = false;
   launcherTargetPaneId.value = null;
@@ -1185,6 +1133,20 @@ function replaceWorkspacePane(paneId: string, pane: TerminalWorkspacePane) {
   target.tab.layout = setTerminalForPane(target.tab.layout, paneId, paneId);
   target.tab.activePaneId = paneId;
   activatePane(target.tab.tabId, paneId);
+}
+
+// Recovery may await Host/Vault data before a dialog exists. Serialize explicit
+// requests during that gap so a burst of typing cannot create competing prompts.
+let sessionRecoveryPending = false;
+async function requestSessionRecovery(paneId: string, target: SshSessionTarget, kind: "credential" | "vault") {
+  if (sessionRecoveryPending || terminalFocusIsBlocked()) return;
+  sessionRecoveryPending = true;
+  try {
+    if (kind === "credential") await requestSessionCredential(paneId, target);
+    else await requestSessionVaultUnlock(paneId, target);
+  } finally {
+    sessionRecoveryPending = false;
+  }
 }
 
 async function requestSessionCredential(
@@ -1324,12 +1286,8 @@ async function connectSavedHost(
 }
 
 async function connectWithoutSavingCredential() {
-  const credential = await prepareTransientCredential({
-    kind: authentication.value as CredentialKind,
-    secret: currentSecret(),
-    passphrase: currentPassphrase(),
-  });
-  await connectWithCredentialRef(credential.credentialRefId);
+  const credentialRefId = await requestSecureCredential({ kind: authentication.value === "privateKey" ? "privateKey" : "password", label: currentLabel(), identityId: null });
+  if (credentialRefId) await connectWithCredentialRef(credentialRefId);
 }
 
 async function connectAndSaveCredential() {
@@ -1338,14 +1296,8 @@ async function connectAndSaveCredential() {
     currentLabel(),
     username.value.trim(),
   )).identityId;
-  const credential = await importCredential({
-      identityId,
-      kind: authentication.value as CredentialKind,
-      secret: currentSecret(),
-      passphrase: currentPassphrase(),
-      priority: 100,
-      label: currentLabel(),
-  });
+  const credentialRefId = await requestSecureCredential({ kind: authentication.value === "privateKey" ? "privateKey" : "password", label: currentLabel(), identityId });
+  if (!credentialRefId) return;
   credentialSavedDuringAttempt.value = true;
   let effectiveHost = host;
   if (host.identityId !== identityId) {
@@ -1370,10 +1322,10 @@ async function connectAndSaveCredential() {
       ? reconnectPane.credentialRefId
       : null;
     const credentialRefIds = [
-      credential.credentialRefId,
+      credentialRefId,
       ...connectionConfig.authenticationPlan.credentialRefIds.filter(
-        (credentialRefId) => credentialRefId !== credential.credentialRefId
-          && credentialRefId !== rejectedCredentialRefId,
+        (existingCredentialRefId) => existingCredentialRefId !== credentialRefId
+          && existingCredentialRefId !== rejectedCredentialRefId,
       ),
     ].slice(0, 16);
     await replaceAuthenticationPlan({
@@ -1383,7 +1335,7 @@ async function connectAndSaveCredential() {
       credentialRefIds,
     });
   }
-  await connectWithCredentialRef(credential.credentialRefId);
+  await connectWithCredentialRef(credentialRefId);
   credentialSavedDuringAttempt.value = false;
 }
 
@@ -1418,42 +1370,15 @@ async function attemptConnect() {
 }
 
 async function saveVaultAndConnect() {
-  if (preparing.value) return;
-  const mode = vaultPromptMode.value;
   const purpose = vaultPurpose.value;
-  vaultErrorVisible.value = false;
-  if (!mode || !vaultPassword.value) {
-    vaultErrorKey.value = "sshTerminal.vaultPasswordRequired";
-    vaultErrorVisible.value = true;
-    return;
-  }
-  if (mode === "create") {
-    if (new TextEncoder().encode(vaultPassword.value).length < 12) {
-      vaultErrorKey.value = "sshTerminal.vaultPasswordTooShort";
-      vaultErrorVisible.value = true;
-      return;
-    }
-    if (vaultPassword.value !== vaultPasswordConfirmation.value) {
-      vaultErrorKey.value = "sshTerminal.vaultPasswordMismatch";
-      vaultErrorVisible.value = true;
-      return;
-    }
-  }
-  preparing.value = true;
-  credentialSavedDuringAttempt.value = false;
-  const submittedPassword = vaultPassword.value;
-  const submittedConfirmation = vaultPasswordConfirmation.value;
-  clearVaultInputs();
-  let vaultReady = false;
   try {
-    const status = mode === "create"
-      ? await createVault(submittedPassword, submittedConfirmation)
-      : await unlockVault(submittedPassword);
-    vaultState.value = status.state;
-    if (status.state !== "unlocked") throw new Error("Vault is unavailable");
-    vaultReady = true;
+    const approved = await requestSecureVault("ensureUnlocked");
+    if (!vaultDialogOpen.value) return;
     vaultDialogOpen.value = false;
     vaultPromptMode.value = null;
+    if (!approved) { launcherOpen.value = true; return; }
+    vaultState.value = "unlocked";
+    preparing.value = true;
     if (purpose === "useSavedCredential" && pendingVaultReconnectPaneIds.size > 0) {
       for (const paneId of [...pendingVaultReconnectPaneIds]) {
         const workspace = findWorkspacePane(paneId);
@@ -1473,55 +1398,13 @@ async function saveVaultAndConnect() {
       await connectAndSaveCredential();
     }
   } catch (error) {
-    clearVaultInputs();
-    if (vaultReady) {
-      showConnectionError(error);
-      if (!reauthenticationPaneId.value) launcherOpen.value = true;
-      return;
-    }
-    const code = typeof error === "object" && error !== null && "code" in error
-      ? String(error.code)
-      : "";
-    vaultErrorKey.value = code === "vault.weak_password"
-      ? "sshTerminal.vaultPasswordTooShort"
-      : code === "vault.password_confirmation_mismatch"
-        ? "sshTerminal.vaultPasswordMismatch"
-        : code === "vault.authentication_failed"
-          ? "sshTerminal.vaultPasswordIncorrect"
-          : "sshTerminal.vaultSaveFailed";
-    vaultErrorVisible.value = true;
-  } finally {
-    preparing.value = false;
-  }
-}
-
-async function skipVaultAndConnect() {
-  if (preparing.value) return;
-  preparing.value = true;
-  vaultErrorVisible.value = false;
-  try {
-    saveCredential.value = false;
-    await connectWithoutSavingCredential();
-  } catch {
     vaultDialogOpen.value = false;
-    launcherOpen.value = true;
-    connectionErrorVisible.value = true;
-  } finally {
-    preparing.value = false;
-  }
+    showConnectionError(error);
+    if (!reauthenticationPaneId.value) launcherOpen.value = true;
+  } finally { preparing.value = false; }
 }
 
-function returnToConnection() {
-  vaultDialogOpen.value = false;
-  vaultPromptMode.value = null;
-  clearVaultInputs();
-  launcherOpen.value = true;
-}
 
-function useOtherAuthentication() {
-  saveCredential.value = false;
-  returnToConnection();
-}
 
 function updateTabState(paneId: string, state: SshSessionState, summary: SshSessionSummary | null) {
   const target = findWorkspacePane(paneId);
@@ -2309,7 +2192,6 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
-  clearVaultInputs();
   vaultPromptMode.value = null;
   unlistenPluginProtocolLaunch?.();
   unlistenPluginProtocolLaunch = null;
@@ -2478,8 +2360,8 @@ onMounted(async () => {
                   @state="(state, summary) => updateTabState(pane.paneId, state, summary)"
                   @bell-attention="setPaneBellAttention(pane.paneId, $event)"
                   @request-authentication-recovery="(_, target) => requestSessionAuthenticationRecovery(pane.paneId, target)"
-                  @request-credential="(_, target) => requestSessionCredential(pane.paneId, target)"
-                  @request-vault-unlock="(_, target) => requestSessionVaultUnlock(pane.paneId, target)"
+                  @request-credential="(_, target) => requestSessionRecovery(pane.paneId, target, 'credential')"
+                  @request-vault-unlock="(_, target) => requestSessionRecovery(pane.paneId, target, 'vault')"
                   @split="splitActivePane"
                   @close="requestClosePane(tab.tabId, pane.paneId)"
                 />
@@ -2701,6 +2583,7 @@ onMounted(async () => {
 
     <NvxDialog
       :model-value="launcherOpen"
+      :dismissible="!preparing"
       plugin-protected
       :title="reauthenticating ? t('sshTerminal.reauthenticateTitle') : t('sshTerminal.dialogTitle')"
       :description="reauthenticating ? t('sshTerminal.reauthenticateDescription') : t('sshTerminal.dialogDescription')"
@@ -2714,7 +2597,7 @@ onMounted(async () => {
         <NvxInput
           id="quick-address"
           v-model="address"
-          :disabled="reauthenticating"
+          :disabled="reauthenticating || preparing"
           :placeholder="t('sshTerminal.addressPlaceholder')"
           data-nvx-dialog-initial-focus
         />
@@ -2727,7 +2610,7 @@ onMounted(async () => {
           <NvxInput
             id="quick-port"
             v-model="port"
-            :disabled="reauthenticating"
+            :disabled="reauthenticating || preparing"
             placeholder="22"
           />
         </NvxField>
@@ -2738,7 +2621,7 @@ onMounted(async () => {
           <NvxInput
             id="quick-username"
             v-model="username"
-            :disabled="reauthenticating"
+            :disabled="reauthenticating || preparing"
             :placeholder="t('sshTerminal.usernamePlaceholder')"
           />
         </NvxField>
@@ -2750,49 +2633,14 @@ onMounted(async () => {
         <NvxSelect
           id="quick-auth"
           v-model="authentication"
+          :disabled="preparing"
           :options="authOptions"
         />
       </NvxField>
-      <NvxField
-        v-if="authentication === 'password'"
-        for-id="quick-password"
-        :label="t('sshTerminal.password')"
-      >
-        <NvxInput
-          id="quick-password"
-          v-model="password"
-          type="password"
-          autocomplete="current-password"
-          :placeholder="t('sshTerminal.passwordPlaceholder')"
-        />
-      </NvxField>
-      <template v-else>
-        <NvxField
-          for-id="quick-private-key"
-          :label="t('sshTerminal.privateKey')"
-        >
-          <NvxTextarea
-            id="quick-private-key"
-            v-model="privateKey"
-            :placeholder="t('sshTerminal.privateKeyPlaceholder')"
-          />
-        </NvxField>
-        <NvxField
-          for-id="quick-passphrase"
-          :label="t('sshTerminal.passphrase')"
-        >
-          <NvxInput
-            id="quick-passphrase"
-            v-model="passphrase"
-            type="password"
-            autocomplete="off"
-            :placeholder="t('sshTerminal.passphrasePlaceholder')"
-          />
-        </NvxField>
-      </template>
       <NvxCheckbox
         id="quick-save-credential"
         v-model="saveCredential"
+        :disabled="preparing"
       >
         {{ t("sshTerminal.saveCredential") }}
         <template #hint>
@@ -2826,76 +2674,6 @@ onMounted(async () => {
           @click="attemptConnect"
         >
           {{ t("sshTerminal.connect") }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
-
-    <NvxDialog
-      v-model="vaultDialogOpen"
-      plugin-protected
-      :title="t(vaultPromptMode === 'create' ? 'sshTerminal.vaultCreateTitle' : 'sshTerminal.vaultUnlockTitle')"
-      :description="vaultPurpose === 'useSavedCredential' ? t('sshTerminal.vaultUnlockForConnection') : t('sshTerminal.vaultDialogDescription')"
-      :close-label="t('sshTerminal.closeVaultDialog')"
-      :dismissible="false"
-    >
-      <NvxInlineNotice
-        v-if="vaultPurpose === 'saveCredential'"
-        :title="t('sshTerminal.hostSavedWithoutCredential')"
-      >
-        {{ t("sshTerminal.hostSavedWithoutCredentialBody") }}
-      </NvxInlineNotice>
-      <NvxField
-        for-id="vault-flow-password"
-        :label="vaultPromptMode === 'create' ? t('sshTerminal.createVaultPassword') : t('sshTerminal.unlockVaultPassword')"
-        :hint="vaultPromptMode === 'create' ? t('sshTerminal.vaultPasswordHint') : undefined"
-      >
-        <NvxInput
-          id="vault-flow-password"
-          v-model="vaultPassword"
-          type="password"
-          :autocomplete="vaultPromptMode === 'create' ? 'new-password' : 'current-password'"
-          data-nvx-dialog-initial-focus
-        />
-      </NvxField>
-      <NvxField
-        v-if="vaultPromptMode === 'create'"
-        for-id="vault-flow-confirmation"
-        :label="t('sshTerminal.confirmVaultPassword')"
-      >
-        <NvxInput
-          id="vault-flow-confirmation"
-          v-model="vaultPasswordConfirmation"
-          type="password"
-          autocomplete="new-password"
-        />
-      </NvxField>
-      <NvxInlineNotice
-        v-if="vaultErrorVisible"
-        tone="error"
-        :title="t(vaultErrorKey)"
-      />
-      <template #actions>
-        <NvxButton
-          variant="ghost"
-          :disabled="preparing"
-          @click="returnToConnection"
-        >
-          {{ t("sshTerminal.back") }}
-        </NvxButton>
-        <NvxButton
-          variant="secondary"
-          :disabled="preparing"
-          @click="vaultPurpose === 'useSavedCredential' ? useOtherAuthentication() : skipVaultAndConnect()"
-        >
-          {{ vaultPurpose === "useSavedCredential" ? t("sshTerminal.useOtherAuthentication") : t("sshTerminal.connectWithoutSaving") }}
-        </NvxButton>
-        <NvxButton
-          :loading="preparing"
-          :loading-label="vaultLoadingLabel"
-          :disabled="!vaultDialogPasswordValid"
-          @click="saveVaultAndConnect"
-        >
-          {{ vaultPurpose === "useSavedCredential" ? t("sshTerminal.unlockAndConnect") : vaultPromptMode === "create" ? t("sshTerminal.createAndSave") : t("sshTerminal.unlockAndSave") }}
         </NvxButton>
       </template>
     </NvxDialog>

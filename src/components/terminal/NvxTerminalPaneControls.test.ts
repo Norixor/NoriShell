@@ -1,9 +1,10 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { i18n } from "../../locales";
 import NvxTerminalPaneControls from "./NvxTerminalPaneControls.vue";
 
 describe("NvxTerminalPaneControls", () => {
+  beforeEach(() => { i18n.global.locale.value = "zh-CN"; });
   it("keeps split, session, and close actions in distinct toolbar groups", async () => {
     const wrapper = mount(NvxTerminalPaneControls, {
       props: {

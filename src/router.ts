@@ -13,9 +13,9 @@ export const router = createRouter({
     { path: "/settings", component: () => import("./views/SettingsView.vue") },
     {
       path: "/settings/identities",
-      component: () => import("./views/IdentitiesSettingsView.vue"),
+      redirect: "/settings?section=identities",
     },
-    { path: "/known-hosts", component: () => import("./views/KnownHostsSettingsView.vue") },
+    { path: "/known-hosts", redirect: "/settings?section=knownHosts" },
     { path: "/plugins", component: () => import("./views/PluginsView.vue") },
     { path: "/plugin/:pluginId/:pageId", component: () => import("./views/PluginPageView.vue") },
     { path: "/:pathMatch(.*)*", redirect: "/terminal" },

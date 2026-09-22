@@ -7,6 +7,8 @@ import type { ServerOverviewSnapshot } from "../core-api/generated/core-api";
 import { i18n } from "../locales";
 
 const client = vi.hoisted(() => ({
+  secureVault: vi.fn(),
+  secureChallenge: vi.fn(),
   decideMetricsHostKey: vi.fn(),
   fetchServerOverview: vi.fn(),
   prepareMetricsKeyboardInteractiveAnswer: vi.fn(),
@@ -28,6 +30,10 @@ vi.mock("../core-api/client", async (importOriginal) => {
     retryMetrics: client.retryMetrics,
   };
 });
+
+vi.mock("../core-api/secure-ssh-challenge-client", () => ({ requestSecureSshChallenge: client.secureChallenge }));
+
+vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: client.secureVault }));
 
 import OverviewView from "./OverviewView.vue";
 
@@ -121,6 +127,8 @@ async function mountView(initialSnapshot: ServerOverviewSnapshot) {
 
 describe("OverviewView Core operation boundaries", () => {
   beforeEach(() => {
+    client.secureVault.mockReset().mockResolvedValue(true);
+    client.secureChallenge.mockReset().mockReturnValue(new Promise(() => undefined));
     vi.clearAllMocks();
     i18n.global.locale.value = "en";
   });
@@ -146,19 +154,39 @@ describe("OverviewView Core operation boundaries", () => {
       .find((candidate) => candidate.attributes("aria-label") === "Review server fingerprint");
     await review?.trigger("click");
     await flushPromises();
-    expect(document.body.textContent).toContain("SHA256:test-fingerprint");
-    const accept = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
-      .find((candidate) => candidate.textContent?.includes("Accept and reconnect"));
-    accept?.click();
-    await flushPromises();
-
-    expect(client.decideMetricsHostKey).toHaveBeenCalledWith({
+    expect(document.body.textContent).not.toContain("SHA256:test-fingerprint");
+    expect(client.secureChallenge).toHaveBeenCalledWith({ kind: "metricsHostKey", request: {
       metricsSessionId,
       hostId,
       expectedGeneration: "2",
       challengeId,
-      decision: "accept",
-    });
+    } });
+    expect(client.decideMetricsHostKey).not.toHaveBeenCalled();
     wrapper.unmount();
   });
+  it.each(["approve", "cancel", "host", "generation", "unmount"])("handles an explicit Vault recovery with %s outcome", async (outcome) => {
+    const initial = snapshot(true);
+    const metrics = initial.cards[0]!.metricsSession!;
+    metrics.hostKeyChallenge = null;
+    metrics.state = "needsAuthentication";
+    metrics.authenticationReason = "vaultLocked";
+    let approve!: (value: boolean) => void;
+    client.secureVault.mockReturnValue(new Promise<boolean>((resolve) => { approve = resolve; }));
+    const { wrapper, router } = await mountView(initial);
+    expect(client.secureVault).not.toHaveBeenCalled();
+    await wrapper.findAll("button").find((button) => [i18n.global.t("overview.unlockVault"), i18n.global.t("sshSettings.vault.title")].includes(button.attributes("aria-label") ?? ""))!.trigger("click");
+    await flushPromises();
+    const fresh = structuredClone(initial);
+    if (outcome === "host") fresh.cards[0]!.catalogEntry.host.stateVersion = "99";
+    if (outcome === "generation") fresh.cards[0]!.metricsSession!.generation = "99";
+    client.fetchServerOverview.mockResolvedValue(fresh);
+    if (outcome === "unmount") wrapper.unmount();
+    approve(outcome !== "cancel"); await flushPromises();
+    expect(client.secureVault).toHaveBeenCalledWith("ensureUnlocked");
+    if (outcome === "approve") expect(client.retryMetrics).toHaveBeenCalledWith({ hostId, expectedGeneration: "2" });
+    else expect(client.retryMetrics).not.toHaveBeenCalled();
+    if (outcome !== "unmount") expect(router.currentRoute.value.path).toBe("/overview");
+    if (outcome !== "unmount") wrapper.unmount();
+  });
+
 });

@@ -405,11 +405,37 @@ pub async fn application_request_exit(
 ) -> CoreResult<ExitReadiness> {
     let readiness = current_exit_readiness(&app);
     if readiness.can_exit || request.disconnect_active_resources {
+        // Editors must approve and finish their own staged-secret/file cleanup before
+        // any session owner is stopped. Cancellation leaves all resource owners intact.
+        let tool_exit = app.state::<crate::tool_window_exit::ToolWindowExit>();
+        let tool_windows = app.state::<crate::tool_windows::ToolWindows>();
+        let tool_exit_permit = tool_exit.prepare(&app, &tool_windows).await.map_err(|()| {
+            Box::new(CoreApiError {
+                code: "app.tool_window_exit_cancelled".into(),
+                category: norishell_core_api::ErrorCategory::Conflict,
+                retry_strategy: norishell_core_api::RetryStrategy::WaitForUser,
+                message_key: "toolWindows.exitCancelled".into(),
+                params: Default::default(),
+                request_id: Some(request.meta.request_id.clone()),
+                diagnostic_id: None,
+                conflict: None,
+            })
+        })?;
         if !lifecycle.begin_cleanup().await {
             return Err(Box::new(CoreApiError::safe_internal(
                 request.meta.request_id,
                 Uuid::new_v4().to_string(),
             )));
+        }
+        // Resource creation can finish while the user considers a draft prompt.
+        // Recheck after creation permits drain; never treat the earlier empty snapshot
+        // as consent to disconnect resources created during that interval.
+        if !request.disconnect_active_resources {
+            let current = current_exit_readiness(&app);
+            if !current.can_exit {
+                lifecycle.cancel_cleanup();
+                return Ok(current);
+            }
         }
         // Every owner receives the same explicit-exit cleanup opportunity even
         // when a sibling fails. Authorization happens only after all results
@@ -470,6 +496,7 @@ pub async fn application_request_exit(
         }
         hosts.shutdown_login_automation_secret_reconciler();
         lifecycle.authorize_exit();
+        tool_exit_permit.commit();
         app.exit(0);
     } else if show_main_window(&app).is_err() {
         return Err(Box::new(CoreApiError::safe_internal(

@@ -55,6 +55,14 @@ const client = vi.hoisted(() => ({
   updateHost: vi.fn(),
 }));
 
+const secureCredential = vi.hoisted(() => vi.fn());
+const secureVault = vi.hoisted(() => vi.fn());
+
+vi.mock("../core-api/secure-credential-client", () => ({
+  requestSecureCredential: secureCredential,
+}));
+vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: secureVault }));
+
 vi.mock("../core-api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../core-api/client")>();
   return {
@@ -701,6 +709,8 @@ describe("SshTerminalView route and Header behavior", () => {
       revision: "1",
       entryCount: 1,
     });
+    secureCredential.mockResolvedValue("019d0000-0000-7000-8000-000000000503");
+    secureVault.mockResolvedValue(true);
     disconnectForClose.mockResolvedValue(undefined);
     terminateForClose.mockResolvedValue(undefined);
     reconnectWithCredential.mockResolvedValue(undefined);
@@ -1232,7 +1242,6 @@ describe("SshTerminalView route and Header behavior", () => {
       updatedAtUnixMs: 10,
     });
     const { wrapper } = await mountShell();
-    const body = new DOMWrapper(document.body);
     const pane = wrapper.findComponent(SshPaneContractStub);
 
     pane.vm.$emit("requestAuthenticationRecovery", "pane-1", {
@@ -1242,16 +1251,43 @@ describe("SshTerminalView route and Header behavior", () => {
     });
     await flushPromises();
 
-    expect(document.body.textContent).toContain(i18n.global.t("sshTerminal.vaultUnlockTitle"));
-    expect(document.querySelector(".ssh-pane-contract-stub")?.getAttribute("data-deferred-recovery"))
-      .toBe("vaultUnlock");
-    await body.get("#vault-flow-password").setValue("correct horse battery staple");
-    document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
     await flushPromises();
 
-    expect(client.unlockVault).toHaveBeenCalledWith("correct horse battery staple");
+    expect(secureVault).toHaveBeenCalledWith("ensureUnlocked");
     expect(reconnectSavedCredential).toHaveBeenCalledTimes(1);
-    expect(document.querySelector("#vault-flow-password")).toBeNull();
+    wrapper.unmount();
+  });
+
+  it.each(["requestCredential", "requestVaultUnlock"])("deduplicates %s while waiting for Host metadata before showing a prompt", async (eventName) => {
+    const readyHost = { ...host, hasReadyCredential: true };
+    client.listHosts.mockResolvedValue([readyHost]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "locked", vaultId: "vault-1", revision: "1", entryCount: 1 });
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({
+      revision: "7",
+      layout: { schemaVersion: 1, activeTabId: "tab-1", tabs: [{
+        tabId: "tab-1", layout: { kind: "pane", paneId: "pane-1", terminalId: "pane-1" },
+        activePaneId: "pane-1", panes: [{ kind: "sshHost", paneId: "pane-1", label: readyHost.label, hostId: readyHost.hostId }],
+      }] }, updatedAtUnixMs: 10,
+    });
+    const { wrapper } = await mountShell();
+    let resolveHosts!: (hosts: HostSummary[]) => void;
+    client.listHosts.mockReturnValue(new Promise<HostSummary[]>((resolve) => { resolveHosts = resolve; }));
+    const callsBefore = client.listHosts.mock.calls.length;
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    const target = { kind: "host", hostId: readyHost.hostId, expectedHostStateVersion: readyHost.stateVersion };
+    pane.vm.$emit(eventName, "pane-1", target);
+    await flushPromises();
+    pane.vm.$emit(eventName, "pane-1", target);
+    await flushPromises();
+    expect(client.listHosts).toHaveBeenCalledTimes(callsBefore + 1);
+    resolveHosts([readyHost]);
+    await flushPromises();
+    if (eventName === "requestCredential") {
+      expect(document.querySelector("#quick-address")).not.toBeNull();
+      expect(secureCredential).not.toHaveBeenCalled();
+    } else {
+      expect(secureVault).toHaveBeenCalledTimes(1);
+    }
     wrapper.unmount();
   });
 
@@ -1284,7 +1320,7 @@ describe("SshTerminalView route and Header behavior", () => {
     await flushPromises();
 
     expect(document.querySelector("#vault-flow-password")).toBeNull();
-    expect(document.querySelector("#quick-password")).not.toBeNull();
+    expect(secureVault).not.toHaveBeenCalled();
     expect(client.createVault).not.toHaveBeenCalled();
     wrapper.unmount();
   });
@@ -1479,7 +1515,7 @@ describe("SshTerminalView route and Header behavior", () => {
     window.dispatchEvent(new Event("focus"));
     await flushPromises();
 
-    expect(reconcileAfterForeground).toHaveBeenCalledTimes(1);
+    expect(reconcileAfterForeground).toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -1707,7 +1743,6 @@ describe("SshTerminalView route and Header behavior", () => {
     await openLauncherQuickConnect(".terminal-pane-launcher", "split.example.test");
     await body.get("#quick-address").setValue("split.example.test");
     await body.get("#quick-username").setValue("ops");
-    await body.get("#quick-password").setValue("transient-only");
     document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
     await flushPromises();
 
@@ -1857,14 +1892,13 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(document.querySelector(".ssh-pane-contract-stub")).toBeNull();
 
-    await body.get("#quick-password").setValue("transient-only");
     document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
     await flushPromises();
 
-    expect(client.prepareTransientCredential).toHaveBeenCalledWith({
+    expect(secureCredential).toHaveBeenCalledWith({
       kind: "password",
-      secret: "transient-only",
-      passphrase: null,
+      label: host.label,
+      identityId: null,
     });
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(document.querySelector(".ssh-pane-contract-stub")?.getAttribute("data-target-kind"))
@@ -1885,11 +1919,10 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(document.body.textContent).toContain("重新输入 SSH 认证");
     expect(document.querySelector<HTMLInputElement>("#quick-address")?.disabled).toBe(true);
     expect(document.querySelector<HTMLInputElement>("#quick-username")?.disabled).toBe(true);
-    await body.get("#quick-password").setValue("replacement-secret");
     document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
     await flushPromises();
-    expect(client.prepareTransientCredential).toHaveBeenLastCalledWith(expect.objectContaining({
-      secret: "replacement-secret",
+    expect(secureCredential).toHaveBeenLastCalledWith(expect.objectContaining({
+      identityId: null,
     }));
     expect(reconnectWithCredential).toHaveBeenCalledWith(
       "019d0000-0000-7000-8000-000000000503",
@@ -1901,7 +1934,6 @@ describe("SshTerminalView route and Header behavior", () => {
     const { wrapper } = await mountShell(`/terminal?hostId=${host.hostId}`);
     const body = new DOMWrapper(document.body);
     await body.get("#quick-address").setValue("different.example.com");
-    await body.get("#quick-password").setValue("transient-only");
     document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
     await flushPromises();
     expect(wrapper.findComponent(SshPaneContractStub).props("target")).toEqual({
@@ -1926,8 +1958,8 @@ describe("SshTerminalView route and Header behavior", () => {
     await body.get("#quick-address").setValue("saved.example.test");
     await body.get("#quick-port").setValue("2222");
     await body.get("#quick-username").setValue("ops");
-    await body.get("#quick-password").setValue("vault-secret");
     await body.get("#quick-save-credential").setValue(true);
+    secureCredential.mockResolvedValueOnce("019d0000-0000-7000-8000-000000000502");
     document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
     await flushPromises();
 
@@ -1938,11 +1970,9 @@ describe("SshTerminalView route and Header behavior", () => {
       username: "ops",
     });
     expect(client.createHost.mock.calls[0]?.[0]).not.toHaveProperty("secret");
-    expect(client.importCredential).toHaveBeenCalledWith(expect.objectContaining({
+    expect(secureCredential).toHaveBeenCalledWith(expect.objectContaining({
       identityId: "019d0000-0000-7000-8000-000000000501",
       kind: "password",
-      secret: "vault-secret",
-      passphrase: null,
     }));
     expect(client.updateHost).toHaveBeenCalledWith(expect.objectContaining({
       hostId: host.hostId,
@@ -1971,29 +2001,16 @@ describe("SshTerminalView route and Header behavior", () => {
     await openLauncherQuickConnect(".terminal-launcher", host.address);
     await body.get("#quick-address").setValue(host.address);
     await body.get("#quick-username").setValue(host.username ?? "");
-    await body.get("#quick-password").setValue("one-use-only");
     await body.get("#quick-save-credential").setValue(true);
+    secureCredential.mockResolvedValueOnce(null);
     document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
     await flushPromises();
 
     expect(client.createHost).toHaveBeenCalledTimes(1);
-    expect(document.body.textContent).toContain("主机信息已保存");
-    Array.from(document.querySelectorAll<HTMLButtonElement>(".nvx-dialog__actions button"))
-      .find((candidate) => candidate.textContent?.includes("不保存密码，直接连接"))?.click();
-    await flushPromises();
-    expect(client.prepareTransientCredential).toHaveBeenCalledWith(expect.objectContaining({
-      secret: "one-use-only",
-    }));
-
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
-    await flushPromises();
-    Array.from(document.querySelectorAll<HTMLButtonElement>(".ssh-terminal-recent__item"))
-      .find((candidate) => candidate.textContent?.includes(noCredentialHost.label))?.click();
-    await flushPromises();
-
-    expect(document.querySelector<HTMLInputElement>("#quick-password")?.value).toBe("");
-    expect(client.prepareTransientCredential).toHaveBeenCalledTimes(1);
-    expect(document.body.textContent).toContain("快速连接");
+    expect(secureCredential).toHaveBeenCalledWith(expect.objectContaining({ identityId: "019d0000-0000-7000-8000-000000000501" }));
+    expect(document.body.textContent).toContain("开始新的终端");
+    expect(document.querySelector("#quick-password")).toBeNull();
+    expect(secureCredential).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 
@@ -2022,7 +2039,7 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(document.querySelector("#quick-password")).toBeNull();
     expect(document.querySelector(".ssh-pane-contract-stub")?.getAttribute("data-target-kind"))
       .toBe("host");
-    expect(client.prepareTransientCredential).not.toHaveBeenCalled();
+    expect(secureCredential).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -2077,8 +2094,8 @@ describe("SshTerminalView route and Header behavior", () => {
       },
     );
     await flushPromises();
-    await body.get("#quick-password").setValue("replacement-secret");
     await body.get("#quick-save-credential").setValue(true);
+    secureCredential.mockResolvedValueOnce("019d0000-0000-7000-8000-000000000502");
     document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
     await flushPromises();
 

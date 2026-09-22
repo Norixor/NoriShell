@@ -1,0 +1,241 @@
+use std::time::Duration;
+
+use semver::Version;
+use serde::{Deserialize, Serialize};
+use tauri::WebviewWindow;
+
+const GITHUB_RELEASES_API: &str =
+    "https://api.github.com/repos/Norixor/NoriShell/releases?per_page=100";
+pub const GITHUB_RELEASES_PAGE: &str = "https://github.com/Norixor/NoriShell/releases";
+const MAIN_WINDOW_LABEL: &str = "main";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    draft: bool,
+    prerelease: bool,
+    tag_name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ReleaseCheckStatus {
+    UpToDate,
+    UpdateAvailable,
+    NoRelease,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReleaseCheckResponse {
+    current_version: String,
+    status: ReleaseCheckStatus,
+    latest_version: Option<String>,
+    release_url: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ReleaseCheckFailureCode {
+    WindowNotAllowed,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReleaseCheckFailure {
+    code: ReleaseCheckFailureCode,
+}
+
+impl ReleaseCheckFailure {
+    const fn unavailable() -> Self {
+        Self {
+            code: ReleaseCheckFailureCode::Unavailable,
+        }
+    }
+}
+
+fn release_version(tag_name: &str) -> Option<Version> {
+    Version::parse(tag_name.strip_prefix('v').unwrap_or(tag_name)).ok()
+}
+
+fn is_eligible_release(current: &Version, release: &GithubRelease) -> Option<Version> {
+    if release.draft {
+        return None;
+    }
+
+    let version = release_version(&release.tag_name)?;
+    // A stable installation never offers prerelease builds, even if a release
+    // was mistakenly published without GitHub's prerelease flag.
+    if current.pre.is_empty() && (release.prerelease || !version.pre.is_empty()) {
+        return None;
+    }
+    Some(version)
+}
+
+fn evaluate_releases(current: Version, releases: Vec<GithubRelease>) -> ReleaseCheckResponse {
+    let latest = releases
+        .iter()
+        .filter_map(|release| is_eligible_release(&current, release))
+        .max_by(|left, right| left.cmp_precedence(right));
+
+    let (status, latest_version) = match latest {
+        None => (ReleaseCheckStatus::NoRelease, None),
+        Some(version) if version.cmp_precedence(&current).is_gt() => (
+            ReleaseCheckStatus::UpdateAvailable,
+            Some(version.to_string()),
+        ),
+        Some(_) => (ReleaseCheckStatus::UpToDate, None),
+    };
+
+    ReleaseCheckResponse {
+        current_version: current.to_string(),
+        status,
+        latest_version,
+        release_url: GITHUB_RELEASES_PAGE,
+    }
+}
+
+async fn read_bounded_response(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, ReleaseCheckFailure> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(ReleaseCheckFailure::unavailable());
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ReleaseCheckFailure::unavailable())?
+    {
+        if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
+            return Err(ReleaseCheckFailure::unavailable());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[tauri::command]
+pub(crate) async fn release_check<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+) -> Result<ReleaseCheckResponse, ReleaseCheckFailure> {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err(ReleaseCheckFailure {
+            code: ReleaseCheckFailureCode::WindowNotAllowed,
+        });
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("NoriShell/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|_| ReleaseCheckFailure::unavailable())?;
+    let response = client
+        .get(GITHUB_RELEASES_API)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|_| ReleaseCheckFailure::unavailable())?;
+    if !response.status().is_success() {
+        return Err(ReleaseCheckFailure::unavailable());
+    }
+
+    let body = read_bounded_response(response).await?;
+    let releases = serde_json::from_slice::<Vec<GithubRelease>>(&body)
+        .map_err(|_| ReleaseCheckFailure::unavailable())?;
+    let current = Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| ReleaseCheckFailure::unavailable())?;
+    Ok(evaluate_releases(current, releases))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(tag_name: &str, draft: bool, prerelease: bool) -> GithubRelease {
+        GithubRelease {
+            draft,
+            prerelease,
+            tag_name: tag_name.into(),
+        }
+    }
+
+    #[test]
+    fn stable_versions_do_not_offer_prereleases_or_drafts() {
+        let result = evaluate_releases(
+            Version::parse("0.1.0").unwrap(),
+            vec![
+                release("v0.2.0-beta.1", false, true),
+                release("v0.3.0", true, false),
+                release("v0.1.1", false, false),
+            ],
+        );
+
+        assert_eq!(result.status, ReleaseCheckStatus::UpdateAvailable);
+        assert_eq!(result.latest_version.as_deref(), Some("0.1.1"));
+        assert_eq!(result.release_url, GITHUB_RELEASES_PAGE);
+    }
+
+    #[test]
+    fn beta_versions_can_advance_to_a_newer_beta_or_the_final_release() {
+        let result = evaluate_releases(
+            Version::parse("0.1.0-beta.1").unwrap(),
+            vec![
+                release("v0.1.0-beta.2", false, true),
+                release("v0.1.0", false, false),
+            ],
+        );
+
+        assert_eq!(result.status, ReleaseCheckStatus::UpdateAvailable);
+        assert_eq!(result.latest_version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn prerelease_numeric_identifiers_and_release_precedence_follow_semver() {
+        let result = evaluate_releases(
+            Version::parse("0.1.0-beta.2").unwrap(),
+            vec![
+                release("v0.1.0-beta.10", false, true),
+                release("v0.1.0-beta.1", false, true),
+            ],
+        );
+
+        assert_eq!(result.status, ReleaseCheckStatus::UpdateAvailable);
+        assert_eq!(result.latest_version.as_deref(), Some("0.1.0-beta.10"));
+    }
+
+    #[test]
+    fn equal_precedence_build_metadata_and_older_releases_are_not_updates() {
+        let result = evaluate_releases(
+            Version::parse("0.1.0+local.1").unwrap(),
+            vec![
+                release("v0.1.0+build.2", false, false),
+                release("v0.0.9", false, false),
+            ],
+        );
+
+        assert_eq!(result.status, ReleaseCheckStatus::UpToDate);
+        assert_eq!(result.latest_version, None);
+    }
+
+    #[test]
+    fn an_empty_or_unparseable_published_list_reports_no_release() {
+        let empty = evaluate_releases(Version::parse("0.1.0").unwrap(), vec![]);
+        let invalid = evaluate_releases(
+            Version::parse("0.1.0").unwrap(),
+            vec![release("release-candidate", false, false)],
+        );
+
+        assert_eq!(empty.status, ReleaseCheckStatus::NoRelease);
+        assert_eq!(invalid.status, ReleaseCheckStatus::NoRelease);
+    }
+}

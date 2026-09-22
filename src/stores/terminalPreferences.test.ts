@@ -23,7 +23,7 @@ describe("terminal preferences interaction", () => {
   });
   it("persists a complete interaction object under the existing v1 terminal features key", () => {
     const store = useTerminalPreferencesStore();
-    const interaction = { ...DEFAULT_TERMINAL_INTERACTION, scrollback: 9_000, scrollSensitivity: 3, smoothScrollDuration: 200 as const, doubleClickSelection: "address" as const, copyOnSelect: true, rightClickBehavior: "paste" as const };
+    const interaction = { ...DEFAULT_TERMINAL_INTERACTION, scrollback: 9_000, scrollSensitivity: 3, smoothScrollDuration: 200 as const, doubleClickSelection: "address" as const, copyOnSelect: true, rightClickBehavior: "paste" as const, sshReconnectOnInput: false };
     expect(store.setInteraction(interaction)).toBe(true);
     expect(JSON.parse(localStorage.getItem(TERMINAL_PREFERENCES_KEY) ?? "{}").interaction).toEqual(interaction);
   });
@@ -46,7 +46,7 @@ describe("terminal preferences interaction", () => {
       pasteWarning: store.preferences.pasteWarning,
     };
     const next = {
-      interaction: { ...DEFAULT_TERMINAL_INTERACTION, scrollback: 9_000, scrollSensitivity: 3, bellMode: "visual" as const },
+      interaction: { ...DEFAULT_TERMINAL_INTERACTION, scrollback: 9_000, scrollSensitivity: 3, bellMode: "visual" as const, sshReconnectOnInput: false },
       pasteWarning: "always" as const,
     };
     const hostHighlights = JSON.parse(JSON.stringify(store.preferences.hostHighlights));
@@ -56,9 +56,14 @@ describe("terminal preferences interaction", () => {
     expect(store.replaceGlobalInteraction(next, expected)).toBe(true);
     expect(store.preferences.interaction).toEqual(next.interaction);
     expect(store.preferences.pasteWarning).toBe("always");
+    expect(store.preferences.interaction.sshReconnectOnInput).toBe(false);
     expect(store.preferences.hostHighlights).toEqual(hostHighlights);
     expect(store.preferences.hostKeyboard).toEqual(hostKeyboard);
     expect(store.preferences.highlights).toEqual(globalHighlights);
+    expect(store.replaceGlobalInteraction(
+      { interaction: { ...store.preferences.interaction, sshReconnectOnInput: true }, pasteWarning: store.preferences.pasteWarning },
+      { interaction: { ...store.preferences.interaction, sshReconnectOnInput: true }, pasteWarning: store.preferences.pasteWarning },
+    )).toBe(false);
     expect(store.replaceGlobalInteraction(expected, expected)).toBe(false);
 
     expect(store.setHostKeyboard(hostId, { mode: "inherit" })).toBe(true);

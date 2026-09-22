@@ -18,6 +18,11 @@ export async function getNativeControlsInset(): Promise<number | null> {
   return typeof inset === "number" && Number.isFinite(inset) && inset > 0 ? inset : null;
 }
 
+export async function setNativeHeaderHeight(height: number): Promise<void> {
+  if (!isTauri() || !Number.isFinite(height) || height <= 0) return;
+  await invoke("window_set_native_header_height", { height });
+}
+
 export function physicalWindowsCaptionHitRegion(
   rect: Pick<DOMRect, "left" | "top" | "width" | "height">,
   scaleFactor: number,

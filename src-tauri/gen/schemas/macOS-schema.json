@@ -363,6 +363,12 @@
           "markdownDescription": "Allows a nonce-bound trusted wrapper to broker only its assigned isolated surface."
         },
         {
+          "description": "Read, answer or cancel the exact SSH credential prompt, and explicitly open the nested Vault prompt when saving it.",
+          "type": "string",
+          "const": "secure-credential-commands",
+          "markdownDescription": "Read, answer or cancel the exact SSH credential prompt, and explicitly open the nested Vault prompt when saving it."
+        },
+        {
           "description": "Allows only the protected plugin Host approval window to read and decide its bound request.",
           "type": "string",
           "const": "secure-plugin-host-approval-commands",
@@ -387,10 +393,46 @@
           "markdownDescription": "Allows only the protected terminal input approval window to read and decide its bound request."
         },
         {
+          "description": "Read and answer the exact SSH challenge owned by this secure window.",
+          "type": "string",
+          "const": "secure-ssh-challenge-commands",
+          "markdownDescription": "Read and answer the exact SSH challenge owned by this secure window."
+        },
+        {
           "description": "Allows only a protected SSH sync data-exchange window to read and decide its bound request.",
           "type": "string",
           "const": "secure-ssh-sync-commands",
           "markdownDescription": "Allows only a protected SSH sync data-exchange window to read and decide its bound request."
+        },
+        {
+          "description": "Read, answer or cancel the exact Vault prompt owned by this window.",
+          "type": "string",
+          "const": "secure-vault-commands",
+          "markdownDescription": "Read, answer or cancel the exact Vault prompt owned by this window."
+        },
+        {
+          "description": "Desktop profile configuration and password staging, without session control.",
+          "type": "string",
+          "const": "tool-desktop-editor",
+          "markdownDescription": "Desktop profile configuration and password staging, without session control."
+        },
+        {
+          "description": "Host configuration and credential management without terminal, plugin, or filesystem browsing access.",
+          "type": "string",
+          "const": "tool-host-editor",
+          "markdownDescription": "Host configuration and credential management without terminal, plugin, or filesystem browsing access."
+        },
+        {
+          "description": "Access only the file and generation registered for the calling window.",
+          "type": "string",
+          "const": "tool-sftp-file",
+          "markdownDescription": "Access only the file and generation registered for the calling window."
+        },
+        {
+          "description": "Read and close only the calling Core-registered tool window.",
+          "type": "string",
+          "const": "tool-window-lifecycle",
+          "markdownDescription": "Read and close only the calling Core-registered tool window."
         },
         {
           "description": "Only the restricted tray panel projection and one-shot actions.",

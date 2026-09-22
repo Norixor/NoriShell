@@ -3,46 +3,91 @@
 </p>
 <h1 align="center">NoriShell</h1>
 <p align="center">本地优先的终端与远程连接工作台</p>
-<p align="center">SSH · 本地终端 · SFTP · RDP / VNC · 加密 Vault · 插件</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · 开发中</p>
+<p align="center">SSH · 本地终端 · SFTP · 端口转发 · RDP / VNC · 加密 Vault · 插件</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.0-beta.1</p>
+<p align="center">简体中文 · <a href="README.en.md">English</a></p>
 
-NoriShell 将远程连接、终端会话、文件传输和凭据管理放进一个桌面应用。基础连接无需登录账号，主机配置保存在本机，已保存的密码与私钥进入加密 Vault；需要跨设备使用时，可通过 Norixor 插件启用同步。
+NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据管理放进一个桌面应用。基础连接无需账号，主机配置保存在本机，持久化密码和私钥进入独立加密 Vault；需要跨设备使用时，可通过 Norixor 插件选择性启用端到端加密同步。
 
-基于 **Tauri 2、Vue 3、TypeScript、xterm 和 Rust** 构建。
+项目基于 **Tauri 2、Vue 3、TypeScript、xterm 和 Rust**。Rust Core 管理连接、秘密、持久化和资源生命周期，前端负责交互与可重建的状态投影。
 
-## 能做什么
+## 目录
+
+- [亮点](#亮点)
+- [界面预览](#界面预览)
+- [功能](#功能)
+- [安装与快速开始](#安装与快速开始)
+- [从源码开发](#从源码开发)
+- [本地优先与安全边界](#本地优先与安全边界)
+- [插件开发](#插件开发)
+- [文档](#文档)
+- [故障排查](#故障排查)
+- [架构与项目结构](#架构与项目结构)
+- [许可证](#许可证)
+
+## 亮点
+
+- **一个窗口管理远程工作。** 在同一个窗口切换终端、主机、文件传输、隧道、服务器概览和远程桌面。
+- **本地优先。** SSH、本地终端、SFTP、隧道和本机配置不依赖云端账号。
+- **明确的身份与秘密边界。** 首次 SSH 指纹需要确认，密钥变化会阻断连接，持久秘密只进入加密 Vault。
+- **连接互不干扰。** 终端、文件传输、隧道和监控独立运行，关闭其中一项不会中断其他连接。
+- **受限插件系统。** 插件使用隔离的 WebAssembly Host、细粒度 capability 和受保护授权；安装与升级均由用户明确导入本地 ZIP。
+- **面向 macOS 与 Windows。** 提供 macOS Apple Silicon / Intel、Windows x64 和 Windows ARM64 安装包。
+
+## 界面预览
+
+![NoriShell 多标签与分屏终端](.github/assets/screenshots/terminal.png)
+
+## 功能
 
 | 能力 | 说明 |
 | --- | --- |
-| SSH 与本地终端 | 多标签、分屏、最近连接，以及独立的本地 Shell 会话 |
-| 主机与连接管理 | 主机分组、密码与密钥认证、跳板机、HTTP CONNECT / SOCKS5 连接入口 |
-| 文件传输与隧道 | SFTP 文件浏览与传输、SSH 端口转发 |
-| 远程桌面 | RDP / VNC 配置与连接，以及 SSH 网关 |
-| 凭据保护 | 加密 Vault、服务器指纹核验、受保护的凭据交互 |
-| 服务器概览 | 按主机查看活动资源，以及启用监控后的系统指标 |
-| 日常操作 | 自定义快捷键、快捷命令、主题、托盘面板与通知偏好 |
-| 插件与同步 | 隔离的 WebAssembly 插件、细粒度权限，以及可选的 Norixor 加密同步 |
+| SSH 与本地终端 | 多标签、嵌套分屏、搜索、重连、最近连接，以及独立的本地 Shell / PTY 会话 |
+| 主机与连接管理 | 分组、标签、收藏、OpenSSH 非秘密配置导入、密码/密钥/Agent 认证和服务器指纹核验 |
+| 路由与兼容策略 | Direct、HTTP CONNECT、SOCKS5、Jump Host / Host Chain，以及按 Host 隔离的算法例外 |
+| 文件与网络 | 多 Pane SFTP 浏览、传输、预览/编辑、实时追踪，以及 Local / Remote / Dynamic 端口转发 |
+| 远程桌面 | RDP / VNC 配置与会话、SSH 网关、缩放、输入、文本剪贴板和 RDP 音频能力 |
+| 服务器概览 | 按 Host 聚合 Terminal、SFTP、Tunnel 和 Metrics，可选采集 CPU、内存、网络与磁盘指标 |
+| 凭据保护 | 独立加密 Vault、一次性凭据、受保护窗口、严格的 host-key 确认与变化阻断 |
+| 日常操作 | 快捷命令、自定义快捷键、关键词高亮、通知、托盘面板和设置导入导出 |
+| 插件与主题 | 隔离的 WebAssembly 插件、细粒度权限、本地 ZIP 导入/升级和纯数据声明式主题 |
+| 可选同步 | 通过 Norixor 插件同步用户明确选择的加密 SSH 与远程桌面配置，不上传本机 Vault 文件 |
+| Telnet | 独立 Telnet 会话；连接前明确提示明文传输、无服务器身份验证和链路篡改风险 |
 
-> 当前处于开发阶段。功能实现与平台验收仍在推进，macOS 与 Windows 的验证覆盖并不完全相同。远程桌面及跨设备同步仍需进一步真实环境验收；源码可用不代表已提供正式签名、完整跨平台验收的稳定安装包。
+## 安装与快速开始
 
-## 本地优先，按需连接
+前往 [GitHub Releases](https://github.com/Norixor/NoriShell/releases)，选择适合设备的安装包。
 
-- **无需账号即可使用基础功能。** 云服务与同步属于可选能力。
-- **秘密交给 Vault。** 持久化密码与私钥加密保存，不作为普通配置明文存储。
-- **连接前核验服务器身份。** 首次 SSH 指纹需要确认，已信任指纹发生变化时阻断连接。
-- **插件按权限运行。** 插件运行在隔离宿主中，不能直接读取 Vault 秘密或访问主应用内部对象。
-- **同步由 Core 处理。** Norixor 插件提供操作入口；加密、比较与恢复由 NoriShell Core 管理。
+| 平台 | 架构 | 安装方式 |
+| --- | --- | --- |
+| macOS 13 及以上 | Apple Silicon（ARM64） / Intel（x64） | 打开对应架构的 `.dmg`，将 NoriShell 拖入“应用程序” |
+| Windows | x64（Intel / AMD） | 运行对应的 `-setup.exe` |
+| Windows | ARM64 | 运行 ARM64 对应的 `-setup.exe` |
 
-这些是设计与实现边界，不是独立安全审计结论。漏洞报告方式见 [SECURITY.md](SECURITY.md)。
+### 检查新版本
 
-## 从源码运行
+在 **设置 → 关于** 中点击“检查更新”。应用读取 [NoriShell GitHub Releases](https://github.com/Norixor/NoriShell/releases) 的公开版本信息；发现新版本后，点击“前往 GitHub 下载”在浏览器中打开发布页，自行选择对应平台和架构的安装包。
 
-### 环境
+更新由你手动下载和安装。Beta 版本可检测后续 Beta 和正式版本；正式版本只提示正式发布。
+
+### 首次连接
+
+1. 从 Terminal 空状态选择 **Quick Connect**、添加 Host 或导入 OpenSSH 配置。
+2. 核对目标地址、端口、路由和认证方式。
+3. 首次连接时确认服务器 host key 算法与指纹；已信任密钥变化时停止并核对服务器。
+4. 需要保存密码、私钥或 passphrase 时创建或解锁 Vault。
+5. 连接成功后按需打开新的 Terminal、SFTP、Tunnel 或 Overview 监控；这些资源彼此独立。
+
+## 从源码开发
+
+### 环境要求
 
 - Node.js **22 或更新版本**。
-- pnpm **10.32.1**，与 `package.json` 一致。
-- Rust **1.97.1**，由 `rust-toolchain.toml` 固定。
-- [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)：macOS 需要 Xcode Command Line Tools；Windows 需要 MSVC C++ 构建工具与 WebView2。
+- pnpm **10.32.1**，与 `package.json` 中的 `packageManager` 一致。
+- Rust **1.97.1**，由 `rust-toolchain.toml` 固定，并包含 `rustfmt` 与 `clippy`。
+- [Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)：macOS 需要 Xcode Command Line Tools；Windows 需要 MSVC C++ 构建工具和 WebView2。
+
+### 本地启动
 
 ```sh
 git clone https://github.com/Norixor/NoriShell.git
@@ -51,45 +96,113 @@ pnpm install --frozen-lockfile
 pnpm tauri dev
 ```
 
-私有预览阶段，克隆需要拥有仓库访问权限。
-
 ### 检查与构建
 
 ```sh
-# 生成契约一致性、类型、Lint、前端测试与构建
+# 生成契约一致性、类型检查、Lint、前端测试和生产构建
 pnpm check
 
-# Rust 格式、测试与静态检查
+# Rust 格式、测试和严格静态检查
 cargo fmt --all -- --check
 cargo test --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 
-# 在当前平台构建桌面应用
+# 构建当前平台的桌面应用
 pnpm tauri build
 ```
 
-正式分发还需要对应平台的签名、打包与验收。不要将本地生成的未签名构建视为官方发行版。
+## 本地优先与安全边界
 
-## 项目结构
+- **秘密只进入 Vault。** 持久化密码、私钥和 passphrase 不作为普通 SQLite 配置或日志保存。
+- **连接前核验服务器身份。** 首次 SSH 指纹需要明确确认；已信任密钥变化时连接被阻断。
+- **不同资源拥有独立连接。** Terminal、SFTP、Tunnel 与 Metrics 不共享 SSH transport。
+- **插件默认无权限。** guest 不能直接读取 Vault、SQLite、SSH socket、宿主 DOM 或任意 Tauri command。
+- **敏感决定使用受保护窗口。** Vault、凭据、host key、插件授权和其他安全确认与普通插件界面隔离。
+- **同步内容由用户选择。** 同步服务不获得 Vault 密码、KEK、VMK、Known Hosts 或设备自动解锁材料。
 
-```text
-src/               Vue 界面、状态投影与共享组件
-src-tauri/         Tauri 桌面入口与宿主集成
-crates/            Rust Core、连接协议、Vault、持久化与插件能力
-examples/plugins/  插件示例
-vendor/            保留上游许可的依赖补丁
+安全问题请通过 [SECURITY.md](SECURITY.md) 中的渠道私密报告。
+
+## 插件开发
+
+插件使用版本化、受限的 WebAssembly ABI，通过宿主的类型化 Broker 请求网络、存储、任务、UI 或协议资源。声明 capability 只是申请权限，不能绕过用户授权、资源范围、generation 栅栏或宿主生命周期。
+
+NoriShell 不提供在线插件市场。安装或升级插件时，用户明确选择本地 ZIP；同一插件的更高版本沿用包校验、权限重新审阅、版本防回退和原子替换流程。
+
+插件开发入口：
+
+- [插件开发指南目录](docs/guides/developers/README.zh-CN.md)
+- [快速入门与示例选择](docs/guides/developers/quickstart.zh-CN.md)
+- [包与 manifest](docs/guides/developers/package.zh-CN.md)
+- [Protocol 13 Wasm ABI](docs/guides/developers/wasm-abi.zh-CN.md)
+- [Broker、资源与存储](docs/guides/developers/broker.zh-CN.md)
+- [声明式 UI](docs/guides/developers/ui.zh-CN.md)
+- [安全与发布检查](docs/guides/developers/security.zh-CN.md)
+
+可运行示例：
+
+- [API 基础示例](examples/plugins/api-demo/README.md)
+- [应用页面与宿主集成](examples/plugins/app-demo/README.md)
+- [多步骤工作流](examples/plugins/workflow-demo/README.md)
+- [网络服务工具](examples/plugins/service-demo/README.md)
+- [字节流协议插件](examples/plugins/protocol-demo/README.md)
+- [SDK 工具与开发循环](examples/plugins/sdk-tooling/README.md)
+- [声明式主题包](examples/theme-plugins/README.md)
+
+## 文档
+
+| 文档目录 | 面向对象与边界 |
+| --- | --- |
+| [完整文档目录](docs/guides/README.md) | 中英文总入口 |
+| [用户指南](docs/guides/users/README.zh-CN.md) | 插件导入、权限、恢复与外观 |
+| [开发指南](docs/guides/developers/README.zh-CN.md) | 包开发、ABI、Broker、UI、主题和安全检查 |
+| [Plugin API 参考](docs/guides/plugin-api/README.zh-CN.md) | guest 可调用的协议、类型、能力、资源与事件 |
+| [Core API 目录](docs/guides/core-api/README.zh-CN.md) | 应用 renderer IPC、commands、events、handlers 与 Plugin Host；不是插件权限面 |
+
+## 故障排查
+
+### macOS 提示“应用已损坏”
+
+如果 macOS 拦截未签名或隔离属性残留的应用，可以在终端中依次执行：
+
+```sh
+sudo spctl --master-disable
+sudo xattr -r -d com.apple.quarantine "/Applications/NoriShell.app"
 ```
 
-Rust Core 管理连接、凭据、持久化与资源生命周期；前端负责交互和可重建的视图状态。第三方补丁的来源与修改范围见 [vendor/README.md](vendor/README.md)。
+然后重新打开 NoriShell。
 
-## 插件
+### 本地构建环境不一致
 
-本仓库包含插件运行框架、SDK 与通用示例；正式官方插件的实现不包含在本仓库中。插件使用受限 WebAssembly ABI，通过宿主提供的能力工作。可从 [应用页面示例](examples/plugins/app-demo/README.md)、[协议示例](examples/plugins/protocol-demo/README.md)和 [SDK 工具](examples/plugins/sdk-tooling/README.md)了解代码结构。
+优先使用仓库固定的 pnpm 与 Rust 版本。依赖异常时先重新执行 `pnpm install --frozen-lockfile`；macOS 首次构建同时核对 Xcode Command Line Tools 和许可状态。
 
-Norixor 同步服务独立运营。客户端源码许可不包含官方服务访问凭据，也不代表服务免费或无限量可用。
+## 架构与项目结构
+
+```text
+Vue Desktop UI
+    │ typed Tauri commands / channels / events
+Rust Core
+    ├── SSH、PTY、SFTP、Tunnel、Metrics 与远程桌面生命周期
+    ├── SQLite 非秘密元数据 + 独立加密 Vault
+    └── 插件包校验、权限 Broker 与资源围栏
+        │ versioned plugin protocol
+Isolated Plugin Host
+    └── 单一受限 Wasm，无直接 Vault、SQLite、socket 或 Tauri 访问
+```
+
+```text
+src/                    Vue 界面、状态投影与共享组件
+src-tauri/              Tauri 桌面入口、原生窗口与宿主集成
+crates/                 Rust Core、协议、Vault、持久化和插件能力
+docs/guides/            用户、插件开发、Plugin API 与 Core API 文档
+examples/plugins/       Wasm 插件与 SDK 示例
+examples/theme-plugins/ 声明式主题示例
+vendor/                 保留上游许可和修改说明的依赖补丁
+```
+
+第三方补丁的来源、许可和修改范围见 [vendor/README.md](vendor/README.md)。
 
 ## 许可证
 
-NoriShell 原创代码采用 **GNU General Public License v3.0 only（GPL-3.0-only）**。完整条款见 [LICENSE](LICENSE)。你可以使用、修改和分发本软件；分发受 GPL 覆盖的版本时，须遵守相应源码提供及其他许可义务。
+NoriShell 原创代码采用 **GNU General Public License v3.0 only（GPL-3.0-only）**。完整条款见 [LICENSE](LICENSE)。使用、修改或分发受 GPL 覆盖的版本时，须履行相应的源码提供及其他许可义务。
 
 第三方源码、依赖和素材保留各自许可，见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。

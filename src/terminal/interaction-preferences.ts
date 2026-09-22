@@ -1,6 +1,6 @@
 /**
-  * Terminal interaction preferences are renderer-local display configuration and never enter sessions, output replay, or command history.
-  * Mouse, keyboard, BEL, and link preferences remain within the same interaction boundary.
+  * Terminal interaction preferences are renderer-local configuration and never enter session payloads, output replay, or command history.
+  * SSH input recovery only initiates the existing reconnect workflow and never retains input.
  */
 export const XTERM_DEFAULT_WORD_SEPARATOR = " ()[]{}',`\"";
 
@@ -22,6 +22,8 @@ export interface InteractionPreferences {
   backspaceMode: TerminalBackspaceMode;
   bellMode: TerminalBellMode;
   linksEnabled: boolean;
+  /** When a failed SSH Pane receives input, reconnect first and discard that triggering input. */
+  sshReconnectOnInput: boolean;
 }
 
 export const DEFAULT_TERMINAL_INTERACTION: Readonly<InteractionPreferences> = {
@@ -36,6 +38,7 @@ export const DEFAULT_TERMINAL_INTERACTION: Readonly<InteractionPreferences> = {
   backspaceMode: "del",
   bellMode: "off",
   linksEnabled: true,
+  sshReconnectOnInput: true,
 };
 
 const selectionValues = new Set<DoubleClickSelection>(["word", "path", "address"]);
@@ -43,7 +46,7 @@ const scrollDurationValues = new Set<InteractionPreferences["smoothScrollDuratio
 const rightClickValues = new Set<RightClickBehavior>(["menu", "paste"]);
 const backspaceValues = new Set<TerminalBackspaceMode>(["del", "bs"]);
 const bellValues = new Set<TerminalBellMode>(["off", "visual", "sound"]);
-const interactionKeys = ["scrollback", "scrollSensitivity", "smoothScrollDuration", "doubleClickSelection", "copyOnSelect", "rightClickBehavior", "optionAsMetaLeft", "optionAsMetaRight", "backspaceMode", "bellMode", "linksEnabled"] as const;
+const interactionKeys = ["scrollback", "scrollSensitivity", "smoothScrollDuration", "doubleClickSelection", "copyOnSelect", "rightClickBehavior", "optionAsMetaLeft", "optionAsMetaRight", "backspaceMode", "bellMode", "linksEnabled", "sshReconnectOnInput"] as const;
 
 function hasValidExistingInteractionFields(candidate: Record<string, unknown>) {
   return typeof candidate.scrollback === "number"
@@ -71,7 +74,8 @@ export function validateInteractionPreferences(value: unknown): value is Interac
     && typeof candidate.optionAsMetaRight === "boolean"
     && backspaceValues.has(candidate.backspaceMode as TerminalBackspaceMode)
     && bellValues.has(candidate.bellMode as TerminalBellMode)
-    && typeof candidate.linksEnabled === "boolean";
+    && typeof candidate.linksEnabled === "boolean"
+    && typeof candidate.sshReconnectOnInput === "boolean";
 }
 
 /** Add defaults only when legacy preferences lack new fields; reject unknown keys or any corrupted existing field. */
@@ -87,6 +91,7 @@ export function parseStoredInteractionPreferences(value: unknown): InteractionPr
   if (candidate.backspaceMode !== undefined && !backspaceValues.has(candidate.backspaceMode as TerminalBackspaceMode)) return null;
   if (candidate.bellMode !== undefined && !bellValues.has(candidate.bellMode as TerminalBellMode)) return null;
   if (candidate.linksEnabled !== undefined && typeof candidate.linksEnabled !== "boolean") return null;
+  if (candidate.sshReconnectOnInput !== undefined && typeof candidate.sshReconnectOnInput !== "boolean") return null;
   return {
     scrollback: candidate.scrollback,
     scrollSensitivity: candidate.scrollSensitivity,
@@ -99,6 +104,7 @@ export function parseStoredInteractionPreferences(value: unknown): InteractionPr
     backspaceMode: candidate.backspaceMode ?? DEFAULT_TERMINAL_INTERACTION.backspaceMode,
     bellMode: candidate.bellMode ?? DEFAULT_TERMINAL_INTERACTION.bellMode,
     linksEnabled: candidate.linksEnabled ?? DEFAULT_TERMINAL_INTERACTION.linksEnabled,
+    sshReconnectOnInput: candidate.sshReconnectOnInput ?? DEFAULT_TERMINAL_INTERACTION.sshReconnectOnInput,
   } as InteractionPreferences;
 }
 

@@ -1,4 +1,6 @@
 import { DOMWrapper, flushPromises, mount } from "@vue/test-utils";
+import { defineComponent, h, shallowRef } from "vue";
+import NvxHostEditor from "../components/hosts/NvxHostEditor.vue";
 import { createPinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostSummary, LoginAutomationStepInput } from "../core-api/generated/core-api";
 import { i18n } from "../locales";
 import { useTipsStore } from "../stores/tips";
+
+const nativeWindows = vi.hoisted(() => ({ open: vi.fn(), listen: vi.fn(), vault: vi.fn() }));
+vi.mock("../tool-windows", () => ({ openToolWindow: nativeWindows.open, onToolWindowChanged: nativeWindows.listen }));
+vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: nativeWindows.vault }));
 
 const client = vi.hoisted(() => ({
   cancelHostCreatePassword: vi.fn(),
@@ -176,7 +182,22 @@ async function mountView(initialPath = "/hosts") {
   const mountHost = document.createElement("div");
   document.body.append(mountHost);
   const pinia = createPinia();
-  const wrapper = mount(HostsView, {
+  const target = shallowRef<{ hostId?: string; initialSection?: "connection" | "connectionRoute" | "loginAutomation" } | null>(null);
+  let changed: ((kind: string) => void) | undefined;
+  nativeWindows.listen.mockImplementation(async (callback) => { changed = callback; return () => { changed = undefined; }; });
+  nativeWindows.open.mockImplementation(async (descriptor) => {
+    target.value = { hostId: descriptor.hostId ?? undefined, initialSection: descriptor.initialSection };
+  });
+  // Native IPC is represented only at the window boundary; the real extracted editor runs unchanged.
+  const Harness = defineComponent(() => () => h("div", [
+    h(HostsView),
+    target.value ? h(NvxHostEditor, {
+      ...target.value,
+      onSaved: () => { target.value = null; changed?.("hostEditor"); },
+      onCancel: () => { target.value = null; },
+    }) : null,
+  ]));
+  const wrapper = mount(Harness, {
     attachTo: mountHost,
     global: { plugins: [pinia, router, i18n] },
   });
@@ -213,6 +234,7 @@ const body = () => new DOMWrapper(document.body);
 describe("HostsView single-Host management contract", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    nativeWindows.vault.mockResolvedValue(true);
     i18n.global.locale.value = "en";
     client.listHostCatalog.mockResolvedValue([catalogEntry]);
     client.listHostGroups.mockResolvedValue([]);
@@ -493,6 +515,71 @@ describe("HostsView single-Host management contract", () => {
     document.body.innerHTML = "";
   });
 
+  it("keeps dirty native-window drafts until discard is explicitly confirmed", async () => {
+    const { wrapper } = await mountView("/hosts?create=1");
+    const editor = wrapper.getComponent(NvxHostEditor);
+    expect(nativeWindows.open).toHaveBeenCalledWith({ kind: "hostEditor", hostId: null, title: "Add Host", initialSection: "connection" });
+    await body().get("#host-address").setValue("unsaved.example.test");
+    expect(await (editor.vm.$.exposed as { requestClose(): Promise<boolean> }).requestClose()).toBe(false);
+    await flushPromises();
+    expect(editor.emitted("cancel")).toBeUndefined();
+    await button("Keep editing")?.click();
+    await flushPromises();
+    expect((body().get("#host-address").element as HTMLInputElement).value).toBe("unsaved.example.test");
+    expect(await (editor.vm.$.exposed as { requestClose(): Promise<boolean> }).requestClose()).toBe(false);
+    await flushPromises();
+    await button("Discard and close")?.click();
+    await flushPromises();
+    expect(editor.emitted("cancel")).toEqual([[]]);
+    expect(document.querySelector("#host-address")).toBeNull();
+    expect(client.createConfiguredHost).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("blocks native close during the independent connection probe", async () => {
+    let finishProbe!: (result: { verified: boolean }) => void;
+    client.testSshConnection.mockImplementationOnce(() => new Promise(resolve => { finishProbe = resolve; }));
+    const { wrapper } = await mountView("/hosts?create=1");
+    const editor = wrapper.getComponent(NvxHostEditor);
+    await chooseSelectOption("host-authentication-mode", "Save password");
+    await body().get("#host-address").setValue("probe.example.test");
+    await body().get("#host-username").setValue("deploy");
+    await body().get("#host-password").setValue("temporary-password");
+    await button("Test connection")?.click();
+    await flushPromises();
+    expect(await (editor.vm.$.exposed as { requestClose(): Promise<boolean> }).requestClose()).toBe(false);
+    expect(editor.emitted("cancel")).toBeUndefined();
+    expect(body().text()).not.toContain("Discard the changes and close this window?");
+    finishProbe({ verified: true });
+    await flushPromises();
+    wrapper.unmount();
+  });
+
+  it("keeps a failed password-create draft open until staged-secret cleanup succeeds", async () => {
+    client.createConfiguredHost.mockRejectedValueOnce(new Error("save failed"));
+    client.cancelHostCreatePassword.mockRejectedValueOnce(new Error("cleanup unavailable"));
+    const { wrapper } = await mountView("/hosts?create=1");
+    const editor = wrapper.getComponent(NvxHostEditor);
+    await chooseSelectOption("host-authentication-mode", "Save password");
+    await body().get("#host-address").setValue("staged.example.test");
+    await body().get("#host-password").setValue("temporary-password");
+    await button("Save Host")?.click();
+    await flushPromises();
+    expect(client.stageHostCreatePassword).toHaveBeenCalledTimes(1);
+    expect(await (editor.vm.$.exposed as { requestClose(): Promise<boolean> }).requestClose()).toBe(false);
+    await flushPromises();
+    await button("Discard and close")?.click();
+    await flushPromises();
+    expect(editor.emitted("cancel")).toBeUndefined();
+    expect(document.querySelector("#host-address")).not.toBeNull();
+    await button("Discard and close")?.click();
+    await flushPromises();
+    expect(editor.emitted("cancel")).toEqual([[]]);
+    expect(client.cancelHostCreatePassword).toHaveBeenCalledTimes(2);
+    expect(client.cancelHostCreatePassword.mock.calls[1]?.[0]).toEqual(client.cancelHostCreatePassword.mock.calls[0]?.[0]);
+    wrapper.unmount();
+  });
+
   it("atomically creates a Host using only non-secret endpoint metadata", async () => {
     const createdHost = {
       ...host,
@@ -509,7 +596,8 @@ describe("HostsView single-Host management contract", () => {
     };
     client.listHostCatalog
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ ...catalogEntry, host: createdHost }]);
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{ ...catalogEntry, host: createdHost }]);
     const { wrapper } = await mountView("/hosts?create=1");
 
     await body().get("#host-label").setValue("Staging");
@@ -677,23 +765,15 @@ describe("HostsView single-Host management contract", () => {
     wrapper.unmount();
   });
 
-  it("refreshes Vault status before opening the Host flow and fixes a missing Vault to create mode", async () => {
+  it("uses the independent secure Vault flow without rendering a Vault password in the editor", async () => {
     client.fetchVaultStatus.mockResolvedValue({ state: "missing" });
-    client.listHostCatalog.mockResolvedValueOnce([]);
     const { wrapper } = await mountView("/hosts?create=1");
-
     await chooseSelectOption("host-authentication-mode", "Save password");
     await button("Create Vault")?.click();
     await flushPromises();
-    expect(document.querySelectorAll("#host-vault-password, #host-vault-password-confirmation")).toHaveLength(2);
-
-    await body().get("#host-vault-password").setValue("密码密码");
-    await body().get("#host-vault-password-confirmation").setValue("密码密码");
-    Array.from(document.querySelectorAll<HTMLButtonElement>(".nvx-dialog__actions button"))
-      .find((candidate) => candidate.textContent?.trim() === "Create Vault")?.click();
-    await flushPromises();
-    expect(client.createVault).toHaveBeenCalledWith("密码密码", "密码密码");
+    expect(nativeWindows.vault).toHaveBeenCalledWith("ensureUnlocked");
     expect(document.querySelector("#host-vault-password")).toBeNull();
+    expect(client.createVault).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -756,6 +836,7 @@ describe("HostsView single-Host management contract", () => {
     };
     client.listHostCatalog
       .mockResolvedValueOnce([{ ...catalogEntry, host: jumpHost }])
+      .mockResolvedValueOnce([{ ...catalogEntry, host: jumpHost }])
       .mockResolvedValueOnce([]);
     const { wrapper } = await mountView("/hosts?create=1");
 
@@ -807,10 +888,10 @@ describe("HostsView single-Host management contract", () => {
     wrapper.unmount();
   });
 
-  it("edits with the current state fence and preserves the Identity reference", async () => {
+  it("reloads the current state fence in the independent editor and preserves the Identity reference", async () => {
     client.listHostCatalog
       .mockResolvedValueOnce([catalogEntry])
-      .mockResolvedValueOnce([{
+      .mockResolvedValue([{
         ...catalogEntry,
         host: { ...host, label: "Production primary", port: 2200, stateVersion: "5" },
       }]);
@@ -825,7 +906,7 @@ describe("HostsView single-Host management contract", () => {
 
     expect(client.updateHost).toHaveBeenCalledWith({
       hostId: host.hostId,
-      expectedStateVersion: "4",
+      expectedStateVersion: "5",
       label: "Production primary",
       address: host.address,
       port: 2200,
@@ -1118,7 +1199,7 @@ describe("HostsView single-Host management contract", () => {
   });
 
   it("reads the standard Agent only on explicit action and saves the selected public key", async () => {
-    const { wrapper } = await mountView();
+    const { tips, wrapper } = await mountView();
 
     await button("SSH Agent")?.click();
     expect(client.listSshAgentKeys).not.toHaveBeenCalled();
@@ -1136,12 +1217,18 @@ describe("HostsView single-Host management contract", () => {
       priority: 100,
       label: "SSH Agent ssh-ed25519 key",
     });
-    expect(body().text()).toContain("SSH Agent credential saved");
+    expect(tips.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        scope: "hosts-agent",
+        tone: "success",
+        title: "SSH Agent credential saved",
+      }),
+    ]));
     wrapper.unmount();
   });
 
   it("imports a selected private-key file through Core and shows its derived fingerprint", async () => {
-    const { wrapper } = await mountView();
+    const { tips, wrapper } = await mountView();
 
     await button("Edit")?.click();
     await flushPromises();
@@ -1159,6 +1246,13 @@ describe("HostsView single-Host management contract", () => {
     expect(client.importPrivateKeyFile.mock.calls[0]?.[0]).not.toHaveProperty("path");
     expect(client.importPrivateKeyFile.mock.calls[0]?.[0]).not.toHaveProperty("secret");
     expect(body().text()).toContain("Imported: ssh-rsa · SHA256:aws-key");
+    expect(tips.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        scope: "host-editor-private-key",
+        tone: "success",
+        title: "Private key encrypted into the Vault",
+      }),
+    ]));
     wrapper.unmount();
   });
 
@@ -1239,7 +1333,7 @@ describe("HostsView single-Host management contract", () => {
   });
 
   it("creates a bounded keyboard-interactive policy without collecting an answer", async () => {
-    const { wrapper } = await mountView();
+    const { tips, wrapper } = await mountView();
 
     await button("Interactive auth")?.click();
     await body().get("#keyboard-interactive-max-rounds").setValue("12");
@@ -1253,13 +1347,19 @@ describe("HostsView single-Host management contract", () => {
       priority: 115,
       label: "Server interactive authentication",
     });
-    expect(body().text()).toContain("Interactive credential saved");
+    expect(tips.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        scope: "hosts-keyboard-interactive",
+        tone: "success",
+        title: "Interactive credential saved",
+      }),
+    ]));
     expect(document.querySelector<HTMLInputElement>("input[type='password']")).toBeNull();
     wrapper.unmount();
   });
 
   it("previews pasted OpenSSH text before atomically importing selected direct Hosts", async () => {
-    const { wrapper } = await mountView();
+    const { tips, wrapper } = await mountView();
 
     await button("Import SSH Config")?.click();
     expect(client.previewOpenSshConfig).not.toHaveBeenCalled();
@@ -1276,7 +1376,13 @@ describe("HostsView single-Host management contract", () => {
       "openssh-preview-1",
       ["openssh-candidate-1"],
     );
-    expect(body().text()).toContain("Atomically imported 1 host");
+    expect(tips.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        scope: "hosts-openssh-import",
+        tone: "success",
+        title: "Atomically imported 1 host(s)",
+      }),
+    ]));
     wrapper.unmount();
   });
 
@@ -1518,6 +1624,8 @@ describe("HostsView single-Host management contract", () => {
     expect(client.cancelLoginAutomationSecret).not.toHaveBeenCalled();
 
     await button("Cancel")?.click();
+    await flushPromises();
+    await button("Discard and close")?.click();
     await flushPromises();
     expect(client.cancelLoginAutomationSecret).toHaveBeenCalledWith({
       operationId,

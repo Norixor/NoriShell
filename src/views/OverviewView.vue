@@ -4,22 +4,19 @@ import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 
 import { NvxOverviewPanel } from "../components/overview";
-import { NvxButton, NvxDialog, NvxField, NvxInlineNotice, NvxInput } from "../components/ui";
+import { NvxInlineNotice } from "../components/ui";
 import {
   canUseDesktopCore,
-  decideMetricsHostKey,
   fetchServerOverview,
-  prepareMetricsKeyboardInteractiveAnswer,
   reconcileMetrics,
-  respondMetricsKeyboardInteractive,
   retryMetrics,
 } from "../core-api/client";
 import type {
-  MetricsHostKeyChallenge,
-  MetricsKeyboardInteractiveChallenge,
   MetricsSessionSummary,
   ServerOverviewSnapshot,
 } from "../core-api/generated/core-api";
+import { requestSecureVault } from "../core-api/secure-vault-client";
+import { requestSecureSshChallenge } from "../core-api/secure-ssh-challenge-client";
 import { createUuidV7 } from "../core-api/ids";
 import { overviewVisualFixture } from "../overview/visual-fixture";
 import { useTipsStore } from "../stores/tips";
@@ -30,13 +27,10 @@ const tips = useTipsStore();
 const snapshot = ref<ServerOverviewSnapshot | null>(null);
 const loading = ref(true);
 const loadFailed = ref(false);
-const actionFailed = ref(false);
 const actionSaving = ref(false);
-const hostKeyChallenge = ref<MetricsHostKeyChallenge | null>(null);
-const keyboardChallenge = ref<MetricsKeyboardInteractiveChallenge | null>(null);
-const keyboardAnswers = ref<string[]>([]);
 let refreshTimer: number | null = null;
 let refreshInFlight = false;
+let disposed = false;
 
 async function refresh() {
   if (!canUseDesktopCore() || refreshInFlight) return;
@@ -75,18 +69,36 @@ function findMetricsSession(hostId: string): MetricsSessionSummary | null {
 async function beginMetricsAction(hostId: string) {
   const session = findMetricsSession(hostId);
   if (!session || actionSaving.value) return;
-  actionFailed.value = false;
-  if (session.hostKeyChallenge) {
-    hostKeyChallenge.value = session.hostKeyChallenge;
-    return;
-  }
-  if (session.keyboardInteractiveChallenge) {
-    keyboardChallenge.value = session.keyboardInteractiveChallenge;
-    keyboardAnswers.value = session.keyboardInteractiveChallenge.prompts.map(() => "");
+  const challenge = session.hostKeyChallenge ?? session.keyboardInteractiveChallenge;
+  if (challenge) {
+    actionSaving.value = true;
+    try {
+      const request = { metricsSessionId: challenge.metricsSessionId, hostId: challenge.hostId, expectedGeneration: challenge.generation, challengeId: challenge.challengeId };
+      if (session.hostKeyChallenge) await requestSecureSshChallenge({ kind: "metricsHostKey", request });
+      else if (session.keyboardInteractiveChallenge) await requestSecureSshChallenge({ kind: "metricsKeyboard", request: { ...request, roundIndex: session.keyboardInteractiveChallenge.roundIndex } });
+      await refresh();
+    } catch {
+      tips.show({ scope: "overview-metrics-action", tone: "error", title: t("overview.actionFailed") });
+    } finally { actionSaving.value = false; }
     return;
   }
   if (session.authenticationReason === "vaultLocked") {
-    await router.push({ path: "/settings", query: { section: "vault" } });
+    const hostVersion = snapshot.value?.cards.find((card) => card.catalogEntry.host.hostId === hostId)?.catalogEntry.host.stateVersion;
+    actionSaving.value = true;
+    try {
+      if (!await requestSecureVault("ensureUnlocked") || disposed) return;
+      // Read a fresh snapshot even when a periodic refresh is already in flight.
+      const fresh = await fetchServerOverview();
+      const card = fresh.cards.find((entry) => entry.catalogEntry.host.hostId === hostId);
+      const current = card?.metricsSession;
+      if (disposed || card?.catalogEntry.host.stateVersion !== hostVersion
+        || current?.metricsSessionId !== session.metricsSessionId || current.generation !== session.generation) return;
+      snapshot.value = fresh;
+      await retryMetrics({ hostId, expectedGeneration: session.generation });
+      if (!disposed) await refresh();
+    } catch {
+      if (!disposed) tips.show({ scope: "overview-metrics-action", tone: "error", title: t("overview.actionFailed") });
+    } finally { actionSaving.value = false; }
     return;
   }
   if (session.authenticationReason === "credentialUnavailable") {
@@ -102,79 +114,6 @@ async function beginMetricsAction(hostId: string) {
   } finally {
     actionSaving.value = false;
   }
-}
-
-async function decideHostKey(decision: "accept" | "reject") {
-  const challenge = hostKeyChallenge.value;
-  if (!challenge || actionSaving.value) return;
-  actionSaving.value = true;
-  actionFailed.value = false;
-  try {
-    await decideMetricsHostKey({
-      metricsSessionId: challenge.metricsSessionId,
-      hostId: challenge.hostId,
-      expectedGeneration: challenge.generation,
-      challengeId: challenge.challengeId,
-      decision,
-    });
-    hostKeyChallenge.value = null;
-    await refresh();
-  } catch {
-    actionFailed.value = true;
-  } finally {
-    actionSaving.value = false;
-  }
-}
-
-async function submitKeyboardAnswers() {
-  const challenge = keyboardChallenge.value;
-  if (!challenge || actionSaving.value || keyboardAnswers.value.length !== challenge.prompts.length) {
-    return;
-  }
-  actionSaving.value = true;
-  actionFailed.value = false;
-  try {
-    const prepared = await Promise.all(challenge.prompts.map((prompt, index) => (
-      prepareMetricsKeyboardInteractiveAnswer({
-        metricsSessionId: challenge.metricsSessionId,
-        expectedGeneration: challenge.generation,
-        challengeId: challenge.challengeId,
-        roundIndex: challenge.roundIndex,
-        promptIndex: prompt.promptIndex,
-        value: keyboardAnswers.value[index] ?? "",
-      })
-    )));
-    await respondMetricsKeyboardInteractive({
-      metricsSessionId: challenge.metricsSessionId,
-      hostId: challenge.hostId,
-      expectedGeneration: challenge.generation,
-      challengeId: challenge.challengeId,
-      roundIndex: challenge.roundIndex,
-      answerRefIds: prepared.map((answer) => answer.answerRefId),
-    });
-    keyboardChallenge.value = null;
-    keyboardAnswers.value = [];
-    await refresh();
-  } catch {
-    actionFailed.value = true;
-  } finally {
-    actionSaving.value = false;
-  }
-}
-
-function setHostKeyDialogOpen(open: boolean) {
-  if (!open && !actionSaving.value) hostKeyChallenge.value = null;
-}
-
-function setKeyboardDialogOpen(open: boolean) {
-  if (!open && !actionSaving.value) {
-    keyboardChallenge.value = null;
-    keyboardAnswers.value = [];
-  }
-}
-
-function setKeyboardAnswer(index: number, value: string) {
-  keyboardAnswers.value[index] = value;
 }
 
 onMounted(async () => {
@@ -196,10 +135,11 @@ onMounted(async () => {
     // Snapshot remains independently readable when one or more monitored Hosts need attention.
   }
   await refresh();
-  refreshTimer = window.setInterval(() => void refresh(), 2_000);
+  if (!disposed) refreshTimer = window.setInterval(() => void refresh(), 2_000);
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
   if (refreshTimer !== null) window.clearInterval(refreshTimer);
 });
 </script>
@@ -222,98 +162,6 @@ onBeforeUnmount(() => {
       @focus-terminal="focusTerminal"
       @metrics-action="beginMetricsAction"
     />
-    <NvxDialog
-      plugin-protected
-      :model-value="hostKeyChallenge !== null"
-      :title="t('overview.hostKeyTitle')"
-      :description="t('overview.hostKeyDescription')"
-      :close-label="t('sshHosts.cancel')"
-      :dismissible="!actionSaving"
-      @update:model-value="setHostKeyDialogOpen"
-    >
-      <template v-if="hostKeyChallenge">
-        <p>{{ t('overview.hostKeyAlgorithm', { algorithm: hostKeyChallenge.algorithm }) }}</p>
-        <code class="overview-view__fingerprint">
-          {{ t('overview.hostKeyFingerprint', { fingerprint: hostKeyChallenge.fingerprintSha256 }) }}
-        </code>
-      </template>
-      <NvxInlineNotice
-        v-if="actionFailed"
-        tone="error"
-        :title="t('overview.actionFailed')"
-      />
-      <template #actions>
-        <NvxButton
-          variant="ghost"
-          :disabled="actionSaving"
-          @click="decideHostKey('reject')"
-        >
-          {{ t('overview.hostKeyReject') }}
-        </NvxButton>
-        <NvxButton
-          :loading="actionSaving"
-          @click="decideHostKey('accept')"
-        >
-          {{ t('overview.hostKeyAccept') }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
-
-    <NvxDialog
-      plugin-protected
-      :model-value="keyboardChallenge !== null"
-      :title="t('overview.authenticationTitle')"
-      :description="t('overview.authenticationDescription')"
-      :close-label="t('sshHosts.cancel')"
-      :dismissible="!actionSaving"
-      @update:model-value="setKeyboardDialogOpen"
-    >
-      <section
-        v-if="keyboardChallenge"
-        class="overview-view__prompts"
-      >
-        <p v-if="keyboardChallenge.name">
-          <strong>{{ keyboardChallenge.name }}</strong>
-        </p>
-        <p v-if="keyboardChallenge.instruction">
-          {{ keyboardChallenge.instruction }}
-        </p>
-        <NvxField
-          v-for="(prompt, index) in keyboardChallenge.prompts"
-          :key="prompt.promptIndex"
-          :for-id="`metrics-prompt-${prompt.promptIndex}`"
-          :label="prompt.label"
-        >
-          <NvxInput
-            :id="`metrics-prompt-${prompt.promptIndex}`"
-            :model-value="keyboardAnswers[index] ?? ''"
-            :type="prompt.echo ? 'text' : 'password'"
-            autocomplete="off"
-            @update:model-value="setKeyboardAnswer(index, $event)"
-          />
-        </NvxField>
-        <NvxInlineNotice
-          v-if="actionFailed"
-          tone="error"
-          :title="t('overview.actionFailed')"
-        />
-      </section>
-      <template #actions>
-        <NvxButton
-          variant="ghost"
-          :disabled="actionSaving"
-          @click="setKeyboardDialogOpen(false)"
-        >
-          {{ t('sshHosts.cancel') }}
-        </NvxButton>
-        <NvxButton
-          :loading="actionSaving"
-          @click="submitKeyboardAnswers"
-        >
-          {{ t('overview.authenticationSubmit') }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
   </main>
 </template>
 

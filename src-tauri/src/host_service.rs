@@ -1566,6 +1566,38 @@ fn import_credential_material(
         .map_err(|error| map_persistence_error(request_id, error))
 }
 
+pub(crate) fn replace_password_credential(
+    request_id: RequestId,
+    credential_ref_id: &CredentialRefId,
+    identity_id: &IdentityId,
+    expected_state_version: WireSequence,
+    secret: Zeroizing<Vec<u8>>,
+    service: &HostService,
+    vault: &VaultService,
+) -> CoreResult<CredentialRefSummary> {
+    let record = service
+        .repository()
+        .get_ready_credential_record(credential_ref_id)
+        .map_err(|error| map_persistence_error(request_id.clone(), error))?;
+    if record.identity_id != *identity_id || record.state_version != expected_state_version {
+        return Err(map_persistence_error(
+            request_id,
+            AppPersistenceError::Conflict,
+        ));
+    }
+    let CredentialRecordDetails::Password { secret_ref_id } = &record.details else {
+        return Err(invalid_credential_error(request_id));
+    };
+    vault
+        .replace_secret(&VaultSecretInsert {
+            secret_ref_id: secret_ref_id.clone(),
+            kind: SecretKind::Password,
+            value: secret,
+        })
+        .map_err(|error| map_vault_error(request_id, error))?;
+    Ok(credential_summary(&record))
+}
+
 fn read_selected_private_key_file(path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
     let mut options = OpenOptions::new();
     options.read(true);

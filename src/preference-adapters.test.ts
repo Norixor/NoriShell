@@ -32,7 +32,10 @@ describe("global preference adapters", () => {
     expect(text).not.toContain("host-secret-label");
     expect(text).not.toContain("/private/example");
     expect(text).not.toContain("pathBytes");
-    expect(Object.keys(parsePreferenceTransfer(text, adapters).groups)).toHaveLength(6);
+    const groups = parsePreferenceTransfer(text, adapters).groups;
+    expect(Object.keys(groups)).toHaveLength(6);
+    expect(groups.interaction).toMatchObject({ interaction: { sshReconnectOnInput: true } });
+    expect(adapters.find((item) => item.id === "interaction")?.defaults()).toMatchObject({ interaction: { sshReconnectOnInput: true } });
   });
 
   it("rejects extra fields rather than silently accepting secrets alongside valid settings", async () => {

@@ -12,6 +12,7 @@ import type {
   NativeTerminalSessionStatus,
 } from "../../core-api/generated/core-api";
 import { i18n } from "../../locales";
+import { useTipsStore } from "../../stores/tips";
 import { resetTerminalInputFocusForTests } from "../../terminal-input-target";
 
 const client = vi.hoisted(() => ({
@@ -343,7 +344,10 @@ describe("NvxLocalTerminalPane", () => {
     await flushPromises();
 
     expect(client.sendLocalInput).toHaveBeenCalledTimes(1);
-    expect(wrapper.text()).toContain("The send result is uncertain. Check the terminal before retrying.");
+    expect(wrapper.text()).not.toContain("The send result is uncertain. Check the terminal before retrying.");
+    expect(useTipsStore().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tone: "error", title: "The send result is uncertain. Check the terminal before retrying." }),
+    ]));
     expect(wrapper.get(".terminal-view-stub").attributes("data-read-only")).toBe("true");
 
     terminal.vm.$emit("input", "pwd\r");

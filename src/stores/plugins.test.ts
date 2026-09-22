@@ -55,11 +55,6 @@ describe("declarative plugin contribution renderer", () => {
   it("preserves typed Core plugin failures instead of replacing them with requestFailed", () => {
     expect(pluginFailureCode({ errorCode: "packageHashMismatch" })).toBe("packageHashMismatch");
     expect(pluginFailureCode({ code: "plugin.conflict" })).toBe("installConflict");
-    expect(pluginFailureCode({ code: "plugin.catalog_signature_invalid" })).toBe("catalogSignatureInvalid");
-    expect(pluginFailureCode({ code: "catalog_payload_invalid" })).toBe("catalogPayloadInvalid");
-    expect(pluginFailureCode({ code: "plugin.catalog_unavailable" })).toBe("catalogUnavailable");
     expect(pluginFailureCode({ code: "plugin.invalid_request" })).toBe("invalidRequest");
-    expect(pluginFailureCode({ code: "plugin.publisher_signature_invalid", messageKey: "errors.plugin.publisherChanged" })).toBe("publisherChanged");
-    expect(pluginFailureCode({ code: "plugin.publisher_signature_invalid" })).toBe("publisherSignatureInvalid");
   });
 });

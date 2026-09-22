@@ -15,7 +15,6 @@ mod native_notification_service;
 mod native_notifications;
 mod native_terminal;
 mod native_terminal_scripts;
-mod norixor_marketplace;
 mod openssh_import_service;
 mod overview_service;
 mod plugin_api;
@@ -25,7 +24,6 @@ mod plugin_extension_registry;
 mod plugin_host_entry;
 mod plugin_host_process;
 mod plugin_host_protocol;
-mod plugin_icon;
 mod plugin_oauth;
 mod plugin_operation_policy;
 mod plugin_operations;
@@ -36,6 +34,10 @@ mod plugin_terminal_session_service;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod process_control;
+mod release_check;
+mod secure_credential_service;
+mod secure_ssh_challenge;
+mod secure_vault_service;
 mod secure_window_frame;
 mod sftp_session_service;
 mod ssh_agent_service;
@@ -49,6 +51,8 @@ mod ssh_sync_exchange_local;
 mod telnet_session_service;
 mod terminal_focus_broker;
 mod time;
+mod tool_window_exit;
+mod tool_windows;
 mod transient_credential_service;
 mod tray_service;
 mod vault_service;
@@ -106,13 +110,9 @@ macro_rules! production_invoke_handler {
             host_service::login_automation_confirm,
             host_service::login_automation_secret_create,
             host_service::login_automation_secret_cancel,
-            plugin_service::plugin_catalog_snapshot,
-            plugin_service::plugin_catalog_refresh,
-            plugin_service::plugin_install,
             plugin_service::plugin_installed_list,
             plugin_service::plugin_theme_list,
             plugin_service::plugin_readiness_get,
-            plugin_service::plugin_icon_read,
             plugin_service::plugin_audit_list,
             plugin_service::plugin_safe_mode_next_start,
             plugin_service::plugin_safe_mode_startup_complete,
@@ -217,6 +217,7 @@ macro_rules! production_invoke_handler {
             tray_service::panel::tray_panel_hide,
             desktop_preferences::desktop_preferences_get,
             desktop_preferences::desktop_preferences_replace,
+            release_check::release_check,
             telnet_session_service::telnet_terminal_open,
             telnet_session_service::telnet_terminal_snapshot,
             plugin_service::protocol_terminal::plugin_protocol_launch_list,
@@ -309,9 +310,9 @@ impl ProductionInvokeRuntime for tauri::Wry {
             desktop_service::desktop_prompt_get,
             desktop_service::desktop_prompt_decide,
             window_frame::window_native_controls_inset,
+            window_frame::window_set_native_header_height,
             window_frame::window_set_windows_maximize_hit_region,
             plugin_service::plugin_local_package_prepare,
-            plugin_service::plugin_catalog_package_prepare,
             plugin_service::plugin_host_approval_open,
             plugin_service::plugin_host_approval_get,
             plugin_service::plugin_host_approval_decide,
@@ -332,6 +333,27 @@ impl ProductionInvokeRuntime for tauri::Wry {
             window_request_close,
             application_request_exit,
             json_export::native_json_export,
+            secure_credential_service::secure_credential_open,
+            secure_credential_service::secure_credential_get,
+            secure_credential_service::secure_credential_submit,
+            secure_credential_service::secure_credential_cancel,
+            secure_ssh_challenge::secure_ssh_challenge_open,
+            secure_ssh_challenge::secure_ssh_challenge_get,
+            secure_ssh_challenge::secure_ssh_challenge_submit,
+            secure_ssh_challenge::secure_ssh_challenge_cancel,
+            secure_vault_service::secure_vault_open,
+            secure_vault_service::secure_vault_ensure_for_host,
+            secure_vault_service::secure_vault_get,
+            secure_vault_service::secure_vault_submit,
+            secure_vault_service::secure_vault_cancel,
+            tool_window_exit::tool_window_exit_reply,
+            tool_windows::tool_window_open,
+            tool_windows::tool_window_get,
+            tool_windows::tool_window_close,
+            tool_windows::tool_window_changed,
+            tool_windows::tool_file_preview,
+            tool_windows::tool_file_tail,
+            tool_windows::tool_file_save,
             tray_service::panel::tray_panel_execute,
         )
     }
@@ -374,6 +396,11 @@ pub fn run() {
         .on_menu_event(handle_application_menu_event)
         .manage(LifecycleState::default())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            if let Some(main_window) = app.get_webview_window("main") {
+                window_frame::install_macos_header_bridge(&main_window)
+                    .map_err(std::io::Error::other)?;
+            }
             #[cfg(windows)]
             if let Some(main_window) = app.get_webview_window("main") {
                 window_frame::install_windows_caption_bridge(&main_window)
@@ -500,6 +527,11 @@ pub fn run() {
                 }));
             app.manage(desktop_service);
             app.manage(host_service);
+            app.manage(tool_windows::ToolWindows::default());
+            app.manage(tool_window_exit::ToolWindowExit::default());
+            app.manage(secure_vault_service::SecureVaultService::default());
+            app.manage(secure_credential_service::SecureCredentialService::default());
+            app.manage(secure_ssh_challenge::SecureSshChallengeService::default());
             app.manage(desktop_preferences_service);
             app.manage(plugin_operations);
             app.manage(vault_service);
@@ -557,6 +589,10 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window_frame::cleanup_macos_header_bridge();
+            }
             if window.label() == "main"
                 && matches!(event, tauri::WindowEvent::Focused(false))
                 && let Some(service) = window.try_state::<desktop_service::DesktopService>()
@@ -571,6 +607,8 @@ pub fn run() {
 
     app.run(|app, event| match event {
         tauri::RunEvent::Exit => {
+            #[cfg(target_os = "macos")]
+            window_frame::cleanup_macos_header_bridge();
             if let Some(service) = app.try_state::<tray_service::NativeTrayService>() {
                 service.stop(app);
             }

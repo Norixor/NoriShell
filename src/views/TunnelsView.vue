@@ -12,6 +12,7 @@ import {
   listForwardRules, listHosts, preflightForwardRule, retainForwardCleanupForExitOnce,
   startForwardSession, stopForwardSession, updateForwardRule,
 } from "../core-api/client";
+import { ensureHostVault } from "../core-api/secure-vault-client";
 import type {
   ForwardFailureCode, ForwardRulePreflightResponse, ForwardRuleSummary, ForwardSessionEvent,
   ForwardSessionState, ForwardSessionSummary, HostSummary, PortForwardRule,
@@ -62,6 +63,8 @@ const deleteTarget = ref<ForwardRuleSummary | null>(null);
 const retainedForExit = ref(new Set<string>());
 const visualFixtureMode = ref(false);
 let refreshTimer: number | null = null;
+let disposed = false;
+const reportedSessionFailures = new Set<string>();
 
 const hostMap = computed(() => new Map(hosts.value.map((host) => [host.hostId, host])));
 const hostOptions = computed(() => hosts.value.map((host) => ({ value: host.hostId, label: `${host.label} · ${host.normalizedAddress}:${host.port}` })));
@@ -140,6 +143,19 @@ function stateLabel(state: TunnelRow["state"]) { return t(`tunnels.states.${stat
 function kindLabel(kind: ForwardKind) { return t(`tunnels.kinds.${kind}`); }
 function hostLabel(hostId: string) { return hostMap.value.get(hostId)?.label ?? hostId; }
 function failureLabel(code: ForwardFailureCode) { return t(`tunnels.failures.${code}`); }
+function reportSessionFailure(session: ForwardSessionSummary) {
+  const failure = session.failure;
+  if (!failure) return;
+  const key = `${session.sessionId}:${session.generation}:${failure.code}`;
+  if (reportedSessionFailures.has(key)) return;
+  reportedSessionFailures.add(key);
+  tips.show({
+    scope: `tunnels-session:${key}`,
+    tone: "error",
+    title: failureLabel(failure.code),
+    message: t("tunnels.sessionFailed", { stage: failure.stage }),
+  });
+}
 function bindLabel(session: ForwardSessionSummary | null, rule: PortForwardRule) {
   return session?.actualBind ? `${session.actualBind.address}:${session.actualBind.port}` : ruleListener(rule);
 }
@@ -160,6 +176,7 @@ function uptime(session: ForwardSessionSummary) {
 function applyEvent(event: ForwardSessionEvent) {
   const index = sessions.value.findIndex((session) => session.sessionId === event.session.sessionId);
   if (index < 0) sessions.value.push(event.session); else sessions.value.splice(index, 1, event.session);
+  reportSessionFailure(event.session);
   selectedKey.value = `session:${event.session.sessionId}`;
 }
 function replaceSavedRule(rule: ForwardRuleSummary) {
@@ -183,12 +200,48 @@ function editRule(rule: ForwardRuleSummary) {
   preflight.value = null; editorOpen.value = true;
 }
 
-async function startRule(rule: PortForwardRule, savedRule: ForwardRuleSummary | null = null) {
+interface PreparedStart {
+  rule: PortForwardRule;
+  savedRule: ForwardRuleSummary | null;
+  current: () => boolean;
+}
+async function prepareStart(rule: PortForwardRule, savedRule: ForwardRuleSummary | null, stillCurrent: () => boolean = () => true, includeOptionalCredentials = false): Promise<PreparedStart | null> {
+  const frozenRule: PortForwardRule = { ...rule };
+  const frozenSaved = savedRule ? { ...savedRule, rule: { ...savedRule.rule } } : null;
+  const hostVersion = hostMap.value.get(frozenRule.hostId)?.stateVersion;
+  const current = () => !disposed && stillCurrent()
+    && hostMap.value.get(frozenRule.hostId)?.stateVersion === hostVersion
+    && (!frozenSaved || savedRules.value.some((saved) => saved.ruleId === frozenSaved.ruleId
+      && saved.stateVersion === frozenSaved.stateVersion && JSON.stringify(saved.rule) === JSON.stringify(frozenSaved.rule)));
+  if (!current()) return null;
+  if (visualFixtureMode.value) return { rule: frozenRule, savedRule: frozenSaved, current };
+  if (!hostVersion) throw new Error("Host unavailable");
+  if (!await ensureHostVault(frozenRule.hostId, hostVersion, includeOptionalCredentials) || !current()) return null;
+  const [freshHosts, freshRules] = await Promise.all([listHosts(), listForwardRules()]);
+  if (!current() || !freshHosts.some((host) => host.hostId === frozenRule.hostId && host.stateVersion === hostVersion)
+    || (frozenSaved && !freshRules.rules.some((saved) => saved.ruleId === frozenSaved.ruleId
+      && saved.stateVersion === frozenSaved.stateVersion && JSON.stringify(saved.rule) === JSON.stringify(frozenSaved.rule)))) return null;
+  return { rule: frozenRule, savedRule: frozenSaved, current };
+}
+async function startPrepared(prepared: PreparedStart): Promise<boolean> {
+  if (!prepared.current()) return false;
+  const { rule, savedRule } = prepared;
   const summary = visualFixtureMode.value
     ? createTunnelVisualFixtureSession(rule, savedRule)
     : await startForwardSession({ ruleId: savedRule?.ruleId ?? null, ruleRevision: savedRule?.stateVersion ?? null, rule }, applyEvent);
-  applyEvent({ schemaVersion: 1, eventSeq: summary.stateRevision, session: summary });
-  showOperationMessage(t("tunnels.feedback.started"));
+  if (!disposed) {
+    applyEvent({ schemaVersion: 1, eventSeq: summary.stateRevision, session: summary });
+    if (summary.failure || summary.state === "failed" || summary.state === "stopped") {
+      if (!summary.failure) showOperationError();
+      return false;
+    }
+    showOperationMessage(t("tunnels.feedback.started"));
+  }
+  return !summary.failure && summary.state !== "failed" && summary.state !== "stopped";
+}
+async function startRule(rule: PortForwardRule, savedRule: ForwardRuleSummary | null = null, stillCurrent?: () => boolean): Promise<boolean> {
+  const prepared = await prepareStart(rule, savedRule, stillCurrent);
+  return prepared ? startPrepared(prepared) : false;
 }
 async function startSavedRow(row: TunnelRow) {
   if (mutating.value) return;
@@ -198,6 +251,7 @@ async function startSavedRow(row: TunnelRow) {
 }
 async function saveRule(startAfterSave: boolean) {
   const rule = draftRule.value;
+  const draftFingerprint = JSON.stringify(draftRule.value);
   if (!rule || !ruleLabel.value.trim() || mutating.value) { showOperationError(); return; }
   mutating.value = true; clearFeedback(); let saved: ForwardRuleSummary | null = null;
   try {
@@ -208,14 +262,16 @@ async function saveRule(startAfterSave: boolean) {
         ? await updateForwardRule({ ruleId: editing.ruleId, expectedStateVersion: editing.stateVersion, label: ruleLabel.value.trim(), rule })
         : await createForwardRule({ label: ruleLabel.value.trim(), rule });
     replaceSavedRule(saved); editingRuleId.value = saved.ruleId; showOperationMessage(t("tunnels.feedback.saved"));
-    if (startAfterSave) await startRule(saved.rule, saved);
+    if (startAfterSave) await startRule(saved.rule, saved, () => JSON.stringify(draftRule.value) === draftFingerprint);
   } catch { showOperationError(saved ? t("tunnels.feedback.savedButStartFailed") : undefined); }
   finally { mutating.value = false; }
 }
 async function startOnce() {
   if (!draftRule.value || mutating.value) { showOperationError(); return; }
   mutating.value = true; clearFeedback();
-  try { await startRule(draftRule.value); } catch { showOperationError(); } finally { mutating.value = false; }
+  const rule = draftRule.value;
+  const fingerprint = JSON.stringify(rule);
+  try { await startRule(rule, null, () => JSON.stringify(draftRule.value) === fingerprint); } catch { showOperationError(); } finally { mutating.value = false; }
 }
 async function runPreflight() {
   if (!draftRule.value || preflighting.value) { showOperationError(); return; }
@@ -240,18 +296,34 @@ async function stop(session: ForwardSessionSummary) {
 }
 async function restart(row: TunnelRow) {
   if (mutating.value) return; mutating.value = true; clearFeedback();
+  const originalSession = row.session ? { ...row.session } : null;
+  let expectedSession = originalSession;
+  const matchesExpected = (session: ForwardSessionSummary) => !expectedSession || (
+    session.sessionId === expectedSession.sessionId && session.generation === expectedSession.generation
+    && session.stateRevision === expectedSession.stateRevision && session.state === expectedSession.state
+  );
   try {
-    if (row.session && !["failed", "stopped"].includes(row.session.state)) {
-      if (visualFixtureMode.value) {
-        const stopped = stopTunnelVisualFixtureSession(row.session);
-        applyEvent({ schemaVersion: 1, eventSeq: stopped.stateRevision, session: stopped });
-      } else {
-        await stopForwardSession({ sessionId: row.session.sessionId, expectedGeneration: row.session.generation });
-      }
-    }
     const currentSaved = row.savedRule && row.session?.ruleRevision === row.savedRule.stateVersion && JSON.stringify(row.rule) === JSON.stringify(row.savedRule.rule) ? row.savedRule : null;
-    await startRule(row.rule, currentSaved); showOperationMessage(t("tunnels.feedback.restarted"));
-  } catch { showOperationError(); } finally { mutating.value = false; }
+    const prepared = await prepareStart(row.rule, currentSaved, () => !expectedSession || sessions.value.some(matchesExpected), originalSession?.failure?.code === "vaultLocked");
+    if (!prepared) return;
+    if (originalSession && !visualFixtureMode.value) {
+      // A tray stop may precede the next UI poll without changing generation.
+      const fresh = await fetchForwardSessionSnapshot();
+      if (!prepared.current() || !fresh.sessions.some(matchesExpected)) return;
+    }
+    if (originalSession && !["failed", "stopped"].includes(originalSession.state)) {
+      const stopped = visualFixtureMode.value
+        ? stopTunnelVisualFixtureSession(originalSession)
+        : await stopForwardSession({ sessionId: originalSession.sessionId, expectedGeneration: originalSession.generation });
+      if (disposed) return;
+      if (stopped.sessionId !== originalSession.sessionId || stopped.generation !== originalSession.generation
+        || stopped.state !== "stopped" || stopped.cleanup.uncertain) throw new Error("Tunnel stop was not confirmed");
+      // Advance only to the state produced by this operation's own successful stop.
+      expectedSession = stopped;
+      applyEvent({ schemaVersion: 1, eventSeq: stopped.stateRevision, session: stopped });
+    }
+    if (await startPrepared(prepared) && !disposed) showOperationMessage(t("tunnels.feedback.restarted"));
+  } catch { if (!disposed) showOperationError(); } finally { mutating.value = false; }
 }
 async function confirmDeleteRule() {
   const target = deleteTarget.value; if (!target || mutating.value) return;
@@ -283,6 +355,7 @@ async function refresh() {
   if (!canUseDesktopCore()) return;
   const [nextHosts, nextRules, snapshot] = await Promise.all([listHosts(), listForwardRules(), fetchForwardSessionSnapshot()]);
   hosts.value = nextHosts; savedRules.value = nextRules.rules; sessions.value = snapshot.sessions;
+  snapshot.sessions.forEach(reportSessionFailure);
   if (!draft.hostId || !nextHosts.some((host) => host.hostId === draft.hostId)) draft.hostId = nextHosts[0]?.hostId ?? "";
 }
 async function openHostInTerminal(session: ForwardSessionSummary) {
@@ -312,15 +385,16 @@ onMounted(async () => {
     hosts.value = tunnelVisualFixture.hosts;
     savedRules.value = tunnelVisualFixture.rules;
     sessions.value = tunnelVisualFixture.sessions;
+    sessions.value.forEach(reportSessionFailure);
     const rule = tunnelVisualFixture.rules[0];
     if (rule) editRule(rule);
     loading.value = false;
     return;
   }
   try { await refresh(); } catch { showOperationError(); } finally { loading.value = false; }
-  refreshTimer = window.setInterval(() => void refresh().catch(() => undefined), 2_000);
+  if (!disposed) refreshTimer = window.setInterval(() => void refresh().catch(() => undefined), 2_000);
 });
-onBeforeUnmount(() => { if (refreshTimer !== null) window.clearInterval(refreshTimer); });
+onBeforeUnmount(() => { disposed = true; if (refreshTimer !== null) window.clearInterval(refreshTimer); });
 </script>
 
 <template>
@@ -534,21 +608,46 @@ onBeforeUnmount(() => { if (refreshTimer !== null) window.clearInterval(refreshT
           <div><span>{{ t("tunnels.details.uptime") }}</span><strong>{{ selectedRow.session ? uptime(selectedRow.session) : "—" }}</strong></div>
           <div><span>{{ t("tunnels.details.transport") }}</span><strong>{{ t("tunnels.details.independentTransport") }}</strong></div>
         </div>
-        <NvxInlineNotice
-          v-if="selectedRow.session?.failure"
-          tone="error"
-          :title="failureLabel(selectedRow.session.failure.code)"
-        >
-          <p>{{ t("tunnels.sessionFailed", { stage: selectedRow.session.failure.stage }) }}</p>
+        <footer v-if="selectedRow.savedRule || selectedRow.session?.failure">
           <NvxButton
-            v-if="['hostKeyReviewRequired', 'hostKeyMismatch', 'credentialUnavailable', 'authenticationRejected', 'vaultLocked'].includes(selectedRow.session.failure.code)"
+            v-if="selectedRow.session?.failure?.code === 'vaultLocked'"
+            :disabled="mutating"
+            size="sm"
+            variant="secondary"
+            @click="restart(selectedRow)"
+          >
+            {{ t("tunnels.unlockVaultAndRetry") }}
+          </NvxButton>
+          <NvxButton
+            v-else-if="selectedRow.session?.failure && ['hostKeyReviewRequired', 'hostKeyMismatch', 'credentialUnavailable', 'authenticationRejected'].includes(selectedRow.session.failure.code)"
             size="sm"
             variant="secondary"
             @click="openHostInTerminal(selectedRow.session)"
           >
             {{ t("tunnels.openTerminalToResolve") }}
           </NvxButton>
-        </NvxInlineNotice>
+          <NvxButton
+            v-if="selectedRow.savedRule"
+            variant="secondary"
+            size="sm"
+            @click="editRule(selectedRow.savedRule)"
+          >
+            <NvxIcon
+              :icon="Pencil"
+              :size="16"
+            />{{ t("tunnels.edit") }}
+          </NvxButton><NvxButton
+            v-if="selectedRow.savedRule"
+            variant="ghost"
+            size="sm"
+            @click="deleteTarget = selectedRow.savedRule"
+          >
+            <NvxIcon
+              :icon="Trash2"
+              :size="16"
+            />{{ t("tunnels.delete") }}
+          </NvxButton>
+        </footer>
         <NvxInlineNotice
           v-if="selectedRow.session?.cleanup.uncertain"
           tone="warning"
@@ -571,27 +670,6 @@ onBeforeUnmount(() => { if (refreshTimer !== null) window.clearInterval(refreshT
             {{ t("tunnels.cleanupUncertain.allowNextExit") }}
           </NvxButton>
         </NvxInlineNotice>
-        <footer v-if="selectedRow.savedRule">
-          <NvxButton
-            variant="secondary"
-            size="sm"
-            @click="editRule(selectedRow.savedRule)"
-          >
-            <NvxIcon
-              :icon="Pencil"
-              :size="16"
-            />{{ t("tunnels.edit") }}
-          </NvxButton><NvxButton
-            variant="ghost"
-            size="sm"
-            @click="deleteTarget = selectedRow.savedRule"
-          >
-            <NvxIcon
-              :icon="Trash2"
-              :size="16"
-            />{{ t("tunnels.delete") }}
-          </NvxButton>
-        </footer>
       </section>
     </section>
 

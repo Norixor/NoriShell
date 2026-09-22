@@ -1416,6 +1416,7 @@ fn map_sftp_error(error: SftpProductionError) -> PluginApiErrorCode {
             | SftpRuntimeError::LengthMismatch
             | SftpRuntimeError::ResumeEvidenceMismatch,
         )
+        | SftpProductionError::VaultUnavailable
         | SftpProductionError::Profile(_)
         | SftpProductionError::Connection { .. }
         | SftpProductionError::Transport(_) => PluginApiErrorCode::Unavailable,

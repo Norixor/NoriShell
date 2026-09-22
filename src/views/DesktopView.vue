@@ -3,24 +3,21 @@ import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, 
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { Monitor, Plus, ChevronDown, RotateCw, Unplug, Scaling, Scan, Maximize2, ClipboardCopy, ClipboardPaste, Volume2, VolumeX, Hand, X } from "lucide-vue-next";
-import { NvxButton, NvxCheckbox, NvxDialog, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxSelect } from "../components/ui";
+import { NvxButton, NvxDialog, NvxIcon, NvxIconButton, NvxInlineNotice } from "../components/ui";
 import NvxDesktopProfileMenu from "../components/desktop/NvxDesktopProfileMenu.vue";
-import NvxDesktopPasswordFields from "../components/desktop/NvxDesktopPasswordFields.vue";
 import NvxDesktopCanvas from "../components/desktop/NvxDesktopCanvas.vue";
 import { desktopClient } from "../core-api/desktop-client";
-import { listHosts, listIdentities, listCredentialRefs } from "../core-api/client";
-import type { DesktopAvailability, DesktopProfile, DesktopSessionSummary, HostSummary, CredentialRefSummary } from "../core-api/generated/core-api";
+import type { DesktopAvailability, DesktopProfile, DesktopSessionSummary } from "../core-api/generated/core-api";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { useTipsStore } from "../stores/tips";
 import { performWindowAction } from "../platform-window";
+import { onToolWindowChanged, openToolWindow } from "../tool-windows";
 defineOptions({ name: "DesktopView" });
 const { t, te } = useI18n(), router = useRouter(), workspace = useWorkspaceTabsStore(), tips = useTipsStore();
 const availability = ref<DesktopAvailability[]>([]);
-const profiles = ref<DesktopProfile[]>([]), sessions = ref<DesktopSessionSummary[]>([]), hosts = ref<HostSummary[]>([]), credentials = ref<CredentialRefSummary[]>([]);
-const activeId = ref(""), active = ref(true), loading = ref(true), busy = ref(false), failed = ref(false), editor = ref(false), deleteTarget = ref<DesktopProfile | null>(null), invalid = ref(false), fit = ref(true), panning = ref(false);
+const profiles = ref<DesktopProfile[]>([]), sessions = ref<DesktopSessionSummary[]>([]);
+const activeId = ref(""), active = ref(true), loading = ref(true), busy = ref(false), failed = ref(false), deleteTarget = ref<DesktopProfile | null>(null), fit = ref(true), panning = ref(false);
 const display = ref<InstanceType<typeof NvxDesktopCanvas> | null>(null);
-const draft = ref<DesktopProfile>(fresh());
-const passwordFields = ref<InstanceType<typeof NvxDesktopPasswordFields> | null>(null);
 const current = computed(() => sessions.value.find((session) => session.id === activeId.value));
 const collapsedProtocols = ref<DesktopProfile["protocol"][]>([]);
 const profileGroups = computed(() => (["rdp", "vnc"] as const)
@@ -31,9 +28,7 @@ function toggleProtocol(protocol: DesktopProfile["protocol"]) {
     ? collapsedProtocols.value.filter((item) => item !== protocol)
     : [...collapsedProtocols.value, protocol];
 }
-const gateways = computed(() => [{ value: "", label: t("desktop.direct") }, ...hosts.value.map((host) => ({ value: host.hostId, label: host.label }))]);
 let timer: ReturnType<typeof setTimeout> | undefined, disposed = false, snapshotBusy = false;
-function fresh(): DesktopProfile { return { id: crypto.randomUUID(), label: "", protocol: "rdp", address: "", port: 3389, username: "", domain: "", hostId: null, gatewayHostId: null, credentialRefId: null, width: 1280, height: 800, clipboardEnabled: false, audioPlaybackEnabled: false, revision: "0" }; }
 function notice(key = "error", tone: "error" | "success" = "error") { tips.show({ scope: "desktop", tone, title: t(`desktop.${key}`) }); }
 async function refresh() {
   if (snapshotBusy || disposed) return;
@@ -45,35 +40,19 @@ async function refresh() {
 async function poll() { if (disposed) return; if (active.value && !document.hidden) await refresh(); if (!disposed) timer = setTimeout(() => void poll(), 750); }
 async function load() {
   loading.value = true; failed.value = false;
-  try { const [saved, savedHosts, identities, available] = await Promise.all([desktopClient.profiles(), listHosts(), listIdentities(), desktopClient.availability()]); availability.value = available; profiles.value = saved; hosts.value = savedHosts; credentials.value = (await Promise.all(identities.map((identity) => listCredentialRefs(identity.identityId)))).flat(); await refresh(); }
+  try { const [saved, available] = await Promise.all([desktopClient.profiles(), desktopClient.availability()]); availability.value = available; profiles.value = saved; await refresh(); }
   catch { failed.value = true; }
   finally { loading.value = false; }
 }
-function edit(profile?: DesktopProfile) { void display.value?.invalidate(); draft.value = profile ? { ...profile } : fresh(); invalid.value = false; editor.value = true; }
-async function save() {
-  if (busy.value) return;
-  const value = { ...draft.value };
-  if (!value.label.trim() || !value.address.trim() || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535 || value.width * value.height > 16_777_216 || ![value.width, value.height].every((n) => Number.isInteger(n) && n >= 200 && n <= 8192)) { invalid.value = true; return; }
-  busy.value = true;
+async function edit(profile?: DesktopProfile) {
+  void display.value?.invalidate();
   try {
-    const fields = passwordFields.value;
-    const passwordStage = await fields?.prepare() ?? null;
-    if (passwordStage === false || disposed || !editor.value || draft.value.id !== value.id) return;
-    const saved = await desktopClient.save({ ...value, label: value.label.trim(), address: value.address.trim() }, passwordStage);
-    fields?.acceptSaved();
-    if (disposed) return;
-    profiles.value = [...profiles.value.filter((item) => item.id !== saved.id), saved];
-    editor.value = false; notice("saved", "success");
-    if (passwordStage) {
-      // The save already succeeded; a credential-option refresh failure must not report the write as failed.
-      try {
-        const identities = await listIdentities();
-        const updated = (await Promise.all(identities.map((identity) => listCredentialRefs(identity.identityId)))).flat();
-        if (!disposed) credentials.value = updated;
-      } catch { if (!disposed) failed.value = true; }
-    }
-  }
-  catch { notice(); } finally { busy.value = false; }
+    await openToolWindow({
+      kind: "desktopEditor",
+      profileId: profile?.id ?? null,
+      title: t(profile ? "desktop.editProfile" : "desktop.newProfile"),
+    });
+  } catch { notice(); }
 }
 async function open(profile: DesktopProfile) {
   if (busy.value) return; busy.value = true;
@@ -127,14 +106,8 @@ function togglePanning() {
 function activate(tabId: string) { const session = sessions.value.find((item) => `desktop:${item.id}` === tabId); if (!session) return; workspace.terminalController?.deactivate(); activeId.value = session.id; void router.push("/desktop"); }
 const unregister = workspace.registerDesktopController({ activate, close: (id) => void close(id), closeMany: (ids) => { void (async () => { for (const id of ids) await close(id); })(); }, deactivate: () => { active.value = false; void display.value?.invalidate(); } });
 watch([sessions, activeId, busy, () => t("desktop.title")], () => workspace.syncDesktopState({ tabs: sessions.value.map((session) => ({ groupId: `desktop:${session.id}`, label: session.profile.label, stateLabel: t(`desktop.states.${session.state}`) })), activeTabId: activeId.value ? `desktop:${activeId.value}` : "", busy: busy.value }), { deep: true, immediate: true });
-function changeProtocol(protocol: string) {
-  if (protocol !== "rdp" && protocol !== "vnc") return;
-  draft.value.protocol = protocol;
-  if (protocol === "vnc") draft.value.audioPlaybackEnabled = false;
-  draft.value.port = protocol === "rdp" ? 3389 : 5900;
-}
-
 let focusOperation = "";
+let disposeToolWindowListener: (() => void) | undefined;
 watch(() => router.currentRoute.value.query.focusOperation, async (operation) => {
   if (typeof operation !== "string" || operation === focusOperation || router.currentRoute.value.path !== "/desktop") return;
   focusOperation = operation;
@@ -148,10 +121,16 @@ watch(() => router.currentRoute.value.query.focusOperation, async (operation) =>
   } catch { if (!disposed) tips.show({ tone: "error", title: t("errors.tray.actionUnavailable") }); }
 }, { immediate: true });
 
-onMounted(() => { void load(); void poll(); });
+onMounted(() => {
+  void load();
+  void poll();
+  void onToolWindowChanged((kind) => { if (kind === "desktopEditor") void load(); }).then((dispose) => {
+    if (disposed) dispose(); else disposeToolWindowListener = dispose;
+  }).catch(() => { /* The desktop list remains usable when tool-window notifications are unavailable. */ });
+});
 onActivated(() => { active.value = true; workspace.terminalController?.deactivate(); void refresh(); });
 onDeactivated(() => { active.value = false; void display.value?.invalidate(); });
-onBeforeUnmount(() => { disposed = true; clearTimeout(timer); unregister(); });
+onBeforeUnmount(() => { disposed = true; clearTimeout(timer); disposeToolWindowListener?.(); unregister(); });
 </script>
 <template>
   <section class="desktop-page">
@@ -237,7 +216,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer); unregister(); });
                   </NvxButton>
                   <NvxDesktopProfileMenu
                     :disabled="busy"
-                    :active="active && !editor && !deleteTarget && !collapsedProtocols.includes(group.protocol)"
+                    :active="active && !deleteTarget && !collapsedProtocols.includes(group.protocol)"
                     @edit="edit(profile)"
                     @delete="deleteTarget = profile"
                   />
@@ -380,7 +359,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer); unregister(); });
         <NvxDesktopCanvas
           ref="display"
           :session="current"
-          :active="active && !editor && !deleteTarget"
+          :active="active && !deleteTarget"
           :fit="fit"
           :panning="panning"
           @error="notice('inputFailed')"
@@ -398,154 +377,6 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer); unregister(); });
         </NvxButton>
       </div>
     </main>
-    <NvxDialog
-      v-model="editor"
-      plugin-protected
-      :title="t(profiles.some((profile) => profile.id === draft.id) ? 'desktop.editProfile' : 'desktop.newProfile')"
-      :close-label="t('desktop.cancel')"
-      :dismissible="!busy"
-      size="lg"
-    >
-      <form
-        class="desktop-form"
-        :inert="busy"
-        @submit.prevent="save"
-      >
-        <NvxInlineNotice
-          v-if="invalid"
-          class="desktop-form__wide"
-          tone="error"
-          :title="t('desktop.invalid')"
-        />
-        <NvxField
-          for-id="desktop-label"
-          :label="t('desktop.label')"
-        >
-          <NvxInput
-            id="desktop-label"
-            v-model="draft.label"
-            :maxlength="128"
-          />
-        </NvxField>
-        <NvxField :label="t('desktop.protocol')">
-          <NvxSelect
-            :model-value="draft.protocol"
-            :aria-label="t('desktop.protocol')"
-            :options="[{ value: 'rdp', label: 'RDP' }, { value: 'vnc', label: 'VNC' }]"
-            @update:model-value="changeProtocol"
-          />
-        </NvxField>
-        <NvxField
-          for-id="desktop-address"
-          :label="t('desktop.address')"
-        >
-          <NvxInput
-            id="desktop-address"
-            v-model="draft.address"
-            :maxlength="253"
-          />
-        </NvxField>
-        <NvxField
-          for-id="desktop-port"
-          :label="t('desktop.port')"
-        >
-          <NvxInput
-            id="desktop-port"
-            :model-value="String(draft.port)"
-            type="number"
-            :min="1"
-            :max="65535"
-            @update:model-value="draft.port = Number($event)"
-          />
-        </NvxField>
-        <NvxField
-          for-id="desktop-user"
-          :label="t('desktop.username')"
-        >
-          <NvxInput
-            id="desktop-user"
-            v-model="draft.username"
-          />
-        </NvxField>
-        <NvxField
-          v-if="draft.protocol === 'rdp'"
-          for-id="desktop-domain"
-          :label="t('desktop.domain')"
-        >
-          <NvxInput
-            id="desktop-domain"
-            v-model="draft.domain"
-          />
-        </NvxField>
-        <NvxDesktopPasswordFields
-          v-if="editor"
-          :key="draft.id"
-          ref="passwordFields"
-          v-model="draft.credentialRefId"
-          :new-profile="draft.revision === '0'"
-          :credentials="credentials"
-          :label="draft.label.trim() || draft.address.trim()"
-          :busy="busy"
-        />
-        <NvxField
-          class="desktop-form__wide"
-          :label="t('desktop.gateway')"
-        >
-          <NvxSelect
-            :model-value="draft.gatewayHostId ?? ''"
-            :options="gateways"
-            :aria-label="t('desktop.gateway')"
-            @update:model-value="draft.gatewayHostId = $event || null"
-          />
-        </NvxField>
-        <NvxField
-          v-for="dimension in (['width', 'height'] as const)"
-          :key="dimension"
-          :for-id="`desktop-${dimension}`"
-          :label="t(`desktop.${dimension}`)"
-        >
-          <NvxInput
-            :id="`desktop-${dimension}`"
-            :model-value="String(draft[dimension])"
-            type="number"
-            :min="200"
-            :max="8192"
-            @update:model-value="draft[dimension] = Number($event)"
-          />
-        </NvxField>
-        <NvxCheckbox
-          v-if="draft.protocol === 'rdp'"
-          v-model="draft.audioPlaybackEnabled"
-          class="desktop-form__wide"
-        >
-          {{ t('desktop.audioPlayback') }}<template #hint>
-            {{ t('desktop.audioPlaybackHint') }}
-          </template>
-        </NvxCheckbox>
-        <NvxCheckbox
-          v-model="draft.clipboardEnabled"
-          class="desktop-form__wide"
-        >
-          {{ t('desktop.clipboard') }}<template #hint>
-            {{ t('desktop.clipboardHint') }}
-          </template>
-        </NvxCheckbox>
-      </form>
-      <template #actions>
-        <NvxButton
-          variant="secondary"
-          :disabled="busy"
-          @click="editor = false"
-        >
-          {{ t('desktop.cancel') }}
-        </NvxButton><NvxButton
-          :loading="busy"
-          @click="save"
-        >
-          {{ t('desktop.save') }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
     <NvxDialog
       :model-value="!!deleteTarget"
       :title="t('desktop.delete')"
@@ -602,8 +433,6 @@ h1 { font-size: var(--nvx-font-size-sm); margin: 0; white-space: nowrap; }
 .desktop-empty { margin: auto; padding: var(--nvx-space-6); text-align: center; color: var(--nvx-color-text-secondary); }
 .desktop-empty h2 { color: var(--nvx-color-text-primary); font-size: var(--nvx-font-size-lg); }
 .desktop-empty p { max-width: 360px; }
-.desktop-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--nvx-space-3); }
-.desktop-form__wide { grid-column: 1 / -1; }
 @media (max-width: 850px) { .desktop-page { grid-template-columns: 245px minmax(0, 1fr); } }
 @media (max-width: 600px) { .desktop-page { grid-template-columns: 1fr; grid-template-rows: minmax(120px, 35%) 1fr; } .desktop-profiles { border-right: 0; border-bottom: 1px solid var(--nvx-color-border); } }
 </style>

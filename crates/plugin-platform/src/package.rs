@@ -17,9 +17,8 @@ use zip::{CompressionMethod, ZipArchive};
 use crate::{
     InspectedPluginProtocols, InspectedPluginSettings, InspectedPluginWorkflows,
     PLUGIN_PROTOCOLS_ASSET_PATH, PLUGIN_SETTINGS_ASSET_PATH, PLUGIN_WORKFLOWS_ASSET_PATH,
-    PluginPlatformError, Result, VerifiedCatalogEntry, catalog::decode_key,
-    catalog::decode_signature, catalog::publisher_signature_message, inspect_plugin_protocols,
-    inspect_plugin_settings, inspect_plugin_workflows,
+    PluginPlatformError, Result, inspect_plugin_protocols, inspect_plugin_settings,
+    inspect_plugin_workflows,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -84,64 +83,6 @@ pub struct InspectedPackage {
 pub struct InspectedFile {
     pub relative_path: PathBuf,
     pub uncompressed_size: u64,
-}
-
-pub fn inspect_package(
-    package_path: &Path,
-    entry: &VerifiedCatalogEntry,
-    limits: PackageLimits,
-) -> Result<InspectedPackage> {
-    let mut file = open_regular_package(package_path)?;
-    let metadata = file.metadata()?;
-    if metadata.len() > limits.max_archive_bytes {
-        return Err(PluginPlatformError::PackageTooLarge);
-    }
-    if metadata.len() != entry.package_size {
-        return Err(PluginPlatformError::PackageSizeMismatch);
-    }
-    let package_bytes = read_package_snapshot(&mut file, limits.max_archive_bytes)?;
-    if package_bytes.len() as u64 != metadata.len() {
-        return Err(PluginPlatformError::PackageSizeMismatch);
-    }
-    let package_sha256: [u8; 32] = Sha256::digest(&package_bytes).into();
-    if lower_hex(&package_sha256) != entry.package_sha256 {
-        return Err(PluginPlatformError::PackageHashMismatch);
-    }
-    let publisher_key = decode_key(&entry.publisher_key_base64)?;
-    let publisher_signature = decode_signature(&entry.publisher_signature_base64)?;
-    publisher_key
-        .verify_strict(&publisher_signature_message(entry)?, &publisher_signature)
-        .map_err(|_| PluginPlatformError::InvalidPublisherSignature)?;
-
-    let mut archive = ZipArchive::new(Cursor::new(package_bytes))?;
-    let files = validate_archive(&mut archive, limits)?;
-    let manifest = read_archive_manifest(&mut archive, limits)?;
-    if !manifest_matches(&manifest, entry) {
-        return Err(PluginPlatformError::ManifestMismatch);
-    }
-    let (package_kind, theme_definition, theme_definition_sha256) =
-        inspect_package_kind(&mut archive, &files, &manifest, limits)?;
-    let (settings, protocols, workflows) = if package_kind == PluginPackageKind::Wasm {
-        (
-            inspect_settings_asset(&mut archive)?,
-            inspect_protocols_asset(&mut archive)?,
-            inspect_workflows_asset(&mut archive)?,
-        )
-    } else {
-        (None, None, None)
-    };
-    Ok(InspectedPackage {
-        manifest,
-        package_size: metadata.len(),
-        package_sha256,
-        files,
-        package_kind,
-        theme_definition,
-        theme_definition_sha256,
-        settings,
-        protocols,
-        workflows,
-    })
 }
 
 /// Inspects a package explicitly selected by the local user. This path does not
@@ -266,16 +207,6 @@ fn inspect_theme_asset<R: Read + Seek>(
     Ok((definition, Sha256::digest(&bytes).into()))
 }
 
-/// Reads the fixed theme definition from one already authenticated package
-/// snapshot. The caller still owns the package-kind and exact-file checks.
-pub(crate) fn inspect_theme_asset_from_package_snapshot(
-    package_bytes: &[u8],
-    limits: PackageLimits,
-) -> Result<(ThemeDefinition, [u8; 32])> {
-    let mut archive = ZipArchive::new(Cursor::new(package_bytes))?;
-    inspect_theme_asset(&mut archive, limits)
-}
-
 fn inspect_settings_asset<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
 ) -> Result<Option<InspectedPluginSettings>> {
@@ -298,7 +229,6 @@ fn inspect_settings_asset<R: Read + Seek>(
 }
 
 /// Reads settings from an already verified, immutable package byte snapshot.
-/// Marketplace verification uses this after authenticating the same bytes.
 pub fn inspect_settings_asset_from_package_snapshot(
     package_bytes: &[u8],
 ) -> Result<Option<InspectedPluginSettings>> {
@@ -510,20 +440,6 @@ fn validate_path(name: &str, is_directory: bool) -> Result<PathBuf> {
     Ok(PathBuf::from(trimmed))
 }
 
-fn manifest_matches(manifest: &PluginManifest, entry: &VerifiedCatalogEntry) -> bool {
-    manifest.plugin_id == entry.plugin_id
-        && manifest.name == entry.name
-        && manifest.publisher == entry.publisher
-        && manifest.version == entry.version
-        && manifest.protocol_major == entry.protocol_major
-        && manifest.protocol_minor == entry.protocol_minor
-        && manifest.platform == entry.platform
-        && manifest.architectures == entry.architectures
-        && manifest.package_url.as_deref() == Some(entry.package_url.as_str())
-        && manifest.capabilities == entry.capabilities
-        && manifest.minimum_app_version == entry.minimum_app_version
-}
-
 fn validate_local_manifest(
     manifest: &PluginManifest,
     current_app_version: &Version,
@@ -536,7 +452,7 @@ fn validate_local_manifest(
         norishell_core_api::plugin_capability_min_protocol_minor(*capability)
             > manifest.protocol_minor
     }) {
-        return Err(PluginPlatformError::IncompatibleCatalogEntry);
+        return Err(PluginPlatformError::InvalidProtocolCatalog);
     }
     let version =
         Version::parse(&manifest.version).map_err(|_| PluginPlatformError::ManifestMismatch)?;
@@ -634,17 +550,13 @@ pub(crate) fn lower_hex(bytes: &[u8]) -> String {
 mod tests {
     use std::{fs::File, io::Write as _};
 
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    use ed25519_dalek::{Signer as _, SigningKey};
     use norishell_core_api::{
         PLUGIN_PROTOCOL_MINOR, PLUGIN_THEME_PROTOCOL_MINOR, PluginCapability, PluginId,
         PluginPackageKind,
     };
-    use sha2::{Digest, Sha256};
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-    use super::{PackageLimits, PluginManifest, inspect_local_package, inspect_package, lower_hex};
-    use crate::{VerifiedCatalogEntry, catalog::publisher_signature_message};
+    use super::{PackageLimits, PluginManifest, inspect_local_package};
 
     fn manifest() -> PluginManifest {
         PluginManifest {
@@ -759,49 +671,6 @@ mod tests {
             .write_all(protocols)
             .expect("protocol catalog bytes");
         archive.finish().expect("finish package");
-    }
-
-    fn signed_entry(path: &std::path::Path, signing: &SigningKey) -> VerifiedCatalogEntry {
-        let package = std::fs::read(path).expect("package bytes");
-        let manifest = manifest();
-        let mut entry = VerifiedCatalogEntry {
-            plugin_id: manifest.plugin_id,
-            name: manifest.name,
-            publisher: manifest.publisher,
-            version: manifest.version,
-            protocol_major: manifest.protocol_major,
-            protocol_minor: manifest.protocol_minor,
-            platform: manifest.platform,
-            architectures: manifest.architectures,
-            package_url: manifest.package_url.expect("catalog package url"),
-            package_size: package.len() as u64,
-            package_sha256: lower_hex(&Sha256::digest(&package)),
-            publisher_key_base64: BASE64.encode(signing.verifying_key().as_bytes()),
-            publisher_signature_base64: BASE64.encode([0_u8; 64]),
-            capabilities: manifest.capabilities,
-            minimum_app_version: manifest.minimum_app_version,
-            published_at_unix_ms: 1,
-        };
-        let signature = signing.sign(&publisher_signature_message(&entry).expect("message"));
-        entry.publisher_signature_base64 = BASE64.encode(signature.to_bytes());
-        entry
-    }
-
-    #[test]
-    fn inspect_verifies_hash_signature_manifest_and_fixed_archive_shape() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let package = directory.path().join("fixture.zip");
-        write_package(&package, &["assets/icon.svg"]);
-        let signing = SigningKey::from_bytes(&[4; 32]);
-        let entry = signed_entry(&package, &signing);
-        let inspected = inspect_package(&package, &entry, PackageLimits::default())
-            .expect("inspect valid package");
-        assert_eq!(inspected.files.len(), 3);
-
-        let collision = directory.path().join("collision.zip");
-        write_package(&collision, &["assets/Icon.svg", "assets/icon.svg"]);
-        let collision_entry = signed_entry(&collision, &signing);
-        assert!(inspect_package(&collision, &collision_entry, PackageLimits::default()).is_err());
     }
 
     #[test]

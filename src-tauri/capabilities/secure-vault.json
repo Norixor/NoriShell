@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "secure-vault",
+  "description": "Vault secrets are submitted only by their exact Core-owned prompt window.",
+  "windows": ["secure-vault-*"],
+  "permissions": ["core:window:allow-start-dragging", "secure-vault-commands"]
+}

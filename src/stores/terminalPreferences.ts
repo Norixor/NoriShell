@@ -41,7 +41,8 @@ function sameInteraction(left: InteractionPreferences, right: InteractionPrefere
     && left.optionAsMetaRight === right.optionAsMetaRight
     && left.backspaceMode === right.backspaceMode
     && left.bellMode === right.bellMode
-    && left.linksEnabled === right.linksEnabled;
+    && left.linksEnabled === right.linksEnabled
+    && left.sshReconnectOnInput === right.sshReconnectOnInput;
 }
 
 function defaults(): TerminalPreferences {

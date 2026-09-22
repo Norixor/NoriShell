@@ -357,10 +357,16 @@
           "markdownDescription": "Allows the trusted main NoriShell WebView to call the application command surface."
         },
         {
-          "description": "Allows a sandbox wrapper to read only the package-bound HTML assigned to its exact window label.",
+          "description": "Allows a nonce-bound trusted wrapper to broker only its assigned isolated surface.",
           "type": "string",
           "const": "plugin-isolated-surface-commands",
-          "markdownDescription": "Allows a sandbox wrapper to read only the package-bound HTML assigned to its exact window label."
+          "markdownDescription": "Allows a nonce-bound trusted wrapper to broker only its assigned isolated surface."
+        },
+        {
+          "description": "Read, answer or cancel the exact SSH credential prompt, and explicitly open the nested Vault prompt when saving it.",
+          "type": "string",
+          "const": "secure-credential-commands",
+          "markdownDescription": "Read, answer or cancel the exact SSH credential prompt, and explicitly open the nested Vault prompt when saving it."
         },
         {
           "description": "Allows only the protected plugin Host approval window to read and decide its bound request.",
@@ -387,10 +393,130 @@
           "markdownDescription": "Allows only the protected terminal input approval window to read and decide its bound request."
         },
         {
+          "description": "Read and answer the exact SSH challenge owned by this secure window.",
+          "type": "string",
+          "const": "secure-ssh-challenge-commands",
+          "markdownDescription": "Read and answer the exact SSH challenge owned by this secure window."
+        },
+        {
           "description": "Allows only a protected SSH sync data-exchange window to read and decide its bound request.",
           "type": "string",
           "const": "secure-ssh-sync-commands",
           "markdownDescription": "Allows only a protected SSH sync data-exchange window to read and decide its bound request."
+        },
+        {
+          "description": "Read, answer or cancel the exact Vault prompt owned by this window.",
+          "type": "string",
+          "const": "secure-vault-commands",
+          "markdownDescription": "Read, answer or cancel the exact Vault prompt owned by this window."
+        },
+        {
+          "description": "Desktop profile configuration and password staging, without session control.",
+          "type": "string",
+          "const": "tool-desktop-editor",
+          "markdownDescription": "Desktop profile configuration and password staging, without session control."
+        },
+        {
+          "description": "Host configuration and credential management without terminal, plugin, or filesystem browsing access.",
+          "type": "string",
+          "const": "tool-host-editor",
+          "markdownDescription": "Host configuration and credential management without terminal, plugin, or filesystem browsing access."
+        },
+        {
+          "description": "Access only the file and generation registered for the calling window.",
+          "type": "string",
+          "const": "tool-sftp-file",
+          "markdownDescription": "Access only the file and generation registered for the calling window."
+        },
+        {
+          "description": "Read and close only the calling Core-registered tool window.",
+          "type": "string",
+          "const": "tool-window-lifecycle",
+          "markdownDescription": "Read and close only the calling Core-registered tool window."
+        },
+        {
+          "description": "Only the restricted tray panel projection and one-shot actions.",
+          "type": "string",
+          "const": "tray-panel-commands",
+          "markdownDescription": "Only the restricted tray panel projection and one-shot actions."
+        },
+        {
+          "description": "No features are enabled by default, as we believe\nthe clipboard can be inherently dangerous and it is \napplication specific if read and/or write access is needed.\n\nClipboard interaction needs to be explicitly enabled.\n",
+          "type": "string",
+          "const": "clipboard-manager:default",
+          "markdownDescription": "No features are enabled by default, as we believe\nthe clipboard can be inherently dangerous and it is \napplication specific if read and/or write access is needed.\n\nClipboard interaction needs to be explicitly enabled.\n"
+        },
+        {
+          "description": "Enables the clear command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:allow-clear",
+          "markdownDescription": "Enables the clear command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the read_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:allow-read-image",
+          "markdownDescription": "Enables the read_image command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the read_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:allow-read-text",
+          "markdownDescription": "Enables the read_text command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the write_html command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:allow-write-html",
+          "markdownDescription": "Enables the write_html command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the write_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:allow-write-image",
+          "markdownDescription": "Enables the write_image command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the write_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:allow-write-text",
+          "markdownDescription": "Enables the write_text command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:deny-clear",
+          "markdownDescription": "Denies the clear command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the read_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:deny-read-image",
+          "markdownDescription": "Denies the read_image command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the read_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:deny-read-text",
+          "markdownDescription": "Denies the read_text command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the write_html command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:deny-write-html",
+          "markdownDescription": "Denies the write_html command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the write_image command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:deny-write-image",
+          "markdownDescription": "Denies the write_image command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the write_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "clipboard-manager:deny-write-text",
+          "markdownDescription": "Denies the write_text command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

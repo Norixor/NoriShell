@@ -34,6 +34,10 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(projectRoot, "index.html"),
+        toolWindow: resolve(projectRoot, "tool-window.html"),
+        secureVault: resolve(projectRoot, "secure-vault.html"),
+        secureCredential: resolve(projectRoot, "secure-credential.html"),
+        secureSshChallenge: resolve(projectRoot, "secure-ssh-challenge.html"),
         trayPanel: resolve(projectRoot, "tray-panel.html"),
         secureDesktop: resolve(projectRoot, "secure-desktop.html"),
         securePluginHostApproval: resolve(projectRoot, "secure-plugin-host-approval.html"),

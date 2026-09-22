@@ -4,7 +4,7 @@ import { computed, onScopeDispose, ref, watch } from "vue";
 import { useAppThemeStore } from "./appTheme";
 import { validateApplicationPreferences, validateAppearancePreferences, type ApplicationPreferences, type AppearancePreferences } from "../ui-transfer";
 import { applyUiZoom, isUiZoom, type UiZoom } from "../ui-zoom";
-import { i18n, type AppLocale } from "../locales";
+import { i18n, resolveLocale, type LocalePreference } from "../locales";
 import {
   parseThemePreference,
   resolveThemePreference,
@@ -89,7 +89,17 @@ export const useUiStore = defineStore("ui", () => {
   const uiZoom = ref<UiZoom>(isUiZoom(stored.uiZoom) ? stored.uiZoom : 100);
   const appliedUiZoom = ref<UiZoom>(100);
   const uiZoomBusy = ref(false);
-  const locale = ref<AppLocale>(stored.locale === "en" ? "en" : "zh-CN");
+  const localePreference = ref<LocalePreference>(
+    stored.locale === "en" || stored.locale === "zh-CN" ? stored.locale : "system",
+  );
+  const systemLanguages = ref<readonly string[]>(navigator.languages);
+  const locale = computed(() => resolveLocale(localePreference.value, systemLanguages.value));
+  const updateSystemLanguage = () => {
+    systemLanguages.value = [...navigator.languages];
+    applyDocumentPreferences();
+  };
+  window.addEventListener("languagechange", updateSystemLanguage);
+  onScopeDispose(() => window.removeEventListener("languagechange", updateSystemLanguage));
   const terminalStartupBehavior = ref<TerminalStartupBehavior>(
     stored.terminalStartupBehavior === "welcome" ? "welcome" : "restoreHistory",
   );
@@ -131,7 +141,7 @@ export const useUiStore = defineStore("ui", () => {
       theme: theme.value,
       themePreference: themePreference.value,
       uiZoom: uiZoom.value,
-      locale: locale.value,
+      locale: localePreference.value,
       terminalStartupBehavior: terminalStartupBehavior.value,
       newTerminalBehavior: newTerminalBehavior.value,
       singlePaneTabCloseBehavior: singlePaneTabCloseBehavior.value,
@@ -228,7 +238,7 @@ export const useUiStore = defineStore("ui", () => {
   }
 
   function applicationPreferences(): ApplicationPreferences {
-    return { themePreference: themePreference.value, locale: locale.value, uiZoom: uiZoom.value,
+    return { themePreference: themePreference.value, locale: localePreference.value, uiZoom: uiZoom.value,
       terminalStartupBehavior: terminalStartupBehavior.value, newTerminalBehavior: newTerminalBehavior.value,
       singlePaneTabCloseBehavior: singlePaneTabCloseBehavior.value };
   }
@@ -258,7 +268,7 @@ export const useUiStore = defineStore("ui", () => {
       persistPreferences({ ...next, theme: nextTheme });
       themePreference.value = next.themePreference;
       theme.value = nextTheme;
-      locale.value = next.locale;
+      localePreference.value = next.locale;
       uiZoom.value = next.uiZoom;
       terminalStartupBehavior.value = next.terminalStartupBehavior;
       newTerminalBehavior.value = next.newTerminalBehavior;
@@ -304,9 +314,10 @@ export const useUiStore = defineStore("ui", () => {
     return true;
   }
 
-  function setLocale(value: AppLocale) {
-    locale.value = value;
-    applyPreferences();
+  function setLocale(value: LocalePreference) {
+    persistPreferences({ locale: value });
+    localePreference.value = value;
+    applyDocumentPreferences();
   }
 
   function setTerminalStartupBehavior(value: TerminalStartupBehavior) {
@@ -450,6 +461,7 @@ export const useUiStore = defineStore("ui", () => {
     replaceApplicationPreferences,
     replaceAppearancePreferences,
     locale,
+    localePreference,
     terminalStartupBehavior,
     newTerminalBehavior,
     singlePaneTabCloseBehavior,

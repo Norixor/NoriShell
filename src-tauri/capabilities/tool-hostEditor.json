@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tool-hostEditor",
+  "description": "Core-owned scoped nonmodal tool window.",
+  "windows": [
+    "tool-hostEditor-*"
+  ],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "tool-window-lifecycle",
+    "tool-host-editor"
+  ]
+}

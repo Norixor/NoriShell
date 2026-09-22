@@ -14,7 +14,6 @@ enableAutoUnmount(afterEach);
 
 const hooks = vi.hoisted(() => ({
   applicationExit: undefined as undefined | (() => Promise<void>),
-  fetchPluginCatalogSnapshot: vi.fn(),
   flushAndExit: vi.fn(),
   listInstalledPlugins: vi.fn(),
   listPluginNavigation: vi.fn().mockResolvedValue([]),
@@ -43,8 +42,8 @@ vi.mock("./stores/ui", () => ({
 vi.mock("./core-api/native-tray", () => ({ readyNativeTrayActions: vi.fn().mockResolvedValue([]), takeNativeTrayAction: vi.fn() }));
 vi.mock("./core-api/native-notifications", () => ({ setNativeNotificationContext: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("./core-api/client", () => ({
+  fetchVaultStatus: vi.fn().mockResolvedValue({ state: "missing" }),
   completePluginSafeModeStartup: vi.fn().mockResolvedValue({}),
-  fetchPluginCatalogSnapshot: hooks.fetchPluginCatalogSnapshot,
   listInstalledPlugins: hooks.listInstalledPlugins,
   listPluginNavigation: hooks.listPluginNavigation,
   requestApplicationExit: vi.fn(),
@@ -211,7 +210,6 @@ describe("plugin runtime status projection", () => {
     await flushPromises();
     expect(usePluginsStore(pinia).installed).toEqual([{ ...enabledPlugin, state: "crashed", stateVersion: "8" }]);
     expect(hooks.listInstalledPlugins).toHaveBeenCalledTimes(2);
-    expect(hooks.fetchPluginCatalogSnapshot).not.toHaveBeenCalled();
   });
 
   it("keeps the prior installed projection when an event refresh fails", async () => {

@@ -9,7 +9,6 @@ import {
   enablePlugin,
   getPluginOperation,
   getPluginReadiness,
-  fetchPluginCatalogSnapshot,
   installLocalPlugin,
   invokePluginContribution,
   preparePluginContributionCopy,
@@ -19,13 +18,9 @@ import {
   listPendingPluginTerminalInput,
   openPluginTerminalInput,
   prepareLocalPluginPackage,
-  prepareCatalogPluginPackage,
-  refreshPluginCatalog,
   replacePluginCapabilityGrants,
   setPluginSafeModeNextStart,
   uninstallPlugin,
-  type PluginCatalogEntryDto,
-  type PluginCatalogSnapshotDto,
 } from "../core-api/client";
 import type {
   InstalledPluginSummary,
@@ -43,7 +38,6 @@ import type {
 } from "../core-api/generated/core-api";
 import { invalidatePluginHostDom } from "../plugins/hostDomBroker";
 import { usePluginExtensionsStore } from "./pluginExtensions";
-import { usePluginIconsStore } from "./pluginIcons";
 
 const ACTIVE_OPERATION_STATES = new Set(["pending", "running", "awaitingCapabilities"]);
 const OPERATION_POLL_INTERVAL_MS = 250;
@@ -55,14 +49,8 @@ const MAX_CONTRIBUTION_TEXT_LENGTH = 2_048;
 const BIDI_CONTROLS = new Set([0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069]);
 
 const CORE_PLUGIN_FAILURE_CODES: Partial<Record<string, PluginErrorCode>> = {
-  "plugin.trust_roots_unavailable": "trustRootsUnavailable",
-  "plugin.catalog_unavailable": "catalogUnavailable",
-  "plugin.catalog_envelope_invalid": "catalogEnvelopeInvalid",
-  "plugin.catalog_signature_invalid": "catalogSignatureInvalid",
-  "plugin.catalog_payload_invalid": "catalogPayloadInvalid",
   "plugin.package_too_large": "packageTooLarge",
   "plugin.package_hash_mismatch": "packageHashMismatch",
-  "plugin.publisher_signature_invalid": "publisherSignatureInvalid",
   "plugin.package_archive_invalid": "packageArchiveInvalid",
   "plugin.package_path_rejected": "packagePathRejected",
   "plugin.package_limits_exceeded": "packageLimitsExceeded",
@@ -78,15 +66,13 @@ const CORE_PLUGIN_FAILURE_CODES: Partial<Record<string, PluginErrorCode>> = {
   "plugin.invalid_request": "invalidRequest",
 };
 
-export type PluginFailureCode = PluginErrorCode | "requestFailed" | "pollTimedOut" | "publisherChanged";
+export type PluginFailureCode = PluginErrorCode | "requestFailed" | "pollTimedOut";
 
 export function pluginFailureCode(
   error: unknown,
   fallback: "requestFailed" | "pollTimedOut" = "requestFailed",
 ): PluginFailureCode {
-  const candidate = error as { code?: unknown; errorCode?: unknown; messageKey?: unknown } | null;
-  if (candidate?.code === "plugin.publisher_signature_invalid"
-    && candidate.messageKey === "errors.plugin.publisherChanged") return "publisherChanged";
+  const candidate = error as { code?: unknown; errorCode?: unknown } | null;
   if (typeof candidate?.errorCode === "string") {
     return candidate.errorCode as PluginErrorCode;
   }
@@ -246,20 +232,15 @@ function waitForNextPoll() {
 }
 
 export const usePluginsStore = defineStore("plugins", () => {
-  const pluginIcons = usePluginIconsStore();
   const pluginExtensions = usePluginExtensionsStore();
   const preparedPackage = ref<PluginLocalPackagePreview | null>(null);
   const installed = ref<InstalledPluginSummary[]>([]);
-  const catalog = ref<PluginCatalogSnapshotDto | null>(null);
   const audit = ref<PluginAuditEntry[]>([]);
   const readiness = ref<PluginReadiness | null>(null);
   const pendingInput = ref<PluginTerminalInputProposal[]>([]);
   const contributions = ref<SafePluginContributionPanel[]>([]);
   const operations = ref<Record<string, PluginOperationSummary>>({});
   const loading = ref(false);
-  const catalogLoading = ref(false);
-  const catalogRefreshing = ref(false);
-  const catalogErrorCode = ref<PluginFailureCode | null>(null);
   const errorCode = ref<PluginFailureCode | null>(null);
   const success = ref<PluginSuccessState | null>(null);
   const invokingActionKey = ref<string | null>(null);
@@ -305,46 +286,18 @@ export const usePluginsStore = defineStore("plugins", () => {
     errorCode.value = pluginFailureCode(error, fallback);
   }
 
-  function failureCode(error: unknown, fallback: "requestFailed" | "pollTimedOut" = "requestFailed") {
-    return pluginFailureCode(error, fallback);
-  }
-
-  async function loadCatalog(refreshIcons = false) {
-    catalogLoading.value = true;
-    try {
-      catalog.value = await fetchPluginCatalogSnapshot();
-      const pluginIds = [...new Set(catalog.value.entries.map((entry) => entry.pluginId))];
-      pluginIcons.retain(pluginIds, "catalog");
-      for (const pluginId of pluginIds) {
-        void pluginIcons.load(pluginId, "catalog", catalog.value.catalogRevision, refreshIcons);
-      }
-      catalogErrorCode.value = null;
-      return catalog.value;
-    } catch (error) {
-      catalog.value = null;
-      catalogErrorCode.value = failureCode(error);
-      return null;
-    } finally {
-      catalogLoading.value = false;
-    }
-  }
-
   async function loadInstalled() {
     const loadVersion = ++installedLoadVersion;
     const next = await listInstalledPlugins();
     if (loadVersion === installedLoadVersion) {
       installed.value = next;
-      pluginIcons.retain(next.map((plugin) => plugin.pluginId), "installed");
-      for (const plugin of next) {
-        void pluginIcons.load(plugin.pluginId, "installed", `${plugin.activeVersion}:${plugin.packageSha256}`);
-      }
     }
     return next;
   }
 
   /**
    * Reconcile only the Core-owned installed-plugin projection. Runtime lifecycle
-   * events must not refresh the marketplace or make a failed read look successful.
+   * events must not make a failed installed-plugin read look successful.
    */
   async function refreshInstalled() {
     try {
@@ -375,7 +328,6 @@ export const usePluginsStore = defineStore("plugins", () => {
   async function reloadProjections(pluginId?: string) {
     const tasks: Promise<unknown>[] = [
       loadInstalled(),
-      loadCatalog(),
       listPluginAudit().then((entries) => { audit.value = entries; }),
       loadPendingInput(),
       loadContributions(),
@@ -464,24 +416,6 @@ export const usePluginsStore = defineStore("plugins", () => {
     }
   }
 
-  async function prepareCatalog(entry: PluginCatalogEntryDto) {
-    errorCode.value = null;
-    setSuccess(null);
-    try {
-      await discardPrepared();
-      const current = installed.value.find((plugin) => plugin.pluginId === entry.pluginId);
-      preparedPackage.value = await prepareCatalogPluginPackage({
-        pluginId: entry.pluginId,
-        version: entry.version,
-        expectedStateVersion: current?.stateVersion ?? null,
-      });
-      return preparedPackage.value;
-    } catch (error) {
-      setFailure(error);
-      return null;
-    }
-  }
-
   function applySpecialPermissionOutcome(outcome: PluginSpecialPermissionOutcome) {
     if (outcome.kind !== "preparedPackage") return;
     const current = preparedPackage.value;
@@ -561,28 +495,6 @@ export const usePluginsStore = defineStore("plugins", () => {
       }
     }
     return result;
-  }
-
-  async function refreshCatalog() {
-    if (catalogRefreshing.value) return null;
-    catalogRefreshing.value = true;
-    catalogErrorCode.value = null;
-    try {
-      const result = await trackOperation(await refreshPluginCatalog(), null);
-      if (result.state === "succeeded") {
-        await loadCatalog(true);
-        for (const plugin of installed.value) {
-          void pluginIcons.load(plugin.pluginId, "installed", `${plugin.activeVersion}:${plugin.packageSha256}`, true);
-        }
-      }
-      else catalogErrorCode.value = result.errorCode ?? "requestFailed";
-      return result;
-    } catch (error) {
-      catalogErrorCode.value = failureCode(error);
-      return null;
-    } finally {
-      catalogRefreshing.value = false;
-    }
   }
 
   async function reloadRuntimeProjections(pluginId: string) {
@@ -755,27 +667,20 @@ export const usePluginsStore = defineStore("plugins", () => {
   return {
     preparedPackage,
     installed,
-    catalog,
     audit,
     readiness,
     pendingInput,
     contributions,
     operations,
     loading,
-    catalogLoading,
-    catalogRefreshing,
-    catalogErrorCode,
     errorCode,
     success,
     invokingActionKey,
     initialize,
-    loadCatalog,
     refreshInstalled,
-    refreshCatalog,
     loadContributions,
     loadPendingInput,
     prepareImport,
-    prepareCatalog,
     applySpecialPermissionOutcome,
     discardPrepared,
     installPrepared,

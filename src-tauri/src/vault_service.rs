@@ -608,6 +608,25 @@ impl VaultService {
         })
     }
 
+    pub(crate) fn replace_secret(
+        &self,
+        secret: &VaultSecretInsert,
+    ) -> Result<VaultStatus, VaultServiceError> {
+        self.with_vault_guard(|guard| {
+            let vault = guard.as_mut().ok_or(VaultServiceError::NotUnlocked)?;
+            if vault.requires_reload() {
+                return Err(VaultError::ReloadRequired.into());
+            }
+            let secret_ref = SecretRef::parse(secret.secret_ref_id.as_str())?;
+            vault.replace_secret_with_ref(SecretInsert::new(
+                secret_ref,
+                secret.kind,
+                secret.value.as_slice(),
+            ))?;
+            Ok(self.status_from(Some(vault)))
+        })
+    }
+
     pub(crate) fn delete_secrets(
         &self,
         secret_ref_ids: &[SecretRefId],
@@ -858,7 +877,8 @@ pub(crate) fn map_service_error(
             RetryStrategy::RefreshSnapshot,
             "errors.vault.requiresReload",
         ),
-        VaultServiceError::SecretNotFound => (
+        VaultServiceError::SecretNotFound
+        | VaultServiceError::Vault(VaultError::SecretNotFound(_)) => (
             "vault.secret_not_found",
             ErrorCategory::NeedsReconciliation,
             RetryStrategy::Reconcile,

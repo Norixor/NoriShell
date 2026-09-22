@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "secure-ssh-challenge-commands"
+description = "Read and answer the exact SSH challenge owned by this secure window."
+commands.allow = ["secure_ssh_challenge_get", "secure_ssh_challenge_submit", "secure_ssh_challenge_cancel"]

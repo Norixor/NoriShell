@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { terminalInteractionEn } from "../../locales/terminal-interaction";
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
 import { useTipsStore } from "../../stores/tips";
-import { NvxButton, NvxInput, NvxSelect } from "../ui";
+import { NvxButton, NvxCheckbox, NvxInput, NvxSelect } from "../ui";
 import NvxTerminalInteractionSettings from "./NvxTerminalInteractionSettings.vue";
 
 const coreApi = vi.hoisted(() => ({ listHostCatalog: vi.fn() }));
@@ -42,6 +42,17 @@ describe("NvxTerminalInteractionSettings", () => {
     expect(store.preferences.interaction.scrollback).toBe(5_000);
     await button(wrapper, "Save changes").trigger("click");
     expect(store.preferences.interaction).toMatchObject({ scrollback: 9_000, scrollSensitivity: 3, smoothScrollDuration: 100, doubleClickSelection: "address", copyOnSelect: true, rightClickBehavior: "paste", optionAsMetaLeft: false, optionAsMetaRight: false, backspaceMode: "del", bellMode: "off", linksEnabled: true });
+    wrapper.unmount();
+  });
+  it("saves the SSH reconnect-on-input switch only after explicit save", async () => {
+    const { wrapper, store } = setup();
+    const reconnect = wrapper.findAllComponents(NvxCheckbox)
+      .find((item) => item.text().includes("Reconnect SSH on input after interruption"))!;
+    reconnect.vm.$emit("update:modelValue", false);
+    await wrapper.vm.$nextTick();
+    expect(store.preferences.interaction.sshReconnectOnInput).toBe(true);
+    await button(wrapper, "Save changes").trigger("click");
+    expect(store.preferences.interaction.sshReconnectOnInput).toBe(false);
     wrapper.unmount();
   });
   it("shows an inline error and keeps the saved value when a numeric draft is outside its bounds", async () => {

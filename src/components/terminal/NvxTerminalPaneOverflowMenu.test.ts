@@ -1,10 +1,11 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { i18n } from "../../locales";
 import NvxTerminalPaneOverflowMenu from "./NvxTerminalPaneOverflowMenu.vue";
 
 describe("NvxTerminalPaneOverflowMenu", () => {
+  beforeEach(() => { i18n.global.locale.value = "zh-CN"; });
   it("groups narrow Pane actions behind one accessible menu button", async () => {
     const wrapper = mount(NvxTerminalPaneOverflowMenu, {
       props: {

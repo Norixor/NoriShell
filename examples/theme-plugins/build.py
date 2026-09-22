@@ -12,8 +12,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = ROOT.parents[1]
 OUTPUT = REPOSITORY / "output" / "theme-plugins"
-THEMES = (("clear", "NoriShell-Theme-Clear-1.0.0.zip"),
-          ("midnight", "NoriShell-Theme-Midnight-1.0.0.zip"),
+THEMES = (("clear", "NoriShell-Theme-Moss-1.1.0.zip"),
+          ("midnight", "NoriShell-Theme-Mulberry-1.1.0.zip"),
           ("sand", "NoriShell-Theme-Sand-1.0.0.zip"))
 MANIFEST_KEYS = {"pluginId", "name", "publisher", "version", "protocolMajor", "protocolMinor",
                  "platform", "architectures", "capabilities", "minimumAppVersion"}
@@ -52,8 +52,8 @@ def validate(manifest: dict, theme: dict, source: Path) -> None:
         raise ValueError(f"{source}: manifest fields must exactly match the plugin wire contract")
     if not (isinstance(manifest["pluginId"], str) and manifest["pluginId"] == f"com.norishell.theme.{theme.get('id')}"):
         raise ValueError(f"{source}: manifest pluginId must bind the theme id")
-    if manifest["version"] != "1.0.0" or manifest["protocolMajor"] != 1 or manifest["protocolMinor"] != 14:
-        raise ValueError(f"{source}: theme package must target protocol 1.14 at version 1.0.0")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", manifest["version"]) or manifest["protocolMajor"] != 1 or manifest["protocolMinor"] != 14:
+        raise ValueError(f"{source}: theme package must target protocol 1.14 with a numeric semantic version")
     if manifest["platform"] != "desktop" or manifest["architectures"] != ["universal"] or manifest["capabilities"] != [] or manifest["minimumAppVersion"] != "0.1.0":
         raise ValueError(f"{source}: theme packages are universal desktop data packages without capabilities")
     if set(theme) != THEME_KEYS or len(json.dumps(theme, ensure_ascii=False).encode("utf-8")) > 32 * 1024:
@@ -86,6 +86,8 @@ def package(slug: str, filename: str) -> dict:
     manifest_path, theme_path = source / "manifest.json", source / "assets" / "theme.json"
     manifest, theme = read_json(manifest_path), read_json(theme_path)
     validate(manifest, theme, source)
+    if not filename.endswith(f"-{manifest['version']}.zip"):
+        raise ValueError(f"{source}: archive filename must match manifest version")
     OUTPUT.mkdir(parents=True, exist_ok=True)
     destination = OUTPUT / filename
     with tempfile.NamedTemporaryFile(dir=OUTPUT, prefix=f".{slug}-", suffix=".zip", delete=False) as temporary:

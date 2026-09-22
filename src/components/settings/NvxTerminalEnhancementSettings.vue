@@ -35,7 +35,7 @@ function changeMarkers(value: string) { report(markers.setEnabled(value === "sho
       <p>{{ t('terminalEnhancements.description') }}</p>
     </header>
     <div class="enhancement-settings__rows">
-      <label class="enhancement-settings__row">
+      <div class="enhancement-settings__row">
         <span><strong>{{ t('terminalEnhancements.paste.setting') }}</strong><small>{{ t('terminalEnhancements.paste.settingHint') }}</small></span>
         <NvxSelect
           :model-value="preferences.preferences.pasteWarning"
@@ -43,8 +43,8 @@ function changeMarkers(value: string) { report(markers.setEnabled(value === "sho
           :aria-label="t('terminalEnhancements.paste.setting')"
           @update:model-value="changePaste"
         />
-      </label>
-      <label class="enhancement-settings__row">
+      </div>
+      <div class="enhancement-settings__row">
         <span><strong>{{ t('terminalEnhancements.hostMarkers') }}</strong><small>{{ t('terminalEnhancements.hostMarkersHint') }}</small></span>
         <NvxSelect
           :model-value="markers.enabled ? 'show' : 'hide'"
@@ -52,7 +52,7 @@ function changeMarkers(value: string) { report(markers.setEnabled(value === "sho
           :aria-label="t('terminalEnhancements.hostMarkers')"
           @update:model-value="changeMarkers"
         />
-      </label>
+      </div>
     </div>
     <slot />
   </section>

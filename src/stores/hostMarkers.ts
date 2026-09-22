@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { readonly, ref } from "vue";
+import { onScopeDispose, readonly, ref } from "vue";
 import { normalizeHostMarker, type HostMarker } from "../host-markers";
 
 export const HOST_MARKERS_STORAGE_KEY = "norishell.host-markers.v1";
@@ -21,6 +21,10 @@ export const useHostMarkersStore = defineStore("hostMarkers", () => {
   const initial = read();
   const enabled = ref(initial.enabled);
   const markers = ref(initial.markers);
+  function reload() { const current = read(); enabled.value = current.enabled; markers.value = current.markers; }
+  const onStorage = (event: StorageEvent) => { if (event.key === HOST_MARKERS_STORAGE_KEY || event.key === null) reload(); };
+  window.addEventListener("storage", onStorage);
+  onScopeDispose(() => window.removeEventListener("storage", onStorage));
   function commit(next: Preferences): HostMarkerSaveResult {
     try { localStorage.setItem(HOST_MARKERS_STORAGE_KEY, JSON.stringify(next)); }
     catch { return "storage-error"; }
@@ -38,6 +42,7 @@ export const useHostMarkersStore = defineStore("hostMarkers", () => {
     if (!hostId.trim()) return "invalid";
     const marker = input === null ? null : normalizeHostMarker(input);
     if (input !== null && !marker) return "invalid";
+    reload();
     const next = { ...markers.value };
     if (marker) Object.defineProperty(next, hostId, { value: marker, enumerable: true, configurable: true, writable: true });
     else delete next[hostId];
@@ -46,6 +51,7 @@ export const useHostMarkersStore = defineStore("hostMarkers", () => {
   }
   function remove(hostId: string) { return set(hostId, null); }
   function setEnabled(value: boolean): HostMarkerSaveResult {
+    reload();
     if (value === enabled.value) return "saved";
     return commit({ version: 1, enabled: value, markers: markers.value });
   }

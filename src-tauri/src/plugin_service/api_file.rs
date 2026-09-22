@@ -6,7 +6,11 @@ use crate::plugin_api::{
     ResourceOwner,
     files::{PluginFileAccessScope, PluginFileGrant},
 };
-use cap_std::fs::{Dir, File, Metadata, MetadataExt as _};
+#[cfg(windows)]
+use cap_fs_ext::MetadataExt as _;
+#[cfg(unix)]
+use cap_std::fs::MetadataExt as _;
+use cap_std::fs::{Dir, File, Metadata};
 use norishell_core_api::{
     PluginApiErrorCode, PluginApiValue, PluginApprovalOperation, PluginFileAccessRequest,
     PluginFilePickerKind,
@@ -173,13 +177,5 @@ fn file_identity(metadata: &Metadata) -> Result<String, PluginApiErrorCode> {
 
 #[cfg(windows)]
 fn file_identity(metadata: &Metadata) -> Result<String, PluginApiErrorCode> {
-    Ok(format!(
-        "{}:{}",
-        metadata
-            .volume_serial_number()
-            .ok_or(PluginApiErrorCode::Unavailable)?,
-        metadata
-            .file_index()
-            .ok_or(PluginApiErrorCode::Unavailable)?
-    ))
+    Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
 }

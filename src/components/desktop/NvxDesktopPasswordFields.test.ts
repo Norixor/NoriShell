@@ -5,17 +5,17 @@ import NvxDesktopPasswordFields from "./NvxDesktopPasswordFields.vue";
 import { desktopEn } from "../../locales/desktop";
 
 const api = vi.hoisted(() => ({
-  cancelHostCreatePassword: vi.fn(), createVault: vi.fn(), fetchVaultStatus: vi.fn(),
-  stageHostCreatePassword: vi.fn(), unlockVault: vi.fn(),
+  cancelHostCreatePassword: vi.fn(), stageHostCreatePassword: vi.fn(),
 }));
+const secureVault = vi.hoisted(() => ({ requestSecureVault: vi.fn() }));
 vi.mock("../../core-api/client", () => api);
+vi.mock("../../core-api/secure-vault-client", () => secureVault);
 function mountFields() {
   return mount(NvxDesktopPasswordFields, {
     props: { newProfile: true, modelValue: null, credentials: [], label: "Fixture desktop", busy: false },
     global: {
       plugins: [createI18n({ legacy: false, locale: "en", messages: { en: { desktop: desktopEn } } })],
       stubs: {
-        Teleport: true,
         NvxSelect: { props: ["modelValue", "options", "disabled"], emits: ["update:modelValue"], template: '<select :value="modelValue" :disabled="disabled" @change="$emit(\'update:modelValue\', $event.target.value)"><option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option></select>' },
       },
     },
@@ -28,17 +28,15 @@ function deferred<T>() {
 }
 beforeEach(() => {
   vi.resetAllMocks();
-  api.fetchVaultStatus.mockResolvedValue({ state: "unlocked" });
+  secureVault.requestSecureVault.mockResolvedValue(true);
   api.stageHostCreatePassword.mockResolvedValue({ stagedPasswordId: "staged-fixture" });
   api.cancelHostCreatePassword.mockResolvedValue({ cancelled: true });
-  api.createVault.mockResolvedValue({ state: "unlocked" });
-  api.unlockVault.mockResolvedValue({ state: "unlocked" });
 });
 describe("desktop creation password lifecycle", () => {
-  it("leaves an empty password optional without opening Vault or staging a secret", async () => {
+  it("leaves an empty password optional without opening a protected Vault window or staging a secret", async () => {
     const wrapper = mountFields();
     expect(await wrapper.vm.prepare()).toBeNull();
-    expect(api.fetchVaultStatus).not.toHaveBeenCalled();
+    expect(secureVault.requestSecureVault).not.toHaveBeenCalled();
     expect(api.stageHostCreatePassword).not.toHaveBeenCalled();
     wrapper.unmount();
     expect(api.cancelHostCreatePassword).not.toHaveBeenCalled();
@@ -64,55 +62,35 @@ describe("desktop creation password lifecycle", () => {
     expect(api.cancelHostCreatePassword).not.toHaveBeenCalled();
   });
 
-  it("creates Missing Vault with confirmation before resuming the same save", async () => {
-    api.fetchVaultStatus.mockResolvedValue({ state: "missing" });
+  it("uses the protected Vault window before staging and never renders Vault password fields here", async () => {
     const wrapper = mountFields();
     await wrapper.get("#desktop-password").setValue("synthetic-desktop-password");
-    const saving = wrapper.vm.prepare(); await flushPromises();
-    expect(api.stageHostCreatePassword).not.toHaveBeenCalled();
-    await wrapper.get("#desktop-save-vault-password").setValue("synthetic-vault-password");
-    await wrapper.get("#desktop-save-vault-confirmation").setValue("different-password");
-    const submit = wrapper.findAll("button").find((button) => button.text() === desktopEn.createVault)!;
-    expect(submit.attributes("disabled")).toBeDefined();
-    await wrapper.get("#desktop-save-vault-confirmation").setValue("synthetic-vault-password");
-    expect(wrapper.findAll("button").find((button) => button.text() === desktopEn.createVault)!.attributes("disabled")).toBeUndefined();
-    await wrapper.findAll("button").find((button) => button.text() === desktopEn.createVault)!.trigger("click"); await flushPromises();
-    expect(api.createVault).toHaveBeenCalledWith("synthetic-vault-password", "synthetic-vault-password");
-    expect(api.unlockVault).not.toHaveBeenCalled();
-    expect(await saving).toEqual(expect.objectContaining({ stagedPasswordId: "staged-fixture" }));
+    expect(await wrapper.vm.prepare()).toEqual(expect.objectContaining({ stagedPasswordId: "staged-fixture" }));
+    expect(secureVault.requestSecureVault).toHaveBeenCalledWith("ensureUnlocked");
     expect(wrapper.find("#desktop-save-vault-password").exists()).toBe(false);
-    wrapper.unmount();
-  });
-
-  it("cancels Locked Vault without staging or saving the desktop password", async () => {
-    api.fetchVaultStatus.mockResolvedValue({ state: "locked" });
-    const wrapper = mountFields();
-    await wrapper.get("#desktop-password").setValue("synthetic-desktop-password");
-    const saving = wrapper.vm.prepare(); await flushPromises();
     expect(wrapper.find("#desktop-save-vault-confirmation").exists()).toBe(false);
-    const cancel = wrapper.findAll("button").find((button) => button.text() === desktopEn.cancel)!;
-    await cancel.trigger("click");
-    expect(await saving).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("cancels the protected Vault window without staging or saving the desktop password", async () => {
+    secureVault.requestSecureVault.mockResolvedValue(false);
+    const wrapper = mountFields();
+    await wrapper.get("#desktop-password").setValue("synthetic-desktop-password");
+    expect(await wrapper.vm.prepare()).toBe(false);
     expect((wrapper.get("#desktop-password").element as HTMLInputElement).value).toBe("");
-    expect(api.createVault).not.toHaveBeenCalled();
     expect(api.stageHostCreatePassword).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it("uses unlock for RequiresReload and keeps secrets cleared after Vault failure", async () => {
-    api.fetchVaultStatus.mockResolvedValue({ state: "requiresReload" });
-    api.unlockVault.mockRejectedValue(new Error("fixture rejection"));
+  it("keeps secrets cleared when the protected Vault window rejects", async () => {
+    secureVault.requestSecureVault.mockRejectedValue(new Error("fixture rejection"));
     const wrapper = mountFields();
     await wrapper.get("#desktop-password").setValue("synthetic-desktop-password");
-    const saving = wrapper.vm.prepare(); await flushPromises();
-    await wrapper.get("#desktop-save-vault-password").setValue("synthetic-vault-password");
-    await wrapper.findAll("button").find((button) => button.text() === desktopEn.unlockVault)!.trigger("click");
-    await flushPromises();
-    expect(api.unlockVault).toHaveBeenCalledTimes(1);
-    expect((wrapper.get("#desktop-save-vault-password").element as HTMLInputElement).value).toBe("");
+    expect(await wrapper.vm.prepare()).toBe(false);
+    expect(secureVault.requestSecureVault).toHaveBeenCalledTimes(1);
+    expect((wrapper.get("#desktop-password").element as HTMLInputElement).value).toBe("");
     expect(api.stageHostCreatePassword).not.toHaveBeenCalled();
     wrapper.unmount();
-    expect(await saving).toBe(false);
   });
 
   it("cleans a failed stage by its original operation even if the response was lost", async () => {
@@ -166,11 +144,28 @@ describe("desktop creation password lifecycle", () => {
     wrapper.unmount();
   });
 
-  it("bounds UTF-8 bytes before opening Vault", async () => {
+  it("reports password staging as dirty and awaits its cleanup before allowing the editor to close", async () => {
+    const wrapper = mountFields();
+    await wrapper.get("#desktop-password").setValue("synthetic-desktop-password");
+    expect(wrapper.emitted("dirty-change")?.at(-1)).toEqual([true]);
+    const stage = await wrapper.vm.prepare();
+    expect(stage).toEqual(expect.objectContaining({ stagedPasswordId: "staged-fixture" }));
+    if (!stage) throw new Error("expected staged password");
+
+    expect(await wrapper.vm.discard()).toBe(true);
+    expect(api.cancelHostCreatePassword).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: stage.operationId,
+      idempotencyKey: stage.idempotencyKey,
+    }));
+    expect(wrapper.emitted("dirty-change")?.at(-1)).toEqual([false]);
+    wrapper.unmount();
+  });
+
+  it("bounds UTF-8 bytes before opening the protected Vault window", async () => {
     const wrapper = mountFields();
     await wrapper.get("#desktop-password").setValue("字".repeat(1500));
     expect(await wrapper.vm.prepare()).toBe(false);
-    expect(api.fetchVaultStatus).not.toHaveBeenCalled();
+    expect(secureVault.requestSecureVault).not.toHaveBeenCalled();
     expect(api.stageHostCreatePassword).not.toHaveBeenCalled();
     wrapper.unmount();
   });

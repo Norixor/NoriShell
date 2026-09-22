@@ -1,4 +1,4 @@
-import type { AppLocale } from "./locales";
+import type { LocalePreference } from "./locales";
 import { isUiZoom, type UiZoom } from "./ui-zoom";
 import type { ThemePreference } from "./ui-preferences";
 import {
@@ -17,7 +17,7 @@ import {
 
 export interface ApplicationPreferences {
   themePreference: ThemePreference;
-  locale: AppLocale;
+  locale: LocalePreference;
   uiZoom: UiZoom;
   terminalStartupBehavior: "welcome" | "restoreHistory";
   newTerminalBehavior: "welcome" | "localTerminal";
@@ -40,7 +40,7 @@ export interface AppearancePreferences {
 }
 
 export const DEFAULT_APPLICATION_PREFERENCES: ApplicationPreferences = {
-  themePreference: "light", locale: "zh-CN", uiZoom: 100,
+  themePreference: "light", locale: "system", uiZoom: 100,
   terminalStartupBehavior: "restoreHistory", newTerminalBehavior: "welcome", singlePaneTabCloseBehavior: "confirm",
 };
 export function defaultAppearancePreferences(): AppearancePreferences {
@@ -60,7 +60,7 @@ export function exactPreferenceKeys(value: unknown, keys: readonly string[]): va
 export function validateApplicationPreferences(value: unknown): value is ApplicationPreferences {
   if (!exactPreferenceKeys(value, Object.keys(DEFAULT_APPLICATION_PREFERENCES))) return false;
   return ["light", "dark", "system"].includes(value.themePreference as string)
-    && ["zh-CN", "en"].includes(value.locale as string) && isUiZoom(value.uiZoom)
+    && ["system", "zh-CN", "en"].includes(value.locale as string) && isUiZoom(value.uiZoom)
     && ["welcome", "restoreHistory"].includes(value.terminalStartupBehavior as string)
     && ["welcome", "localTerminal"].includes(value.newTerminalBehavior as string)
     && ["confirm", "closeDirectly"].includes(value.singlePaneTabCloseBehavior as string);
