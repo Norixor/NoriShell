@@ -3875,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-app-persistence"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "base64 0.22.1",
  "norishell-core-api",
@@ -3890,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-core-api"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "hex",
  "serde",
@@ -3902,7 +3902,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-desktop"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.22.1",
@@ -3966,7 +3966,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-desktop-protocol"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -3974,7 +3974,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-plugin-platform"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 2.2.0",
@@ -3993,7 +3993,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-plugin-sdk"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "norishell-core-api",
  "norishell-plugin-platform",
@@ -4006,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-rdp-client"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "cpal",
  "ironrdp",
@@ -4023,7 +4023,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-secret-vault"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4046,14 +4046,14 @@ dependencies = [
 
 [[package]]
 name = "norishell-server-metrics"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "norishell-ssh-domain"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "base64 0.22.1",
  "sha2 0.10.9",
@@ -4062,7 +4062,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-ssh-profile-sync"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4078,7 +4078,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-ssh-transport"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4093,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-telnet-runtime"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "thiserror 2.0.20",
  "tokio",
@@ -4101,7 +4101,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-vnc-client"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta"
 dependencies = [
  "jpeg-decoder",
  "norishell-desktop-protocol",

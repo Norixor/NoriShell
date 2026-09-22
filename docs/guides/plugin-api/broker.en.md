@@ -1,12 +1,12 @@
 # Broker methods, resources, requests, and results
 
-Every row is a `PluginApiOperation` variant inside [`PluginApiCall`](types.en.md#pluginapicall). A successful result is a `PluginApiValue`; failures are [`PluginApiErrorCode`](types.en.md#error-and-availability-types). The operation list is complete for protocol 1.13; [`describe`](types.en.md#error-and-availability-types) determines which entries are available in the current runtime.
+Every row is a `PluginApiOperation` variant inside [`PluginApiCall`](types.en.md#pluginapicall). A successful result is a `PluginApiValue`; failures are [`PluginApiErrorCode`](types.en.md#pluginapierrorcode). The operation list is complete for protocol 1.13; [`describe`](types.en.md#pluginapidescription) determines which entries are available in the current runtime.
 
 | Method | Request payload | Completed result |
 | --- | --- | --- |
-| `appRegister` | [`PluginAppRegistration`](types.en.md#workflow-app-and-provider-types) | `appAccepted` |
-| `appNotify` | [`PluginAppNotification`](types.en.md#workflow-app-and-provider-types) | `appAccepted` |
-| `appNavigate` | [`PluginAppNavigation`](types.en.md#workflow-app-and-provider-types) | `appAccepted` |
+| `appRegister` | [`PluginAppRegistration`](types.en.md#pluginappregistration) | `appAccepted` |
+| `appNotify` | [`PluginAppNotification`](types.en.md#pluginappnotification) | `appAccepted` |
+| `appNavigate` | [`PluginAppNavigation`](types.en.md#pluginappnavigation) | `appAccepted` |
 | `taskStart` | workflow id, in-memory input JSON, opaque preselected file scopes | `task { PluginWorkflowTaskSnapshot }` |
 | `taskGet` | `PluginWorkflowTaskId` | `task { PluginWorkflowTaskSnapshot }` |
 | `taskList` | none | `tasks { PluginWorkflowTaskSnapshot[] }` |

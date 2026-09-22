@@ -4,7 +4,7 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">本地优先的终端与远程连接工作台</p>
 <p align="center">SSH · 本地终端 · SFTP · 端口转发 · RDP / VNC · 加密 Vault · 插件</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.0-beta.1</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.0-beta</p>
 <p align="center">简体中文 · <a href="README.en.md">English</a></p>
 
 NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据管理放进一个桌面应用。基础连接无需账号，主机配置保存在本机，持久化密码和私钥进入独立加密 Vault；需要跨设备使用时，可通过 Norixor 插件选择性启用端到端加密同步。
@@ -56,13 +56,16 @@ NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据�
 
 ## 安装与快速开始
 
-前往 [GitHub Releases](https://github.com/Norixor/NoriShell/releases)，选择适合设备的安装包。
+前往 [GitHub Releases](https://github.com/Norixor/NoriShell/releases)，选择适合设备的安装包或免安装 ZIP。
 
-| 平台 | 架构 | 安装方式 |
-| --- | --- | --- |
-| macOS 13 及以上 | Apple Silicon（ARM64） / Intel（x64） | 打开对应架构的 `.dmg`，将 NoriShell 拖入“应用程序” |
-| Windows | x64（Intel / AMD） | 运行对应的 `-setup.exe` |
-| Windows | ARM64 | 运行 ARM64 对应的 `-setup.exe` |
+| 平台 | 架构 | 安装包 | 免安装 ZIP |
+| --- | --- | --- | --- |
+| macOS 13 及以上 | Apple Silicon（ARM64） | `.dmg` | 解压后打开 `NoriShell.app` |
+| macOS 13 及以上 | Intel（x64） | `.dmg` | 解压后打开 `NoriShell.app` |
+| Windows | x64（Intel / AMD） | `-setup.exe` | 解压完整文件夹后运行 `norishell.exe` |
+| Windows | ARM64 | `-setup.exe` | 解压完整文件夹后运行 `norishell.exe` |
+
+使用 macOS 安装包时，将 NoriShell 拖入“应用程序”；Windows 安装包按向导安装。ZIP 版使用同样的本机配置与数据目录，运行前请完整解压。Windows ZIP 版需要系统已安装 WebView2 Runtime。
 
 ### 检查新版本
 
@@ -130,23 +133,16 @@ NoriShell 不提供在线插件市场。安装或升级插件时，用户明确�
 
 插件开发入口：
 
-- [插件开发指南目录](docs/guides/developers/README.zh-CN.md)
-- [快速入门与示例选择](docs/guides/developers/quickstart.zh-CN.md)
-- [包与 manifest](docs/guides/developers/package.zh-CN.md)
-- [Protocol 13 Wasm ABI](docs/guides/developers/wasm-abi.zh-CN.md)
-- [Broker、资源与存储](docs/guides/developers/broker.zh-CN.md)
-- [声明式 UI](docs/guides/developers/ui.zh-CN.md)
-- [安全与发布检查](docs/guides/developers/security.zh-CN.md)
+- [完整插件开发指南](docs/guides/developers/README.zh-CN.md)
+- [从零创建第一个插件](docs/guides/developers/start/quickstart.zh-CN.md)
+- [调用 API 与申请权限](docs/guides/developers/development/calling-api.zh-CN.md)
+- [构建插件界面](docs/guides/developers/development/ui.zh-CN.md)
+- [管理任务与资源](docs/guides/developers/development/resources.zh-CN.md)
+- [打包、安装与升级](docs/guides/developers/development/packaging.zh-CN.md)
+- [API 方法与类型参考](docs/guides/plugin-api/README.zh-CN.md)
+- [示例讲解与源码](docs/guides/developers/examples/README.zh-CN.md)
 
-可运行示例：
-
-- [API 基础示例](examples/plugins/api-demo/README.md)
-- [应用页面与宿主集成](examples/plugins/app-demo/README.md)
-- [多步骤工作流](examples/plugins/workflow-demo/README.md)
-- [网络服务工具](examples/plugins/service-demo/README.md)
-- [字节流协议插件](examples/plugins/protocol-demo/README.md)
-- [SDK 工具与开发循环](examples/plugins/sdk-tooling/README.md)
-- [声明式主题包](examples/theme-plugins/README.md)
+更多专题：[Wasm ABI](docs/guides/developers/wasm-abi.zh-CN.md) · [主题插件](docs/guides/developers/themes.zh-CN.md) · [安全与发布检查](docs/guides/developers/security.zh-CN.md) · [SDK 开发工具](examples/plugins/sdk-tooling/README.md)
 
 ## 文档
 

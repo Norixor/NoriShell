@@ -1,12 +1,12 @@
 # Broker 方法、资源、请求与结果
 
-每行都是 [`PluginApiCall`](types.zh-CN.md#pluginapicall) 内的一个 `PluginApiOperation` variant。成功结果为 `PluginApiValue`，失败为 [`PluginApiErrorCode`](types.zh-CN.md#error-与-availability-类型)。下表是 protocol 1.13 的完整 operation 清单；当前 runtime 实际开放的子集必须由 [`describe`](types.zh-CN.md#error-与-availability-类型) 查询。
+每行都是 [`PluginApiCall`](types.zh-CN.md#pluginapicall) 内的一个 `PluginApiOperation` variant。成功结果为 `PluginApiValue`，失败为 [`PluginApiErrorCode`](types.zh-CN.md#pluginapierrorcode)。下表是 protocol 1.13 的完整 operation 清单；当前 runtime 实际开放的子集必须由 [`describe`](types.zh-CN.md#pluginapidescription) 查询。
 
 | 方法 | 请求 payload | 成功结果 |
 | --- | --- | --- |
-| `appRegister` | [`PluginAppRegistration`](types.zh-CN.md#workflowapp-与-provider-类型) | `appAccepted` |
-| `appNotify` | [`PluginAppNotification`](types.zh-CN.md#workflowapp-与-provider-类型) | `appAccepted` |
-| `appNavigate` | [`PluginAppNavigation`](types.zh-CN.md#workflowapp-与-provider-类型) | `appAccepted` |
+| `appRegister` | [`PluginAppRegistration`](types.zh-CN.md#pluginappregistration) | `appAccepted` |
+| `appNotify` | [`PluginAppNotification`](types.zh-CN.md#pluginappnotification) | `appAccepted` |
+| `appNavigate` | [`PluginAppNavigation`](types.zh-CN.md#pluginappnavigation) | `appAccepted` |
 | `taskStart` | workflow id、进程内 input JSON、不透明的预选 file scope | `task { PluginWorkflowTaskSnapshot }` |
 | `taskGet` | `PluginWorkflowTaskId` | `task { PluginWorkflowTaskSnapshot }` |
 | `taskList` | 无 | `tasks { PluginWorkflowTaskSnapshot[] }` |

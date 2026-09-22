@@ -4,7 +4,7 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">A local-first terminal and remote connection workspace</p>
 <p align="center">SSH · Local terminal · SFTP · Port forwarding · RDP / VNC · Encrypted Vault · Plugins</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.0-beta.1</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.0-beta</p>
 <p align="center"><a href="README.md">简体中文</a> · English</p>
 
 NoriShell brings terminal sessions, remote connections, file transfer, remote desktops, and credential management into one desktop application. Core connectivity requires no account. Host configuration stays local, while persisted passwords and private keys are stored in a separate encrypted Vault. End-to-end encrypted synchronization can be enabled selectively through the Norixor plugin when cross-device access is needed.
@@ -56,13 +56,16 @@ The application is built with **Tauri 2, Vue 3, TypeScript, xterm, and Rust**. R
 
 ## Installation and quick start
 
-Visit [GitHub Releases](https://github.com/Norixor/NoriShell/releases) and choose the installer for your device.
+Visit [GitHub Releases](https://github.com/Norixor/NoriShell/releases) and choose an installer or a standalone ZIP for your device.
 
-| Platform | Architecture | Installation |
-| --- | --- | --- |
-| macOS 13 or later | Apple Silicon (ARM64) / Intel (x64) | Open the matching `.dmg` and drag NoriShell into Applications |
-| Windows | x64 (Intel / AMD) | Run the matching `-setup.exe` |
-| Windows | ARM64 | Run the ARM64 `-setup.exe` |
+| Platform | Architecture | Installer | Standalone ZIP |
+| --- | --- | --- | --- |
+| macOS 13 or later | Apple Silicon (ARM64) | `.dmg` | Extract and open `NoriShell.app` |
+| macOS 13 or later | Intel (x64) | `.dmg` | Extract and open `NoriShell.app` |
+| Windows | x64 (Intel / AMD) | `-setup.exe` | Extract the entire folder and run `norishell.exe` |
+| Windows | ARM64 | `-setup.exe` | Extract the entire folder and run `norishell.exe` |
+
+For a macOS installer, drag NoriShell into Applications; on Windows, follow the installer. ZIP builds use the same local settings and data directories. Extract the full archive before running. The Windows ZIP requires WebView2 Runtime to be installed.
 
 ### Check for updates
 
@@ -130,23 +133,16 @@ NoriShell has no online plugin marketplace. To install or upgrade a plugin, the 
 
 Plugin development entry points:
 
-- [Plugin developer guide index](docs/guides/developers/README.en.md)
-- [Quick start and example selection](docs/guides/developers/quickstart.en.md)
-- [Package and manifest](docs/guides/developers/package.en.md)
-- [Protocol-13 Wasm ABI](docs/guides/developers/wasm-abi.en.md)
-- [Brokers, resources, and storage](docs/guides/developers/broker.en.md)
-- [Declarative UI](docs/guides/developers/ui.en.md)
-- [Security and release checks](docs/guides/developers/security.en.md)
+- [Complete plugin developer guide](docs/guides/developers/README.en.md)
+- [Build your first plugin](docs/guides/developers/start/quickstart.en.md)
+- [Call APIs and request permissions](docs/guides/developers/development/calling-api.en.md)
+- [Build plugin interfaces](docs/guides/developers/development/ui.en.md)
+- [Manage tasks and resources](docs/guides/developers/development/resources.en.md)
+- [Package, install, and upgrade](docs/guides/developers/development/packaging.en.md)
+- [API methods and types](docs/guides/plugin-api/README.en.md)
+- [Example walkthroughs and source](docs/guides/developers/examples/README.en.md)
 
-Runnable examples:
-
-- [API fundamentals](examples/plugins/api-demo/README.md)
-- [Application pages and host integration](examples/plugins/app-demo/README.md)
-- [Multi-step workflows](examples/plugins/workflow-demo/README.md)
-- [Network service tooling](examples/plugins/service-demo/README.md)
-- [Byte-stream protocol plugin](examples/plugins/protocol-demo/README.md)
-- [SDK tooling and development loop](examples/plugins/sdk-tooling/README.md)
-- [Declarative theme packages](examples/theme-plugins/README.md)
+More topics: [Wasm ABI](docs/guides/developers/wasm-abi.en.md) · [Theme plugins](docs/guides/developers/themes.en.md) · [Security and release checks](docs/guides/developers/security.en.md) · [SDK tooling](examples/plugins/sdk-tooling/README.md)
 
 ## Documentation
 
