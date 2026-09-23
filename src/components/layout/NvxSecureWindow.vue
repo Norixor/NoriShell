@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ShieldCheck } from "lucide-vue-next";
 import type { Component } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { detectDesktopPlatform } from "../../platform";
 import { NvxIcon } from "../ui";
+import NvxStandaloneHeader from "./NvxStandaloneHeader.vue";
 
 withDefaults(defineProps<{
   title: string;
@@ -19,10 +19,6 @@ withDefaults(defineProps<{
 const { t } = useI18n();
 const platform = detectDesktopPlatform();
 
-function startDragging(event: PointerEvent) {
-  if (platform !== "macos" || event.button !== 0) return;
-  void getCurrentWindow().startDragging().catch(() => undefined);
-}
 </script>
 
 <template>
@@ -33,11 +29,9 @@ function startDragging(event: PointerEvent) {
     data-plugin-protected
     data-theme-protected
   >
-    <header
+    <NvxStandaloneHeader
       class="nvx-secure-window__chrome"
-      @pointerdown="startDragging"
     >
-      <strong class="nvx-secure-window__brand">NoriShell</strong>
       <span class="nvx-secure-window__protected">
         <NvxIcon
           :icon="ShieldCheck"
@@ -45,7 +39,7 @@ function startDragging(event: PointerEvent) {
         />
         {{ t("window.protected") }}
       </span>
-    </header>
+    </NvxStandaloneHeader>
     <div class="nvx-secure-window__content">
       <header class="nvx-secure-window__intro">
         <span
@@ -98,16 +92,6 @@ function startDragging(event: PointerEvent) {
   min-width: 0; overflow: hidden; background: var(--nvx-color-bg-canvas); color: var(--nvx-color-text-primary);
   font-size: var(--nvx-font-size-sm); line-height: var(--nvx-line-height-sm);
 }
-.nvx-secure-window__chrome {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--nvx-space-3);
-  min-height: 36px; padding: 0 var(--nvx-space-5); user-select: none;
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
-}
-.nvx-secure-window[data-platform="macos"] .nvx-secure-window__chrome {
-  /* Align with the native traffic lights' 16pt vertical center. */
-  min-height: 32px; padding-inline-start: 88px;
-}
-.nvx-secure-window__brand { font-size: var(--nvx-font-size-sm); }
 .nvx-secure-window__protected {
   display: inline-flex; align-items: center; gap: var(--nvx-space-1);
   color: var(--nvx-color-success); font-size: var(--nvx-font-size-xs); font-weight: var(--nvx-font-weight-medium);
@@ -157,7 +141,6 @@ function startDragging(event: PointerEvent) {
 .nvx-secure-window__symbol { display: flex; color: var(--nvx-color-accent); }
 @media (max-width: 520px) {
   .nvx-secure-window__content { padding-inline: var(--nvx-space-4); }
-  .nvx-secure-window__chrome { padding-inline: var(--nvx-space-4); gap: var(--nvx-space-2); }
   .nvx-secure-window__body :deep(.secure-facts > div) { grid-template-columns: 88px minmax(0, 1fr); gap: var(--nvx-space-2); }
 }
 </style>

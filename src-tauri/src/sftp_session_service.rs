@@ -25,11 +25,13 @@ use local_capability::{
     rememberable_local_directory_path, safe_local_name_display,
 };
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use local_capability::{
-    LocalBoundaryCapability, LocalDirectoryCapabilityHandle, UnixFileIdentity, UnixLocalBoundary,
-    UnixLocalDirectoryCapability, map_local_entry, openat_identity,
+    LocalBoundaryCapability, LocalDirectoryCapabilityHandle, NativeLocalBoundary,
+    NativeLocalDirectoryCapability, map_local_entry,
 };
+#[cfg(unix)]
+use local_capability::{NativeFileIdentity, openat_identity};
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -44,7 +46,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::{ffi::CString, path::PathBuf};
 
 use norishell_app_persistence::KnownHostObservation;
@@ -4474,15 +4476,15 @@ impl SftpSessionService {
         if request.selected_path.trim().is_empty() {
             return Err(SftpRuntimeError::InvalidInput.into());
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = request;
             return Err(SftpRuntimeError::InvalidState.into());
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let selected = PathBuf::from(&request.selected_path);
-            let capability = UnixLocalDirectoryCapability::register(&selected)
+            let capability = NativeLocalDirectoryCapability::register(&selected)
                 .map_err(|_| SftpRuntimeError::InvalidInput)?;
             let capability_id = uuid::Uuid::now_v7().to_string();
             let revision = 1;
@@ -4500,7 +4502,7 @@ impl SftpSessionService {
                 capability_id.clone(),
                 LocalDirectoryCapability {
                     revision,
-                    capability: Arc::new(LocalDirectoryCapabilityHandle::Unix(capability)),
+                    capability: Arc::new(LocalDirectoryCapabilityHandle::Native(capability)),
                     rememberable_path: rememberable_path.clone(),
                     revoked: Arc::new(AtomicBool::new(false)),
                     expires_at: std::time::Instant::now() + LOCAL_DIRECTORY_CAPABILITY_TTL,
@@ -4526,14 +4528,13 @@ impl SftpSessionService {
         {
             return Err(SftpRuntimeError::InvalidInput.into());
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = request;
-            // Local SFTP filesystem access stays unavailable until Windows has
-            // an equivalent handle/reparse-point-safe capability boundary.
+            // Unsupported platforms must not fall back to ambient path access.
             return Err(SftpRuntimeError::InvalidState.into());
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let operation_id = request.operation_id.to_string();
             let fingerprint = local_directory_list_fingerprint(&request);
@@ -4590,7 +4591,7 @@ impl SftpSessionService {
                 None
             };
             let (entries, next_stream) = match directory_capability.capability.as_ref() {
-                LocalDirectoryCapabilityHandle::Unix(capability) => capability
+                LocalDirectoryCapabilityHandle::Native(capability) => capability
                     .list_page(
                         cursor_state.map(|cursor| cursor.stream),
                         usize::from(request.page_size),
@@ -4619,7 +4620,7 @@ impl SftpSessionService {
                             directory_ref: request.directory_ref.clone(),
                             directory_revision: request.expected_revision.get(),
                             name: name.clone(),
-                            identity: LocalObjectIdentity::from_unix(&identity),
+                            identity: LocalObjectIdentity::from_native(&identity),
                             expires_at: std::time::Instant::now() + DIRECTORY_REFERENCE_TTL,
                         },
                     );
@@ -4681,12 +4682,12 @@ impl SftpSessionService {
         {
             return Err(SftpRuntimeError::InvalidInput.into());
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = request;
             return Err(SftpRuntimeError::InvalidState.into());
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let operation_id = request.operation_id.to_string();
             let fingerprint = local_directory_open_fingerprint(&request);
@@ -4737,7 +4738,7 @@ impl SftpSessionService {
                 return Err(SftpRuntimeError::Conflict.into());
             }
             let child = match parent.capability.as_ref() {
-                LocalDirectoryCapabilityHandle::Unix(parent) => parent
+                LocalDirectoryCapabilityHandle::Native(parent) => parent
                     .open_child(&entry.name, &entry.identity)
                     .map_err(|_| SftpRuntimeError::Conflict)?,
             };
@@ -4758,7 +4759,7 @@ impl SftpSessionService {
                 capability_id.clone(),
                 LocalDirectoryCapability {
                     revision,
-                    capability: Arc::new(LocalDirectoryCapabilityHandle::Unix(child)),
+                    capability: Arc::new(LocalDirectoryCapabilityHandle::Native(child)),
                     rememberable_path: rememberable_path.clone(),
                     revoked: Arc::new(AtomicBool::new(false)),
                     expires_at: std::time::Instant::now() + LOCAL_DIRECTORY_CAPABILITY_TTL,
@@ -4837,7 +4838,7 @@ impl SftpSessionService {
                 )
                 .await?;
             let child = match parent.capability.as_ref() {
-                LocalDirectoryCapabilityHandle::Unix(parent) => parent
+                LocalDirectoryCapabilityHandle::Native(parent) => parent
                     .create_child(request.name.as_bytes())
                     .map_err(|_| SftpRuntimeError::Conflict)?,
             };
@@ -4860,7 +4861,7 @@ impl SftpSessionService {
                 capability_id.clone(),
                 LocalDirectoryCapability {
                     revision,
-                    capability: Arc::new(LocalDirectoryCapabilityHandle::Unix(child)),
+                    capability: Arc::new(LocalDirectoryCapabilityHandle::Native(child)),
                     rememberable_path: rememberable_path.clone(),
                     revoked: Arc::new(AtomicBool::new(false)),
                     expires_at: std::time::Instant::now() + LOCAL_DIRECTORY_CAPABILITY_TTL,
@@ -6848,20 +6849,20 @@ impl SftpSessionService {
         capability: &LocalDirectoryCapability,
         entry: &LocalDirectoryEntryReference,
     ) -> Result<(), SftpProductionError> {
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (capability, entry);
             Err(SftpRuntimeError::InvalidState.into())
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         match capability.capability.as_ref() {
-            LocalDirectoryCapabilityHandle::Unix(capability) => {
+            LocalDirectoryCapabilityHandle::Native(capability) => {
                 let name =
                     CString::new(entry.name.clone()).map_err(|_| SftpRuntimeError::InvalidInput)?;
                 let observed = capability
                     .entry_identity(&name)
                     .map_err(|_| SftpRuntimeError::Conflict)?;
-                if !entry.identity.matches_unix(&observed) {
+                if !entry.identity.matches_native(&observed) {
                     return Err(SftpRuntimeError::Conflict.into());
                 }
                 Ok(())
@@ -7019,14 +7020,14 @@ impl SftpSessionService {
         {
             return Err(SftpRuntimeError::Conflict.into());
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (capability, name_bytes, precondition, expected_bytes);
             Err(SftpRuntimeError::InvalidState.into())
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         match capability.capability.as_ref() {
-            LocalDirectoryCapabilityHandle::Unix(capability) => capability
+            LocalDirectoryCapabilityHandle::Native(capability) => capability
                 .derive_upload_boundary(name_bytes, precondition, expected_bytes)
                 .map_err(|_| SftpRuntimeError::Conflict.into()),
         }
@@ -7058,7 +7059,7 @@ impl SftpSessionService {
         }
         #[cfg(unix)]
         match capability.capability.as_ref() {
-            LocalDirectoryCapabilityHandle::Unix(capability) => capability
+            LocalDirectoryCapabilityHandle::Native(capability) => capability
                 .derive_download_boundary(name_bytes)
                 .map_err(|_| SftpRuntimeError::Conflict.into()),
         }
@@ -7643,7 +7644,7 @@ impl SftpSessionService {
                 };
                 #[cfg(unix)]
                 {
-                    let Ok(capability) = boundary.unix() else {
+                    let Ok(capability) = boundary.native() else {
                         return CleanupOutcome::Residual {
                             opaque_location: "selected local temporary file".to_owned(),
                         };
@@ -7738,17 +7739,17 @@ impl SftpSessionService {
                     )?;
                     return Err(SftpRuntimeError::ResumeEvidenceMismatch.into());
                 }
-                #[cfg(not(unix))]
+                #[cfg(not(any(unix, windows)))]
                 let expected_prefix: SftpRuntimeResult<Vec<u8>> =
                     Err(SftpRuntimeError::InvalidState);
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 let expected_prefix: SftpRuntimeResult<Vec<u8>> = (|| {
                     use std::io::Read as _;
 
                     let length = usize::try_from(transfer.transferred_bytes)
                         .map_err(|_| SftpRuntimeError::InvalidInput)?;
                     let source = boundary
-                        .unix()
+                        .native()
                         .map_err(|_| SftpRuntimeError::InvalidState)?
                         .open_upload_source(transfer.expected_bytes)
                         .map_err(|_| SftpRuntimeError::InvalidState)?;
@@ -8329,7 +8330,7 @@ impl SftpSessionService {
             (TransferDirection::Download, TransferEndpoint::LocalBoundaryToken(_)) => {
                 #[cfg(unix)]
                 {
-                    let Ok(capability) = boundary.unix() else {
+                    let Ok(capability) = boundary.native() else {
                         return CleanupOutcome::Residual {
                             opaque_location: "local boundary unavailable".to_owned(),
                         };
@@ -8360,7 +8361,7 @@ impl SftpSessionService {
         live: &SftpProductionSession<TrustedSftpHostKeyVerifier>,
         verified_resume_file: Option<RemoteSftpFile>,
     ) -> Result<(), TransferFailureCode> {
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (
                 session_key,
@@ -8372,7 +8373,7 @@ impl SftpSessionService {
             );
             return Err(TransferFailureCode::PermissionDenied);
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let TransferEndpoint::Remote(target) = &plan.target else {
                 return Err(TransferFailureCode::Protocol);
@@ -8411,12 +8412,12 @@ impl SftpSessionService {
                 }
             }
 
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             let source = boundary
-                .unix()?
+                .native()?
                 .open_upload_source(plan.expected_bytes)
                 .map_err(|_| TransferFailureCode::PermissionDenied)?;
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             let source = {
                 boundary.unsupported()?;
                 unreachable!()
@@ -8550,7 +8551,7 @@ impl SftpSessionService {
                 return Err(TransferFailureCode::LengthMismatch);
             }
             #[cfg(unix)]
-            let capability = boundary.unix()?;
+            let capability = boundary.native()?;
             #[cfg(not(unix))]
             {
                 boundary.unsupported()?;
@@ -8631,7 +8632,7 @@ impl SftpSessionService {
             #[cfg(unix)]
             let target = target.into_std().await;
             #[cfg(unix)]
-            let temporary_identity = UnixFileIdentity::from_metadata(
+            let temporary_identity = NativeFileIdentity::from_metadata(
                 &target
                     .metadata()
                     .map_err(|_| TransferFailureCode::PermissionDenied)?,
@@ -8765,25 +8766,26 @@ impl SftpSessionService {
         kind: wire::SftpLocalBoundaryKind,
         selected_path: String,
     ) -> Result<wire::SftpLocalBoundary, SftpRuntimeError> {
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (kind, selected_path);
-            // Windows must use an equivalent directory/file handle plus
-            // reparse-point-safe implementation before local SFTP transfer is
-            // enabled. Never fall back to path-based writes.
+            // Unsupported platforms must not fall back to ambient path access.
             return Err(SftpRuntimeError::InvalidState);
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let selected = PathBuf::from(selected_path);
-            let unix = UnixLocalBoundary::register(&selected, kind)
+            let native = NativeLocalBoundary::register(&selected, kind)
                 .map_err(|_| SftpRuntimeError::InvalidInput)?;
-            let size = unix.upload_identity.as_ref().map(|identity| identity.size);
+            let size = native
+                .upload_identity
+                .as_ref()
+                .map(|identity| identity.size);
             let boundary = LocalBoundary {
                 kind,
                 display_name: local_display_name(&selected),
                 size,
-                capability: Arc::new(LocalBoundaryCapability::Unix(unix)),
+                capability: Arc::new(LocalBoundaryCapability::Native(native)),
             };
             let token = uuid::Uuid::new_v4().to_string();
             let response = wire::SftpLocalBoundary {
@@ -9178,7 +9180,7 @@ impl SftpSessionService {
             };
             #[cfg(unix)]
             let cleanup = boundary
-                .unix()
+                .native()
                 .and_then(|capability| {
                     capability
                         .temporary_name(&transfer_id)
@@ -10779,7 +10781,7 @@ mod tests {
             .unwrap();
         let target = directory.path().join("download.bin");
         let unix =
-            UnixLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
+            NativeLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
                 .expect("download boundary");
         let temporary_name = unix.temporary_name(&transfer_id).expect("temporary name");
         let mut temporary = unix
@@ -10793,7 +10795,7 @@ mod tests {
                 kind: wire::SftpLocalBoundaryKind::DownloadTarget,
                 display_name: "download.bin".to_owned(),
                 size: None,
-                capability: Arc::new(LocalBoundaryCapability::Unix(unix)),
+                capability: Arc::new(LocalBoundaryCapability::Native(unix)),
             },
         );
         service.records.lock().await.insert(
@@ -11406,8 +11408,8 @@ mod tests {
             kind: wire::SftpLocalBoundaryKind::UploadSource,
             display_name: "source.bin".to_owned(),
             size: Some(8),
-            capability: Arc::new(LocalBoundaryCapability::Unix(
-                UnixLocalBoundary::register(&source, wire::SftpLocalBoundaryKind::UploadSource)
+            capability: Arc::new(LocalBoundaryCapability::Native(
+                NativeLocalBoundary::register(&source, wire::SftpLocalBoundaryKind::UploadSource)
                     .unwrap(),
             )),
         };
@@ -11582,8 +11584,8 @@ mod tests {
             kind: wire::SftpLocalBoundaryKind::UploadSource,
             display_name: "source.bin".to_owned(),
             size: Some(8),
-            capability: Arc::new(LocalBoundaryCapability::Unix(
-                UnixLocalBoundary::register(&source, wire::SftpLocalBoundaryKind::UploadSource)
+            capability: Arc::new(LocalBoundaryCapability::Native(
+                NativeLocalBoundary::register(&source, wire::SftpLocalBoundaryKind::UploadSource)
                     .unwrap(),
             )),
         };
@@ -11702,7 +11704,7 @@ mod tests {
         let state_revision = actor.transfers[&transfer_id_internal].state_revision;
 
         let unix =
-            UnixLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
+            NativeLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
                 .unwrap();
         let temporary_name = unix.temporary_name(&transfer_id_internal).unwrap();
         let temporary_path = directory
@@ -11718,7 +11720,7 @@ mod tests {
                 kind: wire::SftpLocalBoundaryKind::DownloadTarget,
                 display_name: "download.bin".to_owned(),
                 size: None,
-                capability: Arc::new(LocalBoundaryCapability::Unix(unix)),
+                capability: Arc::new(LocalBoundaryCapability::Native(unix)),
             },
         );
         service.records.lock().await.insert(

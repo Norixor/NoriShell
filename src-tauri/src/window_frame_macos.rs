@@ -1,6 +1,7 @@
-//! AppKit-owned main-window buttons aligned with the WebView header.
+//! AppKit-owned window buttons aligned with each WebView header.
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     ptr::NonNull,
 };
 
@@ -9,7 +10,7 @@ use objc2::{MainThreadMarker, rc::Retained, runtime::ProtocolObject};
 use objc2_app_kit::{
     NSView, NSViewFrameDidChangeNotification, NSWindow, NSWindowButton,
     NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
-    NSWindowStyleMask,
+    NSWindowStyleMask, NSWindowWillCloseNotification,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObjectProtocol, NSOperationQueue, NSPoint,
@@ -17,7 +18,7 @@ use objc2_foundation::{
 use tauri::WebviewWindow;
 
 thread_local! {
-    static BRIDGE: RefCell<Option<HeaderBridge>> = const { RefCell::new(None) };
+    static BRIDGES: RefCell<HashMap<String, HeaderBridge>> = RefCell::new(HashMap::new());
     static QUEUED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -47,8 +48,8 @@ fn schedule_alignment() {
     // Defer until AppKit has finished its current layout. Frame notifications
     // caused by our own adjustment are coalesced while QUEUED remains true.
     let callback = RcBlock::new(|| {
-        BRIDGE.with_borrow_mut(|bridge| {
-            if let Some(bridge) = bridge {
+        BRIDGES.with_borrow_mut(|bridges| {
+            for bridge in bridges.values_mut() {
                 bridge.align();
             }
         });
@@ -207,6 +208,9 @@ impl HeaderBridge {
 
 pub(super) fn install(window: &WebviewWindow) -> Result<(), String> {
     let _main_thread = MainThreadMarker::new().ok_or("window.native_main_thread_required")?;
+    if BRIDGES.with_borrow(|bridges| bridges.contains_key(window.label())) {
+        return Ok(());
+    }
     let native = window
         .ns_window()
         .map_err(|_| "window.native_handle_unavailable")?;
@@ -240,16 +244,39 @@ pub(super) fn install(window: &WebviewWindow) -> Result<(), String> {
             )
         });
     }
-    BRIDGE.with_borrow_mut(|slot| *slot = Some(bridge));
+    let label = window.label().to_owned();
+    let closing_label = label.clone();
+    let callback = RcBlock::new(move |_: NonNull<NSNotification>| {
+        // Release retained AppKit views and observers when this exact window closes.
+        BRIDGES.with_borrow_mut(|bridges| {
+            bridges.remove(&closing_label);
+        });
+    });
+    // SAFETY: the notification is delivered on main for this retained NSWindow.
+    bridge.observers.push(unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(NSWindowWillCloseNotification),
+            Some(&bridge.window),
+            None,
+            &callback,
+        )
+    });
+    BRIDGES.with_borrow_mut(|bridges| {
+        bridges.insert(label, bridge);
+    });
     schedule_alignment();
     Ok(())
 }
 
-pub(super) fn set_height(height: f64) -> Result<(), String> {
+pub(super) fn set_height(label: &str, height: f64) -> Result<(), String> {
     let _main_thread = MainThreadMarker::new().ok_or("window.native_main_thread_required")?;
-    BRIDGE.with_borrow_mut(|bridge| {
-        let bridge = bridge.as_mut().ok_or("window.native_header_unavailable")?;
+    BRIDGES.with_borrow_mut(|bridges| {
+        let bridge = bridges
+            .get_mut(label)
+            .ok_or("window.native_header_unavailable")?;
         bridge.height = height;
+        // Publish the actual horizontal inset only after the native alignment.
+        bridge.align();
         Ok::<_, String>(())
     })?;
     schedule_alignment();
@@ -257,5 +284,5 @@ pub(super) fn set_height(height: f64) -> Result<(), String> {
 }
 
 pub(super) fn cleanup() {
-    BRIDGE.with_borrow_mut(|bridge| *bridge = None);
+    BRIDGES.with_borrow_mut(HashMap::clear);
 }

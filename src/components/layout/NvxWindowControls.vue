@@ -2,6 +2,8 @@
 import { Minus, Square, X } from "lucide-vue-next";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   performWindowAction,
@@ -11,12 +13,20 @@ import {
 import { NvxIcon, NvxIconButton } from "../ui";
 
 const { t } = useI18n();
+const props = withDefaults(defineProps<{ standalone?: boolean }>(), { standalone: false });
 const controlsRoot = ref<HTMLElement | null>(null);
+const canMaximize = ref(!props.standalone);
 let resizeObserver: ResizeObserver | null = null;
 let pendingMeasurement: number | null = null;
+let disposed = false;
 
 async function perform(action: "close" | "minimize" | "maximize") {
+  if (action === "maximize" && !canMaximize.value) return;
   try {
+    if (props.standalone) {
+      await invoke("window_standalone_action", { action });
+      return;
+    }
     await performWindowAction(action === "maximize" ? "toggleMaximize" : action);
   } catch {
     console.error(`window.${action}_failed`);
@@ -25,7 +35,9 @@ async function perform(action: "close" | "minimize" | "maximize") {
 
 async function publishMaximizeHitRegion() {
   pendingMeasurement = null;
-  const button = controlsRoot.value?.querySelector<HTMLElement>("[data-windows-maximize]");
+  const button = canMaximize.value
+    ? controlsRoot.value?.querySelector<HTMLElement>("[data-windows-maximize]:not(:disabled)")
+    : null;
   const region = button
     ? physicalWindowsCaptionHitRegion(button.getBoundingClientRect(), window.devicePixelRatio)
     : null;
@@ -41,16 +53,28 @@ function scheduleMaximizeHitRegion() {
   pendingMeasurement = requestAnimationFrame(() => void publishMaximizeHitRegion());
 }
 
-onMounted(() => {
+onMounted(async () => {
   scheduleMaximizeHitRegion();
   window.addEventListener("resize", scheduleMaximizeHitRegion);
   if (typeof ResizeObserver !== "undefined" && controlsRoot.value) {
     resizeObserver = new ResizeObserver(scheduleMaximizeHitRegion);
     resizeObserver.observe(controlsRoot.value);
   }
+  if (props.standalone) {
+    try {
+      const resizable = await getCurrentWindow().isResizable();
+      if (disposed) return;
+      canMaximize.value = resizable;
+      scheduleMaximizeHitRegion();
+    } catch {
+      // Fixed or unavailable native windows must never advertise a Snap target.
+      canMaximize.value = false;
+    }
+  }
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
   window.removeEventListener("resize", scheduleMaximizeHitRegion);
   resizeObserver?.disconnect();
   if (pendingMeasurement !== null) cancelAnimationFrame(pendingMeasurement);
@@ -78,6 +102,7 @@ onBeforeUnmount(() => {
     <NvxIconButton
       class="nvx-window-controls__windows"
       data-windows-maximize
+      :disabled="!canMaximize"
       :label="t('window.maximize')"
       @click="perform('maximize')"
     >

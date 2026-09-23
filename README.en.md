@@ -4,7 +4,7 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">A local-first terminal and remote connection workspace</p>
 <p align="center">SSH · Local terminal · SFTP · Port forwarding · RDP / VNC · Encrypted Vault · Plugins</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.0-beta</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.1-beta</p>
 <p align="center"><a href="README.md">简体中文</a> · English</p>
 
 NoriShell brings terminal sessions, remote connections, file transfer, remote desktops, and credential management into one desktop application. Core connectivity requires no account. Host configuration stays local, while persisted passwords and private keys are stored in a separate encrypted Vault. End-to-end encrypted synchronization can be enabled selectively through the Norixor plugin when cross-device access is needed.

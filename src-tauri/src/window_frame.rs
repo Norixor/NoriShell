@@ -99,11 +99,66 @@ pub fn window_native_controls_inset(window: WebviewWindow) -> Option<f64> {
 /// `HTMAXBUTTON` bridge. The Vue component owns visual layout; Win32 owns the
 /// non-client hit-test semantics required by Windows 11 Snap Layout.
 #[tauri::command]
-pub fn window_set_windows_maximize_hit_region(
+pub async fn window_set_windows_maximize_hit_region(
     window: WebviewWindow,
     region: Option<WindowsCaptionHitRegion>,
 ) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let current = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let result = install_windows_caption_bridge(&current)
+                    .and_then(|()| set_windows_maximize_hit_region(&current, region));
+                let _ = sender.send(result);
+            })
+            .map_err(|_| "window.caption_bridge_unavailable".to_owned())?;
+        receiver
+            .await
+            .map_err(|_| "window.caption_bridge_unavailable".to_owned())?
+    }
+    #[cfg(not(windows))]
     set_windows_maximize_hit_region(&window, region)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StandaloneWindowAction {
+    Close,
+    Minimize,
+    Maximize,
+    Drag,
+}
+
+/// The injected caller window is the only target; renderers cannot name another window.
+#[tauri::command]
+pub async fn window_standalone_action(
+    window: WebviewWindow,
+    action: StandaloneWindowAction,
+) -> Result<(), String> {
+    let result = match action {
+        StandaloneWindowAction::Drag => window.start_dragging(),
+        StandaloneWindowAction::Close => window.close(),
+        StandaloneWindowAction::Minimize => window.minimize(),
+        StandaloneWindowAction::Maximize => {
+            if !window
+                .is_resizable()
+                .map_err(|_| "window.action_unavailable")?
+            {
+                return Ok(());
+            }
+            if window
+                .is_maximized()
+                .map_err(|_| "window.action_unavailable")?
+            {
+                window.unmaximize()
+            } else {
+                window.maximize()
+            }
+        }
+    };
+    result.map_err(|_| "window.action_unavailable".to_owned())
 }
 
 #[cfg(target_os = "macos")]
@@ -315,21 +370,24 @@ fn set_windows_maximize_hit_region(
     }
 }
 
-/// Updates the native main-window header using logical AppKit points.
+/// Updates the calling window's native header using logical AppKit points.
 #[tauri::command]
 pub async fn window_set_native_header_height(
     window: WebviewWindow,
     height: f64,
 ) -> Result<(), String> {
-    if window.label() != "main" || !height.is_finite() || !(32.0..=160.0).contains(&height) {
+    if !height.is_finite() || !(32.0..=160.0).contains(&height) {
         return Err("window.native_header_invalid".to_owned());
     }
     #[cfg(target_os = "macos")]
     {
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let current = window.clone();
         window
             .run_on_main_thread(move || {
-                let _ = sender.send(macos::set_height(height));
+                let result = macos::install(&current)
+                    .and_then(|()| macos::set_height(current.label(), height));
+                let _ = sender.send(result);
             })
             .map_err(|_| "window.native_header_unavailable".to_owned())?;
         receiver
@@ -337,7 +395,10 @@ pub async fn window_set_native_header_height(
             .map_err(|_| "window.native_header_unavailable".to_owned())?
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(())
+    {
+        let _ = window;
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]

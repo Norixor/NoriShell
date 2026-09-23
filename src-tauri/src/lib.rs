@@ -310,6 +310,7 @@ impl ProductionInvokeRuntime for tauri::Wry {
             desktop_service::desktop_prompt_get,
             desktop_service::desktop_prompt_decide,
             window_frame::window_native_controls_inset,
+            window_frame::window_standalone_action,
             window_frame::window_set_native_header_height,
             window_frame::window_set_windows_maximize_hit_region,
             plugin_service::plugin_local_package_prepare,

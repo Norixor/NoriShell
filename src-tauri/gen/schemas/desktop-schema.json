@@ -411,6 +411,12 @@
           "markdownDescription": "Read, answer or cancel the exact Vault prompt owned by this window."
         },
         {
+          "description": "Allows Core-owned standalone windows to control only their own native frame.",
+          "type": "string",
+          "const": "standalone-window-frame",
+          "markdownDescription": "Allows Core-owned standalone windows to control only their own native frame."
+        },
+        {
           "description": "Desktop profile configuration and password staging, without session control.",
           "type": "string",
           "const": "tool-desktop-editor",

@@ -22,6 +22,7 @@ fn fixture_module() -> Vec<u8> {
             (import "norishell.host" "emit" (func $emit (param i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "nvx_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "nvx_dealloc") (param i32 i32))
             (func (export "nvx_handle") (param i32 i32) (result i32) i32.const 0)
         )"#,
     )
@@ -112,7 +113,7 @@ fn exact_desktop_binary_enters_plugin_host_before_tauri_and_cleans_up() {
             "sequence": 1,
             "request": {
                 "protocolMajor": 1,
-                "protocolMinor": 0,
+                "protocolMinor": PLUGIN_API_PROTOCOL_MINOR,
                 "requestId": "fixture-request",
                 "kind": "initialize",
                 "payloadJson": "{}"
@@ -120,7 +121,10 @@ fn exact_desktop_binary_enters_plugin_host_before_tauri_and_cleans_up() {
         }),
     );
     let result = read_frame(&mut output);
-    assert_eq!(result["kind"], "result");
+    assert_eq!(
+        result["kind"], "result",
+        "unexpected plugin-host frame: {result}"
+    );
     assert_eq!(result["sequence"], 1);
     assert_eq!(result["outputs"], json!([]));
 

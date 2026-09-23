@@ -344,6 +344,8 @@ fn build_module() -> Vec<u8> {
   (func (export "nvx_alloc") (param i32) (result i32)
     i32.const {INPUT_ADDRESS})
 
+  (func (export "nvx_dealloc") (param i32 i32))
+
   (func (export "nvx_handle") (param $pointer i32) (param $length i32) (result i32)
     local.get $pointer
     i32.const {message_kind_input_offset}

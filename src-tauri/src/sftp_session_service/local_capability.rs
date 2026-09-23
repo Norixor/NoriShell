@@ -24,6 +24,13 @@ use norishell_core_api as wire;
 
 use super::{MAX_LABEL_BYTES, TransferFailureCode, is_unsafe_display_character};
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub(super) use windows::{
+    NativeDirectoryStream, NativeFileIdentity, NativeLocalBoundary, NativeLocalDirectoryCapability,
+};
+
 #[cfg(unix)]
 use super::{CleanupOutcome, TransferId};
 
@@ -75,24 +82,24 @@ pub(super) struct LocalDirectoryEntryReference {
 pub(super) struct LocalDirectoryCursor {
     pub(super) directory_ref: String,
     pub(super) directory_revision: u64,
-    #[cfg(unix)]
-    pub(super) stream: UnixDirectoryStream,
-    #[cfg(not(unix))]
+    #[cfg(any(unix, windows))]
+    pub(super) stream: NativeDirectoryStream,
+    #[cfg(not(any(unix, windows)))]
     pub(super) unsupported: (),
     pub(super) expires_at: std::time::Instant,
 }
 
 #[derive(Debug)]
 pub(super) enum LocalDirectoryCapabilityHandle {
-    #[cfg(unix)]
-    Unix(UnixLocalDirectoryCapability),
-    #[cfg(not(unix))]
+    #[cfg(any(unix, windows))]
+    Native(NativeLocalDirectoryCapability),
+    #[cfg(not(any(unix, windows)))]
     Unsupported,
 }
 
 #[cfg(unix)]
 #[derive(Debug)]
-pub(super) struct UnixLocalDirectoryCapability {
+pub(super) struct NativeLocalDirectoryCapability {
     pub(super) directory: File,
     pub(super) device: u64,
     pub(super) inode: u64,
@@ -100,21 +107,21 @@ pub(super) struct UnixLocalDirectoryCapability {
 
 #[cfg(unix)]
 #[derive(Debug)]
-pub(super) struct UnixDirectoryStream(pub(super) *mut libc::DIR);
+pub(super) struct NativeDirectoryStream(pub(super) *mut libc::DIR);
 
 #[cfg(unix)]
 type UnixDirectoryPage = (
-    Vec<(Vec<u8>, UnixFileIdentity)>,
-    Option<UnixDirectoryStream>,
+    Vec<(Vec<u8>, NativeFileIdentity)>,
+    Option<NativeDirectoryStream>,
 );
 
 // SAFETY: each stream is removed from the cursor map before use, so it has one
 // owner and is never iterated concurrently. Drop closes it on the owning task.
 #[cfg(unix)]
-unsafe impl Send for UnixDirectoryStream {}
+unsafe impl Send for NativeDirectoryStream {}
 
 #[cfg(unix)]
-impl Drop for UnixDirectoryStream {
+impl Drop for NativeDirectoryStream {
     fn drop(&mut self) {
         if !self.0.is_null() {
             unsafe { libc::closedir(self.0) };
@@ -124,15 +131,15 @@ impl Drop for UnixDirectoryStream {
 
 #[derive(Debug)]
 pub(super) enum LocalBoundaryCapability {
-    #[cfg(unix)]
-    Unix(UnixLocalBoundary),
-    #[cfg(not(unix))]
+    #[cfg(any(unix, windows))]
+    Native(NativeLocalBoundary),
+    #[cfg(not(any(unix, windows)))]
     Unsupported,
 }
 
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct UnixFileIdentity {
+pub(super) struct NativeFileIdentity {
     pub(super) device: u64,
     pub(super) inode: u64,
     pub(super) mode: u32,
@@ -143,17 +150,17 @@ pub(super) struct UnixFileIdentity {
 
 #[cfg(unix)]
 #[derive(Debug)]
-pub(super) struct UnixLocalBoundary {
+pub(super) struct NativeLocalBoundary {
     pub(super) parent: File,
     pub(super) parent_device: u64,
     pub(super) parent_inode: u64,
     pub(super) name: CString,
     pub(super) upload_source: Option<File>,
-    pub(super) upload_identity: Option<UnixFileIdentity>,
+    pub(super) upload_identity: Option<NativeFileIdentity>,
 }
 
 #[cfg(unix)]
-impl UnixFileIdentity {
+impl NativeFileIdentity {
     pub(super) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
 
@@ -180,9 +187,9 @@ impl UnixFileIdentity {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl LocalObjectIdentity {
-    pub(super) fn from_unix(identity: &UnixFileIdentity) -> Self {
+    pub(super) fn from_native(identity: &NativeFileIdentity) -> Self {
         let kind = if identity.is_regular() {
             LocalObjectKind::File
         } else if identity.is_directory() {
@@ -202,19 +209,19 @@ impl LocalObjectIdentity {
         }
     }
 
-    pub(super) fn matches_unix(&self, identity: &UnixFileIdentity) -> bool {
-        self == &Self::from_unix(identity)
+    pub(super) fn matches_native(&self, identity: &NativeFileIdentity) -> bool {
+        self == &Self::from_native(identity)
     }
 }
 
 #[cfg(unix)]
-impl UnixLocalDirectoryCapability {
+impl NativeLocalDirectoryCapability {
     pub(super) fn register(selected: &Path) -> io::Result<Self> {
         let directory = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(selected)?;
-        let identity = UnixFileIdentity::from_metadata(&directory.metadata()?);
+        let identity = NativeFileIdentity::from_metadata(&directory.metadata()?);
         if !identity.is_directory() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -229,7 +236,7 @@ impl UnixLocalDirectoryCapability {
     }
 
     pub(super) fn verify(&self) -> io::Result<()> {
-        let identity = UnixFileIdentity::from_metadata(&self.directory.metadata()?);
+        let identity = NativeFileIdentity::from_metadata(&self.directory.metadata()?);
         if identity.device != self.device
             || identity.inode != self.inode
             || !identity.is_directory()
@@ -242,7 +249,7 @@ impl UnixLocalDirectoryCapability {
         Ok(())
     }
 
-    pub(super) fn entry_identity(&self, name: &CStr) -> io::Result<UnixFileIdentity> {
+    pub(super) fn entry_identity(&self, name: &CStr) -> io::Result<NativeFileIdentity> {
         self.verify()?;
         let mut stat = MaybeUninit::<libc::stat>::zeroed();
         let result = unsafe {
@@ -258,7 +265,7 @@ impl UnixLocalDirectoryCapability {
         }
         let stat = unsafe { stat.assume_init() };
         let (modified_seconds, modified_nanoseconds) = (stat.st_mtime, stat.st_mtime_nsec);
-        Ok(UnixFileIdentity {
+        Ok(NativeFileIdentity {
             device: u64::try_from(stat.st_dev).unwrap_or(0),
             inode: stat.st_ino,
             mode: u32::from(stat.st_mode),
@@ -270,7 +277,7 @@ impl UnixLocalDirectoryCapability {
 
     pub(super) fn list_page(
         &self,
-        stream: Option<UnixDirectoryStream>,
+        stream: Option<NativeDirectoryStream>,
         page_size: usize,
         revoked: &AtomicBool,
     ) -> io::Result<UnixDirectoryPage> {
@@ -299,7 +306,7 @@ impl UnixLocalDirectoryCapability {
                     unsafe { libc::close(descriptor) };
                     return Err(io::Error::last_os_error());
                 }
-                UnixDirectoryStream(directory)
+                NativeDirectoryStream(directory)
             }
         };
         let mut entries = Vec::new();
@@ -336,7 +343,7 @@ impl UnixLocalDirectoryCapability {
         let observed = self.entry_identity(&name)?;
         if expected.kind != LocalObjectKind::File
             || !observed.is_regular()
-            || !expected.matches_unix(&observed)
+            || !expected.matches_native(&observed)
             || observed.size != expected_bytes
         {
             return Err(io::Error::new(
@@ -350,7 +357,7 @@ impl UnixLocalDirectoryCapability {
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             0,
         )?;
-        let opened = UnixFileIdentity::from_metadata(&source.metadata()?);
+        let opened = NativeFileIdentity::from_metadata(&source.metadata()?);
         if opened != observed || !opened.is_regular() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -361,7 +368,7 @@ impl UnixLocalDirectoryCapability {
             kind: wire::SftpLocalBoundaryKind::UploadSource,
             display_name: safe_local_name_display(name_bytes),
             size: Some(expected_bytes),
-            capability: Arc::new(LocalBoundaryCapability::Unix(UnixLocalBoundary {
+            capability: Arc::new(LocalBoundaryCapability::Native(NativeLocalBoundary {
                 parent: self.directory.try_clone()?,
                 parent_device: self.device,
                 parent_inode: self.inode,
@@ -400,7 +407,7 @@ impl UnixLocalDirectoryCapability {
             kind: wire::SftpLocalBoundaryKind::DownloadTarget,
             display_name: safe_local_name_display(name_bytes),
             size: None,
-            capability: Arc::new(LocalBoundaryCapability::Unix(UnixLocalBoundary {
+            capability: Arc::new(LocalBoundaryCapability::Native(NativeLocalBoundary {
                 parent: self.directory.try_clone()?,
                 parent_device: self.device,
                 parent_inode: self.inode,
@@ -421,7 +428,7 @@ impl UnixLocalDirectoryCapability {
         let observed = self.entry_identity(&name)?;
         if expected.kind != LocalObjectKind::Directory
             || !observed.is_directory()
-            || !expected.matches_unix(&observed)
+            || !expected.matches_native(&observed)
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -434,7 +441,7 @@ impl UnixLocalDirectoryCapability {
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0,
         )?;
-        let opened = UnixFileIdentity::from_metadata(&directory.metadata()?);
+        let opened = NativeFileIdentity::from_metadata(&directory.metadata()?);
         if opened != observed || !opened.is_directory() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -473,12 +480,15 @@ impl UnixLocalDirectoryCapability {
                 "created local child is not a directory",
             ));
         }
-        self.open_child(name.to_bytes(), &LocalObjectIdentity::from_unix(&identity))
+        self.open_child(
+            name.to_bytes(),
+            &LocalObjectIdentity::from_native(&identity),
+        )
     }
 }
 
-#[cfg(unix)]
-fn local_modified_at_unix_ms(identity: &UnixFileIdentity) -> Option<i64> {
+#[cfg(any(unix, windows))]
+fn local_modified_at_unix_ms(identity: &NativeFileIdentity) -> Option<i64> {
     identity.modified_seconds.checked_mul(1_000)?.checked_add(
         identity
             .modified_nanoseconds
@@ -518,11 +528,11 @@ pub(super) fn rememberable_local_child_path(parent: Option<&str>, name: &[u8]) -
     rememberable_local_directory_path(&Path::new(parent).join(name))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) fn map_local_entry(
     entry_ref: String,
     name: &[u8],
-    identity: &UnixFileIdentity,
+    identity: &NativeFileIdentity,
 ) -> wire::SftpLocalDirectoryEntry {
     let kind = if identity.is_regular() {
         wire::SftpLocalEntryKind::File
@@ -545,7 +555,7 @@ pub(super) fn map_local_entry(
 }
 
 #[cfg(unix)]
-impl UnixLocalBoundary {
+impl NativeLocalBoundary {
     pub(super) fn register(selected: &Path, kind: wire::SftpLocalBoundaryKind) -> io::Result<Self> {
         let name = selected
             .file_name()
@@ -559,7 +569,7 @@ impl UnixLocalBoundary {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(parent_path)?;
-        let parent_identity = UnixFileIdentity::from_metadata(&parent.metadata()?);
+        let parent_identity = NativeFileIdentity::from_metadata(&parent.metadata()?);
         if !parent_identity.is_directory() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -574,7 +584,7 @@ impl UnixLocalBoundary {
                     libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
                     0,
                 )?;
-                let identity = UnixFileIdentity::from_metadata(&source.metadata()?);
+                let identity = NativeFileIdentity::from_metadata(&source.metadata()?);
                 if !identity.is_regular() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -606,7 +616,7 @@ impl UnixLocalBoundary {
     }
 
     pub(super) fn verify_parent(&self) -> io::Result<()> {
-        let identity = UnixFileIdentity::from_metadata(&self.parent.metadata()?);
+        let identity = NativeFileIdentity::from_metadata(&self.parent.metadata()?);
         if identity.device != self.parent_device
             || identity.inode != self.parent_inode
             || !identity.is_directory()
@@ -630,7 +640,7 @@ impl UnixLocalBoundary {
         let expected = self.upload_identity.as_ref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "missing source identity")
         })?;
-        let observed = UnixFileIdentity::from_metadata(&source.metadata()?);
+        let observed = NativeFileIdentity::from_metadata(&source.metadata()?);
         if &observed != expected || !observed.is_regular() || observed.size != expected_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -642,7 +652,7 @@ impl UnixLocalBoundary {
         Ok(source)
     }
 
-    pub(super) fn target_identity(&self) -> io::Result<Option<UnixFileIdentity>> {
+    pub(super) fn target_identity(&self) -> io::Result<Option<NativeFileIdentity>> {
         self.verify_parent()?;
         let identity = openat_identity(&self.parent, &self.name)?;
         if identity.as_ref().is_some_and(|value| !value.is_regular()) {
@@ -708,8 +718,8 @@ impl UnixLocalBoundary {
     pub(super) fn commit_download(
         &self,
         temporary_name: &CStr,
-        temporary_identity: &UnixFileIdentity,
-        target_identity: Option<&UnixFileIdentity>,
+        temporary_identity: &NativeFileIdentity,
+        target_identity: Option<&NativeFileIdentity>,
     ) -> Result<(bool, bool, u64), TransferFailureCode> {
         self.verify_parent()
             .map_err(|_| TransferFailureCode::PermissionDenied)?;
@@ -801,24 +811,27 @@ fn openat_file(parent: &File, name: &CStr, flags: i32, mode: libc::mode_t) -> io
 }
 
 #[cfg(unix)]
-pub(super) fn openat_identity(parent: &File, name: &CStr) -> io::Result<Option<UnixFileIdentity>> {
+pub(super) fn openat_identity(
+    parent: &File,
+    name: &CStr,
+) -> io::Result<Option<NativeFileIdentity>> {
     match openat_file(
         parent,
         name,
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
         0,
     ) {
-        Ok(file) => Ok(Some(UnixFileIdentity::from_metadata(&file.metadata()?))),
+        Ok(file) => Ok(Some(NativeFileIdentity::from_metadata(&file.metadata()?))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
 }
 
 impl LocalBoundary {
-    #[cfg(unix)]
-    pub(super) fn unix(&self) -> Result<&UnixLocalBoundary, TransferFailureCode> {
+    #[cfg(any(unix, windows))]
+    pub(super) fn native(&self) -> Result<&NativeLocalBoundary, TransferFailureCode> {
         match self.capability.as_ref() {
-            LocalBoundaryCapability::Unix(capability) => Ok(capability),
+            LocalBoundaryCapability::Native(capability) => Ok(capability),
         }
     }
 
@@ -828,7 +841,7 @@ impl LocalBoundary {
         Err(TransferFailureCode::PermissionDenied)
     }
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -866,14 +879,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("target.bin");
         let boundary =
-            UnixLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
+            NativeLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
                 .unwrap();
         let transfer_id = TransferId::parse("transfer-race").unwrap();
         let temporary = boundary.temporary_name(&transfer_id).unwrap();
         let mut file = boundary.create_temporary(&temporary).unwrap();
         file.write_all(b"new").unwrap();
         file.sync_all().unwrap();
-        let temporary_identity = UnixFileIdentity::from_metadata(&file.metadata().unwrap());
+        let temporary_identity = NativeFileIdentity::from_metadata(&file.metadata().unwrap());
         std::fs::write(&target, b"old").unwrap();
 
         assert_eq!(
@@ -896,7 +909,7 @@ mod tests {
         let target = directory.path().join("target.bin");
         std::fs::write(&target, b"old").unwrap();
         let boundary =
-            UnixLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
+            NativeLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
                 .unwrap();
         let target_identity = boundary.target_identity().unwrap().unwrap();
         let temporary = boundary
@@ -905,7 +918,7 @@ mod tests {
         let mut file = boundary.create_temporary(&temporary).unwrap();
         file.write_all(b"new-content").unwrap();
         file.sync_all().unwrap();
-        let temporary_identity = UnixFileIdentity::from_metadata(&file.metadata().unwrap());
+        let temporary_identity = NativeFileIdentity::from_metadata(&file.metadata().unwrap());
 
         assert_eq!(
             boundary.commit_download(&temporary, &temporary_identity, Some(&target_identity),),
@@ -929,7 +942,7 @@ mod tests {
         let retained_parent = root.path().join("retained");
         std::fs::create_dir(&selected_parent).unwrap();
         let selected_target = selected_parent.join("target.bin");
-        let boundary = UnixLocalBoundary::register(
+        let boundary = NativeLocalBoundary::register(
             &selected_target,
             wire::SftpLocalBoundaryKind::DownloadTarget,
         )
@@ -943,7 +956,7 @@ mod tests {
         let mut file = boundary.create_temporary(&temporary).unwrap();
         file.write_all(b"capability-owned").unwrap();
         file.sync_all().unwrap();
-        let temporary_identity = UnixFileIdentity::from_metadata(&file.metadata().unwrap());
+        let temporary_identity = NativeFileIdentity::from_metadata(&file.metadata().unwrap());
         boundary
             .commit_download(&temporary, &temporary_identity, None)
             .unwrap();
@@ -965,7 +978,7 @@ mod tests {
         let retained = directory.path().join("retained.bin");
         std::fs::write(&source, b"original").unwrap();
         let boundary =
-            UnixLocalBoundary::register(&source, wire::SftpLocalBoundaryKind::UploadSource)
+            NativeLocalBoundary::register(&source, wire::SftpLocalBoundaryKind::UploadSource)
                 .unwrap();
         std::fs::rename(&source, &retained).unwrap();
         std::fs::write(&source, b"replacement").unwrap();
@@ -983,7 +996,7 @@ mod tests {
         for name in ["a", "b", "c", "d"] {
             std::fs::write(directory.path().join(name), name.as_bytes()).unwrap();
         }
-        let capability = UnixLocalDirectoryCapability::register(directory.path()).unwrap();
+        let capability = NativeLocalDirectoryCapability::register(directory.path()).unwrap();
         let revoked = AtomicBool::new(false);
         let (first, cursor) = capability.list_page(None, 2, &revoked).unwrap();
         assert_eq!(first.len(), 2);
@@ -1009,11 +1022,11 @@ mod tests {
         std::fs::write(directory.path().join("file"), b"old").unwrap();
         std::fs::create_dir(directory.path().join("child")).unwrap();
         symlink("file", directory.path().join("link")).unwrap();
-        let capability = UnixLocalDirectoryCapability::register(directory.path()).unwrap();
+        let capability = NativeLocalDirectoryCapability::register(directory.path()).unwrap();
 
         let file_name = CString::new("file").unwrap();
         let original = capability.entry_identity(&file_name).unwrap();
-        let original = LocalObjectIdentity::from_unix(&original);
+        let original = LocalObjectIdentity::from_native(&original);
         std::fs::rename(
             directory.path().join("file"),
             directory.path().join("old-file"),
@@ -1033,7 +1046,7 @@ mod tests {
                 capability
                     .derive_upload_boundary(
                         name.to_bytes(),
-                        &LocalObjectIdentity::from_unix(&identity),
+                        &LocalObjectIdentity::from_native(&identity),
                         identity.size,
                     )
                     .is_err()
@@ -1048,13 +1061,13 @@ mod tests {
         let child_path = directory.path().join("child");
         std::fs::create_dir(&child_path).unwrap();
         std::fs::write(child_path.join("inside"), b"data").unwrap();
-        let parent = UnixLocalDirectoryCapability::register(directory.path()).unwrap();
+        let parent = NativeLocalDirectoryCapability::register(directory.path()).unwrap();
         let child_name = CString::new("child").unwrap();
         let child_identity = parent.entry_identity(&child_name).unwrap();
         let child = parent
             .open_child(
                 child_name.to_bytes(),
-                &LocalObjectIdentity::from_unix(&child_identity),
+                &LocalObjectIdentity::from_native(&child_identity),
             )
             .unwrap();
         let (entries, next) = child.list_page(None, 8, &AtomicBool::new(false)).unwrap();
@@ -1066,7 +1079,7 @@ mod tests {
     #[test]
     fn child_directory_creation_is_relative_and_never_overwrites() {
         let directory = tempfile::tempdir().unwrap();
-        let parent = UnixLocalDirectoryCapability::register(directory.path()).unwrap();
+        let parent = NativeLocalDirectoryCapability::register(directory.path()).unwrap();
         let child = parent.create_child(b"copied-tree").unwrap();
         assert!(directory.path().join("copied-tree").is_dir());
         assert!(child.verify().is_ok());
