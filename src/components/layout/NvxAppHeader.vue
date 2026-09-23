@@ -3,7 +3,7 @@ import brandMarkUrl from "../../assets/norishell-mark.svg?no-inline";
 import type { DesktopPlatform } from "../../platform";
 import NvxWindowControls from "./NvxWindowControls.vue";
 
-defineProps<{ platform: DesktopPlatform }>();
+withDefaults(defineProps<{ platform: DesktopPlatform; standalone?: boolean }>(), { standalone: false });
 </script>
 
 <template>
@@ -41,6 +41,7 @@ defineProps<{ platform: DesktopPlatform }>();
     </div>
     <NvxWindowControls
       v-if="platform === 'windows'"
+      :standalone="standalone"
     />
   </header>
 </template>

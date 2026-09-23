@@ -184,23 +184,24 @@ impl PluginService {
                 },
             );
         }
-        let result = WebviewWindowBuilder::new(
-            &app,
-            &label,
-            WebviewUrl::App(
-                format!(
-                    "plugin-isolated.html?surfaceId={}&channelNonce={channel_nonce}",
-                    surface.surface_id
-                )
-                .into(),
-            ),
-        )
-        .title(format!("NoriShell — {}", surface.title))
-        .inner_size(f64::from(surface.width), f64::from(surface.height))
-        .min_inner_size(480.0, 360.0)
-        .resizable(true)
-        .center()
-        .build();
+        let result =
+            crate::secure_window_frame::apply_secure_window_frame(WebviewWindowBuilder::new(
+                &app,
+                &label,
+                WebviewUrl::App(
+                    format!(
+                        "plugin-isolated.html?surfaceId={}&channelNonce={channel_nonce}",
+                        surface.surface_id
+                    )
+                    .into(),
+                ),
+            ))
+            .title(format!("NoriShell — {}", surface.title))
+            .inner_size(f64::from(surface.width), f64::from(surface.height))
+            .min_inner_size(480.0, 360.0)
+            .resizable(true)
+            .center()
+            .build();
         let window = match result {
             Ok(window) => window,
             Err(_) => {

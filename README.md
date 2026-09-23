@@ -4,7 +4,7 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">本地优先的终端与远程连接工作台</p>
 <p align="center">SSH · 本地终端 · SFTP · 端口转发 · RDP / VNC · 加密 Vault · 插件</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.0-beta</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.1-beta</p>
 <p align="center">简体中文 · <a href="README.en.md">English</a></p>
 
 NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据管理放进一个桌面应用。基础连接无需账号，主机配置保存在本机，持久化密码和私钥进入独立加密 Vault；需要跨设备使用时，可通过 Norixor 插件选择性启用端到端加密同步。

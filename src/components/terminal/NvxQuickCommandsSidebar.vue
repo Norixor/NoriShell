@@ -329,6 +329,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .quick-commands {
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   flex-direction: column;

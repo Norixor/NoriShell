@@ -11,11 +11,11 @@ const frame = ref<HTMLElement | null>(null);
 let header: HTMLElement | null = null;
 let headerObserver: ResizeObserver | null = null;
 
-function syncNativeHeaderHeight() {
+async function syncNativeHeaderHeight() {
   if (!header) return;
   // WebView CSS pixels need the applied zoom, not the display backing scale.
   const height = header.getBoundingClientRect().height * props.zoom;
-  if (height > 0) void setNativeHeaderHeight(height).catch(() => {
+  if (height > 0) await setNativeHeaderHeight(height).catch(() => {
     // Keep AppKit controls available if the window is closing or not yet ready.
   });
 }
@@ -36,7 +36,7 @@ onMounted(async () => {
   if (header) {
     headerObserver = new ResizeObserver(syncNativeHeaderHeight);
     headerObserver.observe(header);
-    syncNativeHeaderHeight();
+    await syncNativeHeaderHeight();
   }
   try {
     nativeControlsInset.value = await getNativeControlsInset();

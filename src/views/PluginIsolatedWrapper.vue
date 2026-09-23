@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import NvxButton from "../components/ui/NvxButton.vue";
+import NvxStandaloneHeader from "../components/layout/NvxStandaloneHeader.vue";
 import { getPluginIsolatedSurfaceContent, invokePluginIsolatedBridge } from "../core-api/client";
 import type { PluginIsolatedPendingAction } from "../core-api/generated/core-api";
 import { PluginIsolatedBridge } from "../plugin-isolated-bridge";
@@ -96,6 +97,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="plugin-isolated-wrapper">
+    <NvxStandaloneHeader>{{ t('plugins.isolated.title') }}</NvxStandaloneHeader>
     <p
       v-if="unavailable"
       class="plugin-isolated-wrapper__unavailable"

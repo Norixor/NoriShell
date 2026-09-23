@@ -7,6 +7,7 @@ import { useI18n } from "vue-i18n";
 import NvxHostEditor from "../components/hosts/NvxHostEditor.vue";
 import NvxDesktopProfileEditor from "../components/desktop/NvxDesktopProfileEditor.vue";
 import NvxSftpFileWindow from "../components/sftp/NvxSftpFileWindow.vue";
+import NvxStandaloneHeader from "../components/layout/NvxStandaloneHeader.vue";
 import { NvxInlineNotice, NvxTips } from "../components/ui";
 import { closeToolWindow, notifyToolWindowChanged, type ToolTarget } from "../tool-windows";
 const { t } = useI18n();
@@ -43,12 +44,9 @@ onBeforeUnmount(() => { disposed = true; unlisten?.(); exitController?.dispose()
     data-plugin-protected
     data-theme-protected
   >
-    <header
-      class="tool-window__title"
-      data-tauri-drag-region
-    >
-      {{ target?.title ?? 'NoriShell' }}
-    </header>
+    <NvxStandaloneHeader>
+      <span class="tool-window__title">{{ target?.title ?? 'NoriShell' }}</span>
+    </NvxStandaloneHeader>
     <NvxInlineNotice
       v-if="failed"
       tone="error"
@@ -90,7 +88,7 @@ onBeforeUnmount(() => { disposed = true; unlisten?.(); exitController?.dispose()
 <style scoped>
 :global(html:has(#tool-app)), :global(body:has(#tool-app)), :global(#tool-app) { margin: 0; width: 100%; height: 100%; min-width: 0; }
 .tool-window { height: 100dvh; display: flex; flex-direction: column; color: var(--nvx-color-text-primary); background: var(--nvx-color-bg-canvas); }
-.tool-window__title { padding: 8px 100px; min-height: 36px; text-align: center; border-bottom: 1px solid var(--nvx-color-border); font-weight: 600; overflow-wrap: anywhere; }
+.tool-window__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-window__body { flex: 1; min-height: 0; overflow: auto; padding: var(--nvx-space-4); }
 .tool-window__body--sftp-file { overflow: hidden; padding: 0; }
 </style>

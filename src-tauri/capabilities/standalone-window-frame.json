@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "standalone-window-frame",
+  "description": "Shared frame only for Core-owned editor and protected prompt windows.",
+  "windows": [
+    "tool-hostEditor-*", "tool-desktopEditor-*", "tool-sftpFile-*",
+    "secure-credential-*", "desktop-auth-*", "secure-vault-*",
+    "secure-ssh-challenge-*", "secure-ssh-sync-*", "secure-plugin-host-*",
+    "secure-plugin-permission-*", "secure-plugin-remote-*", "secure-plugin-input-*",
+    "plugin-isolated-*"
+  ],
+  "permissions": ["standalone-window-frame", "core:window:allow-is-resizable"]
+}

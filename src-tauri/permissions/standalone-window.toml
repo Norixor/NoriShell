@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "standalone-window-frame"
+description = "Allows Core-owned standalone windows to control only their own native frame."
+commands.allow = [
+  "window_native_controls_inset",
+  "window_set_native_header_height",
+  "window_set_windows_maximize_hit_region",
+  "window_standalone_action",
+]

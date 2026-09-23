@@ -32,7 +32,8 @@ describe("SecurePluginRemoteApproval", () => {
     const wrapper = mount(SecurePluginRemoteApproval, { global: { plugins: [i18n] } });
     await flushPromises();
     expect(wrapper.get("main").attributes("data-plugin-protected")).toBeDefined();
-    expect(wrapper.find("img").exists()).toBe(false);
+    // Untrusted prompt text lives below the shared, trusted brand header.
+    expect(wrapper.get(".nvx-secure-window__content").find("img").exists()).toBe(false);
     expect(wrapper.findAll("pre")[0]?.text()).toContain("<img src=x onerror=alert(1)>");
     expect(wrapper.get(".secure-remote__body").find("footer").exists()).toBe(false);
     await wrapper.get("footer button:last-child").trigger("click");

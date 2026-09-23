@@ -8,6 +8,7 @@ const client = vi.hoisted(() => ({
 }));
 vi.mock("../core-api/client", () => client);
 vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: () => false,
   convertFileSrc: (token: string, protocol: string) => `${protocol}://localhost/${token}`,
 }));
 import PluginIsolatedWrapper from "./PluginIsolatedWrapper.vue";
@@ -50,6 +51,8 @@ describe("PluginIsolatedWrapper bootstrap", () => {
     expect(wrapper.get("iframe").attributes()).toMatchObject({
       src: "norishell-plugin://localhost/document-token", sandbox: "allow-scripts", referrerpolicy: "no-referrer", title: "Plugin surface",
     });
+    expect(wrapper.find(".nvx-app-header").exists()).toBe(true);
+    expect(wrapper.get("iframe").element.contains(wrapper.get(".nvx-app-header").element)).toBe(false);
     wrapper.unmount();
   });
 });
