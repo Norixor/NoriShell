@@ -4,10 +4,15 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">本地优先的终端与远程连接工作台</p>
 <p align="center">SSH · 本地终端 · SFTP · 端口转发 · RDP / VNC · 加密 Vault · 插件</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.2</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows</p>
 <p align="center">简体中文 · <a href="README.en.md">English</a></p>
 
 NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据管理放进一个桌面应用。基础连接无需账号，主机配置保存在本机，持久化密码和私钥进入独立加密 Vault；需要跨设备使用时，可通过 Norixor 插件或[自建同步示例](example/self-host-sync/readme.md)选择性启用端到端加密同步。
+
+<p align="center">
+  <a href="https://github.com/Norixor/NoriShell/releases/latest"><strong>下载 NoriShell</strong></a>
+  · <a href="#安装与快速开始">查看安装说明</a>
+</p>
 
 项目基于 **Tauri 2、Vue 3、TypeScript、xterm 和 Rust**。Rust Core 管理连接、秘密、持久化和资源生命周期，前端负责交互与可重建的状态投影。
 
@@ -34,6 +39,8 @@ NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据�
 - **连接互不干扰。** 终端、文件传输、隧道和监控独立运行，关闭其中一项不会中断其他连接。
 - **受限插件系统。** 插件使用隔离的 WebAssembly Host、细粒度 capability 和受保护授权；安装与升级均由用户明确导入本地 ZIP。
 - **面向 macOS 与 Windows。** 提供 macOS Apple Silicon / Intel、Windows x64 和 Windows ARM64 安装包。
+
+需要多端同步时，可按[自建同步指南](docs/guides/users/self-host-sync.zh-CN.md)部署服务端并导入插件。在第一台设备确认上传，再在其他设备点击“立即同步”审阅恢复；恢复已有加密数据时，需要最初上传设备的 Vault 密码。同步范围与冲突处理也见该指南。
 
 ## 界面预览
 
@@ -67,8 +74,6 @@ NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据�
 | Windows | ARM64 | `-setup.exe` | 解压完整文件夹后运行 `norishell.exe` |
 
 使用 macOS 安装包时，将 NoriShell 拖入“应用程序”；Windows 安装包按向导安装。ZIP 版使用同样的本机配置与数据目录，运行前请完整解压。Windows ZIP 版需要系统已安装 WebView2 Runtime。
-
-需要跨设备同步时，参照[自建同步服务端与插件安装指南](docs/guides/users/self-host-sync.zh-CN.md)部署服务端，并在应用中导入对应插件 ZIP。
 
 ### 检查新版本
 
