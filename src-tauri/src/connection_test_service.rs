@@ -141,7 +141,8 @@ pub async fn ssh_connection_test(
 fn map_profile_error(request_id: RequestId, error: ConnectionProfileError) -> Box<CoreApiError> {
     match error {
         ConnectionProfileError::InvalidTarget
-        | ConnectionProfileError::UnsupportedConfiguration => core_error(
+        | ConnectionProfileError::UnsupportedConfiguration
+        | ConnectionProfileError::LoginAutomationConfirmationRequired => core_error(
             request_id,
             "ssh_connection_test.invalid_request",
             ErrorCategory::Validation,

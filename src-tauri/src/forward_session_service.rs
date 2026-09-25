@@ -2635,7 +2635,8 @@ fn profile_failure(error: ConnectionProfileError) -> ForwardRuntimeError {
             "connection-profile",
             "the saved Host has no ready credential",
         ),
-        ConnectionProfileError::UnsupportedConfiguration => ForwardFailure::new(
+        ConnectionProfileError::UnsupportedConfiguration
+        | ConnectionProfileError::LoginAutomationConfirmationRequired => ForwardFailure::new(
             ForwardFailureCode::Protocol,
             "connection-profile",
             "the saved Host connection configuration is not supported",

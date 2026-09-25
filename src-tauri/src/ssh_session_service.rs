@@ -1727,6 +1727,13 @@ fn map_connection_profile_error(
     match error {
         ConnectionProfileError::InvalidTarget
         | ConnectionProfileError::UnsupportedConfiguration => validation_error(request_id),
+        ConnectionProfileError::LoginAutomationConfirmationRequired => core_error(
+            request_id,
+            "ssh_terminal.login_automation_confirmation_required",
+            ErrorCategory::Conflict,
+            RetryStrategy::WaitForUser,
+            "errors.sshSession.loginAutomationConfirmationRequired",
+        ),
         ConnectionProfileError::StaleHost => conflict_error(request_id),
         ConnectionProfileError::CredentialUnavailable => credential_error(request_id),
         ConnectionProfileError::PersistenceUnavailable => unavailable_error(request_id),

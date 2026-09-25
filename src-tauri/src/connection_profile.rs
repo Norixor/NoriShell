@@ -168,6 +168,7 @@ pub(crate) enum ConnectionProfileError {
     InvalidTarget,
     StaleHost,
     CredentialUnavailable,
+    LoginAutomationConfirmationRequired,
     UnsupportedConfiguration,
     PersistenceUnavailable,
 }
@@ -461,9 +462,12 @@ fn resolve_saved_host(
             steps: snapshot.login_automation.steps.clone(),
         });
     if snapshot.login_automation.enabled
-        && (snapshot.login_automation.confirmed_revision
-            != Some(snapshot.login_automation.revision)
-            || snapshot.login_automation.steps.is_empty()
+        && snapshot.login_automation.confirmed_revision != Some(snapshot.login_automation.revision)
+    {
+        return Err(ConnectionProfileError::LoginAutomationConfirmationRequired);
+    }
+    if snapshot.login_automation.enabled
+        && (snapshot.login_automation.steps.is_empty()
             || snapshot.login_automation.steps.iter().any(|step| {
                 matches!(
                     step,
@@ -1821,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn unconfirmed_login_automation_does_not_block_metrics_resolution() {
+    fn unconfirmed_login_automation_requires_confirmation_before_terminal_open() {
         let directory = tempfile::tempdir().expect("tempdir");
         let database_path = directory.path().join("ssh/norishell.sqlite3");
         let mut repository = AppRepository::open(database_path).expect("repository");
@@ -1873,7 +1877,7 @@ mod tests {
         );
         assert!(matches!(
             terminal,
-            Err(ConnectionProfileError::UnsupportedConfiguration)
+            Err(ConnectionProfileError::LoginAutomationConfirmationRequired)
         ));
     }
 

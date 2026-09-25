@@ -128,7 +128,9 @@ const networkExposesRate = computed(() => (
   networkStatus.value.state === "available" || networkStatus.value.state === "stale"
 ));
 const sampleLabel = computed(() => {
-  if (metricStatus.value.state !== "available") return metricStatus.value.label;
+  if (metricStatus.value.state !== "available" && metricStatus.value.state !== "stale") {
+    return metricStatus.value.label;
+  }
   if (!latest.value) return t("overview.loading");
   const elapsedSeconds = Math.max(
     0,
@@ -138,9 +140,17 @@ const sampleLabel = computed(() => {
     numeric: "always",
     style: "narrow",
   });
-  if (elapsedSeconds < 60) return relative.format(-elapsedSeconds, "second");
-  if (elapsedSeconds < 3_600) return relative.format(-Math.floor(elapsedSeconds / 60), "minute");
-  return relative.format(-Math.floor(elapsedSeconds / 3_600), "hour");
+  const elapsed = elapsedSeconds < 60
+    ? relative.format(-elapsedSeconds, "second")
+    : elapsedSeconds < 3_600
+      ? relative.format(-Math.floor(elapsedSeconds / 60), "minute")
+      : relative.format(-Math.floor(elapsedSeconds / 3_600), "hour");
+  if (metricStatus.value.state !== "stale") return elapsed;
+  const state = props.card.metricsSession?.state;
+  return t(state === "backoff" || state === "connecting" || state === "verifyingHostKey"
+    || state === "authenticating" || state === "detectingPlatform" || state === "sampling"
+    ? "overview.retryingSample"
+    : "overview.lastSample", { time: elapsed });
 });
 const sampleTitle = computed(() => {
   if (!latest.value) return sampleLabel.value;
@@ -241,6 +251,7 @@ function metricAriaLabel(
   value: string,
   status: ReturnType<typeof statusForField>,
 ) {
+  if (status.state === "stale") return `${label}: ${value}, ${status.label}`;
   return status.label ? `${label}: ${status.label}` : `${label}: ${value}`;
 }
 
@@ -381,7 +392,7 @@ function formatBytes(value: string) {
         :class="`nvx-server-card__network--${networkStatus.state}`"
         :data-status="networkStatus.state"
         :aria-label="networkExposesRate
-          ? `${t('overview.receive')} ${formatRate(latest?.network.receiveBytesPerSecond)}, ${t('overview.transmit')} ${formatRate(latest?.network.transmitBytesPerSecond)}`
+          ? `${t('overview.receive')} ${formatRate(latest?.network.receiveBytesPerSecond)}, ${t('overview.transmit')} ${formatRate(latest?.network.transmitBytesPerSecond)}${networkStatus.state === 'stale' ? `, ${networkStatus.label}` : ''}`
           : `${t('overview.network')}: ${networkStatus.label}`"
         role="status"
       >

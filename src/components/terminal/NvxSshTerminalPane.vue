@@ -7,6 +7,8 @@ import {
   attachSshSession,
   detachSshSession,
   disconnectSshSession,
+  confirmLoginAutomation,
+  getHostConnectionConfig,
   getSshSession,
   heartbeatSshAttachment,
   openSshSession,
@@ -31,6 +33,7 @@ import type {
   SshSessionState,
   SshSessionSummary,
   SshSessionTarget,
+  LoginAutomationSummary,
   TerminalInputLease,
 } from "../../core-api/generated/core-api";
 import {
@@ -146,6 +149,17 @@ const openFailed = ref(false);
 const disconnecting = ref(false);
 const reconnecting = ref(false);
 const reconnectErrorKey = ref<string | null>(null);
+const pendingAutomationConfirmation = ref<LoginAutomationSummary | null>(null);
+const pendingAutomationCredentialRefId = ref<string | null>(null);
+const pendingAutomationReconnect = ref(false);
+const automationConfirmationBusy = ref(false);
+const automationConfirmationFailed = ref(false);
+const automationConfirmationOpen = computed({
+  get: () => pendingAutomationConfirmation.value !== null,
+  set: (open: boolean) => {
+    if (!open && !automationConfirmationBusy.value) pendingAutomationConfirmation.value = null;
+  },
+});
 const algorithmDetailsOpen = ref(false);
 let inputSequence = 0n;
 let promptBoundaryInputSequence: bigint | null = null;
@@ -663,7 +677,11 @@ async function open(credentialRefId = props.credentialRefId) {
   } catch (error) {
     openFailed.value = true;
     const coreError = parseCoreApiError(error);
-    reconnectErrorKey.value = coreError?.messageKey ?? "sshSession.reconnectFailed";
+    if (coreError?.code === "ssh_terminal.login_automation_confirmation_required") {
+      await showLoginAutomationConfirmation(credentialRefId, false);
+    } else {
+      reconnectErrorKey.value = coreError?.messageKey ?? "sshSession.reconnectFailed";
+    }
     emit("state", "failed", session.value);
     if (coreError?.code === "ssh_terminal.credential_unavailable") {
       emit("requestAuthenticationRecovery", props.paneId, props.target);
@@ -671,6 +689,47 @@ async function open(credentialRefId = props.credentialRefId) {
   } finally {
     binding = false;
     opening.value = false;
+  }
+}
+
+async function showLoginAutomationConfirmation(credentialRefId: string | null, reconnectAttempt: boolean) {
+  const target = session.value?.target ?? props.target;
+  if (target.kind !== "host") return;
+  try {
+    const summary = (await getHostConnectionConfig(target.hostId)).loginAutomation;
+    if (summary.hostId !== target.hostId
+      || !summary.enabled
+      || summary.confirmedRevision === summary.revision
+      || summary.steps.length === 0) {
+      reconnectErrorKey.value = "sshSession.loginAutomation.confirmationUnavailable";
+      return;
+    }
+    pendingAutomationCredentialRefId.value = credentialRefId;
+    pendingAutomationReconnect.value = reconnectAttempt;
+    automationConfirmationFailed.value = false;
+    reconnectErrorKey.value = null;
+    pendingAutomationConfirmation.value = summary;
+  } catch {
+    reconnectErrorKey.value = "sshSession.loginAutomation.confirmationUnavailable";
+  }
+}
+
+async function confirmPendingLoginAutomation() {
+  const summary = pendingAutomationConfirmation.value;
+  if (!summary || automationConfirmationBusy.value) return;
+  automationConfirmationBusy.value = true;
+  automationConfirmationFailed.value = false;
+  try {
+    await confirmLoginAutomation({ hostId: summary.hostId, expectedRevision: summary.revision });
+    const credentialRefId = pendingAutomationCredentialRefId.value;
+    const reconnectAttempt = pendingAutomationReconnect.value;
+    pendingAutomationConfirmation.value = null;
+    if (reconnectAttempt) await reconnect(credentialRefId, true);
+    else await open(credentialRefId);
+  } catch {
+    automationConfirmationFailed.value = true;
+  } finally {
+    automationConfirmationBusy.value = false;
   }
 }
 
@@ -1103,7 +1162,9 @@ async function reconnect(
     if (props.active) terminalView.value?.focus();
   } catch (error) {
     const coreError = parseCoreApiError(error);
-    if (
+    if (coreError?.code === "ssh_terminal.login_automation_confirmation_required") {
+      await showLoginAutomationConfirmation(credentialRefId, true);
+    } else if (
       coreError?.code === "ssh_terminal.credential_unavailable"
       && credentialRefId === null
     ) {
@@ -1458,6 +1519,50 @@ onBeforeUnmount(() => {
     />
 
     <NvxDialog
+      v-model="automationConfirmationOpen"
+      :title="t('sshSession.loginAutomation.confirmationTitle', { host: label })"
+      :description="t('sshSession.loginAutomation.confirmationDescription')"
+      :close-label="t('sshSession.loginAutomation.confirmationCancel')"
+      :dismissible="!automationConfirmationBusy"
+    >
+      <ol class="ssh-login-automation__review">
+        <li
+          v-for="(step, index) in pendingAutomationConfirmation?.steps ?? []"
+          :key="index"
+        >
+          <strong>{{ t(`sshHosts.loginAutomation.stepTypes.${step.kind}`) }}</strong>
+          <code v-if="step.kind === 'expect'">{{ step.literalText }}</code>
+          <code v-else-if="step.kind === 'sendText'">{{ step.text }}</code>
+          <span v-else>{{ step.secretLabel }}</span>
+          <small>{{ t('sshHosts.loginAutomation.timeout') }}: {{ step.timeoutSeconds }}</small>
+          <small v-if="step.kind !== 'expect' && step.appendEnter">
+            {{ t('sshHosts.loginAutomation.appendEnter') }}
+          </small>
+        </li>
+      </ol>
+      <NvxInlineNotice
+        v-if="automationConfirmationFailed"
+        tone="error"
+        :title="t('sshSession.loginAutomation.confirmationFailed')"
+      />
+      <template #actions>
+        <NvxButton
+          variant="ghost"
+          :disabled="automationConfirmationBusy"
+          @click="automationConfirmationOpen = false"
+        >
+          {{ t('sshSession.loginAutomation.confirmationCancel') }}
+        </NvxButton>
+        <NvxButton
+          :loading="automationConfirmationBusy"
+          @click="confirmPendingLoginAutomation"
+        >
+          {{ t('sshSession.loginAutomation.confirmationAccept') }}
+        </NvxButton>
+      </template>
+    </NvxDialog>
+
+    <NvxDialog
       v-model="algorithmDetailsOpen"
       :title="t('sshSession.algorithms.title')"
       :description="t('sshSession.algorithms.description')"
@@ -1604,6 +1709,24 @@ onBeforeUnmount(() => {
 
 .ssh-login-automation__body small {
   color: var(--nvx-color-danger);
+}
+
+.ssh-login-automation__review {
+  display: grid;
+  gap: var(--nvx-space-3);
+  max-height: 45vh;
+  overflow-y: auto;
+  padding-left: var(--nvx-space-5);
+}
+
+.ssh-login-automation__review li {
+  display: grid;
+  gap: var(--nvx-space-1);
+  overflow-wrap: anywhere;
+}
+
+.ssh-login-automation__review code {
+  white-space: pre-wrap;
 }
 
 .ssh-negotiated-algorithms {
