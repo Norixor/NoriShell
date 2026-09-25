@@ -8,9 +8,9 @@ Core 会在准入和真正受保护写入前，核验 operation、精确 target�
 
 guest 只能通过 `permissions`、`permissionRevoke` 和 `permissionsForget` 查看或撤销自己当前拥有的 remembered-operation 摘要，不能借此扩大 capability grant。基于选择器的记录只保留带 Core 生成不透明后缀的通用标签，不保留本地路径或 serial identity。网络 `host:port` 与本地 process basename 可以作为可读管理标签，但精确冻结 scope 仍只在 Core 内。宿主管理可以保留历史和已过期记录供查看。
 
-`onOpen`、timer、provider callback 与 workflow 自动 step 都是后台上下文，不能打开 protected prompt、创建/解锁 Vault、请求 terminal input 或把可见 surface 当作批准。应返回 `interactionRequired`、`vaultMissing`、`vaultLocked` 或 `vaultRequiresReload`，等待明确用户 action。源码出现或 `describe` 列出均不代表 native、hardware、macOS 或 Windows 已验收；以[实施状态](../../../README.md#安装与快速开始)为准。
+`onOpen`、timer、provider callback 与 workflow 自动 step 都是后台上下文，不能打开 protected prompt、创建/解锁 Vault、请求 terminal input 或把可见 surface 当作批准。应返回 `interactionRequired`、`vaultMissing`、`vaultLocked` 或 `vaultRequiresReload`，等待明确用户 action。源码出现或 `describe` 列出均不代表 native、hardware、macOS 或 Windows 已验收；以[实施状态](../../../README.zh-CN.md#安装与快速开始)为准。
 
 
 ## SSH 与远程桌面同步
 
-`sshSync` 同时承载可移植 SSH 与 RDP/VNC 配置。Core 负责范围、依赖、保存密码的加密及恢复；插件只声明端点并展示聚合事实，不能读取密码或原始配置。V3 新写入支持桌面配置；可读取受认证的 V2，旧客户端拒绝 V3。配置与密码可独立选择，取消范围不会删除本地对象。真实平台和云端验收边界见[实现状态](../../../README.md#安装与快速开始)。
+`sshSync` 同时承载可移植 SSH 与 RDP/VNC 配置。Core 负责范围、依赖、保存密码的加密及恢复；插件只声明端点并展示聚合事实，不能读取密码或原始配置。V3 新写入支持桌面配置；可读取受认证的 V2，旧客户端拒绝 V3。配置与密码可独立选择，取消范围不会删除本地对象。真实平台和云端验收边界见[实现状态](../../../README.zh-CN.md#安装与快速开始)。

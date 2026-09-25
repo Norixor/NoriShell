@@ -9,6 +9,6 @@ Import profile loads a draft. Export saved profile exports the applied profile, 
 
 Terminal appearance is managed independently in Terminal preferences. Follow application can use a package-provided palette; fixed and custom terminal palettes remain independent. A color change never creates, reconnects or closes a terminal session.
 
-Security, credential and permission confirmations retain built-in appearance. Native controls and file dialogs follow platform limits. Ordinary declarative plugin panels can follow the theme; independently drawn isolated pages require plugin support. See [implementation status](../../../README.en.md#installation-and-quick-start) for current platform acceptance.
+Security, credential and permission confirmations retain built-in appearance. Native controls and file dialogs follow platform limits. Ordinary declarative plugin panels can follow the theme; independently drawn isolated pages require plugin support. See [implementation status](../../../README.md#installation-and-quick-start) for current platform acceptance.
 
 Moss and Mulberry retain the former Clear/Midnight theme IDs. A local ZIP cannot authorize a changed package through a self-reported publisher: uninstall the old theme while retaining data, then import and enable the new package. Existing overrides remain; reset the theme and save to use its complete new defaults.

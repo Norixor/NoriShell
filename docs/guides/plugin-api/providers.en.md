@@ -8,7 +8,7 @@
 
 `appNavigate` accepts only controlled application routes or the plugin’s own page. The main window may close declarative dialogs owned by the same plugin, package hash, and instance generation before navigating. Unknown dialogs, another plugin’s dialogs, and application security dialogs discard navigation immediately; dismissal does not replay it. Core ownership and dialog blocking are checked again after closing the owned dialogs.
 
-Core integration fixtures have exercised the actual ProtocolSessionActor and task execution/cancellation; macOS native workflow checks cover execution, cancellation after refresh, cancellation on normal exit, and interrupted recovery after abnormal exit. The service example has completed a real HTTPS query after protected approval. Remaining platform, protocol, and hardware checks are tracked in [implementation status](../../../README.en.md#installation-and-quick-start). Package authors must still query `describe`; source availability, package validation, and unit tests do not replace the relevant native acceptance.
+Core integration fixtures have exercised the actual ProtocolSessionActor and task execution/cancellation; macOS native workflow checks cover execution, cancellation after refresh, cancellation on normal exit, and interrupted recovery after abnormal exit. The service example has completed a real HTTPS query after protected approval. Remaining platform, protocol, and hardware checks are tracked in [implementation status](../../../README.md#installation-and-quick-start). Package authors must still query `describe`; source availability, package validation, and unit tests do not replace the relevant native acceptance.
 
 ## Declare the provider catalog
 

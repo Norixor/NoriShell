@@ -13,4 +13,4 @@ Current source version is Core API **1.85**. The generated TypeScript contract i
 - [Registered handler and main-window ACL directory](handlers.generated.md)
 - [Generated event payload directory](events.generated.md)
 
-Exact generated request/result types are authoritative when implementation changes. The catalog records source interfaces; it does not claim platform, native-window, hardware, or Windows acceptance. Those remain in [implementation status](../../../README.en.md#installation-and-quick-start).
+Exact generated request/result types are authoritative when implementation changes. The catalog records source interfaces; it does not claim platform, native-window, hardware, or Windows acceptance. Those remain in [implementation status](../../../README.md#installation-and-quick-start).
