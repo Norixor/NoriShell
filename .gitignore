@@ -47,5 +47,6 @@ src-tauri/target/
 # Official plugins are maintained separately from the client source release
 /examples/plugins/official-operations/
 /examples/plugins/norixor-account/
+/crates/plugin-platform/examples/verify_official_operations.rs
 __pycache__/
 *.pyc
