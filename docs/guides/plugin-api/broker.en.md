@@ -46,6 +46,6 @@ Every row is a `PluginApiOperation` variant inside [`PluginApiCall`](types.en.md
 
 Resource handles are opaque and scoped to owner, package hash, grant state, consumer, and runtime generation. Close is explicit; cancellation, revocation, disable, replacement, crash, or a stale fence can close them too. A returned handle or `*Sent` result is local Core acceptance, not proof of remote I/O. Resource events carry bounded actual open/data/exit/error/close facts.
 
-Serial and protocol-provider APIs are included because they are in the current ABI and broker implementation. They are not claims of native, hardware, Windows, or end-to-end acceptance. See [implementation status](../../../README.en.md#installation-and-quick-start) and [developer broker guidance](../developers/broker.en.md).
+Serial and protocol-provider APIs are included because they are in the current ABI and broker implementation. They are not claims of native, hardware, Windows, or end-to-end acceptance. See [implementation status](../../../README.md#installation-and-quick-start) and [developer broker guidance](../developers/broker.en.md).
 
 The main application owns opted-in plugin shortcut bindings across page changes. Conflicting bindings do not execute. Terminal input, editable controls, IME composition, and blocking dialogs remain protected; application teardown removes the listener. A file command invokes its registered document action, which must still obtain a fresh handle through native FilePick selection and scope approval. Declaring extensions does not grant file access.

@@ -13,4 +13,4 @@ Core API 是 NoriShell 自身 WebView 的应用 renderer IPC，**不是**插件 
 - [已注册 handler 与主窗口 ACL 目录](handlers.generated.md)
 - [生成 event payload 目录](events.generated.md)
 
-实现变动时以生成 request/result type 为准。本目录记录源码接口，不能据此声称平台、原生窗口、硬件或 Windows 已验收；这些事实只在[实施状态](../../../README.md#安装与快速开始)记录。
+实现变动时以生成 request/result type 为准。本目录记录源码接口，不能据此声称平台、原生窗口、硬件或 Windows 已验收；这些事实只在[实施状态](../../../README.zh-CN.md#安装与快速开始)记录。

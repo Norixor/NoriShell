@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="824" viewBox="0 0 1160 824" role="img" aria-labelledby="title desc" lang="en">
+<title id="title">How NoriShell works</title><desc id="desc">The user interacts through the desktop interface or separate protected windows. Rust Core owns connections and sessions, checks identity and authentication, and manages input and resource lifecycle. Isolated WebAssembly plugins request approved capabilities through the Core permission broker and cannot directly access the Vault. Core connects remote sessions and the local shell. Local SQLite stores non-secret settings; the encrypted Vault stores saved secrets and is not uploaded by sync.</desc>
+<defs><linearGradient id="core" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#174fae"/><stop offset="1" stop-color="#12386f"/></linearGradient><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="m1 1 5 3-5 3" fill="none" stroke="#8193af" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<g font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+<rect x="1" y="1" width="1158" height="822" rx="24" fill="#f7f9fc" stroke="#e0e6ee"/>
+<rect x="40" y="40" width="5" height="36" rx="2.5" fill="#1f5fd2"/>
+<text x="60" y="68" font-size="30" fill="#192b45" font-weight="650" >How NoriShell works</text>
+<text x="40" y="108" font-size="19" fill="#586478" font-weight="400" >One workspace. Connections and sensitive operations stay under Core control.</text>
+<text x="40" y="151" font-size="13" fill="#68778e" font-weight="650" letter-spacing="1.4">YOU &amp; THE INTERFACE</text>
+<text x="408" y="151" font-size="13" fill="#68778e" font-weight="650" letter-spacing="1.4">ON YOUR DEVICE</text>
+<text x="832" y="151" font-size="13" fill="#68778e" font-weight="650" letter-spacing="1.4">SESSION TARGETS</text>
+<path d="M330 242H396" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M330 414H396" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M752 242H820" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M792 242V490H820" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<circle cx="792" cy="242" r="4" fill="#8193af"/>
+<path d="M330 683H366V485H396" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M580 536V589" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M580 589V630" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M580 589H952V630" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<circle cx="580" cy="589" r="4" fill="#8193af"/>
+<rect x="40" y="174" width="290" height="138" rx="18" fill="#fff" stroke="#dce3ec"/>
+<g transform="translate(62 196) scale(1)" fill="none" stroke="#1f5fd2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="3"/><path d="M8 21h8M12 17v4"/></g>
+<text x="101" y="216" font-size="22" fill="#192b45" font-weight="620" >Desktop interface</text>
+<text x="62" y="256" font-size="19" fill="#586478" font-weight="400" >Tabs · files · hosts</text>
+<text x="62" y="286" font-size="17" fill="#586478" font-weight="400" >Requests in · state out</text>
+<rect x="40" y="356" width="290" height="160" rx="18" fill="#eef6f4" stroke="#bbd8d0"/>
+<g transform="translate(62 378) scale(1)" fill="none" stroke="#267a62" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 21 6v6c0 5-9 10-9 10S3 17 3 12V6Z"/><path d="m8 12 3 3 5-6"/></g>
+<text x="101" y="398" font-size="21" fill="#205a4d" font-weight="620" >Protected windows</text>
+<text x="62" y="441" font-size="19" fill="#315e53" font-weight="400" >Credentials &amp; approvals</text>
+<text x="62" y="477" font-size="17" fill="#52736a" font-weight="400" >Separate from plugin UI</text>
+<rect x="40" y="586" width="290" height="192" rx="18" fill="#f4f2fa" stroke="#d6d0e7"/>
+<g transform="translate(62 608) scale(1)" fill="none" stroke="#72599a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 17.5h7M17.5 14v7"/></g>
+<text x="101" y="628" font-size="22" fill="#574078" font-weight="620" >Isolated plugins</text>
+<text x="62" y="671" font-size="16.5" fill="#655b78" font-weight="400" >WebAssembly · separate process</text>
+<text x="62" y="704" font-size="17" fill="#655b78" font-weight="400" >Request approved capabilities</text>
+<path d="M62 725H308" stroke="#ded9ea"/>
+<text x="62" y="753" font-size="17" fill="#574078" font-weight="550" >No direct Vault access</text>
+<rect x="408" y="174" width="344" height="362" rx="20" fill="url(#core)" stroke="#154c9f"/>
+<g transform="translate(434 198) scale(1.15)" fill="none" stroke="#c3d8ff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="3"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/><path d="m9 10 3 3 3-3"/></g>
+<text x="477" y="225" font-size="30" fill="#ffffff" font-weight="650" >Rust Core</text>
+<text x="434" y="275" font-size="20" fill="#e2ebfd" font-weight="500" >Owns connections &amp; sessions</text>
+<path d="M434 300H726" stroke="#ffffff" stroke-opacity=".19"/>
+<path d="m435 332 4 4 8-9" fill="none" stroke="#a9c6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="458" y="339" font-size="18" fill="#e3ecff" font-weight="400" >Identity &amp; authentication</text>
+<path d="m435 372 4 4 8-9" fill="none" stroke="#a9c6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="458" y="379" font-size="18" fill="#e3ecff" font-weight="400" >Input &amp; resource lifecycle</text>
+<rect x="430" y="440" width="300" height="74" rx="12" fill="#e8f0ff" stroke="#e8f0ff"/>
+<text x="448" y="469" font-size="20" fill="#163c76" font-weight="650" >Permission broker</text>
+<text x="448" y="495" font-size="16" fill="#4a6388" font-weight="400" >Checks every plugin request</text>
+<rect x="832" y="174" width="288" height="228" rx="18" fill="#fff" stroke="#dce3ec"/>
+<g transform="translate(854 196) scale(1)" fill="none" stroke="#1f5fd2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01M15 6.5h3M15 17.5h3"/></g>
+<text x="893" y="216" font-size="22" fill="#192b45" font-weight="620" >Remote sessions</text>
+<text x="854" y="257" font-size="20" fill="#44556f" font-weight="400" >SSH · SFTP · tunnels</text>
+<text x="854" y="288" font-size="19" fill="#44556f" font-weight="400" >RDP / VNC · metrics</text>
+<path d="M854 310H1098" stroke="#e3e8f0"/>
+<text x="854" y="341" font-size="17" fill="#586478" font-weight="400" >SSH host key checked</text>
+<text x="854" y="368" font-size="17" fill="#586478" font-weight="400" >before authentication</text>
+<rect x="832" y="444" width="288" height="112" rx="18" fill="#eef3fa" stroke="#d4dfed"/>
+<g transform="translate(854 464) scale(1)" fill="none" stroke="#1f5fd2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="18" rx="3"/><path d="m6 8 4 4-4 4M13 16h5"/></g>
+<text x="893" y="486" font-size="22" fill="#192b45" font-weight="620" >Local shell</text>
+<text x="854" y="526" font-size="18" fill="#586478" font-weight="400" >Local PTY · default shell</text>
+<rect x="408" y="638" width="344" height="140" rx="18" fill="#fff" stroke="#dce3ec"/>
+<g transform="translate(430 660) scale(1)" fill="none" stroke="#62748c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 4 18 4 18 0V5M3 12c0 4 18 4 18 0"/></g>
+<text x="469" y="680" font-size="22" fill="#192b45" font-weight="620" >Local database</text>
+<text x="430" y="717" font-size="19" fill="#44556f" font-weight="500" >Non-secret settings</text>
+<text x="430" y="751" font-size="16" fill="#586478" font-weight="400" >Hosts · preferences · trust records</text>
+<rect x="784" y="638" width="336" height="140" rx="18" fill="#edf4ff" stroke="#c9dafa"/>
+<g transform="translate(806 658) scale(1)" fill="none" stroke="#1f5fd2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="12" rx="3"/><path d="M8 10V6a4 4 0 0 1 8 0v4M12 15v3"/></g>
+<text x="845" y="680" font-size="22" fill="#204b8d" font-weight="620" >Encrypted Vault</text>
+<text x="806" y="717" font-size="18" fill="#445f88" font-weight="500" >Saved passwords &amp; private keys</text>
+<text x="806" y="751" font-size="16" fill="#586f92" font-weight="400" >Sync does not upload this file</text>
+</g></svg>

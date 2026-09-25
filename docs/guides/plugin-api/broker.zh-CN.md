@@ -46,6 +46,6 @@
 
 resource handle 是绑定 owner、package hash、grant state、consumer 和 runtime generation 的不透明引用。必须显式 close；取消、revoke、disable、replacement、crash 或 stale fence 也可将其关闭。拿到 handle 或 `*Sent` 只表示本地 Core 已接受，不证明远端 I/O；resource event 才传递有界的实际 open/data/exit/error/close 事实。
 
-serial 和 protocol-provider API 已纳入当前 ABI 与 broker 实现，但不能据此声称已完成 native、hardware、Windows 或端到端验收。请查看[实施状态](../../../README.md#安装与快速开始)和[开发 Broker 指南](../developers/broker.zh-CN.md)。
+serial 和 protocol-provider API 已纳入当前 ABI 与 broker 实现，但不能据此声称已完成 native、hardware、Windows 或端到端验收。请查看[实施状态](../../../README.zh-CN.md#安装与快速开始)和[开发 Broker 指南](../developers/broker.zh-CN.md)。
 
 插件快捷键由主应用生命周期管理，用户显式启用后可跨页面使用；同一组合键存在多个匹配时不执行。终端、可编辑控件、输入法组合输入和阻断式对话框中的按键仍被保护，应用销毁时移除监听。文件命令调用注册的文档动作；该动作仍须通过 FilePick 原生选择及范围审批取得新的文件句柄，扩展名声明本身不授予文件访问权。
