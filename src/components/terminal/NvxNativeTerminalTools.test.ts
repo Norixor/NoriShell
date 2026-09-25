@@ -42,12 +42,12 @@ const session = {
   paneId: "pane-a",
 };
 
-function historyEntry(command: string, id = "019d0000-0000-7000-8000-000000000301") {
+function historyEntry(command: string, id = "019d0000-0000-7000-8000-000000000301", completedAtUnixMs = 1) {
   return {
     entryId: id,
     scope: { kind: "host" as const, hostId: "host-a" },
     command,
-    completedAtUnixMs: 1,
+    completedAtUnixMs,
     elapsedMillis: 1,
     exitCode: 0,
   };
@@ -84,20 +84,6 @@ function configureNative(pinia: ReturnType<typeof createPinia>) {
     historyAvailable: true,
     historyPersistenceFailed: false,
   });
-  native.sessions = [{
-    session,
-    shellKind: "zsh",
-    captureState: "ready",
-    failureCode: null,
-    activity: "prompt",
-    capturesCommand: true,
-    historyPaused: false,
-    promptObserved: true,
-    promptSequence: "1",
-    promptInputSequence: "1",
-    promptInputEpoch: "1",
-    completionCursor: "1",
-  }];
   return native;
 }
 
@@ -116,6 +102,7 @@ function mountTools(draft = "") {
       writable: true,
       draft,
       currentDraft: () => draft,
+      isEmptyShellPrompt: () => true,
       enable: vi.fn(),
     },
     global: { plugins: [pinia, i18n] },
@@ -178,10 +165,9 @@ describe("NvxNativeTerminalTools", () => {
     await vi.advanceTimersByTimeAsync(220);
     await flushPromises();
 
-    const suggestion = Array.from(document.querySelectorAll<HTMLButtonElement>(".native-terminal-tools__suggestions > button"))
-      .find((button) => button.textContent?.includes("git status"));
-    expect(suggestion).toBeTruthy();
-    suggestion?.click();
+    expect(wrapper.emitted("suggestionChange")?.at(-1)?.[0]).toEqual({ draft: "git", suffix: " status" });
+    expect(document.querySelector(".native-terminal-tools__suggestions")).toBeNull();
+    (wrapper.vm as unknown as { acceptSuggestion(): void }).acceptSuggestion();
     await flushPromises();
     expect(send).toHaveBeenCalledWith(" status");
     await wrapper.setProps({ draft: "gitx", currentDraft: () => "gitx" });
@@ -197,7 +183,7 @@ describe("NvxNativeTerminalTools", () => {
     await wrapper.setProps({ hostId: null, draft: "git", currentDraft: () => "git" });
     await vi.advanceTimersByTimeAsync(220);
     expect(api.listNativeTerminalHistory).not.toHaveBeenCalled();
-    expect(document.querySelector(".native-terminal-tools__suggestions")).toBeNull();
+    expect(wrapper.emitted("suggestionChange")?.at(-1)?.[0]).toBeNull();
     wrapper.unmount();
   });
 
@@ -211,7 +197,26 @@ describe("NvxNativeTerminalTools", () => {
     pending.resolve([historyEntry("git status")]);
     await flushPromises();
 
-    expect(document.querySelector(".native-terminal-tools__suggestions")).toBeNull();
+    expect(wrapper.emitted("suggestionChange")?.at(-1)?.[0]).toBeNull();
     wrapper.unmount();
   });
+
+  it("shows one suggestion from the most frequent matching command", async () => {
+    api.listNativeTerminalHistory.mockResolvedValue([
+      historyEntry("git status", "a", 12),
+      historyEntry("git log", "b", 11),
+      historyEntry("git log", "c", 10),
+      historyEntry("git status", "d", 9),
+      historyEntry("git status", "e", 8),
+    ]);
+    const { wrapper } = mountTools();
+    await wrapper.setProps({ draft: "git", currentDraft: () => "git" });
+    await vi.advanceTimersByTimeAsync(220);
+    await flushPromises();
+    expect(api.listNativeTerminalHistory).toHaveBeenCalledWith({ scope: { kind: "host", hostId: "host-a" }, query: "git", limit: 2_000 });
+    expect(wrapper.emitted("suggestionChange")?.at(-1)?.[0]).toEqual({ draft: "git", suffix: " status" });
+    wrapper.unmount();
+  });
+
+
 });

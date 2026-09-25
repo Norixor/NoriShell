@@ -166,7 +166,6 @@ defineExpose({ requestPaste, pasteFromClipboard });
       <NvxButton
         variant="ghost"
         :disabled="busy"
-        data-nvx-dialog-initial-focus
         @click="cancel"
       >
         {{ t('terminalEnhancements.paste.cancel') }}
@@ -174,6 +173,7 @@ defineExpose({ requestPaste, pasteFromClipboard });
       <NvxButton
         :loading="busy"
         :loading-label="t('terminalEnhancements.paste.pasting')"
+        data-nvx-dialog-initial-focus
         @click="accept"
       >
         {{ t('terminalEnhancements.paste.confirm') }}

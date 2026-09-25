@@ -69,6 +69,7 @@ const writes = {
   focus: vi.fn(),
   selection: vi.fn(),
 };
+let viewDimensions = { rows: 28, cols: 96 };
 
 const terminalViewStub = defineComponent({
   name: "NvxTerminalView",
@@ -83,7 +84,7 @@ const terminalViewStub = defineComponent({
     expose({
       writeBytes: writes.bytes,
       writeGap: writes.gap,
-      dimensions: () => ({ rows: 28, cols: 96 }),
+      dimensions: () => viewDimensions,
       focus: writes.focus,
       findNext: writes.findNext,
       findPrevious: writes.findPrevious,
@@ -203,6 +204,8 @@ function mountPane(
   deferredStart = false,
   deferredRecovery: "reconnect" | "credential" | "vaultUnlock" = "reconnect",
   credentialRefId: string | null = "019d0000-0000-7000-8000-000000000413",
+  initialDirectory: string | null = null,
+  visible = true,
 ) {
   const mountHost = document.createElement("div");
   document.body.append(mountHost);
@@ -217,8 +220,11 @@ function mountPane(
       deferredStart,
       deferredRecovery,
       active,
+      visible,
+      initialDirectory,
       canSplitHorizontal: true,
       canSplitVertical: true,
+      canSplitWorkspaceRight: true,
     },
     global: {
       plugins: [createPinia(), i18n],
@@ -236,6 +242,7 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
   beforeEach(() => {
     client.secureChallenge.mockReset().mockReturnValue(new Promise(() => undefined));
     vi.clearAllMocks();
+    viewDimensions = { rows: 28, cols: 96 };
     localStorage.clear();
     resetTerminalInputFocusForTests();
     i18n.global.locale.value = "en";
@@ -332,7 +339,7 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     wrapper.unmount();
   });
 
-  it("shows the negotiated policy and algorithms for the exact route stage", async () => {
+  it("does not expose negotiated algorithms as a Pane toolbar action", async () => {
     const running = summary("running", {
       negotiatedAlgorithms: [{
         routeStage: { kind: "target" },
@@ -358,13 +365,8 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     const wrapper = mountPane();
     await flushPromises();
 
-    document.querySelector<HTMLButtonElement>('[aria-label="View negotiated algorithms"]')?.click();
-    await flushPromises();
-    expect(document.body.textContent).toContain("curve25519-sha256");
-    expect(document.body.textContent).toContain("ssh-ed25519");
-    expect(document.body.textContent).toContain("Policy revision");
-    expect(document.body.textContent).toContain("2");
-    expect(document.body.textContent).toContain("2026.08.29.1");
+    expect(document.querySelector('[aria-label="View negotiated algorithms"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("curve25519-sha256");
     wrapper.unmount();
   });
 
@@ -524,10 +526,67 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
       bytes: [0, 195, 169, 27, 91, 65],
     });
     expect(client.resizeSshTerminal).toHaveBeenCalledWith(expect.objectContaining({
-      resizeSeq: "1",
+      resizeSeq: "2",
       rows: 33,
       cols: 120,
     }));
+    wrapper.unmount();
+  });
+
+  it("sends geometry changes for the active SSH attachment before input focus is granted", async () => {
+    const running = summary("running");
+    client.changeTerminalInputFocus.mockImplementation(() => new Promise(() => undefined));
+    client.openSshSession.mockResolvedValue({
+      operationId: "019d0000-0000-7000-8000-000000000451",
+      idempotencyKey: "open",
+      openAttemptId: running.openAttemptId,
+      stateRevision: running.stateRevision,
+      session: running,
+      attachment: attachment(),
+    });
+    const wrapper = mountPane();
+    await flushPromises();
+
+    wrapper.findComponent({ name: "NvxTerminalView" }).vm.$emit("resize", 35, 116);
+    await flushPromises();
+
+    expect(client.resizeSshTerminal).toHaveBeenCalledWith({
+      sessionId: running.sessionId,
+      expectedGeneration: running.generation,
+      channelId: running.channelId,
+      attachmentId: attachment().attachmentId,
+      viewId: paneId,
+      resizeSeq: "2",
+      rows: 35,
+      cols: 116,
+    });
+    expect(client.sendSshInput).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("reasserts the current size when a visible SSH view returns without a new fit event", async () => {
+    const running = summary("running");
+    client.getSshSession.mockResolvedValue(details(running));
+    client.attachSshSession.mockResolvedValue({
+      stateRevision: running.stateRevision,
+      attachmentRevision: running.attachmentRevision,
+      attachment: attachment(),
+      replay: [],
+    });
+    const wrapper = mountPane(running, false);
+    await flushPromises();
+    client.resizeSshTerminal.mockClear();
+
+    await wrapper.setProps({ visible: false });
+    await wrapper.setProps({ visible: true });
+    await flushPromises();
+
+    expect(client.resizeSshTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      rows: 28,
+      cols: 96,
+      attachmentId: attachment().attachmentId,
+    }));
+    expect(client.sendSshInput).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -606,6 +665,57 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
 
     expect(writes.focus).not.toHaveBeenCalled();
     expect(client.sendSshInput).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("sends the requested directory once through the focused SSH lease after the shell is running", async () => {
+    const running = summary("running");
+    client.getSshSession.mockResolvedValue(details(running));
+    client.attachSshSession.mockResolvedValue({
+      stateRevision: running.stateRevision,
+      attachmentRevision: running.attachmentRevision,
+      attachment: attachment(),
+      replay: [],
+    });
+    const wrapper = mountPane(running, true, false, "reconnect", running.credentialRefId, "/srv/a'b");
+    await flushPromises();
+
+    expect(client.sendSshInput).toHaveBeenCalledTimes(1);
+    expect(client.sendSshInput).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: running.sessionId,
+      expectedGeneration: running.generation,
+      bytes: Array.from(new TextEncoder().encode("cd '/srv/a'\\''b'\r")),
+    }));
+    expect(wrapper.emitted("initialDirectoryHandled")?.[0]).toEqual(["/srv/a'b"]);
+    await wrapper.setProps({ initialDirectory: null });
+    await flushPromises();
+    expect(client.sendSshInput).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("waits for login automation to finish before changing the requested directory", async () => {
+    const automating = summary("automatingLogin", { channelId: attachment().channelId });
+    let onEvent: ((value: SshSessionEvent) => void) | null = null;
+    client.getSshSession.mockResolvedValue(details(automating));
+    client.attachSshSession.mockImplementation(async (_request, listener) => {
+      onEvent = listener;
+      return {
+        stateRevision: automating.stateRevision,
+        attachmentRevision: automating.attachmentRevision,
+        attachment: attachment(),
+        replay: [],
+      };
+    });
+    const wrapper = mountPane(automating, true, false, "reconnect", automating.credentialRefId, "/srv/ready");
+    await flushPromises();
+    expect(client.sendSshInput).not.toHaveBeenCalled();
+
+    dispatchCapturedEvent(onEvent, event(automating, {
+      kind: "stateChanged", previousState: "automatingLogin", state: "running",
+      closeReason: null, failureReason: null,
+    }));
+    await flushPromises();
+    expect(client.sendSshInput).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 
@@ -924,7 +1034,9 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
 
     const wrapper = mountPane(running);
     await flushPromises();
-    expect(wrapper.text()).toContain("SSH heartbeat · 1 routes");
+    expect(wrapper.get(".ssh-terminal-pane__state").text()).toMatch(/^\d+ms$/);
+    expect(wrapper.get(".ssh-terminal-pane__latency-trigger").attributes("title"))
+      .toContain("SSH keepalive enabled");
 
     dispatchCapturedEvent(onEvent, event(running, {
       kind: "heartbeatChanged",
@@ -942,7 +1054,9 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
       },
     }));
     await flushPromises();
-    expect(wrapper.text()).toContain("SSH heartbeat · 2 pending failures");
+    expect(wrapper.get(".ssh-terminal-pane__state").text()).toBe("— ms");
+    expect(wrapper.get(".ssh-terminal-pane__latency-trigger").attributes("title"))
+      .toContain("SSH keepalive failed 2 times in a row");
 
     dispatchCapturedEvent(onEvent, event(running, {
       kind: "stateChanged",
@@ -953,6 +1067,117 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     }, "2"));
     await flushPromises();
     expect(wrapper.text()).not.toContain("SSH heartbeat");
+    wrapper.unmount();
+  });
+
+  it("shows each Jump Host and target latency below the ms label and dismisses on focus loss or Escape", async () => {
+    const running = summary("running");
+    let onEvent: ((value: SshSessionEvent) => void) | null = null;
+    const hop = (hopIndex: number) => ({
+      kind: "jumpHost" as const,
+      hopIndex,
+      hostId: `019d0000-0000-7000-8000-00000000040${hopIndex}`,
+      endpoint: { address: `jump-${hopIndex + 1}.example.test`, port: 22, username: "deploy" },
+    });
+    client.getSshSession.mockResolvedValue(details(running, {
+      heartbeat: {
+        policyRevision: "2",
+        mode: "transportKeepalive",
+        transports: [
+          { routeStage: { kind: "target" }, nextDueAtUnixMs: null, lastSentAtUnixMs: 100, lastAckAtUnixMs: 120, consecutiveFailures: 0 },
+          { routeStage: hop(1), nextDueAtUnixMs: null, lastSentAtUnixMs: 100, lastAckAtUnixMs: 114, consecutiveFailures: 0 },
+          { routeStage: hop(0), nextDueAtUnixMs: null, lastSentAtUnixMs: 100, lastAckAtUnixMs: 108, consecutiveFailures: 0 },
+        ],
+        shell: null,
+      },
+    }));
+    client.attachSshSession.mockImplementation(async (_request, listener) => {
+      onEvent = listener;
+      return {
+        stateRevision: running.stateRevision,
+        attachmentRevision: running.attachmentRevision,
+        attachment: attachment(),
+        replay: [],
+      };
+    });
+    const wrapper = mountPane(running);
+    await flushPromises();
+    const trigger = wrapper.get<HTMLButtonElement>(".ssh-terminal-pane__latency-trigger");
+    expect(trigger.text()).toBe("20ms");
+    expect(wrapper.find(".ssh-terminal-pane__latency-popover").exists()).toBe(false);
+
+    await trigger.trigger("click");
+    await flushPromises();
+    const rows = Array.from(document.body.querySelectorAll<HTMLElement>(".ssh-terminal-pane__latency-row"));
+    expect(rows.map((row) => [
+      row.querySelector(".ssh-terminal-pane__latency-host span")?.textContent,
+      row.querySelector(".ssh-terminal-pane__latency-host small")?.textContent,
+      row.querySelector(".ssh-terminal-pane__latency-value")?.textContent,
+    ])).toEqual([
+      ["Jump Host 1", "jump-1.example.test:22", "8 ms"],
+      ["Jump Host 2", "jump-2.example.test:22", "14 ms"],
+      ["Target Host", "ssh.example.test:22", "20 ms"],
+    ]);
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+
+    dispatchCapturedEvent(onEvent, event(running, {
+      kind: "heartbeatChanged",
+      heartbeat: {
+        policyRevision: "2",
+        mode: "transportKeepalive",
+        transports: [
+          { routeStage: { kind: "target" }, nextDueAtUnixMs: null, lastSentAtUnixMs: 130, lastAckAtUnixMs: 120, consecutiveFailures: 0 },
+          { routeStage: hop(1), nextDueAtUnixMs: null, lastSentAtUnixMs: 100, lastAckAtUnixMs: 114, consecutiveFailures: 1 },
+          { routeStage: hop(0), nextDueAtUnixMs: null, lastSentAtUnixMs: 130, lastAckAtUnixMs: null, consecutiveFailures: 0 },
+        ],
+        shell: null,
+      },
+    }));
+    await flushPromises();
+    expect(trigger.text()).toBe("— ms");
+    expect(Array.from(document.body.querySelectorAll(".ssh-terminal-pane__latency-value"), (value) => value.textContent))
+      .toEqual(["—", "—", "—"]);
+
+    trigger.element.focus();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    await flushPromises();
+    expect(document.body.querySelector(".ssh-terminal-pane__latency-popover")).toBeNull();
+
+    await trigger.trigger("click");
+    await flushPromises();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flushPromises();
+    expect(document.body.querySelector(".ssh-terminal-pane__latency-popover")).toBeNull();
+    await trigger.trigger("click");
+    await flushPromises();
+    outside.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    await flushPromises();
+    expect(document.body.querySelector(".ssh-terminal-pane__latency-popover")).toBeNull();
+    outside.remove();
+    wrapper.unmount();
+  });
+
+  it("shows a one-shot target latency while periodic keepalive is disabled", async () => {
+    const running = summary("running");
+    client.getSshSession.mockResolvedValue(details(running, {
+      heartbeat: {
+        policyRevision: null,
+        mode: "disabled",
+        transports: [{
+          routeStage: { kind: "target" },
+          nextDueAtUnixMs: null,
+          lastSentAtUnixMs: 100,
+          lastAckAtUnixMs: 137,
+          consecutiveFailures: 0,
+        }],
+        shell: null,
+      },
+    }));
+    const wrapper = mountPane(running);
+    await flushPromises();
+    expect(wrapper.get(".ssh-terminal-pane__latency-trigger").text()).toBe("37ms");
     wrapper.unmount();
   });
 
@@ -1044,9 +1269,9 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     await flushPromises();
 
     expect(client.openSshSession).toHaveBeenCalledTimes(2);
-    expect(wrapper.text()).toContain(i18n.global.t("sshSession.states.running"));
+    expect(wrapper.get(".ssh-terminal-pane__state").text()).toBe("— ms");
     expect(wrapper.get(".ssh-terminal-pane__state").text()).toBe(
-      i18n.global.t("sshSession.states.running"),
+      "— ms",
     );
     wrapper.unmount();
   });
@@ -1097,7 +1322,7 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
 
     expect(client.confirmLoginAutomation).toHaveBeenCalledWith({ hostId: target.hostId, expectedRevision: "2" });
     expect(client.openSshSession).toHaveBeenCalledTimes(2);
-    expect(wrapper.text()).toContain(i18n.global.t("sshSession.states.running"));
+    expect(wrapper.get(".ssh-terminal-pane__state").text()).toBe("— ms");
     wrapper.unmount();
   });
 
@@ -1163,7 +1388,7 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     await flushPromises();
 
     expect(client.reconnectSshSession).toHaveBeenCalledTimes(2);
-    expect(wrapper.text()).toContain(i18n.global.t("sshSession.states.running"));
+    expect(wrapper.get(".ssh-terminal-pane__state").text()).toBe("— ms");
     wrapper.unmount();
   });
 
@@ -1338,7 +1563,7 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     await flushPromises();
 
     expect(client.getSshSession).toHaveBeenCalledTimes(2);
-    expect(wrapper.text()).toContain(i18n.global.t("sshSession.states.running"));
+    expect(wrapper.get(".ssh-terminal-pane__state").text()).toBe("— ms");
     expect(wrapper.get(".ssh-terminal-pane__disconnect").attributes("disabled"))
       .toBeUndefined();
 
@@ -1435,7 +1660,7 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
       disconnectForClose(): Promise<void>;
     }).disconnectForClose()).rejects.toThrow("stale disconnect fence");
     expect(client.getSshSession).toHaveBeenCalledTimes(2);
-    expect(wrapper.text()).toContain(i18n.global.t("sshSession.states.running"));
+    expect(wrapper.get(".ssh-terminal-pane__state").text()).toBe("— ms");
     wrapper.unmount();
   });
 

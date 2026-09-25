@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AppLocale } from "../locales";
 import type {
   ForwardSessionId,
-  NativeTerminalSessionScope,
   SshSessionId,
   TelnetSessionId,
   TransferId,
@@ -18,13 +17,6 @@ export interface NativeNotificationPermissionSnapshot {
   permission: NativeNotificationPermission;
   lastDelivery: NativeNotificationDelivery;
 }
-
-export interface NativeTerminalNotificationClick {
-  eventId: string;
-  scope: NativeTerminalSessionScope;
-}
-
-export const nativeTerminalNotificationClickEvent = "native-terminal-notification-click";
 
 // Native notification clicks contain only opaque resource fences. Consumers
 // must revalidate the exact generation/revision before focusing an existing
@@ -53,8 +45,8 @@ export function testNativeNotification(locale: AppLocale): Promise<NativeNotific
   return invoke("native_notification_test", { request: { meta: meta(), locale } });
 }
 
-export function setNativeNotificationContext(locale: string, visibleScope: NativeTerminalSessionScope | null): Promise<void> {
-  return invoke("native_notification_context_set", { request: { meta: meta(), locale: locale === "en" ? "en" : "zh-CN", visibleScope } });
+export function setNativeNotificationContext(locale: string): Promise<void> {
+  return invoke("native_notification_context_set", { request: { meta: meta(), locale: locale === "en" ? "en" : "zh-CN" } });
 }
 
 export function nativeNotificationFailure(error: unknown): NativeNotificationFailure {

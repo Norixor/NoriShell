@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Columns2, Rows2, X } from "lucide-vue-next";
+import { Columns2, PanelRight, Rows2, X } from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
 
 import { NvxIcon, NvxIconButton } from "../ui";
@@ -8,12 +8,14 @@ import NvxPluginContributionSlot from "./NvxPluginContributionSlot.vue";
 withDefaults(defineProps<{
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
+  canSplitWorkspaceRight: boolean;
   showLayoutActions: boolean;
   pluginContextKey?: string;
 }>(), { pluginContextKey: "global-terminal" });
 
 const emit = defineEmits<{
   split: [direction: "horizontal" | "vertical"];
+  splitWorkspaceRight: [];
   close: [];
 }>();
 
@@ -48,6 +50,17 @@ const { t } = useI18n();
         >
           <NvxIcon
             :icon="Rows2"
+            :size="16"
+          />
+        </NvxIconButton>
+        <NvxIconButton
+          size="sm"
+          :label="canSplitWorkspaceRight ? t('sshTerminal.splitWorkspaceRight') : t('sshTerminal.splitLimitReached')"
+          :disabled="!canSplitWorkspaceRight"
+          @click="emit('splitWorkspaceRight')"
+        >
+          <NvxIcon
+            :icon="PanelRight"
             :size="16"
           />
         </NvxIconButton>

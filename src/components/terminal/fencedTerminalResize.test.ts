@@ -43,4 +43,22 @@ describe("createFencedTerminalResize", () => {
     expect(send).toHaveBeenNthCalledWith(1, "1");
     expect(send).toHaveBeenNthCalledWith(2, "2");
   });
+
+  it("reasserts an already applied size after another view may have changed the PTY", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    const coordinator = createFencedTerminalResize((dimensions) => ({
+      key: `attachment:${dimensions.rows}:${dimensions.cols}`,
+      send: (sequence) => send(sequence),
+    }));
+
+    coordinator.resize(31, 101);
+    await coordinator.flush();
+    coordinator.resize(31, 101);
+    await coordinator.flush();
+    expect(send).toHaveBeenCalledTimes(1);
+
+    coordinator.reassert(31, 101);
+    await coordinator.flush();
+    expect(send).toHaveBeenNthCalledWith(2, "2");
+  });
 });

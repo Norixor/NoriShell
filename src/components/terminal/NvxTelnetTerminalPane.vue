@@ -68,6 +68,7 @@ const props = withDefaults(defineProps<{
   active: boolean;
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
+  canSplitWorkspaceRight: boolean;
 }>(), { deferredStart: false });
 
 const emit = defineEmits<{
@@ -75,6 +76,7 @@ const emit = defineEmits<{
   state: [state: TelnetSessionState, summary: TelnetSessionSummary | null];
   bellAttention: [active: boolean];
   split: [direction: "horizontal" | "vertical"];
+  splitWorkspaceRight: [];
   close: [];
 }>();
 
@@ -602,8 +604,10 @@ onBeforeUnmount(() => {
           :plugin-context-key="paneId"
           :can-split-horizontal="canSplitHorizontal"
           :can-split-vertical="canSplitVertical"
+          :can-split-workspace-right="canSplitWorkspaceRight"
           :show-layout-actions="active"
           @split="emit('split', $event)"
+          @split-workspace-right="emit('splitWorkspaceRight')"
           @close="emit('close')"
         />
       </span>

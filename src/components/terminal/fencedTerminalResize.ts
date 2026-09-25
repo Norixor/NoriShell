@@ -10,27 +10,32 @@ interface ResolvedResize {
 
 /**
   * Retain the latest terminal size and submit it only when the caller can resolve a current valid fence.
-  * Failures never guess write results; the next fit or new lease replays the latest size.
+  * Failures never guess write results; the next fit or explicit view reassertion replays the latest size.
  */
 export function createFencedTerminalResize(
   resolve: (dimensions: TerminalDimensions) => ResolvedResize | null,
 ) {
   let sequence = 0n;
-  let pending: TerminalDimensions | null = null;
+  let pending: { dimensions: TerminalDimensions; force: boolean } | null = null;
   let appliedKey: string | null = null;
   let flushing = false;
 
   function resize(rows: number, cols: number) {
-    pending = { rows, cols };
+    pending = { dimensions: { rows, cols }, force: pending?.force ?? false };
+    void flush();
+  }
+
+  function reassert(rows: number, cols: number) {
+    pending = { dimensions: { rows, cols }, force: true };
     void flush();
   }
 
   async function flush() {
     if (flushing || !pending) return;
     const requested = pending;
-    const resolved = resolve(requested);
+    const resolved = resolve(requested.dimensions);
     if (!resolved) return;
-    if (appliedKey === resolved.key) {
+    if (!requested.force && appliedKey === resolved.key) {
       pending = null;
       return;
     }
@@ -42,9 +47,9 @@ export function createFencedTerminalResize(
       await resolved.send(sequence.toString());
       succeeded = true;
       appliedKey = resolved.key;
-      if (pending?.rows === requested.rows && pending.cols === requested.cols) pending = null;
+      if (pending === requested) pending = null;
     } catch {
-      // Keep the latest size for the next fit or focus-lease transition.
+      // Keep the latest size for the next fit or view reassertion.
     } finally {
       flushing = false;
     }
@@ -56,5 +61,5 @@ export function createFencedTerminalResize(
     appliedKey = null;
   }
 
-  return { resize, flush, reset };
+  return { resize, reassert, flush, reset };
 }

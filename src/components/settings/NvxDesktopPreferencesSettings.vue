@@ -11,7 +11,7 @@ const { t } = useI18n();
 const preferences = useDesktopPreferencesStore();
 const tips = useTipsStore();
 const draft = ref<DesktopPreferences | null>(null);
-const toggles = ["trayShowStatus", "trayShowHostNames", "notificationBackgroundOnly", "notificationFailureOnly", "notifyTransferCompleted", "notifyTransferFailed", "notifyDisconnected"] as const;
+const toggles = ["trayShowStatus", "trayShowHostNames", "notificationBackgroundOnly", "notifyTransferCompleted", "notifyTransferFailed", "notifyDisconnected"] as const;
 const closeOptions = computed(() => (["hide", "quit"] as const).map((value) => ({ value, label: t(`desktopPreferences.close.${value}`) })));
 const recentOptions = computed(() => Array.from({ length: 11 }, (_, value) => ({ value: String(value), label: value === 0 ? t("desktopPreferences.noRecent") : t("desktopPreferences.recentCount", { count: value }) })));
 watch(() => preferences.snapshot, (snapshot) => {

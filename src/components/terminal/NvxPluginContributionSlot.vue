@@ -32,8 +32,9 @@ const copyKey = ref<string | null>(null);
 const feedback = ref("");
 const { rootRef, triggerRef, viewportPanelRef, viewportPanelStyle, open: toolbarMenuOpen, closeMenu: closeToolbarMenu, toggleMenu, handleMenuKeyDown: onMenuKeyDown } = usePopoverMenu({ enabled: props.toolbarMenu });
 const genericContributionCount = ref(0);
-const openTerminalTools = inject(terminalPluginToolsKey, null);
-const hasTerminalTools = computed(() => Boolean(openTerminalTools) && props.extensionSlot === "terminalToolbar");
+const terminalPluginTools = inject(terminalPluginToolsKey, null);
+const hasTerminalTools = computed(() => props.extensionSlot === "terminalToolbar"
+  && Boolean(terminalPluginTools?.available.value));
 const panels = computed(() => plugins.contributions.filter((panel) => panel.slot === props.extensionSlot));
 const usesMenuItems = computed(() => props.menu || props.toolbarMenu);
 const targetId = computed(() => ({
@@ -81,7 +82,7 @@ async function copyValue(panel: SafePluginContributionPanel, copyId: string) {
 
 function toggleToolbarMenu() {
   if (hasTerminalTools.value && !panels.value.length && !genericContributionCount.value) {
-    openTerminalTools?.(props.instanceKey);
+    terminalPluginTools?.open(props.instanceKey);
     return;
   }
   toggleMenu();
@@ -136,7 +137,7 @@ onActivated(() => void refresh());
             class="plugin-slot__menu-item"
             type="button"
             role="menuitem"
-            @click.stop="openTerminalTools?.(instanceKey); closeToolbarMenu()"
+            @click.stop="terminalPluginTools?.open(instanceKey); closeToolbarMenu()"
           >
             {{ t('plugins.tools.open') }}
           </button>
@@ -198,7 +199,7 @@ onActivated(() => void refresh());
       class="plugin-slot__menu-item"
       type="button"
       role="menuitem"
-      @click.stop="openTerminalTools?.(instanceKey)"
+      @click.stop="terminalPluginTools?.open(instanceKey)"
     >
       {{ t('plugins.tools.open') }}
     </button>

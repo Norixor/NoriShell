@@ -38,8 +38,9 @@ import NvxTerminalTools from "./NvxTerminalTools.vue";
 import NvxTerminalView from "./NvxTerminalView.vue";
 import { createFencedTerminalResize } from "./fencedTerminalResize";
 import NvxNativeTerminalTools from "./NvxNativeTerminalTools.vue";
-import { enableNativeTerminal } from "../../core-api/native-terminal";
-import type { NativeTerminalSessionScope, NativeTerminalSessionStatus, NativeTerminalShellKind } from "../../core-api/generated/core-api";
+import { recordNativeTerminalHistory } from "../../core-api/native-terminal";
+import { useNativeTerminalStore } from "../../stores/nativeTerminal";
+import type { NativeTerminalSessionScope } from "../../core-api/generated/core-api";
 import type { ShortcutCommandId } from "../../shortcuts";
 
 interface TerminalViewExpose {
@@ -67,9 +68,11 @@ const props = withDefaults(defineProps<{
   label: string;
   existingSession: LocalSessionSummary | null;
   deferredStart?: boolean;
+  visible: boolean;
   active: boolean;
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
+  canSplitWorkspaceRight: boolean;
 }>(), { deferredStart: false });
 
 const emit = defineEmits<{
@@ -77,14 +80,16 @@ const emit = defineEmits<{
   state: [state: LocalSessionState, summary: LocalSessionSummary | null];
   bellAttention: [active: boolean];
   split: [direction: "horizontal" | "vertical"];
+  splitWorkspaceRight: [];
   close: [];
 }>();
 
 const { t, te } = useI18n();
 const tips = useTipsStore();
+const nativeHistory = useNativeTerminalStore();
 const nativeTools = ref<InstanceType<typeof NvxNativeTerminalTools> | null>(null);
 const inputDraft = ref<string | null>(null);
-const shellPromptKey = ref<string | null>(null);
+const ghostSuggestion = ref<{ draft: string; suffix: string } | null>(null);
 const viewId = props.paneId;
 const terminalView = ref<TerminalViewExpose | null>(null);
 const terminalTools = ref<TerminalToolsExpose | null>(null);
@@ -104,7 +109,6 @@ const opening = ref(false);
 const openFailed = ref(false);
 const terminating = ref(false);
 let inputSequence = 0n;
-let promptBoundaryInputSequence: bigint | null = null;
 let leaseTimer: number | null = null;
 let attachmentHeartbeatTimer: number | null = null;
 let unregisterInputTarget: (() => void) | null = null;
@@ -121,8 +125,7 @@ let pendingEventBytes = 0;
 const fencedResize = createFencedTerminalResize((dimensions) => {
   const current = session.value;
   const currentAttachment = attachment.value;
-  const currentLease = lease.value;
-  if (!current?.ptyId || !currentAttachment || !currentLease || current.state !== "running") return null;
+  if (!props.visible || !current?.ptyId || !currentAttachment || current.state !== "running") return null;
   const ptyId = current.ptyId;
   return {
     key: [
@@ -139,9 +142,6 @@ const fencedResize = createFencedTerminalResize((dimensions) => {
       ptyId,
       attachmentId: currentAttachment.attachmentId,
       viewId,
-      leaseId: currentLease.leaseId,
-      focusEpoch: currentLease.focusEpoch,
-      inputEpoch: currentLease.inputEpoch,
       resizeSeq,
       rows: dimensions.rows,
       cols: dimensions.cols,
@@ -150,6 +150,12 @@ const fencedResize = createFencedTerminalResize((dimensions) => {
 });
 const resize = fencedResize.resize;
 const flushPendingResize = fencedResize.flush;
+
+function reassertCurrentResize() {
+  if (!props.visible) return;
+  const size = terminalView.value?.dimensions();
+  if (size) fencedResize.reassert(size.rows, size.cols);
+}
 
 const state = computed<LocalSessionState>(
   () => session.value?.state
@@ -178,26 +184,6 @@ const nativeScope = computed<NativeTerminalSessionScope | null>(() => session.va
   kind: "local", sessionId: session.value.sessionId, generation: session.value.generation,
   ptyId: session.value.ptyId, paneId: viewId,
 } : null);
-function acceptNativePrompt(status: NativeTerminalSessionStatus | null) {
-  shellPromptKey.value = status && status.promptInputSequence === inputSequence.toString()
-    && promptBoundaryInputSequence === inputSequence
-    && status.promptInputEpoch === lease.value?.inputEpoch
-    ? `${status.session.sessionId}:${status.session.generation}:${status.promptSequence}` : null;
-}
-async function enableNativeShell(shellKind: NativeTerminalShellKind) {
-  const current = session.value;
-  const attached = attachment.value;
-  const inputLease = lease.value;
-  if (!current?.ptyId || !attached || !inputLease || !writable.value) throw new Error("Terminal unavailable");
-  inputSequence++;
-  promptBoundaryInputSequence = inputSequence;
-  return enableNativeTerminal({ shellKind, confirmedEmptyPrompt: true, inputFence: { kind: "local", payload: {
-    sessionId: current.sessionId, expectedGeneration: current.generation, expectedStateRevision: current.stateRevision,
-    ptyId: current.ptyId, attachmentId: attached.attachmentId, viewId,
-    focusEpoch: inputLease.focusEpoch, leaseId: inputLease.leaseId,
-    inputEpoch: inputLease.inputEpoch, clientSeq: inputSequence.toString(),
-  } } });
-}
 function runShortcut(commandId: ShortcutCommandId) {
   if (!props.active) return;
   if (commandId === "terminal.search") openSearch();
@@ -386,7 +372,6 @@ async function open() {
     lastAppliedEventSeq = 0n;
     lastAppliedOutputSeq = 0n;
     inputSequence = 0n;
-    promptBoundaryInputSequence = null;
     attachment.value = response.attachment;
     updateSummary(response.session);
     binding = false;
@@ -489,7 +474,7 @@ function applyFocusLease(inputLease: TerminalInputLease | null) {
     : null;
   if (lease.value) startLeaseHeartbeat();
   else stopLeaseHeartbeat();
-  if (lease.value) void flushPendingResize();
+  if (props.visible) void flushPendingResize();
 }
 
 function stopLeaseHeartbeat() {
@@ -563,7 +548,6 @@ async function send(value: string) {
   }
   inputSequence += 1n;
   // A prompt can arrive after typed-ahead input; do not mistake this line for empty input.
-  promptBoundaryInputSequence = ["\r", "\n", "\u0003"].includes(value) ? inputSequence : null;
   await sendLocalInput({
     sessionId: current.sessionId,
     expectedGeneration: current.generation,
@@ -579,7 +563,11 @@ async function send(value: string) {
   });
 }
 
-async function handleTerminalInput(value: string) {
+async function handleTerminalInput(value: string, observedCommand?: string) {
+  const current = session.value;
+  const attached = attachment.value;
+  const inputLease = lease.value;
+  const previousSequence = inputSequence;
   try {
     await send(value);
   } catch {
@@ -593,7 +581,19 @@ async function handleTerminalInput(value: string) {
       tone: "error",
       title: t("quickCommands.runFailed"),
     });
+    return;
   }
+  if (!observedCommand || value !== "\r" || !current?.ptyId || !attached || !inputLease
+    || inputSequence !== previousSequence + 1n) return;
+  try {
+    const recorded = await recordNativeTerminalHistory({ command: observedCommand, inputFence: { kind: "local", payload: {
+      sessionId: current.sessionId, expectedGeneration: current.generation, expectedStateRevision: current.stateRevision,
+      ptyId: current.ptyId, attachmentId: attached.attachmentId, viewId,
+      focusEpoch: inputLease.focusEpoch, leaseId: inputLease.leaseId,
+      inputEpoch: inputLease.inputEpoch, clientSeq: inputSequence.toString(),
+    } } });
+    if (recorded) nativeHistory.historyChanged();
+  } catch { /* Uncertain history capture must not change terminal input or retry its Enter. */ }
 }
 
 
@@ -654,6 +654,8 @@ function activateFromTab() {
   if (!props.active) return;
   registerInputTarget();
   void focusTerminalInputTarget(props.paneId);
+  if (session.value?.attachmentCount && session.value.attachmentCount > 1) reassertCurrentResize();
+  else void flushPendingResize();
   terminalView.value?.focus();
 }
 
@@ -685,6 +687,11 @@ onMounted(() => {
 watch(() => props.active, (active) => {
   if (!active) deactivateFromTab();
 });
+
+watch(
+  () => [props.visible, session.value?.sessionId, session.value?.generation, session.value?.state, attachment.value?.attachmentId] as const,
+  reassertCurrentResize,
+);
 
 onBeforeUnmount(() => {
   window.removeEventListener("beforeunload", releaseRendererBinding);
@@ -729,9 +736,8 @@ onBeforeUnmount(() => {
           :writable="writable"
           :draft="inputDraft"
           :current-draft="() => terminalView?.currentDraft() ?? null"
-          :enable="enableNativeShell"
           @invalidate-draft="terminalView?.invalidateDraft()"
-          @prompt="acceptNativePrompt"
+          @suggestion-change="ghostSuggestion = $event"
           @focus="terminalView?.focus()"
         />
         <NvxTerminalTools
@@ -743,8 +749,10 @@ onBeforeUnmount(() => {
           :plugin-context-key="pluginContextKey"
           :can-split-horizontal="canSplitHorizontal"
           :can-split-vertical="canSplitVertical"
+          :can-split-workspace-right="canSplitWorkspaceRight"
           :show-layout-actions="active"
           @split="emit('split', $event)"
+          @split-workspace-right="emit('splitWorkspaceRight')"
           @close="emit('close')"
         >
           <NvxButton
@@ -780,6 +788,7 @@ onBeforeUnmount(() => {
           class="local-terminal-pane__overflow"
           :can-split-horizontal="canSplitHorizontal"
           :can-split-vertical="canSplitVertical"
+          :can-split-workspace-right="canSplitWorkspaceRight"
           :has-selection="hasSelection"
           :show-layout-actions="active"
           show-session-action
@@ -790,6 +799,7 @@ onBeforeUnmount(() => {
           @search="openSearch"
           @copy="copySelection"
           @split="emit('split', $event)"
+          @split-workspace-right="emit('splitWorkspaceRight')"
           @session="['exited', 'failed', 'closed'].includes(state) && !cleanupPending ? open() : terminateForClose()"
           @close="emit('close')"
         />
@@ -810,7 +820,7 @@ onBeforeUnmount(() => {
     <NvxTerminalView
       ref="terminalView"
       :pane-id="paneId"
-      :shell-prompt-key="shellPromptKey"
+      :ghost-suggestion="ghostSuggestion"
       :read-only="!writable"
       :terminal-label="t('localSession.terminalLabel', { label: shellLabel })"
       :gap-label="t('localSession.outputGap')"
@@ -819,6 +829,7 @@ onBeforeUnmount(() => {
       @selection-change="hasSelection = $event"
       @search-request="openSearch"
       @draft-change="inputDraft = $event"
+      @accept-suggestion="nativeTools?.acceptSuggestion()"
       @bell-attention="emit('bellAttention', $event)"
     />
   </section>

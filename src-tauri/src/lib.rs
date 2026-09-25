@@ -14,7 +14,6 @@ mod metrics_session_service;
 mod native_notification_service;
 mod native_notifications;
 mod native_terminal;
-mod native_terminal_scripts;
 mod offline_backup_service;
 mod openssh_import_service;
 mod overview_service;
@@ -208,8 +207,7 @@ macro_rules! production_invoke_handler {
             native_notification_service::native_notification_context_set,
             native_terminal::native_terminal_settings_get,
             native_terminal::native_terminal_settings_replace,
-            native_terminal::native_terminal_enable,
-            native_terminal::native_terminal_snapshot,
+            native_terminal::native_terminal_history_record,
             native_terminal::native_terminal_history_list,
             native_terminal::native_terminal_history_delete,
             native_terminal::native_terminal_history_clear,
@@ -569,10 +567,7 @@ pub fn run() {
             app.manage(vault_service);
             app.manage(plugin_credential_service);
             app.manage(
-                native_notification_service::NativeNotificationService::start(
-                    app.handle().clone(),
-                    native_terminal_service.clone(),
-                ),
+                native_notification_service::NativeNotificationService::start(app.handle().clone()),
             );
             app.manage(native_terminal_service);
             app.manage(ssh_sync_local);
@@ -581,7 +576,20 @@ pub fn run() {
             app.manage(ssh_agent_service);
             app.manage(openssh_import_service::OpenSshImportService::default());
             app.manage(ssh_session_service);
-            app.manage(metrics_session_service);
+            app.manage(metrics_session_service.clone());
+            let startup_metrics = metrics_session_service;
+            let startup_lifecycle = app.state::<LifecycleState>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                let request_id = norishell_core_api::RequestId::new();
+                let Ok(_creation_permit) =
+                    startup_lifecycle.acquire_resource_creation(request_id.clone())
+                else {
+                    return;
+                };
+                if startup_metrics.reconcile_hosts(request_id).await.is_err() {
+                    eprintln!("startup metrics reconciliation failed");
+                }
+            });
             app.manage(telnet_session_service);
             app.manage(forward_session_service);
             app.manage(sftp_session_service);

@@ -21,6 +21,7 @@ commands.allow = [
   "native_terminal_settings_replace",
   "native_terminal_enable",
   "native_terminal_snapshot",
+  "native_terminal_history_record",
   "native_terminal_history_list",
   "native_terminal_history_delete",
   "native_terminal_history_clear",

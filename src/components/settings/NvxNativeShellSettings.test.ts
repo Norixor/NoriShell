@@ -41,7 +41,6 @@ function mountSettings() {
       ],
       stubs: { Teleport: true },
     },
-    slots: { "notification-permission": "<button type='button'>Request permission</button>" },
   });
 }
 
@@ -68,9 +67,9 @@ describe("NvxNativeShellSettings", () => {
     await flushPromises();
 
     expect(wrapper.findAll('input[type="number"]').map(input => (input.element as HTMLInputElement).value))
-      .toEqual(["120", "800", "14"]);
+      .toEqual(["800", "14"]);
     expect(wrapper.findAll('input[type="checkbox"]').map(input => (input.element as HTMLInputElement).checked))
-      .toEqual([true, true, false, true]);
+      .toEqual([true, false, true]);
     const save = wrapper.findAll("button").find(button => button.text().includes("Save settings"));
     expect(save!.attributes("disabled")).toBeDefined();
     wrapper.unmount();
@@ -82,20 +81,19 @@ describe("NvxNativeShellSettings", () => {
     const wrapper = mountSettings();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("The Vault is locked or needs reload");
-    expect(wrapper.text()).toContain("Request permission");
+    expect(wrapper.text()).toContain("The Vault is missing, locked, or needs reload");
     const numericInputs = wrapper.findAll('input[type="number"]');
     await numericInputs[0]!.setValue("120");
     const save = wrapper.findAll("button").find((button) => button.text().includes("Save settings"));
     await save!.trigger("click");
     expect(api.replaceNativeTerminalSettings).toHaveBeenCalledWith(expect.objectContaining({
-      notificationThresholdSeconds: 120,
+      historyMaxEntries: 120,
     }), "7");
 
     await numericInputs[0]!.setValue("180");
     resolveSave({
       ...snapshot,
-      settings: { ...snapshot.settings, notificationThresholdSeconds: 120 },
+      settings: { ...snapshot.settings, historyMaxEntries: 120 },
       settingsRevision: "8",
     });
     await flushPromises();
@@ -116,7 +114,7 @@ describe("NvxNativeShellSettings", () => {
     await retry!.trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Completion notifications");
+    expect(wrapper.text()).toContain("Command history");
     expect(wrapper.find('input[type="checkbox"]').exists()).toBe(true);
     wrapper.unmount();
   });

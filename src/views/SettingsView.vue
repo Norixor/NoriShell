@@ -813,15 +813,14 @@ function saveCustomScheme() {
 
         <NvxReleaseSettings v-else-if="activeSection === 'about'" />
         <NvxPreferenceTransferSettings v-else-if="activeSection === 'transfer'" />
-        <NvxDesktopPreferencesSettings v-else-if="activeSection === 'desktop'" />
+        <div v-else-if="activeSection === 'desktop'">
+          <NvxDesktopPreferencesSettings />
+          <NvxNativeNotificationSettings />
+        </div>
         <NvxTerminalInteractionSettings v-else-if="activeSection === 'interaction'" />
         <NvxSftpSettings v-else-if="activeSection === 'files'" />
         <NvxTerminalEnhancementSettings v-else-if="activeSection === 'enhancements'">
-          <NvxNativeShellSettings @saved="nativeTerminal.refresh()">
-            <template #notification-permission>
-              <NvxNativeNotificationSettings />
-            </template>
-          </NvxNativeShellSettings>
+          <NvxNativeShellSettings @saved="nativeTerminal.refresh()" />
         </NvxTerminalEnhancementSettings>
         <section v-else-if="activeSection === 'highlights'">
           <NvxInlineNotice

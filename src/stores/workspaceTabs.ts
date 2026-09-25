@@ -35,8 +35,8 @@ export interface WorkspacePageTab {
 
 export interface TerminalHeaderController {
   /** Activate only an existing exactly matching SSH or local Pane; return false when blocked or missing. */
-  focusNativeSession(scope: NativeTerminalSessionScope): boolean;
   /** A failed resource may have no Channel; focus only the existing SSH session and generation. */
+  focusNativeSession(scope: NativeTerminalSessionScope): boolean;
   focusSshSession(sessionId: SshSessionId, generation: WireSequence): boolean;
   /** A failed resource may have no PTY; focus only the existing local session and generation. */
   focusLocalSession(sessionId: LocalSessionId, generation: WireSequence): boolean;

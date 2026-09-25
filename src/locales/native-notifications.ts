@@ -1,6 +1,6 @@
 export const nativeNotificationsZhCN = {
   title: "系统通知权限",
-  description: "任务、传输和意外断线提醒只显示通用摘要，不包含命令、主机地址、用户名、文件名或终端输出。",
+  description: "文件传输和意外断线提醒只显示通用摘要，不包含命令、主机地址、用户名、文件名或终端输出。",
   loading: "正在读取系统权限…",
   permission: {
     notDetermined: "尚未授权",
@@ -30,7 +30,7 @@ export const nativeNotificationsZhCN = {
 
 export const nativeNotificationsEn = {
   title: "System notification permission",
-  description: "Task, transfer, and unexpected-disconnect alerts show a generic summary without commands, host addresses, usernames, file names, or terminal output.",
+  description: "Transfer and unexpected-disconnect alerts show a generic summary without commands, host addresses, usernames, file names, or terminal output.",
   loading: "Reading system permission…",
   permission: {
     notDetermined: "Permission not requested",

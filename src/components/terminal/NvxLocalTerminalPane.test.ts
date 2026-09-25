@@ -9,7 +9,6 @@ import type {
   LocalSessionInputLease,
   LocalSessionState,
   LocalSessionSummary,
-  NativeTerminalSessionStatus,
 } from "../../core-api/generated/core-api";
 import { i18n } from "../../locales";
 import { useTipsStore } from "../../stores/tips";
@@ -35,9 +34,9 @@ vi.mock("../../core-api/client", async (importOriginal) => {
 });
 
 import NvxLocalTerminalPane from "./NvxLocalTerminalPane.vue";
-import NvxNativeTerminalTools from "./NvxNativeTerminalTools.vue";
 
 const paneId = "019d0000-0000-7000-8000-000000001001";
+let viewDimensions = { rows: 31, cols: 101 };
 const writes = {
   bytes: vi.fn(),
   clearSearch: vi.fn(),
@@ -61,7 +60,7 @@ const terminalViewStub = defineComponent({
     expose({
       writeBytes: writes.bytes,
       writeGap: writes.gap,
-      dimensions: () => ({ rows: 31, cols: 101 }),
+      dimensions: () => viewDimensions,
       focus: writes.focus,
       findNext: writes.findNext,
       findPrevious: writes.findPrevious,
@@ -135,6 +134,7 @@ function mountPane(
   existingSession: LocalSessionSummary | null = null,
   active = true,
   deferredStart = false,
+  visible = true,
 ) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -146,8 +146,10 @@ function mountPane(
       existingSession,
       deferredStart,
       active,
+      visible,
       canSplitHorizontal: true,
       canSplitVertical: true,
+      canSplitWorkspaceRight: true,
     },
     global: { plugins: [createPinia(), i18n], stubs: { NvxTerminalView: terminalViewStub } },
   });
@@ -156,6 +158,7 @@ function mountPane(
 describe("NvxLocalTerminalPane", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    viewDimensions = { rows: 31, cols: 101 };
     resetTerminalInputFocusForTests();
     i18n.global.locale.value = "en";
     client.fetchTerminalInputFocusSnapshot.mockResolvedValue({
@@ -196,42 +199,6 @@ describe("NvxLocalTerminalPane", () => {
     await flushPromises();
 
     expect(client.openLocalSession).toHaveBeenCalledTimes(1);
-    wrapper.unmount();
-  });
-
-  it("does not treat a delayed prompt after typeahead as an empty Shell line", async () => {
-    const running = summary("running");
-    client.openLocalSession.mockResolvedValue({ session: running, attachment: attachment() });
-    const wrapper = mountPane();
-    await flushPromises();
-    const terminal = wrapper.findComponent(terminalViewStub);
-    const tools = wrapper.findComponent(NvxNativeTerminalTools);
-    const prompt = (sequence: string): NativeTerminalSessionStatus => ({
-      session: { kind: "local", sessionId: running.sessionId, generation: running.generation, ptyId: running.ptyId!, paneId },
-      shellKind: "zsh", captureState: "ready", failureCode: null, activity: "prompt",
-      capturesCommand: true, historyPaused: false, promptObserved: true, completionCursor: "0",
-      promptInputSequence: sequence, promptInputEpoch: "4", promptSequence: sequence,
-    });
-
-    terminal.vm.$emit("input", "\r");
-    await flushPromises();
-    tools.vm.$emit("prompt", prompt("1"));
-    await flushPromises();
-    expect(terminal.props("shellPromptKey")).toContain(":1");
-
-    terminal.vm.$emit("input", "\r");
-    await flushPromises();
-    terminal.vm.$emit("input", "already typed");
-    await flushPromises();
-    tools.vm.$emit("prompt", prompt("3"));
-    await flushPromises();
-    expect(terminal.props("shellPromptKey")).toBeNull();
-
-    terminal.vm.$emit("input", "\r");
-    await flushPromises();
-    tools.vm.$emit("prompt", prompt("4"));
-    await flushPromises();
-    expect(terminal.props("shellPromptKey")).toContain(":4");
     wrapper.unmount();
   });
 
@@ -325,7 +292,7 @@ describe("NvxLocalTerminalPane", () => {
       bytes: [195, 169, 27, 91, 65],
     }));
     expect(client.resizeLocalTerminal).toHaveBeenCalledWith(expect.objectContaining({
-      resizeSeq: "1",
+      resizeSeq: "2",
       rows: 40,
       cols: 120,
     }));
@@ -356,7 +323,61 @@ describe("NvxLocalTerminalPane", () => {
     wrapper.unmount();
   });
 
-  it("replays the newest terminal size after the local input lease is restored", async () => {
+  it("replays the newest terminal size after a hidden local Tab becomes visible", async () => {
+    const running = summary("running");
+    client.getLocalSession.mockResolvedValue(details(running));
+    client.attachLocalSession.mockResolvedValue({
+      stateRevision: running.stateRevision,
+      attachmentRevision: running.attachmentRevision,
+      attachment: attachment(),
+      replay: [],
+    });
+    const wrapper = mountPane(running, false, false, false);
+    await flushPromises();
+
+    viewDimensions = { rows: 42, cols: 132 };
+    wrapper.findComponent({ name: "NvxTerminalView" }).vm.$emit("resize", 42, 132);
+    await flushPromises();
+    expect(client.resizeLocalTerminal).not.toHaveBeenCalled();
+
+    await wrapper.setProps({ active: true, visible: true });
+    (wrapper.vm as unknown as { activateFromTab(): void }).activateFromTab();
+    await flushPromises();
+
+    expect(client.resizeLocalTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      rows: 42,
+      cols: 132,
+    }));
+    wrapper.unmount();
+  });
+
+  it("reasserts the current size when a visible local view returns without a new fit event", async () => {
+    const running = summary("running");
+    client.getLocalSession.mockResolvedValue(details(running));
+    client.attachLocalSession.mockResolvedValue({
+      stateRevision: running.stateRevision,
+      attachmentRevision: running.attachmentRevision,
+      attachment: attachment(),
+      replay: [],
+    });
+    const wrapper = mountPane(running, false);
+    await flushPromises();
+    client.resizeLocalTerminal.mockClear();
+
+    await wrapper.setProps({ visible: false });
+    await wrapper.setProps({ visible: true });
+    await flushPromises();
+
+    expect(client.resizeLocalTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      rows: 31,
+      cols: 101,
+      attachmentId: attachment().attachmentId,
+    }));
+    expect(client.sendLocalInput).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("resizes a visible local Pane even while another Pane owns input focus", async () => {
     const running = summary("running");
     client.getLocalSession.mockResolvedValue(details(running));
     client.attachLocalSession.mockResolvedValue({
@@ -370,16 +391,40 @@ describe("NvxLocalTerminalPane", () => {
 
     wrapper.findComponent({ name: "NvxTerminalView" }).vm.$emit("resize", 42, 132);
     await flushPromises();
-    expect(client.resizeLocalTerminal).not.toHaveBeenCalled();
-
-    await wrapper.setProps({ active: true });
-    (wrapper.vm as unknown as { activateFromTab(): void }).activateFromTab();
-    await flushPromises();
 
     expect(client.resizeLocalTerminal).toHaveBeenCalledWith(expect.objectContaining({
       rows: 42,
       cols: 132,
+      attachmentId: attachment().attachmentId,
     }));
+    expect(client.changeTerminalInputFocus).not.toHaveBeenCalledWith(expect.objectContaining({
+      target: expect.objectContaining({ kind: "local" }),
+    }));
+    wrapper.unmount();
+  });
+
+  it("sends geometry changes for the active local attachment before input focus is granted", async () => {
+    const running = summary("running");
+    client.changeTerminalInputFocus.mockImplementation(() => new Promise(() => undefined));
+    client.openLocalSession.mockResolvedValue({ session: running, attachment: attachment() });
+    const wrapper = mountPane();
+    await flushPromises();
+
+    wrapper.findComponent({ name: "NvxTerminalView" }).vm.$emit("resize", 35, 116);
+    await flushPromises();
+
+    expect(client.resizeLocalTerminal).toHaveBeenCalledWith({
+      sessionId: running.sessionId,
+      expectedGeneration: running.generation,
+      expectedStateRevision: running.stateRevision,
+      ptyId: running.ptyId,
+      attachmentId: attachment().attachmentId,
+      viewId: paneId,
+      resizeSeq: "2",
+      rows: 35,
+      cols: 116,
+    });
+    expect(client.sendLocalInput).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

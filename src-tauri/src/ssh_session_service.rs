@@ -21,7 +21,8 @@ use norishell_core_api::{
     LocalSessionInputLease, LocalSessionInputLeaseRenewRequest, LocalSessionInputRequest,
     LocalSessionOpenRequest, LocalSessionOpenResponse, LocalSessionResizeRequest,
     LocalSessionSnapshot, LocalSessionSnapshotRequest, LocalSessionSummary,
-    LocalSessionTerminateRequest, LoginAutomationStepInput, RequestId, RetryStrategy,
+    LocalSessionTerminateRequest, LoginAutomationStepInput, NativeTerminalHistoryRecordRequest,
+    NativeTerminalHistoryScope, NativeTerminalInputFence, RequestId, RetryStrategy,
     SSH_TERMINAL_EVENT_SCHEMA_VERSION, SSH_TERMINAL_OUTPUT_FRAME_MAX_BYTES,
     ShellHeartbeatLineEnding, SshAlgorithmNegotiationFailure, SshAttachAttemptId, SshAttachmentId,
     SshChannelId, SshHeartbeatMode, SshHostKeyChallenge, SshHostKeyChallengeId, SshHostKeyDecision,
@@ -86,7 +87,7 @@ use crate::ssh_operation_ledger::{
 use crate::{
     core_api_error::core_error,
     host_service::HostService,
-    native_terminal::{NativeTerminalService, PreparedNativeTerminalEnable},
+    native_terminal::NativeTerminalService,
     time::unix_time_ms,
     transient_credential_service::TransientCredentialService,
     vault_service::{VaultService, VaultServiceError},
@@ -545,37 +546,14 @@ impl SshSessionService {
             .await
     }
 
-    pub(crate) async fn native_terminal_enable_ssh(
+    pub(crate) async fn native_terminal_history_record(
         &self,
-        request_id: RequestId,
-        prepared: PreparedNativeTerminalEnable,
-    ) -> ActorResult<()> {
-        let message_request_id = request_id.clone();
+        request: NativeTerminalHistoryRecordRequest,
+    ) -> ActorResult<bool> {
+        let request_id = request.meta.request_id.clone();
         self.focus_broker
             .linearize(self.request(
-                |reply| Message::NativeTerminalEnableSsh {
-                    request_id: message_request_id,
-                    prepared,
-                    reply,
-                },
-                request_id,
-            ))
-            .await
-    }
-
-    pub(crate) async fn native_terminal_enable_local(
-        &self,
-        request_id: RequestId,
-        prepared: PreparedNativeTerminalEnable,
-    ) -> ActorResult<()> {
-        let message_request_id = request_id.clone();
-        self.focus_broker
-            .linearize(self.request(
-                |reply| Message::NativeTerminalEnableLocal {
-                    request_id: message_request_id,
-                    prepared,
-                    reply,
-                },
+                |reply| Message::NativeTerminalHistoryRecord { request, reply },
                 request_id,
             ))
             .await
@@ -741,11 +719,7 @@ impl Actor {
             focused_target: None,
             plugin_observers: BTreeMap::new(),
             live_sessions,
-            local_sessions: LocalSessions::new(
-                live_local_sessions,
-                native_terminal,
-                plugin_metadata_events.clone(),
-            ),
+            local_sessions: LocalSessions::new(live_local_sessions, plugin_metadata_events.clone()),
             shutdown_waiter: None,
             plugin_metadata_events,
         }
@@ -2308,7 +2282,6 @@ struct SessionRecord {
     input_lease: Option<SshSessionInputLease>,
     next_input_epoch: u64,
     last_client_seq: u64,
-    last_resize_seq: u64,
     next_output_seq: u64,
     output_ring: VecDeque<SshSessionOutputItem>,
     output_ring_bytes: usize,
@@ -2353,6 +2326,7 @@ struct AttachmentRecord {
     summary: SshSessionAttachment,
     events: Channel<SshSessionEvent>,
     last_seen_at_unix_ms: i64,
+    last_resize_seq: u64,
 }
 
 struct ActiveChallenge {
@@ -2510,15 +2484,9 @@ enum Message {
         request: SshSessionInputRequest,
         reply: oneshot::Sender<ActorResult<()>>,
     },
-    NativeTerminalEnableSsh {
-        request_id: RequestId,
-        prepared: PreparedNativeTerminalEnable,
-        reply: oneshot::Sender<ActorResult<()>>,
-    },
-    NativeTerminalEnableLocal {
-        request_id: RequestId,
-        prepared: PreparedNativeTerminalEnable,
-        reply: oneshot::Sender<ActorResult<()>>,
+    NativeTerminalHistoryRecord {
+        request: NativeTerminalHistoryRecordRequest,
+        reply: oneshot::Sender<ActorResult<bool>>,
     },
     ApprovedPluginInput {
         request: ApprovedPluginInput,
@@ -2613,6 +2581,14 @@ enum Message {
         last_ack_at_unix_ms: Option<i64>,
         consecutive_failures: u8,
         next_due_at_unix_ms: Option<i64>,
+    },
+    TransportLatencyObserved {
+        session_id: String,
+        generation: u64,
+        policy_revision: Option<WireSequence>,
+        route_stage: SshSessionRouteStage,
+        last_sent_at_unix_ms: i64,
+        last_ack_at_unix_ms: Option<i64>,
     },
     TransportHeartbeatFailed {
         session_id: String,
@@ -2886,28 +2862,8 @@ async fn run_actor(mut actor: Actor, rx: mpsc::Receiver<Message>) {
     let mut mailbox = ActorMailbox::new(rx);
     while let Some(message) = mailbox.next().await {
         match message {
-            Message::NativeTerminalEnableSsh {
-                request_id,
-                prepared,
-                reply,
-            } => {
-                actor
-                    .native_terminal_enable_ssh_with_ack(request_id, prepared, reply, &mut mailbox)
-                    .await;
-            }
-            Message::NativeTerminalEnableLocal {
-                request_id,
-                prepared,
-                reply,
-            } => {
-                actor
-                    .native_terminal_enable_local_with_ack(
-                        request_id,
-                        prepared,
-                        reply,
-                        &mut mailbox,
-                    )
-                    .await;
+            Message::NativeTerminalHistoryRecord { request, reply } => {
+                let _ = reply.send(actor.native_terminal_history_record(request));
             }
             Message::Input { request, reply } => {
                 actor.input_with_ack(request, reply, &mut mailbox).await;
@@ -3209,8 +3165,8 @@ impl Actor {
                 let _ = reply.send(self.lease_renew(request));
             }
             Message::Input { .. } => unreachable!("input is serialized by run_actor"),
-            Message::NativeTerminalEnableSsh { .. } | Message::NativeTerminalEnableLocal { .. } => {
-                unreachable!("native terminal enable is serialized by run_actor")
+            Message::NativeTerminalHistoryRecord { .. } => {
+                unreachable!("history record is serialized by run_actor")
             }
             Message::ApprovedPluginInput { .. } => {
                 unreachable!("approved plugin input is serialized by run_actor")
@@ -3367,6 +3323,21 @@ impl Actor {
                 consecutive_failures,
                 next_due_at_unix_ms,
             ),
+            Message::TransportLatencyObserved {
+                session_id,
+                generation,
+                policy_revision,
+                route_stage,
+                last_sent_at_unix_ms,
+                last_ack_at_unix_ms,
+            } => self.transport_latency_observed(
+                &session_id,
+                generation,
+                policy_revision,
+                route_stage,
+                last_sent_at_unix_ms,
+                last_ack_at_unix_ms,
+            ),
             Message::TransportHeartbeatFailed {
                 session_id,
                 generation,
@@ -3461,10 +3432,6 @@ impl Actor {
                 });
                 self.local_sessions
                     .process_exited(&session_id, generation, exit);
-                if let Ok(session_id) = norishell_core_api::LocalSessionId::parse(&session_id) {
-                    self.native_terminal
-                        .clear_local_session(&session_id, WireSequence::new(generation));
-                }
             }
             Message::LocalProcessFailed {
                 session_id,
@@ -3481,10 +3448,6 @@ impl Actor {
                 });
                 self.local_sessions
                     .process_failed(&session_id, generation, failure);
-                if let Ok(session_id) = norishell_core_api::LocalSessionId::parse(&session_id) {
-                    self.native_terminal
-                        .clear_local_session(&session_id, WireSequence::new(generation));
-                }
             }
             Message::ReapStaleAttachments { now_unix_ms } => {
                 self.reap_stale_attachments(now_unix_ms);
@@ -3746,6 +3709,7 @@ impl Actor {
                 summary: attachment.clone(),
                 events,
                 last_seen_at_unix_ms: now,
+                last_resize_seq: 0,
             },
         );
         self.sessions.insert(
@@ -3770,7 +3734,6 @@ impl Actor {
                 input_lease: None,
                 next_input_epoch: 0,
                 last_client_seq: 0,
-                last_resize_seq: 0,
                 next_output_seq: 1,
                 output_ring: VecDeque::new(),
                 output_ring_bytes: 0,
@@ -4013,12 +3976,14 @@ impl Actor {
             } = plan;
             debug_assert!(!profile_revision_token.is_empty());
             debug_assert!(jump_hosts.len() <= 5);
-            let transport_keepalive_interval = match &heartbeat_policy.policy {
+            // A zero interval captures route-stage ping handles for a single
+            // latency measurement without enabling periodic keepalive.
+            let transport_keepalive_interval = Some(match &heartbeat_policy.policy {
                 HeartbeatPolicy::TransportKeepalive {
                     interval_seconds, ..
-                } => Some(Duration::from_secs(u64::from(*interval_seconds))),
-                _ => None,
-            };
+                } => Duration::from_secs(u64::from(*interval_seconds)),
+                _ => Duration::ZERO,
+            });
             let verifier = Arc::new(ActorHostKeyVerifier {
                 tx: tx.clone(),
                 session_id: session_id.clone(),
@@ -4274,6 +4239,7 @@ impl Actor {
                 summary: attachment.clone(),
                 events,
                 last_seen_at_unix_ms: now,
+                last_resize_seq: 0,
             },
         );
         record.summary.attachment_revision = WireSequence::new(next_revision);
@@ -5072,7 +5038,6 @@ impl Actor {
                 };
                 record.input_lease = Some(lease.clone());
                 record.last_client_seq = 0;
-                record.last_resize_seq = 0;
                 emit_payload(
                     record,
                     SshSessionEventPayload::InputLeaseChanged {
@@ -5263,7 +5228,6 @@ impl Actor {
         };
         record.input_lease = Some(lease.clone());
         record.last_client_seq = 0;
-        record.last_resize_seq = 0;
         self.focused_target = Some(TerminalInputFocusTarget::Ssh(target));
         emit_payload(
             record,
@@ -5406,125 +5370,65 @@ impl Actor {
         });
     }
 
-    async fn native_terminal_enable_ssh_with_ack(
+    fn native_terminal_history_record(
         &mut self,
-        request_id: RequestId,
-        mut prepared: PreparedNativeTerminalEnable,
-        reply: oneshot::Sender<ActorResult<()>>,
-        mailbox: &mut ActorMailbox,
-    ) {
-        let history_scope = self
-            .sessions
-            .get(match &prepared.scope {
-                norishell_core_api::NativeTerminalSessionScope::Ssh { session_id, .. } => {
-                    session_id.as_str()
+        request: NativeTerminalHistoryRecordRequest,
+    ) -> ActorResult<bool> {
+        let request_id = &request.meta.request_id;
+        let scope = match &request.input_fence {
+            NativeTerminalInputFence::Ssh(fence) => {
+                self.validate_global_focus(
+                    GlobalFocusFence {
+                        session_id: &fence.session_id,
+                        generation: fence.expected_generation,
+                        channel_id: Some(&fence.channel_id),
+                        attachment_id: &fence.attachment_id,
+                        view_id: &fence.view_id,
+                        focus_epoch: fence.focus_epoch,
+                    },
+                    request_id,
+                )?;
+                let record = self
+                    .sessions
+                    .get(fence.session_id.as_str())
+                    .ok_or_else(|| not_found_error(request_id.clone()))?;
+                validate_lease(
+                    record,
+                    fence.expected_generation,
+                    &fence.attachment_id,
+                    &fence.view_id,
+                    &fence.lease_id,
+                    fence.input_epoch,
+                    request_id,
+                    true,
+                )?;
+                if record.summary.channel_id.as_ref() != Some(&fence.channel_id)
+                    || record.last_client_seq != fence.client_seq.get()
+                {
+                    return Err(conflict_error(request_id.clone()));
                 }
-                norishell_core_api::NativeTerminalSessionScope::Local { .. } => {
-                    let _ = reply.send(Err(validation_error(request_id)));
-                    return;
-                }
-            })
-            .and_then(|record| match &record.summary.target {
-                SshSessionTarget::Host { host_id, .. } => {
-                    Some(norishell_core_api::NativeTerminalHistoryScope::Host {
+                match &record.summary.target {
+                    SshSessionTarget::Host { host_id, .. } => NativeTerminalHistoryScope::Host {
                         host_id: host_id.clone(),
-                    })
+                    },
+                    SshSessionTarget::QuickConnect { .. } => return Ok(false),
                 }
-                SshSessionTarget::QuickConnect { .. } => None,
-            });
-        if history_scope.is_none() {
-            prepared.disable_command_capture();
-        }
-        let scope = prepared.scope.clone();
-        let nonce = prepared.nonce.clone();
-        let Some(request) = prepared.ssh_input(request_id.clone()) else {
-            let _ = reply.send(Err(validation_error(request_id)));
-            return;
-        };
-        let session_id = request.session_id.as_str().to_owned();
-        let generation = request.expected_generation.get();
-        let completion = match self.queue_input(request) {
-            Ok(completion) => completion,
-            Err(error) => {
-                let _ = reply.send(Err(error));
-                return;
             }
-        };
-        // This state transition shares the writer/focus ordering domain with
-        // the script bytes themselves. Ready output is only a hint, never an
-        // authorization or connection fact.
-        self.native_terminal.mark_pending(&prepared, history_scope);
-        let succeeded = self
-            .wait_for_writer_ack(
-                completion,
-                MANUAL_INPUT_WRITE_TIMEOUT.saturating_add(Duration::from_secs(1)),
-                mailbox,
-            )
-            .await;
-        if !succeeded {
-            self.native_terminal.mark_enable_failed(&scope, &nonce);
-            self.connection_failed(
-                &session_id,
-                generation,
-                TransportError::ConnectionLost,
-                None,
-            );
-            let _ = reply.send(Err(unavailable_error(request_id)));
-            return;
-        }
-        let _ = reply.send(Ok(()));
-    }
-
-    async fn native_terminal_enable_local_with_ack(
-        &mut self,
-        request_id: RequestId,
-        prepared: PreparedNativeTerminalEnable,
-        reply: oneshot::Sender<ActorResult<()>>,
-        mailbox: &mut ActorMailbox,
-    ) {
-        let scope = prepared.scope.clone();
-        let nonce = prepared.nonce.clone();
-        let Some(request) = prepared.local_input(request_id.clone()) else {
-            let _ = reply.send(Err(validation_error(request_id)));
-            return;
-        };
-        let session_id = request.session_id.as_str().to_owned();
-        let generation = request.expected_generation.get();
-        let completion = match self.focused_target.as_ref() {
-            Some(TerminalInputFocusTarget::Local(target)) => {
-                self.local_sessions.input(request, target, self.focus_epoch)
-            }
-            _ => Err(local_terminal::local_stale_focus(request_id.clone())),
-        };
-        let completion = match completion {
-            Ok(completion) => completion,
-            Err(error) => {
-                let _ = reply.send(Err(error));
-                return;
-            }
-        };
-        self.native_terminal.mark_pending(
-            &prepared,
-            Some(norishell_core_api::NativeTerminalHistoryScope::Local),
-        );
-        let succeeded = self
-            .wait_for_writer_ack(completion, MANUAL_INPUT_WRITE_TIMEOUT, mailbox)
-            .await;
-        if !succeeded {
-            self.native_terminal.mark_enable_failed(&scope, &nonce);
-            self.clear_focus_if(|target| {
-                matches!(
+            NativeTerminalInputFence::Local(fence) => {
+                let Some(TerminalInputFocusTarget::Local(target)) = self.focused_target.as_ref()
+                else {
+                    return Err(local_terminal::local_stale_focus(request_id.clone()));
+                };
+                self.local_sessions.validate_history_fence(
+                    fence,
                     target,
-                    TerminalInputFocusTarget::Local(local)
-                        if local.session_id.as_str() == session_id
-                            && local.expected_generation.get() == generation
-                )
-            });
-            self.local_sessions.poison_input(&session_id, generation);
-            let _ = reply.send(Err(unavailable_error(request_id)));
-            return;
-        }
-        let _ = reply.send(Ok(()));
+                    self.focus_epoch,
+                    request_id,
+                )?;
+                NativeTerminalHistoryScope::Local
+            }
+        };
+        self.native_terminal.record_history(scope, request.command)
     }
 
     async fn local_resize_with_ack(
@@ -5535,15 +5439,10 @@ impl Actor {
     ) {
         let session_id = request.session_id.as_str().to_owned();
         let generation = request.expected_generation.get();
+        let attachment_id = request.attachment_id.as_str().to_owned();
         let resize_seq = request.resize_seq.get();
         let request_id = request.meta.request_id.clone();
-        let completion = match self.focused_target.as_ref() {
-            Some(TerminalInputFocusTarget::Local(target)) => {
-                self.local_sessions
-                    .resize(request, target, self.focus_epoch)
-            }
-            _ => Err(local_terminal::local_stale_focus(request_id.clone())),
-        };
+        let completion = self.local_sessions.resize(request);
         let completion = match completion {
             Ok(completion) => completion,
             Err(error) => {
@@ -5552,16 +5451,18 @@ impl Actor {
             }
         };
 
-        // Keep the actor and TerminalFocusBroker at this linearization point
-        // until the PTY owner confirms the real resize. A closed owner or an
+        // Keep actor order until the PTY owner confirms the real resize. A closed owner or an
         // uncertain timeout poisons the generation and never advances sequence.
         let succeeded = self
             .wait_for_writer_ack(completion, MANUAL_INPUT_WRITE_TIMEOUT, mailbox)
             .await;
         let committed = succeeded
-            && self
-                .local_sessions
-                .commit_resize(&session_id, generation, resize_seq);
+            && self.local_sessions.commit_resize(
+                &session_id,
+                generation,
+                &attachment_id,
+                resize_seq,
+            );
         if !committed {
             self.clear_focus_if(|target| {
                 matches!(
@@ -5782,6 +5683,7 @@ impl Actor {
     ) {
         let session_id = request.session_id.as_str().to_owned();
         let generation = request.expected_generation.get();
+        let attachment_id = request.attachment_id.as_str().to_owned();
         let resize_seq = request.resize_seq.get();
         let request_id = request.meta.request_id.clone();
         let completion = match self.queue_resize(request) {
@@ -5803,12 +5705,16 @@ impl Actor {
             .await;
         let committed = succeeded
             && self.sessions.get_mut(&session_id).is_some_and(|record| {
-                if record.summary.generation.get() != generation
-                    || resize_seq <= record.last_resize_seq
-                {
+                if record.summary.generation.get() != generation {
                     return false;
                 }
-                record.last_resize_seq = resize_seq;
+                let Some(attachment) = record.attachments.get_mut(&attachment_id) else {
+                    return false;
+                };
+                if resize_seq <= attachment.last_resize_seq {
+                    return false;
+                }
+                attachment.last_resize_seq = resize_seq;
                 true
             });
         if !committed {
@@ -5832,33 +5738,25 @@ impl Actor {
     ) -> ActorResult<oneshot::Receiver<bool>> {
         let size = PtySize::new(u32::from(request.cols), u32::from(request.rows), 0, 0)
             .map_err(|_| validation_error(request.meta.request_id.clone()))?;
-        self.validate_global_focus(
-            GlobalFocusFence {
-                session_id: &request.session_id,
-                generation: request.expected_generation,
-                channel_id: Some(&request.channel_id),
-                attachment_id: &request.attachment_id,
-                view_id: &request.view_id,
-                focus_epoch: request.focus_epoch,
-            },
-            &request.meta.request_id,
-        )?;
         let record = self
             .sessions
             .get_mut(request.session_id.as_str())
             .ok_or_else(|| not_found_error(request.meta.request_id.clone()))?;
-        validate_lease(
+        validate_attachment(
             record,
             request.expected_generation,
             &request.attachment_id,
             &request.view_id,
-            &request.lease_id,
-            request.input_epoch,
             &request.meta.request_id,
-            true,
         )?;
-        if record.summary.channel_id.as_ref() != Some(&request.channel_id)
-            || request.resize_seq.get() <= record.last_resize_seq
+        let attachment = record
+            .attachments
+            .get(request.attachment_id.as_str())
+            .expect("validated attachment exists");
+        if record.summary.state != SshSessionState::Running
+            || record.summary.channel_id.as_ref() != Some(&request.channel_id)
+            || attachment.summary.channel_id.as_ref() != Some(&request.channel_id)
+            || request.resize_seq.get() <= attachment.last_resize_seq
         {
             return Err(conflict_error(request.meta.request_id));
         }
@@ -5986,8 +5884,6 @@ impl Actor {
                     TerminalInputFocusTarget::Ssh(ssh) if ssh.session_id == request.session_id
                 )
             });
-            self.native_terminal
-                .clear_ssh_session(&request.session_id, request.expected_generation);
             let record = self
                 .sessions
                 .get_mut(&session_id)
@@ -6022,7 +5918,6 @@ impl Actor {
             record.input_activity_epoch = Arc::new(AtomicU64::new(0));
             record.next_input_epoch = 0;
             record.last_client_seq = 0;
-            record.last_resize_seq = 0;
             record.next_output_seq = 1;
             record.output_ring.clear();
             record.output_ring_bytes = 0;
@@ -6051,6 +5946,7 @@ impl Actor {
                         summary,
                         events: attachment.events,
                         last_seen_at_unix_ms: unix_time_ms(),
+                        last_resize_seq: 0,
                     },
                 );
             }
@@ -6848,23 +6744,36 @@ impl Actor {
         let Some(record) = self.sessions.get_mut(session_id) else {
             return;
         };
-        let HeartbeatPolicy::TransportKeepalive {
+        let recurring = if let HeartbeatPolicy::TransportKeepalive {
             interval_seconds,
             reply_timeout_seconds,
             failure_threshold,
         } = record.heartbeat_policy.policy
-        else {
-            return;
+        {
+            Some((interval_seconds, reply_timeout_seconds, failure_threshold))
+        } else {
+            None
         };
         for task in record.transport_heartbeat_tasks.drain(..) {
             task.abort();
         }
+        let now = tokio::time::Instant::now();
+        let now_unix_ms = unix_time_ms();
+        let transports = transports
+            .into_iter()
+            .map(|mut transport| {
+                // Every route stage gets an initial RTT as soon as the Shell is ready.
+                transport.first_due = now;
+                transport.first_due_at_unix_ms = now_unix_ms;
+                transport
+            })
+            .collect::<Vec<_>>();
         let policy_revision = record.heartbeat_policy.revision;
         record.heartbeat.transports = transports
             .iter()
             .map(|transport| SshTransportHeartbeatStatus {
                 route_stage: transport.route_stage.clone(),
-                next_due_at_unix_ms: Some(transport.first_due_at_unix_ms),
+                next_due_at_unix_ms: recurring.map(|_| transport.first_due_at_unix_ms),
                 last_sent_at_unix_ms: None,
                 last_ack_at_unix_ms: None,
                 consecutive_failures: 0,
@@ -6875,6 +6784,40 @@ impl Actor {
             record,
             SshSessionEventPayload::HeartbeatChanged { heartbeat },
         );
+        let Some((interval_seconds, reply_timeout_seconds, failure_threshold)) = recurring else {
+            let tasks = transports
+                .into_iter()
+                .map(|transport| {
+                    let tx = self.tx.clone();
+                    let session_id = session_id.to_owned();
+                    let route_stage = transport.route_stage;
+                    let handle = transport.handle;
+                    let task = tauri::async_runtime::spawn(async move {
+                        let last_sent_at_unix_ms = unix_time_ms();
+                        let acknowledged = matches!(
+                            tokio::time::timeout(Duration::from_secs(3), handle.request_reply())
+                                .await,
+                            Ok(Ok(()))
+                        );
+                        let _ = tx
+                            .send(Message::TransportLatencyObserved {
+                                session_id,
+                                generation,
+                                policy_revision,
+                                route_stage,
+                                last_sent_at_unix_ms,
+                                last_ack_at_unix_ms: acknowledged.then(unix_time_ms),
+                            })
+                            .await;
+                    });
+                    HeartbeatTask::new(task)
+                })
+                .collect();
+            if let Some(record) = self.sessions.get_mut(session_id) {
+                record.transport_heartbeat_tasks = tasks;
+            }
+            return;
+        };
         let tasks = transports
             .into_iter()
             .map(|transport| {
@@ -7038,6 +6981,43 @@ impl Actor {
         }
         status.consecutive_failures = consecutive_failures;
         status.next_due_at_unix_ms = next_due_at_unix_ms;
+        let heartbeat = record.heartbeat.clone();
+        emit_payload(
+            record,
+            SshSessionEventPayload::HeartbeatChanged { heartbeat },
+        );
+    }
+
+    fn transport_latency_observed(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        policy_revision: Option<WireSequence>,
+        route_stage: SshSessionRouteStage,
+        last_sent_at_unix_ms: i64,
+        last_ack_at_unix_ms: Option<i64>,
+    ) {
+        let Some(record) = self.sessions.get_mut(session_id) else {
+            return;
+        };
+        if record.summary.generation.get() != generation
+            || record.heartbeat.policy_revision != policy_revision
+            || record.heartbeat.mode == SshHeartbeatMode::TransportKeepalive
+            || !matches!(
+                record.summary.state,
+                SshSessionState::AutomatingLogin | SshSessionState::Running
+            )
+        {
+            return;
+        }
+        let Some(status) = record.heartbeat.transports.iter_mut().find(|status| {
+            status.route_stage == route_stage && status.last_sent_at_unix_ms.is_none()
+        }) else {
+            return;
+        };
+        status.last_sent_at_unix_ms = Some(last_sent_at_unix_ms);
+        status.last_ack_at_unix_ms = last_ack_at_unix_ms;
+        status.consecutive_failures = u8::from(last_ack_at_unix_ms.is_none());
         let heartbeat = record.heartbeat.clone();
         emit_payload(
             record,
@@ -7518,32 +7498,6 @@ impl Actor {
         }) {
             return;
         }
-        let Some((wire_session_id, channel_id, prompt_input_sequence, prompt_input_epoch)) =
-            self.sessions.get(session_id).and_then(|record| {
-                Some((
-                    record.summary.session_id.clone(),
-                    record.summary.channel_id.clone()?,
-                    WireSequence::new(record.last_client_seq),
-                    record.input_lease.as_ref().map(|lease| lease.input_epoch),
-                ))
-            })
-        else {
-            return;
-        };
-        // Strip only our bounded private OSC frames before they enter the
-        // ring, renderer, plugin observer projection, or automation matcher.
-        // All unrelated VT bytes remain verbatim.
-        let bytes = self.native_terminal.filter_ssh_output(
-            &wire_session_id,
-            WireSequence::new(generation),
-            &channel_id,
-            prompt_input_sequence,
-            prompt_input_epoch,
-            bytes,
-        );
-        if bytes.is_empty() {
-            return;
-        }
         let Some(record) = self.sessions.get_mut(session_id) else {
             return;
         };
@@ -7665,10 +7619,6 @@ impl Actor {
             record.shell_stop = None;
             record.input_lease = None;
         }
-        if let Ok(session_id) = norishell_core_api::SshSessionId::parse(session_id) {
-            self.native_terminal
-                .clear_ssh_session(&session_id, WireSequence::new(generation));
-        }
         let observer_ids = self
             .plugin_observers
             .iter()
@@ -7723,10 +7673,6 @@ impl Actor {
             return;
         }
         let failure = failure_from_route(error, route_stage);
-        if let Ok(wire_session_id) = norishell_core_api::SshSessionId::parse(session_id) {
-            self.native_terminal
-                .clear_ssh_session(&wire_session_id, WireSequence::new(generation));
-        }
         if let Some(record) = self.sessions.get_mut(session_id) {
             clear_keyboard_interactive_challenge(record, TransportError::AuthenticationRejected);
         }
@@ -8424,6 +8370,73 @@ mod tests {
             actor.sessions[healthy.session_id.as_str()].summary.state,
             SshSessionState::Running
         );
+    }
+
+    #[test]
+    fn one_shot_latency_is_recorded_without_enabling_keepalive() {
+        let (_directory, mut actor, _live_sessions, _rx) = actor_fixture();
+        let session = insert_test_session(&mut actor, SshSessionState::Running, 3, 4, None);
+        let record = actor
+            .sessions
+            .get_mut(session.session_id.as_str())
+            .expect("test session");
+        record.heartbeat_policy = test_heartbeat_policy();
+        record.heartbeat = heartbeat_status_from_policy(&record.heartbeat_policy);
+        record
+            .heartbeat
+            .transports
+            .push(SshTransportHeartbeatStatus {
+                route_stage: SshSessionRouteStage::Target,
+                next_due_at_unix_ms: None,
+                last_sent_at_unix_ms: None,
+                last_ack_at_unix_ms: None,
+                consecutive_failures: 0,
+            });
+
+        actor.transport_latency_observed(
+            session.session_id.as_str(),
+            2,
+            None,
+            SshSessionRouteStage::Target,
+            100,
+            Some(140),
+        );
+        assert!(
+            actor.sessions[session.session_id.as_str()]
+                .heartbeat
+                .transports[0]
+                .last_sent_at_unix_ms
+                .is_none()
+        );
+
+        actor.transport_latency_observed(
+            session.session_id.as_str(),
+            3,
+            None,
+            SshSessionRouteStage::Target,
+            100,
+            Some(140),
+        );
+        actor.transport_latency_observed(
+            session.session_id.as_str(),
+            3,
+            None,
+            SshSessionRouteStage::Target,
+            200,
+            None,
+        );
+        let record = &actor.sessions[session.session_id.as_str()];
+        assert_eq!(record.heartbeat.mode, SshHeartbeatMode::Disabled);
+        assert_eq!(
+            record.heartbeat.transports[0].last_sent_at_unix_ms,
+            Some(100)
+        );
+        assert_eq!(
+            record.heartbeat.transports[0].last_ack_at_unix_ms,
+            Some(140)
+        );
+        assert_eq!(record.heartbeat.transports[0].next_due_at_unix_ms, None);
+        assert_eq!(record.summary.state, SshSessionState::Running);
     }
 
     #[test]
@@ -9485,247 +9498,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn native_zsh_enable_through_actor_keeps_pty_running_and_records_completion() {
-        use norishell_core_api::{
-            LocalSessionEventPayload, LocalSessionState, NativeTerminalCaptureState,
-            NativeTerminalEnableRequest, NativeTerminalHistoryListRequest,
-            NativeTerminalHistoryScope, NativeTerminalInputFence, NativeTerminalLocalInputFence,
-            NativeTerminalSettings, NativeTerminalSettingsReplaceRequest, NativeTerminalShellKind,
-            NativeTerminalSnapshotRequest,
-        };
-
-        let directory = tempfile::tempdir().expect("isolated native terminal settings");
-        let hosts = HostService::start(directory.path()).unwrap();
-        let vault = VaultService::start(directory.path());
-        let native = NativeTerminalService::start(directory.path(), vault.clone());
-        native
-            .replace_settings(NativeTerminalSettingsReplaceRequest {
-                meta: RequestMeta {
-                    request_id: RequestId::new(),
-                },
-                expected_settings_revision: WireSequence::new(1),
-                settings: NativeTerminalSettings {
-                    history_enabled: true,
-                    ..NativeTerminalSettings::default()
-                },
-            })
-            .unwrap();
-        let service = SshSessionService::start_with_agent_and_native(
-            hosts,
-            vault,
-            TransientCredentialService::default(),
-            crate::ssh_agent_service::SshAgentService::default(),
-            native.clone(),
-        );
-        let test_service = service.clone();
-        let mut check = tokio::spawn(async move {
-            let output = Arc::new(Mutex::new(Vec::<u8>::new()));
-            let output_sink = output.clone();
-            let request = LocalSessionOpenRequest {
-                meta: RequestMeta {
-                    request_id: RequestId::new(),
-                },
-                operation_id: OperationId::new(),
-                idempotency_key: "native-zsh-actor-open".to_owned(),
-                open_attempt_id: LocalOpenAttemptId::new(),
-                attach_attempt_id: LocalAttachAttemptId::new(),
-                view_id: LocalViewId::new(),
-                rows: 24,
-                cols: 80,
-            };
-            let request_id = request.meta.request_id.clone();
-            let opened = test_service
-                .request(
-                    |reply| Message::LocalOpen {
-                        request,
-                        events: Channel::<LocalSessionEvent>::new(move |event| {
-                            if let tauri::ipc::InvokeResponseBody::Json(json) = event {
-                                let event: LocalSessionEvent = serde_json::from_str(&json).unwrap();
-                                if let LocalSessionEventPayload::OutputFrame { frame } =
-                                    event.payload
-                                {
-                                    let mut bytes = output_sink.lock().unwrap();
-                                    let available =
-                                        OUTPUT_RING_MAX_BYTES.saturating_sub(bytes.len());
-                                    bytes.extend(frame.bytes.into_iter().take(available));
-                                }
-                            }
-                            Ok(())
-                        }),
-                        reply,
-                    },
-                    request_id,
-                )
-                .await
-                .unwrap();
-            let details = wait_for_local_state(
-                &test_service,
-                &opened.session.session_id,
-                LocalSessionState::Running,
-            )
-            .await;
-            let lease = focus_local_session(&test_service, &details, 0, "native-zsh-focus").await;
-            let attachment = details.attachments[0].clone();
-            let input = |sequence, bytes: &[u8]| LocalSessionInputRequest {
-                meta: RequestMeta {
-                    request_id: RequestId::new(),
-                },
-                session_id: details.session.session_id.clone(),
-                expected_generation: details.session.generation,
-                expected_state_revision: details.session.state_revision,
-                pty_id: details.session.pty_id.clone().unwrap(),
-                attachment_id: attachment.attachment_id.clone(),
-                view_id: attachment.view_id.clone(),
-                lease_id: lease.lease_id.clone(),
-                focus_epoch: lease.focus_epoch,
-                input_epoch: lease.input_epoch,
-                client_seq: WireSequence::new(sequence),
-                bytes: bytes.to_vec(),
-            };
-            // Keep the real Core-owned PTY, but make this gate independent of
-            // the account's default shell and personal zsh startup hooks.
-            let isolated_shell = input(1, b"exec /bin/zsh -f\r");
-            let request_id = isolated_shell.meta.request_id.clone();
-            test_service
-                .linearized_request(
-                    |reply| Message::LocalInput {
-                        request: isolated_shell,
-                        reply,
-                    },
-                    request_id,
-                )
-                .await
-                .unwrap();
-            // Only this isolated test shell changes: prevent its bootstrap or
-            // test commands from being saved into the user's shell history.
-            let initial = input(2, b"unset HISTFILE; HISTSIZE=0; SAVEHIST=0; printf '%s%s\\n' '__NVX_' 'BOOT_READY__'\r");
-            let request_id = initial.meta.request_id.clone();
-            test_service
-                .linearized_request(
-                    |reply| Message::LocalInput {
-                        request: initial,
-                        reply,
-                    },
-                    request_id,
-                )
-                .await
-                .unwrap();
-            timeout(Duration::from_secs(5), async {
-                loop {
-                    if output
-                        .lock()
-                        .unwrap()
-                        .windows(b"__NVX_BOOT_READY__".len())
-                        .any(|bytes| bytes == b"__NVX_BOOT_READY__")
-                    {
-                        break;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("real shell reached an empty prompt");
-            let prepared = native
-                .prepare_enable(&NativeTerminalEnableRequest {
-                    meta: RequestMeta {
-                        request_id: RequestId::new(),
-                    },
-                    input_fence: NativeTerminalInputFence::Local(NativeTerminalLocalInputFence {
-                        session_id: details.session.session_id.clone(),
-                        expected_generation: details.session.generation,
-                        expected_state_revision: details.session.state_revision,
-                        pty_id: details.session.pty_id.clone().unwrap(),
-                        attachment_id: attachment.attachment_id.clone(),
-                        view_id: attachment.view_id.clone(),
-                        lease_id: lease.lease_id.clone(),
-                        focus_epoch: lease.focus_epoch,
-                        input_epoch: lease.input_epoch,
-                        client_seq: WireSequence::new(3),
-                    }),
-                    shell_kind: NativeTerminalShellKind::Zsh,
-                    confirmed_empty_prompt: true,
-                })
-                .unwrap();
-            let scope = prepared.scope.clone();
-            test_service
-                .native_terminal_enable_local(RequestId::new(), prepared)
-                .await
-                .expect("real PTY ACKs the full bootstrap");
-            timeout(Duration::from_secs(5), async {
-                loop {
-                    if native.status_for(&scope).is_some_and(|status| {
-                        status.capture_state == NativeTerminalCaptureState::Ready
-                            && status.prompt_observed
-                    }) {
-                        break;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("real zsh emits ready and prompt through the actor");
-            let command = "printf '__NVX_NATIVE_COMMAND__\\n'; false";
-            let request = input(4, format!("{command}\r").as_bytes());
-            let request_id = request.meta.request_id.clone();
-            test_service
-                .linearized_request(|reply| Message::LocalInput { request, reply }, request_id)
-                .await
-                .unwrap();
-            timeout(Duration::from_secs(5), async {
-                loop {
-                    let snapshot = native.snapshot(NativeTerminalSnapshotRequest {
-                        meta: RequestMeta {
-                            request_id: RequestId::new(),
-                        },
-                        after_completion_cursor: None,
-                    });
-                    if snapshot.completions.iter().any(|completion| {
-                        completion.session == scope && completion.exit_code == Some(1)
-                    }) {
-                        break;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("real zsh completion reaches native terminal service");
-            let history = native
-                .history_list(NativeTerminalHistoryListRequest {
-                    meta: RequestMeta {
-                        request_id: RequestId::new(),
-                    },
-                    scope: Some(NativeTerminalHistoryScope::Local),
-                    query: "__NVX_NATIVE_COMMAND__".to_owned(),
-                    limit: 10,
-                })
-                .unwrap();
-            assert!(history.iter().any(|entry| entry.command == command));
-            assert_eq!(
-                local_session_details(&test_service, &details.session.session_id)
-                    .await
-                    .session
-                    .state,
-                LocalSessionState::Running
-            );
-        });
-        let outcome = timeout(Duration::from_secs(25), &mut check).await;
-        if outcome.is_err() {
-            check.abort();
-            let _ = check.await;
-        }
-        // Cleanup runs even when the assertion task fails or times out.
-        service
-            .shutdown_all(RequestId::new())
-            .await
-            .expect("cleanup isolated native PTY");
-        assert!(service.local_exit_blockers().is_empty());
-        outcome
-            .expect("native zsh actor gate completes")
-            .expect("native zsh actor assertions");
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_terminal_actor_owns_pty_focus_replay_exit_and_blocker_cleanup() {
         let (_directory, _hosts, _credentials, service) = network_service_fixture();
@@ -9818,9 +9590,6 @@ mod tests {
             pty_id: pty_id.clone(),
             attachment_id: attachment.attachment_id.clone(),
             view_id: attachment.view_id.clone(),
-            lease_id: lease.lease_id.clone(),
-            focus_epoch: lease.focus_epoch,
-            input_epoch: lease.input_epoch,
             resize_seq: WireSequence::new(1),
             rows: 39,
             cols: 117,
@@ -10173,6 +9942,7 @@ mod tests {
                         summary: attachment,
                         events: Channel::<SshSessionEvent>::new(|_| Ok(())),
                         last_seen_at_unix_ms: now,
+                        last_resize_seq: 0,
                     },
                 )]),
                 active_challenge: None,
@@ -10189,7 +9959,6 @@ mod tests {
                 input_lease: None,
                 next_input_epoch: 0,
                 last_client_seq: 0,
-                last_resize_seq: 0,
                 next_output_seq: 1,
                 output_ring: VecDeque::new(),
                 output_ring_bytes: 0,
@@ -11095,15 +10864,6 @@ mod tests {
         let mut mailbox = ActorMailbox::new(rx);
         let (shell, mut commands) = mpsc::channel(4);
         let session = insert_test_session(&mut actor, SshSessionState::Running, 1, 4, Some(shell));
-        let focus = actor
-            .focus_change(focus_change_request(
-                0,
-                Some(focus_target(&actor, &session)),
-                OperationId::new(),
-                "resize-owner-ack-focus",
-            ))
-            .expect("focus SSH session");
-        let lease = focus.lease.expect("focused SSH lease");
         let channel_id = actor.sessions[session.session_id.as_str()]
             .summary
             .channel_id
@@ -11118,13 +10878,16 @@ mod tests {
             channel_id,
             attachment_id: session.attachment_id.clone(),
             view_id: session.view_id.clone(),
-            focus_epoch: lease.focus_epoch,
-            lease_id: lease.lease_id,
-            input_epoch: lease.input_epoch,
             resize_seq: WireSequence::new(1),
             rows: 39,
             cols: 117,
         };
+        let mut wrong_view = request.clone();
+        wrong_view.view_id = norishell_core_api::SshViewId::new();
+        match actor.queue_resize(wrong_view) {
+            Ok(_) => panic!("another attachment view must not resize this SSH channel"),
+            Err(error) => assert_eq!(error.code, "ssh_terminal.stale_fence"),
+        }
 
         let (reply, mut response) = oneshot::channel();
         let pending = actor.resize_with_ack(request, reply, &mut mailbox);
@@ -11154,9 +10917,68 @@ mod tests {
             .expect_err("owner failure must reject resize");
 
         let record = &actor.sessions[session.session_id.as_str()];
-        assert_eq!(record.last_resize_seq, 0);
+        assert_eq!(
+            record.attachments[session.attachment_id.as_str()].last_resize_seq,
+            0
+        );
         assert_eq!(record.summary.state, SshSessionState::Failed);
         assert!(actor.focused_target.is_none());
+    }
+
+    #[test]
+    fn ssh_resize_sequence_is_scoped_to_attachment() {
+        let (_directory, mut actor, _live_sessions, _rx) = actor_fixture();
+        let (shell, _commands) = mpsc::channel(4);
+        let session = insert_test_session(&mut actor, SshSessionState::Running, 1, 4, Some(shell));
+        let record = actor
+            .sessions
+            .get_mut(session.session_id.as_str())
+            .expect("session");
+        let first = record
+            .attachments
+            .get_mut(session.attachment_id.as_str())
+            .expect("first view");
+        first.last_resize_seq = 7;
+        let mut second = first.summary.clone();
+        second.attachment_id = SshAttachmentId::new();
+        second.view_id = norishell_core_api::SshViewId::new();
+        record.attachments.insert(
+            second.attachment_id.as_str().to_owned(),
+            AttachmentRecord {
+                summary: second.clone(),
+                events: Channel::new(|_| Ok(())),
+                last_seen_at_unix_ms: unix_time_ms(),
+                last_resize_seq: 0,
+            },
+        );
+        let target = focus_target(&actor, &session);
+        actor
+            .focus_change(focus_change_request(
+                0,
+                Some(target),
+                OperationId::new(),
+                "resize-keeps-attachment-sequence",
+            ))
+            .expect("focus first view");
+        assert_eq!(
+            actor.sessions[session.session_id.as_str()].attachments[session.attachment_id.as_str()]
+                .last_resize_seq,
+            7,
+        );
+        let request = SshSessionResizeRequest {
+            meta: RequestMeta {
+                request_id: RequestId::new(),
+            },
+            session_id: session.session_id.clone(),
+            expected_generation: WireSequence::new(1),
+            channel_id: second.channel_id.clone().expect("running channel"),
+            attachment_id: second.attachment_id,
+            view_id: second.view_id,
+            resize_seq: WireSequence::new(1),
+            rows: 42,
+            cols: 132,
+        };
+        assert!(actor.queue_resize(request).is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11186,7 +11008,7 @@ mod tests {
                 "resize-focus-first",
             ))
             .expect("focus first session");
-        let lease = focus.lease.expect("focused SSH lease");
+        let _lease = focus.lease.expect("focused SSH lease");
         let channel_id = actor.sessions[first.session_id.as_str()]
             .summary
             .channel_id
@@ -11207,9 +11029,6 @@ mod tests {
                 channel_id,
                 attachment_id: first.attachment_id,
                 view_id: first.view_id,
-                focus_epoch: lease.focus_epoch,
-                lease_id: lease.lease_id,
-                input_epoch: lease.input_epoch,
                 resize_seq: WireSequence::new(1),
                 rows: 42,
                 cols: 132,
@@ -11257,12 +11076,10 @@ mod tests {
     async fn local_resize_holds_actor_order_until_owner_ack_before_terminate() {
         let (_directory, mut actor, _live_sessions, rx) = actor_fixture();
         let (process, owner_commands) = std_mpsc::sync_channel(4);
-        let (resize_request, target) = actor.local_sessions.insert_resize_test_session(process, 1);
+        let (resize_request, _target) = actor.local_sessions.insert_resize_test_session(process, 1);
         let session_id = resize_request.session_id.clone();
         let generation = resize_request.expected_generation;
         let state_revision = resize_request.expected_state_revision;
-        actor.focus_epoch = 1;
-        actor.focused_target = Some(TerminalInputFocusTarget::Local(target));
         let tx = actor.tx.clone();
         let actor_task = tokio::spawn(run_actor(actor, rx));
 
@@ -11342,10 +11159,15 @@ mod tests {
         let (_directory, mut actor, _live_sessions, rx) = actor_fixture();
         let mut mailbox = ActorMailbox::new(rx);
         let (process, owner_commands) = std_mpsc::sync_channel(4);
-        let (request, target) = actor.local_sessions.insert_resize_test_session(process, 1);
+        let (request, _target) = actor.local_sessions.insert_resize_test_session(process, 1);
+        let mut wrong_view = request.clone();
+        wrong_view.view_id = norishell_core_api::LocalViewId::new();
+        match actor.local_sessions.resize(wrong_view) {
+            Ok(_) => panic!("another attachment view must not resize this local PTY"),
+            Err(error) => assert_eq!(error.code, "local_terminal.stale_fence"),
+        }
         let session_id = request.session_id.clone();
-        actor.focus_epoch = 1;
-        actor.focused_target = Some(TerminalInputFocusTarget::Local(target));
+        let attachment_id = request.attachment_id.clone();
 
         let (reply, mut response) = oneshot::channel();
         let pending = actor.local_resize_with_ack(request, reply, &mut mailbox);
@@ -11377,7 +11199,7 @@ mod tests {
         assert_eq!(
             actor
                 .local_sessions
-                .resize_seq_for_test(session_id.as_str()),
+                .resize_seq_for_test(session_id.as_str(), attachment_id.as_str()),
             Some(0)
         );
         let summary = actor
@@ -12698,6 +12520,7 @@ mod tests {
                         summary: attachment,
                         events: Channel::<SshSessionEvent>::new(|_| Ok(())),
                         last_seen_at_unix_ms: unix_time_ms(),
+                        last_resize_seq: 5,
                     },
                 )]),
                 active_challenge: None,
@@ -12714,7 +12537,6 @@ mod tests {
                 input_lease: Some(old_lease),
                 next_input_epoch: 2,
                 last_client_seq: 8,
-                last_resize_seq: 5,
                 next_output_seq: 42,
                 output_ring: VecDeque::new(),
                 output_ring_bytes: 128,
@@ -12763,7 +12585,10 @@ mod tests {
             .expect("session record");
         assert_eq!(record.next_input_epoch, 0);
         assert_eq!(record.last_client_seq, 0);
-        assert_eq!(record.last_resize_seq, 0);
+        assert_eq!(
+            record.attachments[details.attachments[0].attachment_id.as_str()].last_resize_seq,
+            0
+        );
         assert_eq!(record.next_output_seq, 1);
         assert_eq!(record.output_ring_bytes, 0);
 
@@ -12846,15 +12671,12 @@ mod tests {
                 channel_id: SshChannelId::new(),
                 attachment_id: attachment_id.clone(),
                 view_id: view_id.clone(),
-                focus_epoch: WireSequence::new(1),
-                lease_id: old_lease_id.clone(),
-                input_epoch: WireSequence::new(2),
                 resize_seq: WireSequence::new(6),
                 rows: 31,
                 cols: 101,
             })
             .expect_err("old generation resize must fail closed");
-        assert_eq!(stale_resize.code, "ssh_terminal.stale_focus");
+        assert_eq!(stale_resize.code, "ssh_terminal.stale_fence");
 
         let stale_renew = actor
             .lease_renew(SshSessionInputLeaseRenewRequest {
@@ -13087,9 +12909,6 @@ mod tests {
                     channel_id,
                     attachment_id: attached.attachment.attachment_id,
                     view_id: attached.attachment.view_id,
-                    focus_epoch: lease.focus_epoch,
-                    lease_id: lease.lease_id,
-                    input_epoch: lease.input_epoch,
                     resize_seq: WireSequence::new(1),
                     rows: 47,
                     cols: 139,
@@ -13563,9 +13382,6 @@ mod tests {
             channel_id,
             attachment_id: attachment.attachment_id,
             view_id: attachment.view_id,
-            focus_epoch: lease.focus_epoch,
-            lease_id: lease.lease_id,
-            input_epoch: lease.input_epoch,
             resize_seq: WireSequence::new(1),
             rows: 47,
             cols: 143,
@@ -13918,9 +13734,6 @@ mod tests {
             channel_id: channel_id.clone(),
             attachment_id: attachment.attachment_id.clone(),
             view_id: attachment.view_id.clone(),
-            focus_epoch: lease.focus_epoch,
-            lease_id: lease.lease_id.clone(),
-            input_epoch: lease.input_epoch,
             resize_seq: WireSequence::new(1),
             rows: 43,
             cols: 132,
@@ -14279,9 +14092,6 @@ mod tests {
             channel_id: old_channel_id.clone(),
             attachment_id: old_attachment.attachment_id.clone(),
             view_id: old_attachment.view_id.clone(),
-            focus_epoch: old_lease.focus_epoch,
-            lease_id: old_lease.lease_id.clone(),
-            input_epoch: old_lease.input_epoch,
             resize_seq: WireSequence::new(2),
             rows: 31,
             cols: 101,
@@ -14297,7 +14107,7 @@ mod tests {
             )
             .await
             .expect_err("old generation resize must fail closed");
-        assert_eq!(stale_resize.code, "ssh_terminal.stale_focus");
+        assert_eq!(stale_resize.code, "ssh_terminal.stale_fence");
         let stale_lease_request = SshSessionInputLeaseRenewRequest {
             meta: RequestMeta {
                 request_id: RequestId::new(),

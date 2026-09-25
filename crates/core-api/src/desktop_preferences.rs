@@ -25,6 +25,7 @@ pub struct DesktopPreferences {
     pub tray_recent_limit: u8,
     pub tray_show_host_names: bool,
     pub notification_background_only: bool,
+    /// Retained for existing SQLite and sync profiles; command notifications are removed.
     pub notification_failure_only: bool,
     pub notify_transfer_completed: bool,
     pub notify_transfer_failed: bool,

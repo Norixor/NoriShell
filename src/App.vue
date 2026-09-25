@@ -42,7 +42,7 @@ import { useAppUpdateStore } from "./stores/appUpdate";
 import { useUiStore } from "./stores/ui";
 import { useWorkspaceTabsStore } from "./stores/workspaceTabs";
 import { useNativeTerminalStore } from "./stores/nativeTerminal";
-import { setNativeNotificationContext, type NativeTerminalNotificationClick, type NativeResourceNotificationClick } from "./core-api/native-notifications";
+import { setNativeNotificationContext, type NativeResourceNotificationClick } from "./core-api/native-notifications";
 import { requestExitAfterTerminalWorkspaceFlush } from "./terminal-workspace-persistence";
 import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./views/sftpPluginNavigation";
 
@@ -63,14 +63,8 @@ const workspaceTabs = useWorkspaceTabsStore(pinia);
 const nativeTerminal = useNativeTerminalStore(pinia);
 const appUpdate = useAppUpdateStore(pinia);
 let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
-function updateNativeWindowFocus() {
-  nativeTerminal.setAppFocused(document.hasFocus() && document.visibilityState === "visible");
-}
-
-watch([() => ui.locale, () => nativeTerminal.visiblePaneId, () => nativeTerminal.sessions], () => {
-  if (!isTauri()) return;
-  const session = nativeTerminal.sessions.find((item) => item.session.paneId === nativeTerminal.visiblePaneId)?.session ?? null;
-  void setNativeNotificationContext(ui.locale, session).catch(() => { /* Settings exposes permission and availability. */ });
+watch(() => ui.locale, () => {
+  if (isTauri()) void setNativeNotificationContext(ui.locale).catch(() => { /* Settings exposes permission and availability. */ });
 }, { immediate: true });
 
 type ContentRegion = "before" | "after" | "sidebar" | "footer";
@@ -115,7 +109,6 @@ void ui.setUiZoom(ui.uiZoom, false).then((success) => {
 let unlistenPluginProtocolLaunch: UnlistenFn | null = null;
 let unlistenApplicationExit: UnlistenFn | null = null;
 let unlistenNativeResourceNotification: UnlistenFn | null = null;
-let unlistenNativeNotification: UnlistenFn | null = null;
 let unlistenPluginHostSession: UnlistenFn | null = null;
 let unlistenPluginHostNavigation: UnlistenFn | null = null;
 let unlistenPluginSpecialPermission: UnlistenFn | null = null;
@@ -244,16 +237,9 @@ onMounted(async () => {
   unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => { void router.push("/terminal"); });
   nativeTerminal.start();
   void startTrayNavigation().catch(trayUnavailable);
-  unlistenNativeNotification = await listen<NativeTerminalNotificationClick>("native-terminal-notification-click", ({ payload }) => {
-    workspaceTabs.terminalController?.focusNativeSession?.(payload.scope);
-  });
   unlistenNativeResourceNotification = await listen<NativeResourceNotificationClick>("native-resource-notification-click", ({ payload }) => {
     void navigateNativeResourceNotification(payload, router, workspaceTabs, () => !trayDisposed);
   });
-  updateNativeWindowFocus();
-  window.addEventListener("focus", updateNativeWindowFocus);
-  window.addEventListener("blur", updateNativeWindowFocus);
-  document.addEventListener("visibilitychange", updateNativeWindowFocus);
   await setPluginLocale(ui.locale).catch(() => {
     tips.show({
       tone: "error",
@@ -364,11 +350,6 @@ onBeforeUnmount(() => {
   stopPluginAppNavigation = null;
   unlistenNativeResourceNotification?.();
   unlistenNativeResourceNotification = null;
-  unlistenNativeNotification?.();
-  unlistenNativeNotification = null;
-  window.removeEventListener("focus", updateNativeWindowFocus);
-  window.removeEventListener("blur", updateNativeWindowFocus);
-  document.removeEventListener("visibilitychange", updateNativeWindowFocus);
   unlistenApplicationExit?.();
   unlistenApplicationExit = null;
   unlistenPluginHostSession?.();

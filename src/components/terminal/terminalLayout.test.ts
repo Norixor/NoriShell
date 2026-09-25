@@ -9,6 +9,7 @@ import {
   setTerminalForPane,
   setTerminalSplitRatio,
   splitTerminalPane,
+  splitTerminalWorkspaceToRight,
   terminalPaneDepth,
   terminalLayoutDepth,
   type TerminalLayoutNode,
@@ -71,6 +72,23 @@ describe("terminalLayout", () => {
         ratio: 0.5,
       },
     });
+  });
+
+  it("adds a full-height right Pane beside an existing vertical stack", () => {
+    const stacked = splitTerminalPane(
+      createTerminalPane("pane-1"), "pane-1", "vertical", "pane-2", "split-1",
+    );
+    const layout = splitTerminalWorkspaceToRight(stacked, "pane-3", "split-2");
+
+    expect(layout).toMatchObject({
+      kind: "split",
+      direction: "horizontal",
+      ratio: 0.5,
+      first: stacked,
+      second: { kind: "pane", paneId: "pane-3" },
+    });
+    expect(countTerminalPanes(layout)).toBe(3);
+    expect(findTerminalPane(layout, "pane-1")).toEqual(findTerminalPane(stacked, "pane-1"));
   });
 
   it("restores layouts with more than eight Panes", () => {

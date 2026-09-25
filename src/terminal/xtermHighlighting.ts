@@ -1,9 +1,10 @@
-import type { IDisposable, Terminal } from "@xterm/xterm";
+import type { IDisposable, IMarker, Terminal } from "@xterm/xterm";
 
 import type { HighlightConfiguration, HighlightMatch, HighlightRule } from "./highlighting";
 
 interface CellPosition { row: number; column: number; width: number }
 interface LogicalLine { text: string; positions: CellPosition[] }
+interface HighlightDecoration { marker: IMarker; decoration: IDisposable; column: number; width: number; foreground: string; background: string }
 
 /** Map UTF-16 match positions back to real cells; wide characters, combining characters, and soft wraps never change output. */
 export function visibleHighlightLines(terminal: Terminal): LogicalLine[] {
@@ -54,10 +55,10 @@ export function createTerminalHighlighter(terminal: Terminal, report: (failed: b
   let dirty = false;
   let suspended = false;
   let disposed = false;
-  let decorations: IDisposable[] = [];
+  let decorations: HighlightDecoration[] = [];
 
   function clearDecorations() {
-    for (const item of decorations) item.dispose();
+    for (const item of decorations) { item.decoration.dispose(); item.marker.dispose(); }
     decorations = [];
   }
   function stopWorker() {
@@ -84,6 +85,7 @@ export function createTerminalHighlighter(terminal: Terminal, report: (failed: b
     const viewport = terminal.buffer.active.viewportY;
     const rules = new Map<string, HighlightRule>(config.rules.map((rule) => [rule.id, rule]));
     try {
+      const coldWorker = worker === null;
       worker ??= new Worker(new URL("./highlight.worker.ts", import.meta.url), { type: "module" });
       const activeWorker = worker;
       worker.onerror = () => { if (worker === activeWorker) suspend(); };
@@ -93,33 +95,53 @@ export function createTerminalHighlighter(terminal: Terminal, report: (failed: b
         timeout = undefined;
         pending = false;
         if (event.data.failed) { suspend(); return; }
-        if (version === revision && viewport === terminal.buffer.active.viewportY && config.enabled) {
-          clearDecorations();
+        if (config.enabled && terminal.buffer.active.type === "normal") {
           const buffer = terminal.buffer.active;
+          const currentLines = version === revision && viewport === buffer.viewportY ? lines : visibleHighlightLines(terminal);
           const cursorRow = buffer.baseY + buffer.cursorY;
+          const previous = new Map<string, HighlightDecoration>();
+          for (const item of decorations) {
+            if (!item.marker.isDisposed) previous.set(`${item.marker.line}:${item.column}:${item.width}:${item.foreground}:${item.background}`, item);
+          }
+          const next: HighlightDecoration[] = [];
+          const seen = new Set<string>();
           for (const match of event.data.matches.slice(0, 1_000)) {
             const line = lines[match.line];
+            const current = currentLines[match.line];
             const rule = rules.get(match.ruleId);
-            if (!line || !rule) continue;
+            if (!line || !current || !rule || line.text !== current.text) continue;
+            const currentRanges = highlightCellRanges(current, match.start, match.end);
             for (const range of highlightCellRanges(line, match.start, match.end)) {
-              if (range.row < viewport || range.row >= viewport + terminal.rows || range.width < 1) continue;
+              if (range.row < buffer.viewportY || range.row >= buffer.viewportY + terminal.rows || range.width < 1) continue;
+              if (!currentRanges.some((item) => item.row === range.row && item.column === range.column && item.width === range.width)) continue;
+              const width = Math.min(range.width, terminal.cols - range.column);
+              if (width < 1) continue;
+              const key = `${range.row}:${range.column}:${width}:${rule.foreground}:${rule.background}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              const existing = previous.get(key);
+              if (existing) { previous.delete(key); next.push(existing); continue; }
               const marker = terminal.registerMarker(range.row - cursorRow);
               if (!marker) continue;
               const decoration = terminal.registerDecoration({
-                marker, x: range.column, width: Math.min(range.width, terminal.cols - range.column),
+                marker, x: range.column, width,
                 foregroundColor: rule.foreground, backgroundColor: rule.background, layer: "bottom",
               });
-              decorations.push(marker);
-              if (decoration) decorations.push(decoration);
+              if (decoration) next.push({ marker, decoration, column: range.column, width, foreground: rule.foreground, background: rule.background });
+              else marker.dispose();
             }
           }
+          const retained = new Set(next);
+          for (const item of decorations) if (!retained.has(item)) { item.decoration.dispose(); item.marker.dispose(); }
+          decorations = next;
         }
         if (dirty || version !== revision) { dirty = false; schedule(); }
       };
       pending = true;
       worker.postMessage({ requestId: id, lines: lines.map((line) => line.text), rules: config.rules.map((rule) => ({ ...rule })) });
-      // Do not retry the same configuration automatically after a timeout, preventing malicious regular expressions from retaining CPU.
-      timeout = setTimeout(suspend, 500);
+      // The first reply includes module Worker startup; later scans keep the shorter regex budget.
+      // Do not retry the same configuration automatically after a timeout.
+      timeout = setTimeout(suspend, coldWorker ? 2_000 : 500);
     } catch { suspend(); }
   }
   function schedule() {
@@ -127,12 +149,15 @@ export function createTerminalHighlighter(terminal: Terminal, report: (failed: b
   }
   function invalidate() {
     revision++;
-    clearDecorations();
     schedule();
+  }
+  function resetGeometry() {
+    clearDecorations();
+    invalidate();
   }
   const listeners = [
     terminal.onWriteParsed(invalidate), terminal.onScroll(invalidate),
-    terminal.onResize(invalidate), terminal.buffer.onBufferChange(invalidate),
+    terminal.onResize(resetGeometry), terminal.buffer.onBufferChange(resetGeometry),
   ];
   return {
     update(value: HighlightConfiguration) {

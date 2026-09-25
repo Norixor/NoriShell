@@ -118,6 +118,7 @@ describe("NvxTelnetTerminalPane", () => {
         active: true,
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
       },
       global: {
         plugins: [createPinia(), i18n],
@@ -152,6 +153,7 @@ describe("NvxTelnetTerminalPane", () => {
         active: true,
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
       },
       global: {
         plugins: [createPinia(), i18n],
@@ -190,6 +192,7 @@ describe("NvxTelnetTerminalPane", () => {
         active: true,
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
       },
       global: {
         plugins: [createPinia(), i18n],
@@ -222,6 +225,7 @@ describe("NvxTelnetTerminalPane", () => {
         active: true,
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
       },
       global: {
         plugins: [createPinia(), i18n],
@@ -259,6 +263,7 @@ describe("NvxTelnetTerminalPane", () => {
         active: false,
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
       },
       global: {
         plugins: [createPinia(), i18n],
@@ -281,6 +286,7 @@ describe("NvxTelnetTerminalPane", () => {
         active: true,
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
       },
       global: {
         plugins: [createPinia(), i18n],

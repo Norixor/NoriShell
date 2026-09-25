@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   terminalLayoutMinimumSpan,
   terminalLayoutMinimumSpanAfterSplit,
+  terminalLayoutMinimumSpanAfterWorkspaceRightSplit,
   type TerminalLayoutNode,
   type TerminalPaneNode,
 } from "./terminalLayout";
@@ -34,6 +35,7 @@ defineSlots<{
     pane: TerminalPaneNode;
     canSplitHorizontal: boolean;
     canSplitVertical: boolean;
+    canSplitWorkspaceRight: boolean;
   }): unknown;
 }>();
 
@@ -214,6 +216,12 @@ function canSplitPlacement(placement: PanePlacement, direction: "horizontal" | "
   return total >= requiredSize;
 }
 
+function canSplitWorkspaceRight() {
+  if (rootSize.value.width <= 0) return true;
+  const minimumSpan = terminalLayoutMinimumSpanAfterWorkspaceRightSplit(props.node);
+  return rootSize.value.width >= minimumSpan.widthUnits * props.minimumPaneWidth;
+}
+
 function ratioBounds(placement: SeparatorPlacement) {
   const bounds = root.value?.getBoundingClientRect();
   if (!bounds) return { minimum: 0.15, maximum: 0.85 };
@@ -341,6 +349,7 @@ onBeforeUnmount(() => {
         :pane="placement.pane"
         :can-split-horizontal="canSplitPlacement(placement, 'horizontal')"
         :can-split-vertical="canSplitPlacement(placement, 'vertical')"
+        :can-split-workspace-right="canSplitWorkspaceRight()"
       />
     </section>
 

@@ -392,6 +392,8 @@ pub struct SshShellHeartbeatStatus {
 pub struct SshSessionHeartbeatStatus {
     pub policy_revision: Option<WireSequence>,
     pub mode: SshHeartbeatMode,
+    /// Route-stage RTT samples may contain a single connection-time probe even
+    /// when the configured periodic keepalive mode is disabled.
     pub transports: Vec<SshTransportHeartbeatStatus>,
     pub shell: Option<SshShellHeartbeatStatus>,
 }
@@ -776,9 +778,6 @@ pub struct SshSessionResizeRequest {
     pub channel_id: SshChannelId,
     pub attachment_id: SshAttachmentId,
     pub view_id: SshViewId,
-    pub focus_epoch: WireSequence,
-    pub lease_id: SshInputLeaseId,
-    pub input_epoch: WireSequence,
     pub resize_seq: WireSequence,
     pub rows: u16,
     pub cols: u16,

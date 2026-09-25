@@ -1,6 +1,6 @@
 export const terminalEnhancementsZhCN = {
   title: "终端增强",
-  description: "设置粘贴、历史建议和任务完成提醒。所有功能均在本机运行。",
+  description: "设置粘贴与历史建议。所有功能均在本机运行。",
   highlights: "关键词高亮",
   shortcuts: "快捷键",
   hostMarkers: "显示主机标识",
@@ -24,7 +24,7 @@ export const terminalEnhancementsZhCN = {
     trailingNewline: "末尾包含换行",
     controls: "包含控制字符；预览用转义表示，确认后会发送对应字符。",
     preview: "待粘贴内容",
-    hint: "粘贴会发送到上述终端。没有括号粘贴支持时，换行可能直接执行命令。",
+    hint: "按 Enter 确认粘贴。没有括号粘贴支持时，换行可能直接执行命令。",
     cancel: "取消",
     confirm: "确认粘贴",
     pasting: "正在粘贴",
@@ -38,7 +38,7 @@ export const terminalEnhancementsZhCN = {
 
 export const terminalEnhancementsEn = {
   title: "Terminal enhancements",
-  description: "Configure pasting, history suggestions and command completion alerts. These features run locally.",
+  description: "Configure pasting and history suggestions. These features run locally.",
   highlights: "Keyword highlighting",
   shortcuts: "Keyboard shortcuts",
   hostMarkers: "Show host markers",
@@ -62,7 +62,7 @@ export const terminalEnhancementsEn = {
     trailingNewline: "Contains a trailing newline",
     controls: "Control characters are shown as escapes in this preview. The actual characters will be sent after confirmation.",
     preview: "Text to paste",
-    hint: "This text will be sent to the terminal above. Without bracketed paste support, newlines may execute commands immediately.",
+    hint: "Press Enter to paste. Without bracketed paste support, newlines may execute commands immediately.",
     cancel: "Cancel",
     confirm: "Paste",
     pasting: "Pasting",

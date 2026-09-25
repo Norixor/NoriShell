@@ -10,6 +10,7 @@ describe("NvxTerminalPaneControls", () => {
       props: {
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
         showLayoutActions: true,
       },
       slots: { default: "<button type=\"button\">终止</button>" },
@@ -19,9 +20,11 @@ describe("NvxTerminalPaneControls", () => {
     expect(wrapper.findAll(".terminal-pane-controls__separator")).toHaveLength(2);
     await wrapper.get('button[aria-label="向右拆分 Pane"]').trigger("click");
     await wrapper.get('button[aria-label="向下拆分 Pane"]').trigger("click");
+    await wrapper.get('button[aria-label="在右侧新建完整高度 Pane"]').trigger("click");
     await wrapper.get('button[aria-label="关闭当前 Pane"]').trigger("click");
 
     expect(wrapper.emitted("split")).toEqual([["horizontal"], ["vertical"]]);
+    expect(wrapper.emitted("splitWorkspaceRight")).toHaveLength(1);
     expect(wrapper.emitted("close")).toHaveLength(1);
   });
 
@@ -30,6 +33,7 @@ describe("NvxTerminalPaneControls", () => {
       props: {
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
         showLayoutActions: false,
       },
       slots: { default: "<button type=\"button\">终止</button>" },

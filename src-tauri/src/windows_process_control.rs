@@ -21,7 +21,7 @@ use windows_sys::Win32::{
     System::{
         Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
         JobObjects::{
-            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
             QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
@@ -40,6 +40,12 @@ use windows_sys::Win32::{
 
 const ORDINARY_TERMINATION_EXIT_CODE: u32 = 0x4E56_5854;
 const FORCED_TERMINATION_EXIT_CODE: u32 = 0x4E56_584B;
+
+#[derive(Clone, Copy)]
+enum JobBreakawayPolicy {
+    Deny,
+    Explicit,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminationOutcome {
@@ -97,8 +103,9 @@ pub struct ManagedStdio {
     pub stderr: File,
 }
 
-/// One ConPTY root process and every descendant, assigned to the same private
-/// Job Object before the root executes its first instruction.
+/// One ConPTY root process and its ordinary descendants, assigned to a private
+/// Job Object before the root executes its first instruction. Programs can
+/// explicitly launch detached children outside the Job.
 pub struct ManagedConPtyProcess {
     process: ManagedJobProcess,
     input: File,
@@ -165,7 +172,7 @@ impl ManagedJobProcess {
             .transpose()?;
 
         let mut stdio_pipes = redirect_stdio.then(ChildStdioPipes::new).transpose()?;
-        let job = create_kill_on_close_job()?;
+        let job = create_kill_on_close_job(JobBreakawayPolicy::Deny)?;
         let attribute_count = if redirect_stdio { 2 } else { 1 };
         let mut attributes = ProcessAttributeList::new(attribute_count)?;
         let job_handles = [job.raw()];
@@ -352,7 +359,7 @@ impl ManagedJobProcess {
             return Ok(TerminationOutcome::Terminated);
         }
 
-        // SAFETY: the Job handle remains valid and owns the entire process tree.
+        // SAFETY: the Job handle remains valid and owns all assigned processes.
         if unsafe { TerminateJobObject(self.job.raw(), FORCED_TERMINATION_EXIT_CODE) } == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -412,7 +419,7 @@ impl ManagedJobProcess {
 impl ManagedConPtyProcess {
     /// Starts an exact executable inside a new ConPTY. The pseudo-console and
     /// Job Object attributes are installed on the same STARTUPINFOEX before
-    /// CreateProcessW, so no descendant can escape between spawn and assign.
+    /// CreateProcessW, so the root cannot escape between spawn and assignment.
     pub fn spawn(
         executable: &Path,
         arguments: &[OsString],
@@ -435,7 +442,9 @@ impl ManagedConPtyProcess {
             .map(|directory| encode_null_terminated(directory.as_os_str()))
             .transpose()?;
 
-        let job = create_kill_on_close_job()?;
+        // A terminal is user-controlled: tools such as Codex may explicitly
+        // detach a daemon. Ordinary descendants still remain in this Job.
+        let job = create_kill_on_close_job(JobBreakawayPolicy::Explicit)?;
         let mut attributes = ProcessAttributeList::new(2)?;
         let job_handles = [job.raw()];
         attributes.set_raw(
@@ -640,11 +649,14 @@ impl Drop for ManagedJobProcess {
     }
 }
 
-fn create_kill_on_close_job() -> io::Result<OwnedHandle> {
+fn create_kill_on_close_job(breakaway: JobBreakawayPolicy) -> io::Result<OwnedHandle> {
     // SAFETY: null security attributes and name create one private Job Object.
     let job = OwnedHandle::new(unsafe { CreateJobObjectW(null(), null()) })?;
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if matches!(breakaway, JobBreakawayPolicy::Explicit) {
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+    }
     // SAFETY: limits is initialized and the exact structure size is supplied.
     let configured = unsafe {
         SetInformationJobObject(
@@ -939,8 +951,10 @@ mod tests {
     };
 
     use super::{
-        ManagedConPtyProcess, ManagedJobProcess, ManagedStdio, TerminationOutcome,
-        TerminationPolicy,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobBreakawayPolicy,
+        JobObjectExtendedLimitInformation, ManagedConPtyProcess, ManagedJobProcess, ManagedStdio,
+        QueryInformationJobObject, TerminationOutcome, TerminationPolicy, create_kill_on_close_job,
     };
 
     const FAST_POLICY: TerminationPolicy = TerminationPolicy::with_timeouts(
@@ -948,6 +962,31 @@ mod tests {
         Duration::from_millis(500),
         Duration::from_secs(2),
     );
+
+    #[test]
+    fn only_terminal_jobs_allow_explicit_breakaway() {
+        for (policy, expected_flags) in [
+            (JobBreakawayPolicy::Deny, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE),
+            (
+                JobBreakawayPolicy::Explicit,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+            ),
+        ] {
+            let job = create_kill_on_close_job(policy).expect("create managed Job");
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            let queried = unsafe {
+                QueryInformationJobObject(
+                    job.raw(),
+                    JobObjectExtendedLimitInformation,
+                    (&raw mut limits).cast(),
+                    u32::try_from(std::mem::size_of_val(&limits)).expect("limit size"),
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(queried, 0, "query Job limits");
+            assert_eq!(limits.BasicLimitInformation.LimitFlags, expected_flags);
+        }
+    }
 
     #[test]
     fn command_line_quoting_preserves_spaces_quotes_and_trailing_backslashes() {
@@ -1083,6 +1122,33 @@ mod tests {
     }
 
     #[test]
+    fn conpty_child_can_explicitly_break_away_from_its_job() {
+        let executable = current_test_executable();
+        let args = test_arguments("windows_conpty_child_explicitly_breaks_away");
+        let mut process = ManagedConPtyProcess::spawn(&executable, &args, None, 24, 80)
+            .expect("spawn ConPTY child in terminal Job");
+        let mut reader = process.try_clone_reader().expect("clone ConPTY reader");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let result = reader.read_to_end(&mut output).map(|_| output);
+            let _ = sender.send(result);
+        });
+        assert_eq!(
+            process
+                .wait_for_exit(Duration::from_secs(5))
+                .expect("wait for breakaway probe"),
+            Some(0)
+        );
+        drop(process);
+        receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("bounded ConPTY output")
+            .expect("read ConPTY output");
+        reader_thread.join().expect("join ConPTY reader");
+    }
+
+    #[test]
     fn conpty_dimensions_reject_zero_and_i16_overflow() {
         assert!(super::conpty_dimensions(0, 80).is_err());
         assert!(super::conpty_dimensions(24, 0).is_err());
@@ -1141,6 +1207,29 @@ mod tests {
         let width = info.srWindow.Right - info.srWindow.Left + 1;
         let height = info.srWindow.Bottom - info.srWindow.Top + 1;
         println!("norishell-conpty-size:{width}x{height}");
+    }
+
+    #[test]
+    #[ignore = "helper process invoked by the managed ConPTY breakaway test"]
+    fn windows_conpty_child_explicitly_breaks_away() {
+        use std::os::windows::{io::AsRawHandle, process::CommandExt};
+        use windows_sys::Win32::System::{
+            JobObjects::IsProcessInJob, Threading::CREATE_BREAKAWAY_FROM_JOB,
+        };
+
+        let executable = current_test_executable();
+        let mut child = Command::new(executable)
+            .args(test_arguments("windows_job_leaf_waits"))
+            .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+            .spawn()
+            .expect("spawn child outside terminal Job");
+        let mut in_job = 0;
+        let queried =
+            unsafe { IsProcessInJob(child.as_raw_handle(), std::ptr::null_mut(), &raw mut in_job) };
+        child.kill().expect("terminate breakaway probe");
+        child.wait().expect("reap breakaway probe");
+        assert_ne!(queried, 0, "query child Job membership");
+        assert_eq!(in_job, 0, "explicit breakaway child remained in a Job");
     }
 
     fn test_arguments(name: &str) -> Vec<OsString> {
