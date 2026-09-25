@@ -14,8 +14,6 @@ NoriShell brings terminal sessions, remote connections, file transfer, remote de
   · <a href="#installation-and-quick-start">Installation guide</a>
 </p>
 
-The application is built with **Tauri 2, Vue 3, TypeScript, xterm, and Rust**. Rust Core owns connections, secrets, persistence, and resource lifecycles. The frontend owns interaction and reconstructible state projections.
-
 ## Contents
 
 - [Highlights](#highlights)
@@ -23,24 +21,22 @@ The application is built with **Tauri 2, Vue 3, TypeScript, xterm, and Rust**. R
 - [Features](#features)
 - [Installation and quick start](#installation-and-quick-start)
 - [Development from source](#development-from-source)
-- [Local-first and security boundaries](#local-first-and-security-boundaries)
+- [Security](#security)
 - [Plugin development](#plugin-development)
 - [Documentation](#documentation)
 - [Troubleshooting](#troubleshooting)
-- [Architecture and project layout](#architecture-and-project-layout)
+- [Project layout](#project-layout)
 - [License](#license)
 - [Star History](#star-history)
 
 ## Highlights
 
-- **One workspace for remote operations.** Switch between terminals, hosts, file transfers, tunnels, server monitoring, and remote desktops in one window.
-- **Local-first operation.** SSH, local terminals, SFTP, tunnels, and local configuration do not depend on a cloud account.
-- **Explicit identity and secret boundaries.** First-use SSH fingerprints require confirmation, key changes block the connection, and persisted secrets belong in the encrypted Vault.
-- **Independent connections.** Terminals, file transfers, tunnels, and monitoring run independently; closing one does not disconnect the others.
-- **Constrained plugins.** Plugins use an isolated WebAssembly host, fine-grained capabilities, and protected approval. Installation and upgrades require an explicit local ZIP import.
-- **Built for macOS and Windows.** Installers are available for macOS Apple Silicon / Intel, Windows x64, and Windows ARM64.
+- **Remote work in one window.** Switch between terminals, hosts, file transfers, tunnels, server monitoring, and remote desktops.
+- **No account required.** Host settings stay on your device, and saved passwords and private keys go into the encrypted Vault.
+- **Independent connections.** Closing a terminal, file transfer, tunnel, or monitor does not disconnect the others.
+- **Extend when needed.** Install or upgrade plugins from local ZIP files. NoriShell supports macOS Apple Silicon / Intel and Windows x64 / ARM64.
 
-For cross-device sync, follow the [self-hosted sync guide](docs/guides/users/self-host-sync.en.md) to deploy the server and import the plugin. Confirm the upload on the first device, then select “Sync now” on each additional device to review the restore. Restoring existing encrypted data requires the Vault password from the device that first uploaded it. The guide also covers data scope and conflicts.
+For sync across devices, follow the [self-hosted sync guide](docs/guides/users/self-host-sync.en.md) to deploy the server and import the plugin. Upload from the first device, then select “Sync now” on the others. Restoring existing encrypted data requires that first device's Vault password.
 
 ## Preview
 
@@ -51,16 +47,16 @@ For cross-device sync, follow the [self-hosted sync guide](docs/guides/users/sel
 | Capability | Description |
 | --- | --- |
 | SSH and local terminals | Tabs, nested splits, search, reconnect, recent connections, and independent local Shell / PTY sessions |
-| Host and connection management | Groups, tags, favorites, non-secret OpenSSH import, password/key/Agent authentication, and server fingerprint verification |
-| Routes and compatibility policy | Direct, HTTP CONNECT, SOCKS5, Jump Host / Host Chain, and Host-scoped algorithm exceptions |
-| Files and networking | Multi-pane SFTP browsing, transfer, preview/edit, live follow, plus Local / Remote / Dynamic port forwarding |
+| Host and connection management | Groups, tags, favorites, OpenSSH import, password/key/Agent authentication, and server fingerprint confirmation |
+| Connection routes | Direct connections, HTTP CONNECT / SOCKS5 proxies, jump hosts, and per-host algorithm settings |
+| Files and networking | Multi-pane SFTP browsing, transfer, preview/edit, live follow, plus local/remote/dynamic port forwarding |
 | Remote desktops | RDP / VNC profiles and sessions, SSH gateways, scaling, input, text clipboard, and RDP audio capabilities |
-| Server overview | Per-Host aggregation of Terminal, SFTP, Tunnel, and Metrics resources, with optional CPU, memory, network, and disk metrics |
-| Credential protection | Separate encrypted Vault, one-time credentials, protected windows, and strict host-key confirmation and mismatch blocking |
+| Server overview | Connection status for each host, with optional CPU, memory, network, and disk monitoring |
+| Credential protection | Encrypted Vault, temporary credentials, and server fingerprint confirmation |
 | Daily workflow | Quick commands, custom shortcuts, keyword highlighting, notifications, tray panel, and settings import/export |
-| Plugins and themes | Isolated WebAssembly plugins, fine-grained permissions, local ZIP import/upgrade, and data-only declarative themes |
+| Plugins and themes | Install or upgrade plugins from local ZIP files and enable themes as needed |
 | Optional synchronization | Synchronizes portable SSH, remote-desktop configuration, and non-secret preferences through the Norixor plugin or a self-hosted service without uploading the local Vault file |
-| Telnet | Independent Telnet sessions gated by acknowledgement of plaintext transport, missing server identity, and tampering risks |
+| Telnet | Independent Telnet sessions with a plaintext-transport warning before connecting |
 
 ## Installation and quick start
 
@@ -91,6 +87,8 @@ Open **Settings → About** and click “Check for updates”. When a new versio
 
 ### Prerequisites
 
+NoriShell uses Tauri 2, Vue 3, TypeScript, xterm, and Rust.
+
 - Node.js **22 or newer**.
 - pnpm **10.32.1**, matching `packageManager` in `package.json`.
 - Rust **1.97.1**, pinned by `rust-toolchain.toml`, with `rustfmt` and `clippy`.
@@ -120,22 +118,16 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 pnpm tauri build
 ```
 
-## Local-first and security boundaries
+## Security
 
-- **Secrets belong in the Vault.** Persisted passwords, private keys, and passphrases are not stored as ordinary SQLite configuration or written to logs.
-- **Server identity is checked before connecting.** A first-use SSH fingerprint requires explicit confirmation, and a changed trusted key blocks the connection.
-- **Resources own independent connections.** Terminal, SFTP, Tunnel, and Metrics resources do not share an SSH transport.
-- **Plugins start without authority.** Guest code cannot directly access the Vault, SQLite, SSH sockets, host DOM, or arbitrary Tauri commands.
-- **Sensitive decisions use protected windows.** Vault, credential, host-key, plugin-permission, and other security decisions are isolated from ordinary plugin UI.
-- **Users choose synchronization scope.** The sync service does not receive Vault passwords, KEKs, VMKs, Known Hosts, or device auto-unlock material.
+- Saved passwords and private keys are kept in the encrypted Vault. SSH connections require fingerprint confirmation on first use and are blocked if a trusted fingerprint changes.
+- Plugins need your approval for their capabilities and cannot read the Vault. Sync does not upload the local Vault file.
 
 Report security issues privately through the channels in [SECURITY.md](SECURITY.md).
 
 ## Plugin development
 
-Plugins use a versioned, constrained WebAssembly ABI. They request networking, storage, task, UI, or protocol resources through typed host brokers. Declaring a capability only requests permission; it cannot bypass user approval, resource scope, generation fences, or host lifecycle rules.
-
-NoriShell has no online plugin marketplace. To install or upgrade a plugin, the user explicitly selects a local ZIP. A newer version of the same plugin follows package validation, fresh permission review, anti-rollback checks, and atomic replacement.
+Plugins use WebAssembly and can request access to networking, storage, tasks, and UI capabilities. Install and upgrade them by importing a local ZIP file.
 
 Plugin development entry points:
 
@@ -153,14 +145,14 @@ More topics: [Wasm ABI](docs/guides/developers/wasm-abi.en.md) · [Theme plugins
 
 ## Documentation
 
-| Documentation index | Audience and boundary |
+| Documentation index | Contents |
 | --- | --- |
 | [Complete documentation index](docs/guides/README.md) | English and Chinese entry points |
 | [User guides](docs/guides/users/README.en.md) | Plugin import, permissions, recovery, and appearance |
 | [Self-hosted sync installation](docs/guides/users/self-host-sync.en.md) | Server setup, plugin import, and first sync |
 | [Developer guides](docs/guides/developers/README.en.md) | Package authoring, ABI, brokers, UI, themes, and security checks |
 | [Plugin API reference](docs/guides/plugin-api/README.en.md) | Guest-accessible protocols, types, capabilities, resources, and events |
-| [Core API catalog](docs/guides/core-api/README.en.md) | Renderer IPC, commands, events, handlers, and Plugin Host boundaries; not a plugin permission surface |
+| [Core API catalog](docs/guides/core-api/README.en.md) | Internal desktop commands, events, and types |
 
 ## Troubleshooting
 
@@ -179,19 +171,7 @@ Then open NoriShell again.
 
 Use the pnpm and Rust versions pinned by the repository. If dependencies are inconsistent, run `pnpm install --frozen-lockfile` again. On macOS, also verify the Xcode Command Line Tools and license state before the first build.
 
-## Architecture and project layout
-
-```text
-Vue Desktop UI
-    │ typed Tauri commands / channels / events
-Rust Core
-    ├── SSH, PTY, SFTP, Tunnel, Metrics, and remote-desktop lifecycles
-    ├── SQLite non-secret metadata + separate encrypted Vault
-    └── Plugin package validation, capability broker, and resource fences
-        │ versioned plugin protocol
-Isolated Plugin Host
-    └── One constrained Wasm instance with no direct Vault, SQLite, socket, or Tauri access
-```
+## Project layout
 
 ```text
 src/                    Vue UI, state projections, and shared components
@@ -208,7 +188,7 @@ See [vendor/README.md](vendor/README.md) for the origin, licensing, and modifica
 
 ## License
 
-Original NoriShell code is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)**. See [LICENSE](LICENSE) for the complete terms. Distribution of a GPL-covered version must satisfy the corresponding source-availability and other license obligations.
+Original NoriShell code is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)**. See [LICENSE](LICENSE) for the complete terms.
 
 Third-party source code, dependencies, and assets retain their respective licenses. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
