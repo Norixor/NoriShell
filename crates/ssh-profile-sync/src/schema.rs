@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     net::IpAddr,
 };
@@ -15,6 +15,8 @@ use crate::{
 pub const BUNDLE_SCHEMA: &str = "norishell-ssh-profile-bundle-v1";
 pub const BUNDLE_SCHEMA_V2: &str = "norishell-ssh-profile-bundle-v2";
 pub const BUNDLE_SCHEMA_V3: &str = "norishell-ssh-profile-bundle-v3";
+pub const BUNDLE_SCHEMA_V4: &str = "norishell-ssh-profile-bundle-v4";
+pub const BUNDLE_SCHEMA_V5: &str = "norishell-ssh-profile-bundle-v5";
 const MAX_OBJECTS_PER_KIND: usize = 10_000;
 const MAX_SMALL_TEXT_BYTES: usize = 1_024;
 const MAX_LARGE_TEXT_BYTES: usize = 64 * 1024;
@@ -28,6 +30,10 @@ pub enum BundleSchema {
     V2,
     #[serde(rename = "norishell-ssh-profile-bundle-v3")]
     V3,
+    #[serde(rename = "norishell-ssh-profile-bundle-v4")]
+    V4,
+    #[serde(rename = "norishell-ssh-profile-bundle-v5")]
+    V5,
 }
 
 impl fmt::Debug for BundleSchema {
@@ -36,6 +42,8 @@ impl fmt::Debug for BundleSchema {
             Self::V1 => BUNDLE_SCHEMA,
             Self::V2 => BUNDLE_SCHEMA_V2,
             Self::V3 => BUNDLE_SCHEMA_V3,
+            Self::V4 => BUNDLE_SCHEMA_V4,
+            Self::V5 => BUNDLE_SCHEMA_V5,
         })
     }
 }
@@ -83,12 +91,125 @@ pub struct PortableBundleV1 {
     pub schema: BundleSchema,
     pub revision: u64,
     pub objects: PortableObjects,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferences: Option<PortablePreferencesV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<PortableSecret>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_machine_bound: Vec<SkippedMachineBoundObject>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tombstones: Vec<PortableTombstone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub update_times: Vec<PortableItemUpdateTime>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub preference_update_times: BTreeMap<String, i64>,
+}
+
+/// Authenticated per-item wall-clock time in the encrypted portable bundle.
+/// A missing entry means unknown, never the time at which a snapshot was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PortableItemUpdateTime {
+    pub kind: PortableObjectKind,
+    pub id: PortableObjectId,
+    pub update_time_unix_ms: i64,
+}
+
+/// A bounded copy of the eight host-validated global preference groups. The
+/// frontend adapters own each group's semantic validation and CAS application;
+/// this type also rejects unknown groups and unexpected top-level fields before
+/// the values enter an encrypted exchange or a Core-private pending restore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortablePreferencesV1 {
+    pub product: String,
+    pub version: u16,
+    pub groups: BTreeMap<String, serde_json::Value>,
+}
+
+impl PortablePreferencesV1 {
+    pub fn validate(&self) -> Result<()> {
+        const GROUPS: [(&str, &[&str]); 8] = [
+            (
+                "application",
+                &[
+                    "themePreference",
+                    "locale",
+                    "uiZoom",
+                    "terminalStartupBehavior",
+                    "newTerminalBehavior",
+                    "singlePaneTabCloseBehavior",
+                ],
+            ),
+            (
+                "appearance",
+                &[
+                    "terminalThemeMode",
+                    "terminalFontFamily",
+                    "terminalFontSize",
+                    "terminalFontWeight",
+                    "terminalBoldFontWeight",
+                    "terminalLineHeight",
+                    "terminalLetterSpacing",
+                    "terminalCursorStyle",
+                    "terminalCursorBlink",
+                    "customTerminalPalette",
+                    "customTerminalPaletteName",
+                ],
+            ),
+            ("interaction", &["interaction", "pasteWarning"]),
+            ("highlights", &["enabled", "rules"]),
+            ("shortcuts", &["version", "bindings"]),
+            ("files", &["browser", "rememberLastDirectory"]),
+            (
+                "desktop",
+                &[
+                    "windowCloseBehavior",
+                    "trayShowStatus",
+                    "trayRecentLimit",
+                    "trayShowHostNames",
+                    "notificationBackgroundOnly",
+                    "notificationFailureOnly",
+                    "notifyTransferCompleted",
+                    "notifyTransferFailed",
+                    "notifyDisconnected",
+                ],
+            ),
+            (
+                "commandNotifications",
+                &["notificationsEnabled", "notificationThresholdSeconds"],
+            ),
+        ];
+        if self.product != "NoriShell" || self.version != 1 || self.groups.len() != GROUPS.len() {
+            return Err(SyncCodecError::InvalidBundle(
+                "invalid preferences transfer header",
+            ));
+        }
+        let encoded = serde_json::to_vec(self)?;
+        if encoded.len() > 256 * 1024 {
+            return Err(SyncCodecError::BoundExceeded("preferences"));
+        }
+        for (group, keys) in GROUPS {
+            let Some(value) = self
+                .groups
+                .get(group)
+                .and_then(serde_json::Value::as_object)
+            else {
+                return Err(SyncCodecError::InvalidBundle("missing preferences group"));
+            };
+            let optional_app_theme = group == "appearance" && value.contains_key("appTheme");
+            if value.len() != keys.len() + usize::from(optional_app_theme)
+                || value.keys().any(|key| {
+                    !keys.contains(&key.as_str()) && !(group == "appearance" && key == "appTheme")
+                })
+            {
+                return Err(SyncCodecError::InvalidBundle(
+                    "invalid preferences group shape",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -179,6 +300,24 @@ pub struct PortableDesktopProfile {
     pub height: u16,
     pub clipboard_enabled: bool,
     pub audio_playback_enabled: bool,
+    #[serde(default, skip_serializing_if = "PortableVncProtocolVersion::is_auto")]
+    pub vnc_protocol_version: PortableVncProtocolVersion,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PortableVncProtocolVersion {
+    #[default]
+    Auto,
+    Rfb33,
+    Rfb37,
+    Rfb38,
+}
+
+impl PortableVncProtocolVersion {
+    fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,6 +535,10 @@ pub struct PortableMonitoringPolicy {
     pub enabled: bool,
     pub interval_seconds: u32,
     pub timeout_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_millis: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_millis: Option<u32>,
     pub resources: BTreeSet<MonitoringResource>,
 }
 
@@ -494,22 +637,84 @@ impl PortableBundleV1 {
                 "bundle v1 cannot contain tombstones",
             ));
         }
-        if self.schema != BundleSchema::V3 && !self.objects.desktop_profiles.is_empty() {
+        if !matches!(
+            self.schema,
+            BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5
+        ) && !self.objects.desktop_profiles.is_empty()
+        {
             return Err(SyncCodecError::InvalidBundle(
                 "desktop profiles require bundle v3",
             ));
         }
-        if self.schema != BundleSchema::V3
-            && self
-                .tombstones
-                .iter()
-                .any(|item| item.kind == PortableObjectKind::DesktopProfile)
+        if !matches!(
+            self.schema,
+            BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5
+        ) && self
+            .tombstones
+            .iter()
+            .any(|item| item.kind == PortableObjectKind::DesktopProfile)
         {
             return Err(SyncCodecError::InvalidBundle(
                 "desktop profile tombstones require bundle v3",
             ));
         }
+        match (self.schema, &self.preferences) {
+            (BundleSchema::V4 | BundleSchema::V5, Some(preferences)) => preferences.validate()?,
+            (BundleSchema::V4 | BundleSchema::V5, None) => {
+                return Err(SyncCodecError::InvalidBundle(
+                    "bundle v4/v5 requires preferences",
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(SyncCodecError::InvalidBundle(
+                    "preferences require bundle v4",
+                ));
+            }
+            (_, None) => {}
+        }
         self.objects.validate()?;
+
+        if self.schema != BundleSchema::V5
+            && (!self.update_times.is_empty() || !self.preference_update_times.is_empty())
+        {
+            return Err(SyncCodecError::InvalidBundle(
+                "update times require bundle v5",
+            ));
+        }
+        if self.update_times.len() > 12 * MAX_OBJECTS_PER_KIND {
+            return Err(SyncCodecError::BoundExceeded("update times"));
+        }
+        let present = self
+            .objects
+            .all_nodes()
+            .chain(
+                self.secrets
+                    .iter()
+                    .map(|item| (PortableObjectKind::Secret, item.id)),
+            )
+            .chain(self.tombstones.iter().map(|item| (item.kind, item.id)))
+            .collect::<HashSet<_>>();
+        let mut timed = HashSet::new();
+        for item in &self.update_times {
+            if item.update_time_unix_ms <= 0
+                || !present.contains(&(item.kind, item.id))
+                || !timed.insert((item.kind, item.id))
+            {
+                return Err(SyncCodecError::InvalidBundle("invalid item update time"));
+            }
+        }
+        for (group, time) in &self.preference_update_times {
+            if *time <= 0
+                || !self
+                    .preferences
+                    .as_ref()
+                    .is_some_and(|value| value.groups.contains_key(group))
+            {
+                return Err(SyncCodecError::InvalidBundle(
+                    "invalid preference update time",
+                ));
+            }
+        }
 
         let mut ids = HashSet::new();
         for id in self.all_ids() {
@@ -540,6 +745,7 @@ impl PortableBundleV1 {
         value.secrets.sort_by_key(|item| item.id);
         value.skipped_machine_bound.sort_by_key(|item| item.id);
         value.tombstones.sort_by_key(|item| (item.kind, item.id));
+        value.update_times.sort_by_key(|item| (item.kind, item.id));
         Ok(value)
     }
 
@@ -752,6 +958,13 @@ impl PortableObjects {
                     "VNC desktop profiles cannot enable audio playback",
                 ));
             }
+            if desktop.protocol == PortableDesktopProtocol::Rdp
+                && desktop.vnc_protocol_version != PortableVncProtocolVersion::Auto
+            {
+                return Err(SyncCodecError::InvalidBundle(
+                    "RDP cannot select a VNC protocol version",
+                ));
+            }
             if desktop.width == 0
                 || desktop.height == 0
                 || desktop.width > 8_192
@@ -871,6 +1084,15 @@ impl PortableObjects {
         for policy in &self.monitoring_policies {
             validate_seconds(policy.interval_seconds, "monitoring interval")?;
             validate_seconds(policy.timeout_seconds, "monitoring timeout")?;
+            match (policy.interval_millis, policy.timeout_millis) {
+                (None, None) => {}
+                (Some(interval), Some(timeout))
+                    if (1_500..=300_000).contains(&interval)
+                        && (500..=30_000).contains(&timeout)
+                        && interval.div_ceil(1_000) == policy.interval_seconds
+                        && timeout.div_ceil(1_000) == policy.timeout_seconds => {}
+                _ => return Err(SyncCodecError::InvalidBundle("invalid monitoring duration")),
+            }
             validate_collection(policy.resources.len(), "monitoring resources")?;
         }
         for automation in &self.login_automations {
@@ -919,6 +1141,57 @@ impl PortableObjects {
             .chain(self.heartbeat_policies.iter().map(|item| item.id))
             .chain(self.monitoring_policies.iter().map(|item| item.id))
             .chain(self.login_automations.iter().map(|item| item.id))
+    }
+
+    fn all_nodes(&self) -> impl Iterator<Item = (PortableObjectKind, PortableObjectId)> + '_ {
+        self.hosts
+            .iter()
+            .map(|item| (PortableObjectKind::Host, item.id))
+            .chain(
+                self.desktop_profiles
+                    .iter()
+                    .map(|item| (PortableObjectKind::DesktopProfile, item.id)),
+            )
+            .chain(
+                self.identities
+                    .iter()
+                    .map(|item| (PortableObjectKind::Identity, item.id)),
+            )
+            .chain(
+                self.credentials
+                    .iter()
+                    .map(|item| (PortableObjectKind::Credential, item.id)),
+            )
+            .chain(
+                self.routes
+                    .iter()
+                    .map(|item| (PortableObjectKind::Route, item.id)),
+            )
+            .chain(
+                self.authentication_plans
+                    .iter()
+                    .map(|item| (PortableObjectKind::AuthenticationPlan, item.id)),
+            )
+            .chain(
+                self.algorithm_policies
+                    .iter()
+                    .map(|item| (PortableObjectKind::AlgorithmPolicy, item.id)),
+            )
+            .chain(
+                self.heartbeat_policies
+                    .iter()
+                    .map(|item| (PortableObjectKind::HeartbeatPolicy, item.id)),
+            )
+            .chain(
+                self.monitoring_policies
+                    .iter()
+                    .map(|item| (PortableObjectKind::MonitoringPolicy, item.id)),
+            )
+            .chain(
+                self.login_automations
+                    .iter()
+                    .map(|item| (PortableObjectKind::LoginAutomation, item.id)),
+            )
     }
 
     fn sort_by_id(&mut self) {

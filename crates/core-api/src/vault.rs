@@ -17,6 +17,7 @@ pub enum VaultState {
 pub enum VaultUnlockPolicy {
     CurrentSession,
     Automatic,
+    AutomaticLocal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -86,11 +87,15 @@ pub struct VaultLockRequest {
     pub meta: RequestMeta,
 }
 
+/// An omitted policy preserves the legacy system secure-store behavior.
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultAutoUnlockEnableRequest {
     pub meta: RequestMeta,
     pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub policy: Option<VaultUnlockPolicy>,
 }
 
 impl std::fmt::Debug for VaultAutoUnlockEnableRequest {
@@ -99,6 +104,7 @@ impl std::fmt::Debug for VaultAutoUnlockEnableRequest {
             .debug_struct("VaultAutoUnlockEnableRequest")
             .field("meta", &self.meta)
             .field("password", &"<redacted>")
+            .field("policy", &self.policy)
             .finish()
     }
 }

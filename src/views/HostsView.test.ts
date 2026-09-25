@@ -152,8 +152,8 @@ function hostConnectionConfig(overrides: Record<string, unknown> = {}) {
       revision: "6",
       policy: {
         enabled: false,
-        sampleIntervalSeconds: 15,
-        sampleTimeoutSeconds: 5,
+        sampleIntervalMillis: 1500,
+        sampleTimeoutMillis: 5000,
         diskMountIds: ["root" as const],
         networkInterfaceIds: ["aggregateNonLoopback" as const],
       },
@@ -814,8 +814,8 @@ describe("HostsView single-Host management contract", () => {
       },
       monitoringPolicy: {
         enabled: true,
-        sampleIntervalSeconds: 20,
-        sampleTimeoutSeconds: 4,
+        sampleIntervalMillis: 20000,
+        sampleTimeoutMillis: 4000,
         diskMountIds: ["root"],
         networkInterfaceIds: ["aggregateNonLoopback"],
       },
@@ -1094,8 +1094,8 @@ describe("HostsView single-Host management contract", () => {
       expectedRevision: "6",
       policy: {
         enabled: true,
-        sampleIntervalSeconds: 20,
-        sampleTimeoutSeconds: 4,
+        sampleIntervalMillis: 20000,
+        sampleTimeoutMillis: 4000,
         diskMountIds: ["root"],
         networkInterfaceIds: ["aggregateNonLoopback"],
       },

@@ -371,6 +371,7 @@ impl DesktopService {
                 DesktopPromptKind::Credentials {
                     username: profile.username.clone(),
                     domain: profile.domain.clone(),
+                    password_only: profile.protocol == norishell_core_api::DesktopProtocol::Vnc,
                 },
             )
             .await?;
@@ -503,6 +504,18 @@ impl DesktopService {
                         password,
                         allow_unauthenticated: false,
                         clipboard_enabled: profile.clipboard_enabled,
+                        version: match profile.vnc_protocol_version {
+                            norishell_core_api::VncProtocolVersion::Auto => None,
+                            norishell_core_api::VncProtocolVersion::Rfb33 => {
+                                Some(norishell_vnc_client::VncVersion::RFB33)
+                            }
+                            norishell_core_api::VncProtocolVersion::Rfb37 => {
+                                Some(norishell_vnc_client::VncVersion::RFB37)
+                            }
+                            norishell_core_api::VncProtocolVersion::Rfb38 => {
+                                Some(norishell_vnc_client::VncVersion::RFB38)
+                            }
+                        },
                     },
                     receiver,
                     control,

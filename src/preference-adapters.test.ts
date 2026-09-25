@@ -2,7 +2,9 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createPreferenceAdapters } from "./preference-adapters";
-import { applyPreferencePreview, exportPreferenceTransfer, parsePreferenceTransfer, previewPreferenceTransfer } from "./preferences-transfer";
+import { getDesktopPreferences } from "./core-api/desktop-preferences";
+import { getNativeTerminalSettings } from "./core-api/native-terminal";
+import { applyPreferencePreview, exportFullSyncPreferences, exportPreferenceTransfer, PREFERENCE_GROUP_IDS, parsePreferenceTransfer, previewPreferenceTransfer, validateFullSyncPreferences } from "./preferences-transfer";
 import { useSftpPreferencesStore } from "./stores/sftpPreferences";
 import { useTerminalPreferencesStore } from "./stores/terminalPreferences";
 import { useUiStore } from "./stores/ui";
@@ -36,6 +38,24 @@ describe("global preference adapters", () => {
     expect(Object.keys(groups)).toHaveLength(6);
     expect(groups.interaction).toMatchObject({ interaction: { sshReconnectOnInput: true } });
     expect(adapters.find((item) => item.id === "interaction")?.defaults()).toMatchObject({ interaction: { sshReconnectOnInput: true } });
+  });
+
+  it("exports all eight registered groups as a complete V4 preference DTO", async () => {
+    const adapters = createPreferenceAdapters();
+    vi.mocked(getDesktopPreferences).mockResolvedValue({
+      preferences: adapters.find((item) => item.id === "desktop")!.defaults(), revision: "0",
+    } as Awaited<ReturnType<typeof getDesktopPreferences>>);
+    vi.mocked(getNativeTerminalSettings).mockResolvedValue({
+      settings: {
+        historyEnabled: false, persistEncrypted: false, historyMaxEntries: 100,
+        historyRetentionDays: 30, historyPaused: false, notificationsEnabled: false,
+        notificationThresholdSeconds: 60,
+      }, settingsRevision: "0",
+    } as Awaited<ReturnType<typeof getNativeTerminalSettings>>);
+    const transfer = await exportFullSyncPreferences(adapters);
+    expect(Object.keys(transfer.groups)).toEqual([...PREFERENCE_GROUP_IDS]);
+    expect(validateFullSyncPreferences(transfer, adapters)).toEqual(transfer);
+    expect(() => validateFullSyncPreferences({ ...transfer, groups: { ...transfer.groups, desktop: undefined } }, adapters)).toThrow();
   });
 
   it("rejects extra fields rather than silently accepting secrets alongside valid settings", async () => {

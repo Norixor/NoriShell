@@ -39,6 +39,7 @@ pub(crate) enum NativeAccountState {
     NeedsMfa,
     NeedsEmailVerification,
     Connected,
+    Expired,
     Unavailable,
 }
 
@@ -73,8 +74,8 @@ pub(crate) enum NativeAuthError {
     StateUnavailable,
     #[error("another account operation is already running")]
     OperationInProgress,
-    #[error("the authorization callback was rejected")]
-    CallbackRejected,
+    #[error("the saved account session has expired")]
+    RefreshExpired,
     #[error("authorization was denied")]
     AccessDenied,
     #[error("the authorization server response was invalid")]
@@ -132,6 +133,7 @@ struct AccessToken {
 struct RuntimeState {
     stored: Option<StoredAuthState>,
     access_token: Option<AccessToken>,
+    refresh_expired: bool,
     authorizing: bool,
     pending_challenge: Option<PendingAuthChallenge>,
 }
@@ -250,6 +252,7 @@ impl PluginOAuthService {
             runtime: Arc::new(Mutex::new(RuntimeState {
                 stored,
                 access_token: None,
+                refresh_expired: false,
                 authorizing: false,
                 pending_challenge: None,
             })),
@@ -283,6 +286,8 @@ impl PluginOAuthService {
             .is_some_and(|token| token.expires_at > Instant::now())
         {
             NativeAccountState::Connected
+        } else if runtime.refresh_expired {
+            NativeAccountState::Expired
         } else if stored.refresh_token_ref.is_some() {
             // A persisted refresh token is an active account session from the
             // user's perspective. Core refreshes the short-lived access token
@@ -299,6 +304,15 @@ impl PluginOAuthService {
 
     pub(crate) fn configuration_digest(&self) -> String {
         configuration_sha256(&self.configuration)
+    }
+
+    pub(crate) fn matches_configuration(&self, configuration: &PluginOAuthConfiguration) -> bool {
+        self.configuration.as_ref() == configuration
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_runtime_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.runtime, &other.runtime)
     }
 
     pub(crate) fn allows_resource_url(&self, url: &Url) -> bool {
@@ -501,7 +515,19 @@ impl PluginOAuthService {
             .send()
             .await
             .map_err(|_| NativeAuthError::Network)?;
-        let response = parse_token_response(response).await?;
+        let response = match parse_token_response(response).await {
+            Ok(response) => response,
+            Err(NativeAuthError::RefreshExpired) => {
+                let mut runtime = self
+                    .runtime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                runtime.access_token = None;
+                runtime.refresh_expired = true;
+                return Err(NativeAuthError::RefreshExpired);
+            }
+            Err(error) => return Err(error),
+        };
         let access = Zeroizing::new(response.access_token.clone());
         self.persist_token_response(response)?;
         Ok(access)
@@ -584,6 +610,7 @@ impl PluginOAuthService {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             runtime.stored = Some(next);
+            runtime.refresh_expired = false;
             runtime.access_token = Some(AccessToken {
                 value: Zeroizing::new(std::mem::take(&mut response.access_token)),
                 expires_at: Instant::now()
@@ -630,6 +657,7 @@ impl PluginOAuthService {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             runtime.stored = Some(next);
             runtime.access_token = None;
+            runtime.refresh_expired = false;
         }
         self.cleanup_retired_secrets()
     }
@@ -829,7 +857,7 @@ fn valid_identifier(value: &str, maximum: usize) -> bool {
 }
 
 fn valid_oauth_url(url: &Url) -> bool {
-    url.scheme() == "https"
+    matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
         && url.username().is_empty()
         && url.password().is_none()
@@ -888,15 +916,7 @@ async fn parse_token_response(
     response: reqwest::Response,
 ) -> Result<OAuthTokenResponse, NativeAuthError> {
     if !response.status().is_success() {
-        return Err(
-            if response.status() == StatusCode::BAD_REQUEST
-                || response.status() == StatusCode::UNAUTHORIZED
-            {
-                NativeAuthError::CallbackRejected
-            } else {
-                NativeAuthError::Network
-            },
-        );
+        return Err(token_response_error(response.status()));
     }
     let bytes = response
         .bytes()
@@ -906,6 +926,13 @@ async fn parse_token_response(
         return Err(NativeAuthError::Protocol);
     }
     serde_json::from_slice(&bytes).map_err(|_| NativeAuthError::Protocol)
+}
+
+fn token_response_error(status: StatusCode) -> NativeAuthError {
+    match status {
+        StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED => NativeAuthError::RefreshExpired,
+        _ => NativeAuthError::Network,
+    }
 }
 
 async fn parse_credential_auth_response(
@@ -1121,6 +1148,22 @@ mod tests {
     }
 
     #[test]
+    fn rejected_refresh_is_expired_while_server_failure_is_transient() {
+        assert!(matches!(
+            token_response_error(StatusCode::UNAUTHORIZED),
+            NativeAuthError::RefreshExpired
+        ));
+        assert!(matches!(
+            token_response_error(StatusCode::BAD_REQUEST),
+            NativeAuthError::RefreshExpired
+        ));
+        assert!(matches!(
+            token_response_error(StatusCode::SERVICE_UNAVAILABLE),
+            NativeAuthError::Network
+        ));
+    }
+
+    #[test]
     fn stored_state_rejects_unknown_fields_and_invalid_secret_refs() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("state.json");
@@ -1168,6 +1211,34 @@ mod tests {
 
         let mut configuration = test_configuration();
         configuration.resource_origins = vec!["https://sync.example.test/provider/path".to_owned()];
+        assert!(validate_configuration(&configuration).is_err());
+    }
+
+    #[test]
+    fn oauth_configuration_accepts_http_and_binds_exact_resource_origin() {
+        let mut configuration = test_configuration();
+        configuration.authorization_url = Url::parse("http://127.0.0.1:8080/login").unwrap();
+        configuration.token_url = Url::parse("http://127.0.0.1:8080/token").unwrap();
+        configuration.revoke_url = Url::parse("http://127.0.0.1:8080/revoke").unwrap();
+        configuration.resource_origins = vec!["http://127.0.0.1:8080".to_owned()];
+        assert!(validate_configuration(&configuration).is_ok());
+        let directory = tempfile::tempdir().unwrap();
+        let service = PluginOAuthService::start(
+            directory.path(),
+            VaultService::start(directory.path()),
+            configuration.clone(),
+        )
+        .unwrap();
+        assert!(
+            service.allows_resource_url(&Url::parse("http://127.0.0.1:8080/exchange").unwrap())
+        );
+        assert!(
+            !service.allows_resource_url(&Url::parse("https://127.0.0.1:8080/exchange").unwrap())
+        );
+        assert!(
+            !service.allows_resource_url(&Url::parse("http://127.0.0.1:8081/exchange").unwrap())
+        );
+        configuration.token_url = Url::parse("http://user@127.0.0.1:8080/token").unwrap();
         assert!(validate_configuration(&configuration).is_err());
     }
 

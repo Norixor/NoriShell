@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
-    BundleSchema, PortableBundleV1, PortableObjectId, PortableObjectKind, PortableObjects,
-    PortableTombstone, Result, SyncCodecError,
+    BundleSchema, PortableBundleV1, PortableItemUpdateTime, PortableObjectId, PortableObjectKind,
+    PortableObjects, PortablePreferencesV1, PortableTombstone, Result, SyncCodecError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +18,12 @@ pub enum BundleMergeOutcome {
 pub enum BundleConflictResolution {
     KeepLocal,
     UseRemote,
+    Newest,
 }
+
+const MAX_FUTURE_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+type ObjectNode = (PortableObjectKind, PortableObjectId);
+type ResolvedSides = BTreeMap<ObjectNode, BundleConflictResolution>;
 
 #[derive(Clone)]
 enum Edit<T> {
@@ -47,6 +55,17 @@ pub fn merge_bundles_three_way_with_resolution(
     revision: u64,
     resolution: Option<BundleConflictResolution>,
 ) -> Result<BundleMergeOutcome> {
+    merge_bundles_three_way_with_policies(base, local, remote, revision, resolution, resolution)
+}
+
+pub fn merge_bundles_three_way_with_policies(
+    base: &PortableBundleV1,
+    local: &PortableBundleV1,
+    remote: &PortableBundleV1,
+    revision: u64,
+    conflict_resolution: Option<BundleConflictResolution>,
+    deletion_resolution: Option<BundleConflictResolution>,
+) -> Result<BundleMergeOutcome> {
     base.validate()?;
     local.validate()?;
     remote.validate()?;
@@ -61,16 +80,28 @@ pub fn merge_bundles_three_way_with_resolution(
         &local_tombstones,
         &remote_tombstones,
     );
-    if resolution.is_none() && !conflict_nodes.is_empty() {
+    let now_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0);
+    let (resolved_sides, object_conflicts) = resolve_conflicts(
+        [base, local, remote],
+        &conflict_nodes,
+        local,
+        remote,
+        conflict_resolution,
+        deletion_resolution,
+        now_unix_ms,
+    );
+    let (preferences, preference_conflicts) =
+        merge_preferences(base, local, remote, conflict_resolution, now_unix_ms);
+    if object_conflicts > 0 || preference_conflicts > 0 {
         return Ok(BundleMergeOutcome::Conflicts {
-            count: u32::try_from(conflict_nodes.len()).unwrap_or(u32::MAX),
+            count: u32::try_from(object_conflicts.saturating_add(preference_conflicts))
+                .unwrap_or(u32::MAX),
         });
     }
-    let resolved_closure = if resolution.is_some() {
-        expand_conflict_closure([base, local, remote], &conflict_nodes)
-    } else {
-        BTreeSet::new()
-    };
     let mut objects = PortableObjects::default();
     let mut secrets = Vec::new();
     let mut output_tombstones = base_tombstones.clone();
@@ -86,8 +117,7 @@ pub fn merge_bundles_three_way_with_resolution(
                 &local_tombstones,
                 &remote_tombstones,
                 $id,
-                resolution,
-                &resolved_closure,
+                &resolved_sides,
             );
             $output.extend(values);
             for id in deleted {
@@ -188,21 +218,323 @@ pub fn merge_bundles_three_way_with_resolution(
         |value: &crate::PortableSecret| value.id
     );
 
-    let tombstones = output_tombstones
+    let tombstones: Vec<_> = output_tombstones
         .into_iter()
         .map(|(kind, id)| PortableTombstone { kind, id })
         .collect();
+    let update_times = merge_update_times(&objects, &secrets, &tombstones, base, local, remote);
+    let preference_update_times = merge_preference_times(preferences.as_ref(), base, local, remote);
     let merged = PortableBundleV1 {
-        schema: BundleSchema::V3,
+        schema: if preferences.is_some() {
+            BundleSchema::V5
+        } else {
+            BundleSchema::V3
+        },
         revision,
         objects,
+        preferences,
         secrets,
         skipped_machine_bound: local.skipped_machine_bound.clone(),
         tombstones,
+        update_times,
+        preference_update_times,
     };
+    if (conflict_resolution.is_some() || deletion_resolution.is_some())
+        && (merged.validate().is_err() || validate_reverse_reachability(&merged).is_err())
+    {
+        return Ok(BundleMergeOutcome::Conflicts { count: 1 });
+    }
     merged.validate()?;
     validate_reverse_reachability(&merged)?;
     Ok(BundleMergeOutcome::Merged(Box::new(merged)))
+}
+
+fn merge_preferences(
+    base: &PortableBundleV1,
+    local: &PortableBundleV1,
+    remote: &PortableBundleV1,
+    resolution: Option<BundleConflictResolution>,
+    now_unix_ms: i64,
+) -> (Option<PortablePreferencesV1>, usize) {
+    let (Some(local_preferences), Some(remote_preferences)) =
+        (&local.preferences, &remote.preferences)
+    else {
+        // A legacy bundle has no opinion about preferences; it cannot delete
+        // preferences written by a newer client.
+        return (
+            local
+                .preferences
+                .as_ref()
+                .or(remote.preferences.as_ref())
+                .cloned(),
+            0,
+        );
+    };
+    let mut merged = local_preferences.clone();
+    let mut conflicts = 0;
+    for (group, local_value) in &local_preferences.groups {
+        let remote_value = &remote_preferences.groups[group];
+        let base_value = base
+            .preferences
+            .as_ref()
+            .and_then(|value| value.groups.get(group));
+        let chosen = if local_value == remote_value || base_value == Some(remote_value) {
+            local_value
+        } else if base_value == Some(local_value) {
+            remote_value
+        } else {
+            match resolution {
+                Some(BundleConflictResolution::UseRemote) => remote_value,
+                Some(BundleConflictResolution::Newest) => match newest_side(
+                    local.preference_update_times.get(group).copied(),
+                    remote.preference_update_times.get(group).copied(),
+                    now_unix_ms,
+                ) {
+                    Some(BundleConflictResolution::UseRemote) => remote_value,
+                    Some(BundleConflictResolution::KeepLocal) => local_value,
+                    _ => {
+                        conflicts += 1;
+                        local_value
+                    }
+                },
+                Some(BundleConflictResolution::KeepLocal) => local_value,
+                None => {
+                    conflicts += 1;
+                    local_value
+                }
+            }
+        };
+        merged.groups.insert(group.clone(), chosen.clone());
+    }
+    (Some(merged), conflicts)
+}
+
+fn newest_side(
+    local: Option<i64>,
+    remote: Option<i64>,
+    now_unix_ms: i64,
+) -> Option<BundleConflictResolution> {
+    let (Some(local), Some(remote)) = (local, remote) else {
+        return None;
+    };
+    if local <= 0
+        || remote <= 0
+        || local > now_unix_ms.saturating_add(MAX_FUTURE_CLOCK_SKEW_MS)
+        || remote > now_unix_ms.saturating_add(MAX_FUTURE_CLOCK_SKEW_MS)
+    {
+        return None;
+    }
+    match local.cmp(&remote) {
+        std::cmp::Ordering::Greater => Some(BundleConflictResolution::KeepLocal),
+        std::cmp::Ordering::Less => Some(BundleConflictResolution::UseRemote),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+fn item_time(bundle: &PortableBundleV1, node: ObjectNode) -> Option<i64> {
+    bundle
+        .update_times
+        .iter()
+        .find(|item| (item.kind, item.id) == node)
+        .map(|item| item.update_time_unix_ms)
+}
+
+fn resolve_conflicts(
+    bundles: [&PortableBundleV1; 3],
+    conflicts: &BTreeSet<ObjectNode>,
+    local: &PortableBundleV1,
+    remote: &PortableBundleV1,
+    conflict_resolution: Option<BundleConflictResolution>,
+    deletion_resolution: Option<BundleConflictResolution>,
+    now_unix_ms: i64,
+) -> (ResolvedSides, usize) {
+    let mut sides = ResolvedSides::new();
+    if conflicts.is_empty() {
+        return (sides, 0);
+    }
+    match (conflict_resolution, deletion_resolution) {
+        (None, None) => (sides, conflicts.len()),
+        (
+            Some(BundleConflictResolution::KeepLocal | BundleConflictResolution::UseRemote),
+            resolution,
+        ) if conflict_resolution == resolution => {
+            let side = conflict_resolution.expect("explicit side");
+            let selected = if bundles
+                .iter()
+                .all(|bundle| bundle.schema == BundleSchema::V5)
+            {
+                conflicts.clone()
+            } else {
+                // Legacy explicit direction selected the full dependency closure.
+                expand_conflict_closure(bundles, conflicts)
+            };
+            sides.extend(selected.into_iter().map(|node| (node, side)));
+            (sides, 0)
+        }
+        _ => {
+            let mut remaining = conflicts.clone();
+            let mut unresolved = 0;
+            while let Some(node) = remaining.iter().next().copied() {
+                let closure = expand_conflict_closure(bundles, &BTreeSet::from([node]));
+                let component = closure.intersection(conflicts).copied().collect::<Vec<_>>();
+                for member in &component {
+                    remaining.remove(member);
+                }
+                let mut chosen = None;
+                let mut consistent = true;
+                for member in &component {
+                    let newest = newest_side(
+                        item_time(local, *member),
+                        item_time(remote, *member),
+                        now_unix_ms,
+                    );
+                    let chosen_is_deletion = newest.is_some_and(|winner| match winner {
+                        BundleConflictResolution::KeepLocal => local
+                            .tombstones
+                            .iter()
+                            .any(|item| (item.kind, item.id) == *member),
+                        BundleConflictResolution::UseRemote => remote
+                            .tombstones
+                            .iter()
+                            .any(|item| (item.kind, item.id) == *member),
+                        BundleConflictResolution::Newest => false,
+                    });
+                    let policy = if chosen_is_deletion {
+                        deletion_resolution
+                    } else {
+                        conflict_resolution
+                    };
+                    let side = match policy {
+                        Some(BundleConflictResolution::Newest) => newest,
+                        Some(
+                            BundleConflictResolution::KeepLocal
+                            | BundleConflictResolution::UseRemote,
+                        ) => policy,
+                        None => None,
+                    };
+                    if side.is_none() || chosen.is_some_and(|previous| Some(previous) != side) {
+                        consistent = false;
+                    }
+                    chosen = side.or(chosen);
+                }
+                if consistent {
+                    let side = chosen.expect("nonempty component has a decision");
+                    // The closure groups interdependent conflicts. One-sided
+                    // changes in that closure still merge on their own merits.
+                    sides.extend(component.into_iter().map(|member| (member, side)));
+                } else {
+                    unresolved += component.len();
+                }
+            }
+            (sides, unresolved)
+        }
+    }
+}
+
+fn merge_update_times(
+    objects: &PortableObjects,
+    secrets: &[crate::PortableSecret],
+    tombstones: &[PortableTombstone],
+    base: &PortableBundleV1,
+    local: &PortableBundleV1,
+    remote: &PortableBundleV1,
+) -> Vec<PortableItemUpdateTime> {
+    let mut times = BTreeMap::<ObjectNode, i64>::new();
+    macro_rules! copy_kind {
+        ($kind:expr, $field:ident) => {
+            for value in &objects.$field {
+                let node = ($kind, value.id);
+                for bundle in [base, local, remote] {
+                    if bundle
+                        .objects
+                        .$field
+                        .iter()
+                        .any(|candidate| candidate == value)
+                    {
+                        if let Some(time) = item_time(bundle, node) {
+                            times
+                                .entry(node)
+                                .and_modify(|old| *old = (*old).max(time))
+                                .or_insert(time);
+                        }
+                    }
+                }
+            }
+        };
+    }
+    copy_kind!(PortableObjectKind::Host, hosts);
+    copy_kind!(PortableObjectKind::DesktopProfile, desktop_profiles);
+    copy_kind!(PortableObjectKind::Identity, identities);
+    copy_kind!(PortableObjectKind::Credential, credentials);
+    copy_kind!(PortableObjectKind::Route, routes);
+    copy_kind!(PortableObjectKind::AuthenticationPlan, authentication_plans);
+    copy_kind!(PortableObjectKind::AlgorithmPolicy, algorithm_policies);
+    copy_kind!(PortableObjectKind::HeartbeatPolicy, heartbeat_policies);
+    copy_kind!(PortableObjectKind::MonitoringPolicy, monitoring_policies);
+    copy_kind!(PortableObjectKind::LoginAutomation, login_automations);
+    for value in secrets {
+        let node = (PortableObjectKind::Secret, value.id);
+        for bundle in [base, local, remote] {
+            if bundle.secrets.iter().any(|candidate| candidate == value)
+                && let Some(time) = item_time(bundle, node)
+            {
+                times
+                    .entry(node)
+                    .and_modify(|old| *old = (*old).max(time))
+                    .or_insert(time);
+            }
+        }
+    }
+    for value in tombstones {
+        let node = (value.kind, value.id);
+        for bundle in [base, local, remote] {
+            if bundle.tombstones.contains(value)
+                && let Some(time) = item_time(bundle, node)
+            {
+                times
+                    .entry(node)
+                    .and_modify(|old| *old = (*old).max(time))
+                    .or_insert(time);
+            }
+        }
+    }
+    times
+        .into_iter()
+        .map(|((kind, id), update_time_unix_ms)| PortableItemUpdateTime {
+            kind,
+            id,
+            update_time_unix_ms,
+        })
+        .collect()
+}
+
+fn merge_preference_times(
+    preferences: Option<&PortablePreferencesV1>,
+    base: &PortableBundleV1,
+    local: &PortableBundleV1,
+    remote: &PortableBundleV1,
+) -> BTreeMap<String, i64> {
+    let mut times = BTreeMap::new();
+    let Some(preferences) = preferences else {
+        return times;
+    };
+    for (group, selected) in &preferences.groups {
+        for bundle in [base, local, remote] {
+            if bundle
+                .preferences
+                .as_ref()
+                .and_then(|value| value.groups.get(group))
+                == Some(selected)
+                && let Some(time) = bundle.preference_update_times.get(group)
+            {
+                times
+                    .entry(group.clone())
+                    .and_modify(|old: &mut i64| *old = (*old).max(*time))
+                    .or_insert(*time);
+            }
+        }
+    }
+    times
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -215,8 +547,7 @@ fn merge_values<T: Clone + PartialEq>(
     local_tombstones: &BTreeSet<(PortableObjectKind, PortableObjectId)>,
     remote_tombstones: &BTreeSet<(PortableObjectKind, PortableObjectId)>,
     id: impl Fn(&T) -> PortableObjectId + Copy,
-    resolution: Option<BundleConflictResolution>,
-    resolved_closure: &BTreeSet<(PortableObjectKind, PortableObjectId)>,
+    resolved_sides: &ResolvedSides,
 ) -> (Vec<T>, Vec<PortableObjectId>) {
     let base = value_map(base, id);
     let local = value_map(local, id);
@@ -260,10 +591,11 @@ fn merge_values<T: Clone + PartialEq>(
         let remote_result = apply_edit(base_value, &remote_edit);
         let local_changed = changed(base_value, &local_edit, &local_result);
         let remote_changed = changed(base_value, &remote_edit, &remote_result);
-        let selected = if resolved_closure.contains(&(kind, value_id)) {
-            match resolution.expect("a resolved closure always has an explicit side") {
+        let selected = if let Some(side) = resolved_sides.get(&(kind, value_id)) {
+            match side {
                 BundleConflictResolution::KeepLocal => local_result,
                 BundleConflictResolution::UseRemote => remote_result,
+                BundleConflictResolution::Newest => unreachable!("newest is reduced to a side"),
             }
         } else {
             match (local_changed, remote_changed) {
@@ -432,8 +764,6 @@ fn collect_conflict_nodes(
     ));
     conflicts
 }
-
-type ObjectNode = (PortableObjectKind, PortableObjectId);
 
 fn expand_conflict_closure<'a>(
     bundles: impl IntoIterator<Item = &'a PortableBundleV1>,
@@ -829,18 +1159,51 @@ mod tests {
         BundleSchema, HeartbeatMode, PortableAlgorithmPolicy, PortableAuthenticationPlan,
         PortableBundleV1, PortableCredential, PortableCredentialMaterial, PortableDesktopProfile,
         PortableDesktopProtocol, PortableHeartbeatPolicy, PortableHost, PortableIdentity,
-        PortableMonitoringPolicy, PortableObjectId, PortableObjectKind, PortableObjects,
-        PortableRoute, PortableSecret, PortableSecretKind, PortableTombstone, RouteIngress,
-        SecretBytes,
+        PortableItemUpdateTime, PortableMonitoringPolicy, PortableObjectId, PortableObjectKind,
+        PortableObjects, PortablePreferencesV1, PortableRoute, PortableSecret, PortableSecretKind,
+        PortableTombstone, RouteIngress, SecretBytes,
     };
 
     use super::{
         BundleConflictResolution, BundleMergeOutcome, merge_bundles_three_way,
-        merge_bundles_three_way_with_resolution,
+        merge_bundles_three_way_with_policies, merge_bundles_three_way_with_resolution,
     };
 
     fn id(value: u128) -> PortableObjectId {
         PortableObjectId::from_uuid(Uuid::from_u128(value)).expect("portable ID")
+    }
+
+    fn v5(mut bundle: PortableBundleV1) -> PortableBundleV1 {
+        let groups = serde_json::json!({
+            "application": {"themePreference":null,"locale":null,"uiZoom":null,"terminalStartupBehavior":null,"newTerminalBehavior":null,"singlePaneTabCloseBehavior":null},
+            "appearance": {"terminalThemeMode":null,"terminalFontFamily":null,"terminalFontSize":null,"terminalFontWeight":null,"terminalBoldFontWeight":null,"terminalLineHeight":null,"terminalLetterSpacing":null,"terminalCursorStyle":null,"terminalCursorBlink":null,"customTerminalPalette":null,"customTerminalPaletteName":null},
+            "interaction": {"interaction":null,"pasteWarning":null},
+            "highlights": {"enabled":null,"rules":null},
+            "shortcuts": {"version":null,"bindings":null},
+            "files": {"browser":null,"rememberLastDirectory":null},
+            "desktop": {"windowCloseBehavior":null,"trayShowStatus":null,"trayRecentLimit":null,"trayShowHostNames":null,"notificationBackgroundOnly":null,"notificationFailureOnly":null,"notifyTransferCompleted":null,"notifyTransferFailed":null,"notifyDisconnected":null},
+            "commandNotifications": {"notificationsEnabled":null,"notificationThresholdSeconds":null}
+        });
+        bundle.schema = BundleSchema::V5;
+        bundle.preferences = Some(PortablePreferencesV1 {
+            product: "NoriShell".to_owned(),
+            version: 1,
+            groups: serde_json::from_value(groups).expect("groups"),
+        });
+        bundle
+    }
+
+    fn timed(
+        bundle: &mut PortableBundleV1,
+        kind: PortableObjectKind,
+        id: PortableObjectId,
+        time: i64,
+    ) {
+        bundle.update_times.push(PortableItemUpdateTime {
+            kind,
+            id,
+            update_time_unix_ms: time,
+        });
     }
 
     fn bundle(value: Option<&[u8]>, deleted: bool) -> PortableBundleV1 {
@@ -849,6 +1212,7 @@ mod tests {
         PortableBundleV1 {
             schema: BundleSchema::V2,
             revision: 1,
+            preferences: None,
             objects: PortableObjects {
                 identities: vec![PortableIdentity {
                     id: identity_id,
@@ -893,6 +1257,8 @@ mod tests {
             } else {
                 Vec::new()
             },
+            update_times: Vec::new(),
+            preference_update_times: Default::default(),
         }
     }
 
@@ -956,6 +1322,8 @@ mod tests {
                     enabled: false,
                     interval_seconds: 30,
                     timeout_seconds: 5,
+                    interval_millis: None,
+                    timeout_millis: None,
                     resources: Default::default(),
                 }],
                 ..PortableObjects::default()
@@ -964,6 +1332,7 @@ mod tests {
         PortableBundleV1 {
             schema: BundleSchema::V2,
             revision: 1,
+            preferences: None,
             objects,
             secrets: Vec::new(),
             skipped_machine_bound: Vec::new(),
@@ -982,6 +1351,8 @@ mod tests {
             } else {
                 Vec::new()
             },
+            update_times: Vec::new(),
+            preference_update_times: Default::default(),
         }
     }
 
@@ -997,6 +1368,7 @@ mod tests {
         PortableBundleV1 {
             schema: BundleSchema::V2,
             revision: 1,
+            preferences: None,
             objects: PortableObjects {
                 identities: vec![PortableIdentity {
                     id: identity_id,
@@ -1041,6 +1413,8 @@ mod tests {
                 })
                 .into_iter()
                 .collect(),
+            update_times: Vec::new(),
+            preference_update_times: Default::default(),
         }
     }
 
@@ -1142,6 +1516,8 @@ mod tests {
                 enabled: false,
                 interval_seconds: 30,
                 timeout_seconds: 5,
+                interval_millis: None,
+                timeout_millis: None,
                 resources: Default::default(),
             });
         bundle
@@ -1162,6 +1538,7 @@ mod tests {
                 height: 1_080,
                 clipboard_enabled: true,
                 audio_playback_enabled: true,
+                vnc_protocol_version: crate::PortableVncProtocolVersion::Auto,
             });
         bundle
     }
@@ -1500,5 +1877,259 @@ mod tests {
             "other-desktop.example"
         );
         assert!(use_remote.tombstones.is_empty());
+    }
+
+    #[test]
+    fn newest_resolves_independent_objects_separately_and_retains_their_times() {
+        let mut base = v5(desktop_bundle("first"));
+        let first = &mut base.objects.desktop_profiles[0];
+        first.host_id = None;
+        first.gateway_host_id = None;
+        first.credential_id = None;
+        let mut second = first.clone();
+        second.id = id(41);
+        second.label = "second".to_owned();
+        base.objects.desktop_profiles.push(second);
+        let mut local = base.clone();
+        local.objects.desktop_profiles[0].label = "local first".to_owned();
+        local.objects.desktop_profiles[1].label = "local second".to_owned();
+        timed(&mut local, PortableObjectKind::DesktopProfile, id(40), 200);
+        timed(&mut local, PortableObjectKind::DesktopProfile, id(41), 100);
+        let mut remote = base.clone();
+        remote.objects.desktop_profiles[0].label = "remote first".to_owned();
+        remote.objects.desktop_profiles[1].label = "remote second".to_owned();
+        timed(&mut remote, PortableObjectKind::DesktopProfile, id(40), 100);
+        timed(&mut remote, PortableObjectKind::DesktopProfile, id(41), 200);
+        let BundleMergeOutcome::Merged(merged) = merge_bundles_three_way_with_resolution(
+            &base,
+            &local,
+            &remote,
+            2,
+            Some(BundleConflictResolution::Newest),
+        )
+        .unwrap() else {
+            panic!("independent nodes resolve");
+        };
+        assert_eq!(merged.objects.desktop_profiles[0].label, "local first");
+        assert_eq!(merged.objects.desktop_profiles[1].label, "remote second");
+        assert_eq!(merged.update_times.len(), 2);
+    }
+
+    #[test]
+    fn newest_keeps_one_sided_addition_in_conflict_dependency_closure() {
+        let base = v5(desktop_bundle("base"));
+        let mut local = base.clone();
+        local.objects.desktop_profiles[0].label = "local edit".to_owned();
+        timed(&mut local, PortableObjectKind::DesktopProfile, id(40), 200);
+        let mut remote = base.clone();
+        remote.objects.desktop_profiles[0].label = "remote edit".to_owned();
+        timed(&mut remote, PortableObjectKind::DesktopProfile, id(40), 100);
+        let mut added = remote.objects.desktop_profiles[0].clone();
+        added.id = id(41);
+        added.label = "remote new".to_owned();
+        remote.objects.desktop_profiles.push(added);
+        timed(&mut remote, PortableObjectKind::DesktopProfile, id(41), 150);
+
+        let BundleMergeOutcome::Merged(merged) = merge_bundles_three_way_with_resolution(
+            &base,
+            &local,
+            &remote,
+            2,
+            Some(BundleConflictResolution::Newest),
+        )
+        .unwrap() else {
+            panic!("independent addition must survive");
+        };
+        assert_eq!(merged.objects.desktop_profiles.len(), 2);
+        assert_eq!(merged.objects.desktop_profiles[0].label, "local edit");
+        assert_eq!(merged.objects.desktop_profiles[1].label, "remote new");
+    }
+
+    #[test]
+    fn newest_tombstone_wins_over_older_edit() {
+        let base = v5(desktop_bundle("base"));
+        let mut local = base.clone();
+        local.objects.desktop_profiles.clear();
+        local.tombstones.push(PortableTombstone {
+            kind: PortableObjectKind::DesktopProfile,
+            id: id(40),
+        });
+        timed(&mut local, PortableObjectKind::DesktopProfile, id(40), 200);
+        let mut remote = base.clone();
+        remote.objects.desktop_profiles[0].label = "older edit".to_owned();
+        timed(&mut remote, PortableObjectKind::DesktopProfile, id(40), 100);
+        let BundleMergeOutcome::Merged(merged) = merge_bundles_three_way_with_resolution(
+            &base,
+            &local,
+            &remote,
+            2,
+            Some(BundleConflictResolution::Newest),
+        )
+        .unwrap() else {
+            panic!("newer deletion resolves");
+        };
+        assert!(merged.objects.desktop_profiles.is_empty());
+        assert_eq!(merged.tombstones, local.tombstones);
+        assert_eq!(merged.update_times, local.update_times);
+    }
+
+    #[test]
+    fn deletion_policy_is_independent_from_edit_conflict_policy() {
+        let base = v5(desktop_bundle("base"));
+        let mut local = base.clone();
+        local.objects.desktop_profiles.clear();
+        local.tombstones.push(PortableTombstone {
+            kind: PortableObjectKind::DesktopProfile,
+            id: id(40),
+        });
+        timed(&mut local, PortableObjectKind::DesktopProfile, id(40), 200);
+        let mut remote = base.clone();
+        remote.objects.desktop_profiles[0].label = "older edit".to_owned();
+        timed(&mut remote, PortableObjectKind::DesktopProfile, id(40), 100);
+
+        let BundleMergeOutcome::Merged(auto_deleted) = merge_bundles_three_way_with_policies(
+            &base,
+            &local,
+            &remote,
+            2,
+            None,
+            Some(BundleConflictResolution::Newest),
+        )
+        .unwrap() else {
+            panic!("deletion policy should resolve the newer tombstone");
+        };
+        assert!(auto_deleted.objects.desktop_profiles.is_empty());
+        assert_eq!(
+            merge_bundles_three_way_with_policies(
+                &base,
+                &local,
+                &remote,
+                2,
+                Some(BundleConflictResolution::Newest),
+                None,
+            )
+            .unwrap(),
+            BundleMergeOutcome::Conflicts { count: 1 }
+        );
+    }
+
+    #[test]
+    fn newest_requires_distinct_plausible_times_for_each_double_edit() {
+        let base = v5(bundle(Some(b"base"), false));
+        let mut local = v5(bundle(Some(b"local"), false));
+        let mut remote = v5(bundle(Some(b"remote"), false));
+        let merge = |local: &PortableBundleV1, remote: &PortableBundleV1| {
+            merge_bundles_three_way_with_resolution(
+                &base,
+                local,
+                remote,
+                2,
+                Some(BundleConflictResolution::Newest),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            merge(&local, &remote),
+            BundleMergeOutcome::Conflicts { count: 1 }
+        );
+        timed(&mut local, PortableObjectKind::Secret, id(1), 100);
+        timed(&mut remote, PortableObjectKind::Secret, id(1), 100);
+        assert_eq!(
+            merge(&local, &remote),
+            BundleMergeOutcome::Conflicts { count: 1 }
+        );
+        remote.update_times[0].update_time_unix_ms = i64::MAX;
+        assert_eq!(
+            merge(&local, &remote),
+            BundleMergeOutcome::Conflicts { count: 1 }
+        );
+    }
+
+    #[test]
+    fn newest_opposite_choices_within_shared_dependency_stay_manual() {
+        let base = v5(desktop_bundle("base"));
+        let mut local = base.clone();
+        local.objects.desktop_profiles[0].label = "local desktop".to_owned();
+        local.objects.hosts[0].label = "local host".to_owned();
+        timed(&mut local, PortableObjectKind::DesktopProfile, id(40), 200);
+        timed(&mut local, PortableObjectKind::Host, id(10), 100);
+        let mut remote = base.clone();
+        remote.objects.desktop_profiles[0].label = "remote desktop".to_owned();
+        remote.objects.hosts[0].label = "remote host".to_owned();
+        timed(&mut remote, PortableObjectKind::DesktopProfile, id(40), 100);
+        timed(&mut remote, PortableObjectKind::Host, id(10), 200);
+        assert_eq!(
+            merge_bundles_three_way_with_resolution(
+                &base,
+                &local,
+                &remote,
+                2,
+                Some(BundleConflictResolution::Newest),
+            )
+            .unwrap(),
+            BundleMergeOutcome::Conflicts { count: 2 }
+        );
+    }
+
+    #[test]
+    fn newest_selects_preference_groups_independently() {
+        let base = v5(bundle(Some(b"base"), false));
+        let mut local = base.clone();
+        let mut remote = base.clone();
+        local
+            .preference_update_times
+            .insert("application".to_owned(), 200);
+        remote
+            .preference_update_times
+            .insert("application".to_owned(), 100);
+        local
+            .preference_update_times
+            .insert("files".to_owned(), 100);
+        remote
+            .preference_update_times
+            .insert("files".to_owned(), 200);
+        local
+            .preferences
+            .as_mut()
+            .unwrap()
+            .groups
+            .get_mut("application")
+            .unwrap()["locale"] = serde_json::json!("local");
+        remote
+            .preferences
+            .as_mut()
+            .unwrap()
+            .groups
+            .get_mut("application")
+            .unwrap()["locale"] = serde_json::json!("remote");
+        local
+            .preferences
+            .as_mut()
+            .unwrap()
+            .groups
+            .get_mut("files")
+            .unwrap()["browser"] = serde_json::json!("local");
+        remote
+            .preferences
+            .as_mut()
+            .unwrap()
+            .groups
+            .get_mut("files")
+            .unwrap()["browser"] = serde_json::json!("remote");
+        let BundleMergeOutcome::Merged(merged) = merge_bundles_three_way_with_resolution(
+            &base,
+            &local,
+            &remote,
+            2,
+            Some(BundleConflictResolution::Newest),
+        )
+        .unwrap() else {
+            panic!("preference groups resolve");
+        };
+        let groups = &merged.preferences.as_ref().unwrap().groups;
+        assert_eq!(groups["application"]["locale"], "local");
+        assert_eq!(groups["files"]["browser"], "remote");
+        assert_eq!(merged.preference_update_times["application"], 200);
+        assert_eq!(merged.preference_update_times["files"], 200);
     }
 }

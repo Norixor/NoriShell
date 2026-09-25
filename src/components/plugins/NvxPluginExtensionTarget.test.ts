@@ -104,6 +104,39 @@ describe("NvxPluginExtensionTarget", () => {
     wrapper.unmount();
   });
 
+  it("opens the current page plugin settings from a declared button without invoking the guest", async () => {
+    const extensions = usePluginExtensionsStore();
+    const context = { targetId: "app.page", surfaceKind: "page" as const, contextHandle: "sync-page", targetRevision: "1", displayLabel: "Sync" };
+    const contribution = {
+      pluginId: "com.norishell.self-host-sync", pluginName: "Sync", target: context,
+      instanceGeneration: "1", packageSha256: "a".repeat(64), onOpenActionId: "sync.pageOpened",
+      document: { schemaVersion: 1, rootNodeId: "root", nodes: [{
+        kind: "button", nodeId: "root", actionId: "norishell.openSettings:serverUrl",
+        label: "Enter server address", icon: "settings", variant: "primary", disabled: false,
+      }] },
+    };
+    vi.spyOn(extensions, "acquireTarget").mockResolvedValue({ key: "sync-page", context });
+    vi.spyOn(extensions, "loadTargetContributions").mockResolvedValue([contribution] as never);
+    vi.spyOn(extensions, "forContext").mockReturnValue([contribution] as never);
+    vi.spyOn(extensions, "releaseTarget").mockResolvedValue();
+    const invokeAction = vi.spyOn(extensions, "invokeAction").mockResolvedValue(null);
+    const wrapper = mount(NvxPluginExtensionTarget, {
+      props: { targetId: "app.page", selectedPluginId: contribution.pluginId },
+      global: { plugins: [i18n, getActivePinia()!] },
+    });
+    await flushPromises();
+    invokeAction.mockClear();
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
+    expect(wrapper.emitted("openSettings")).toEqual([[
+      contribution.pluginId, contribution.pluginName, "serverUrl",
+    ]]);
+    expect(invokeAction).not.toHaveBeenCalled();
+    await wrapper.vm.refreshAfterSettingsChange(contribution.pluginId);
+    expect(invokeAction).toHaveBeenCalledOnce();
+    expect(invokeAction.mock.calls[0]?.[1]).toBe("sync.pageOpened");
+  });
+
   it("releases a route target acquired after its renderer was unmounted", async () => {
     const extensions = usePluginExtensionsStore();
     let resolveLease!: (lease: Awaited<ReturnType<typeof extensions.acquireTarget>>) => void;
@@ -524,6 +557,50 @@ describe("NvxPluginExtensionTarget", () => {
       expect(select.attributes("aria-activedescendant")).toBe(highlighted);
       expect(draft.element).toHaveProperty("value", "user draft");
     } finally { footer.unmount(); tools.unmount(); vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it("requests dialog dismissal only after the self-host sync login reaches connected", async () => {
+    const extensions = usePluginExtensionsStore();
+    const context: PluginExtensionTargetContext = {
+      targetId: "app.page", surfaceKind: "page", contextHandle: "sync-login", targetRevision: "1", displayLabel: "Sync",
+    };
+    const contribution: PluginUiContribution = {
+      pluginId: "com.norishell.self-host-sync", pluginName: "Sync", artifactFingerprintSha256: "a".repeat(64),
+      packageSha256: "b".repeat(64), instanceGeneration: "1", stateVersion: "1", contributionRevision: "1",
+      target: context,
+      document: { schemaVersion: 1, rootNodeId: "login", nodes: [{
+        kind: "button", nodeId: "login", actionId: "sync.login", label: "Log in", icon: null,
+        variant: "primary", disabled: false,
+      }] },
+    };
+    vi.spyOn(extensions, "acquireTarget").mockResolvedValue({ key: "sync-login", context });
+    vi.spyOn(extensions, "loadTargetContributions").mockResolvedValue([contribution]);
+    vi.spyOn(extensions, "forContext").mockReturnValue([contribution]);
+    vi.spyOn(extensions, "releaseTarget").mockResolvedValue();
+    const invoke = vi.spyOn(extensions, "invokeAction").mockResolvedValue({
+      contribution: { ...contribution, contributionRevision: "2" },
+      sshSyncStatus: { profileId: "primary", accountState: "disconnected", operationState: "failed", stableErrorCode: "authorizationDenied" },
+      hostDomOperations: null, clipboardText: null, hostApprovalId: null,
+      terminalInputSuggestion: null, isolatedSurfaceOpened: false,
+    } as never);
+    const wrapper = mount(NvxPluginExtensionTarget, {
+      props: { targetId: "app.page", selectedPluginId: contribution.pluginId },
+      global: { plugins: [i18n, getActivePinia()!] },
+    });
+    await flushPromises();
+    const requestAction = wrapper.getComponent(NvxPluginUiDocument).props("requestAction") as (
+      actionId: string, fields: [],
+    ) => Promise<{ closeDialogOnSuccess: boolean } | null>;
+    expect((await requestAction("sync.login", []))?.closeDialogOnSuccess).toBe(false);
+    invoke.mockResolvedValue({
+      contribution: { ...contribution, contributionRevision: "2" },
+      sshSyncStatus: { profileId: "primary", accountState: "connected", operationState: "idle", stableErrorCode: null },
+      hostDomOperations: null, clipboardText: null, hostApprovalId: null,
+      terminalInputSuggestion: null, isolatedSurfaceOpened: false,
+    } as never);
+    expect((await requestAction("sync.login", []))?.closeDialogOnSuccess).toBe(true);
+    expect((await requestAction("sync.status", []))?.closeDialogOnSuccess).toBe(false);
+    wrapper.unmount();
   });
 
 });

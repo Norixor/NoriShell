@@ -10,6 +10,7 @@
 | [应用集成](./app-integration.zh-CN.md) | 命令、可选快捷键、通知、导航或原生文件句柄 | Wasm 构建与 SDK 包检查 | 命令/快捷键、原生选择器、范围审阅、通知和句柄清理 |
 | [隔离 UI](./isolated-ui.zh-CN.md) | 通过受限桥接的包内 HTML/CSS/JS 页面 | Wasm 构建和隔离页面 ABI 验证 | 隔离 WebView、MessagePort、审批提示与资源清理 |
 | [Protocol Demo](./protocol.zh-CN.md) | framed TCP 终端 provider | loopback fixture harness、ZIP 检查与校验和 | 桌面终端生命周期与受保护审批流程 |
+| [自建同步](./self-host-sync.zh-CN.md) | 自行部署 HTTPS 同步后端、加密交换与应用运行时自动同步 | Go 六目标构建、Wasm Host verifier、ZIP 检查与伴生包 | macOS/Windows 原生导入、授权、双设备恢复和真实 HTTPS 代理 |
 
 前置条件和精确的 API Demo 构建命令请先看 [快速入门](../start/quickstart.zh-CN.md)。每个示例在通过 NoriShell 导入流程选择前都只是本地包；构建命令不会发布或安装它。
 

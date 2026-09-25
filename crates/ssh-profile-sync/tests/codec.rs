@@ -29,6 +29,7 @@ fn sample_bundle() -> PortableBundleV1 {
     PortableBundleV1 {
         schema: BundleSchema::V1,
         revision: 2,
+        preferences: None,
         objects: PortableObjects {
             hosts: vec![PortableHost {
                 id: host_id,
@@ -88,6 +89,8 @@ fn sample_bundle() -> PortableBundleV1 {
                 enabled: true,
                 interval_seconds: 30,
                 timeout_seconds: 5,
+                interval_millis: None,
+                timeout_millis: None,
                 resources: BTreeSet::from([
                     MonitoringResource::Cpu,
                     MonitoringResource::Memory,
@@ -167,6 +170,8 @@ fn sample_bundle() -> PortableBundleV1 {
             },
         ],
         tombstones: Vec::new(),
+        update_times: Vec::new(),
+        preference_update_times: Default::default(),
     }
 }
 
@@ -191,6 +196,7 @@ fn sample_desktop_bundle() -> PortableBundleV1 {
             height: 1_080,
             clipboard_enabled: true,
             audio_playback_enabled: true,
+            vnc_protocol_version: norishell_ssh_profile_sync::PortableVncProtocolVersion::Auto,
         });
     bundle
 }
@@ -308,6 +314,17 @@ fn desktop_profiles_require_v3_and_reject_dangling_or_unsafe_references() {
 
 #[test]
 fn desktop_profile_validation_matches_runtime_endpoint_and_protocol_limits() {
+    let mut previous = serde_json::to_value(sample_desktop_bundle()).unwrap();
+    previous["objects"]["desktopProfiles"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("vncProtocolVersion");
+    let restored: PortableBundleV1 = serde_json::from_value(previous).unwrap();
+    assert_eq!(
+        restored.objects.desktop_profiles[0].vnc_protocol_version,
+        PortableVncProtocolVersion::Auto
+    );
+
     let mut invalid = sample_desktop_bundle();
     invalid.objects.desktop_profiles[0].address = "bad..desktop".into();
     assert!(invalid.validate().is_err());
@@ -721,4 +738,190 @@ fn secret_and_key_debug_output_is_redacted() {
             .contains("recovery password")
     );
     assert!(!format!("{:?}", SecretBytes::new(b"private".to_vec()).unwrap()).contains("private"));
+}
+
+fn sample_preferences() -> PortablePreferencesV1 {
+    let shapes: [(&str, &[&str]); 8] = [
+        (
+            "application",
+            &[
+                "themePreference",
+                "locale",
+                "uiZoom",
+                "terminalStartupBehavior",
+                "newTerminalBehavior",
+                "singlePaneTabCloseBehavior",
+            ],
+        ),
+        (
+            "appearance",
+            &[
+                "terminalThemeMode",
+                "terminalFontFamily",
+                "terminalFontSize",
+                "terminalFontWeight",
+                "terminalBoldFontWeight",
+                "terminalLineHeight",
+                "terminalLetterSpacing",
+                "terminalCursorStyle",
+                "terminalCursorBlink",
+                "customTerminalPalette",
+                "customTerminalPaletteName",
+            ],
+        ),
+        ("interaction", &["interaction", "pasteWarning"]),
+        ("highlights", &["enabled", "rules"]),
+        ("shortcuts", &["version", "bindings"]),
+        ("files", &["browser", "rememberLastDirectory"]),
+        (
+            "desktop",
+            &[
+                "windowCloseBehavior",
+                "trayShowStatus",
+                "trayRecentLimit",
+                "trayShowHostNames",
+                "notificationBackgroundOnly",
+                "notificationFailureOnly",
+                "notifyTransferCompleted",
+                "notifyTransferFailed",
+                "notifyDisconnected",
+            ],
+        ),
+        (
+            "commandNotifications",
+            &["notificationsEnabled", "notificationThresholdSeconds"],
+        ),
+    ];
+    let groups = shapes
+        .into_iter()
+        .map(|(name, keys)| {
+            (
+                name.to_owned(),
+                Value::Object(
+                    keys.iter()
+                        .map(|key| ((*key).to_owned(), Value::Null))
+                        .collect(),
+                ),
+            )
+        })
+        .collect();
+    PortablePreferencesV1 {
+        product: "NoriShell".into(),
+        version: 1,
+        groups,
+    }
+}
+
+fn empty_v4_preferences_bundle() -> PortableBundleV1 {
+    PortableBundleV1 {
+        schema: BundleSchema::V4,
+        revision: 2,
+        objects: PortableObjects::default(),
+        preferences: Some(sample_preferences()),
+        secrets: Vec::new(),
+        skipped_machine_bound: Vec::new(),
+        tombstones: Vec::new(),
+        update_times: Vec::new(),
+        preference_update_times: Default::default(),
+    }
+}
+
+#[test]
+fn v5_item_and_preference_times_roundtrip_inside_authenticated_bundle() {
+    let mut bundle = sample_bundle();
+    bundle.schema = BundleSchema::V5;
+    bundle.preferences = Some(sample_preferences());
+    let host_id = bundle.objects.hosts[0].id;
+    bundle.update_times.push(PortableItemUpdateTime {
+        kind: PortableObjectKind::Host,
+        id: host_id,
+        update_time_unix_ms: 1_700_000_000_000,
+    });
+    bundle
+        .preference_update_times
+        .insert("application".to_owned(), 1_700_000_000_001);
+    bundle.validate().unwrap();
+    let mut v5_binding = binding();
+    v5_binding.schema = BundleSchema::V5;
+    let key = SyncKey::from_bytes([7; 32]);
+    let envelope = encrypt_bundle(&bundle, &key, [9; 24], &v5_binding).unwrap();
+    let opened = decrypt_bundle(&envelope, &key, &v5_binding).unwrap();
+    assert_eq!(opened.update_times, bundle.update_times);
+    assert_eq!(
+        opened.preference_update_times,
+        bundle.preference_update_times
+    );
+
+    let mut old = empty_v4_preferences_bundle();
+    let encoded = serde_json::to_value(&old).unwrap();
+    old = serde_json::from_value(encoded).unwrap();
+    assert!(old.update_times.is_empty());
+    assert!(old.preference_update_times.is_empty());
+}
+
+#[test]
+fn v4_preferences_encrypt_roundtrip_and_v3_absence_has_no_delete_semantics() {
+    let mut v4 = sample_bundle();
+    v4.schema = BundleSchema::V4;
+    v4.preferences = Some(sample_preferences());
+    v4.validate().unwrap();
+    let key = SyncKey::from_bytes([7; 32]);
+    let mut v4_binding = binding();
+    v4_binding.schema = BundleSchema::V4;
+    let envelope = encrypt_bundle(&v4, &key, [9; 24], &v4_binding).unwrap();
+    let opened = decrypt_bundle(&envelope, &key, &v4_binding).unwrap();
+    assert_eq!(opened.preferences, v4.preferences);
+    let portable = empty_v4_preferences_bundle();
+    let mut legacy = portable.clone();
+    legacy.schema = BundleSchema::V3;
+    legacy.preferences = None;
+    let BundleMergeOutcome::Merged(merged) =
+        merge_bundles_three_way(&legacy, &portable, &legacy, 3).unwrap()
+    else {
+        panic!("V3 has no preference deletion opinion")
+    };
+    assert_eq!(merged.schema, BundleSchema::V5);
+    assert_eq!(merged.preferences, portable.preferences);
+}
+
+#[test]
+fn v4_preference_same_group_edits_conflict_and_keep_other_groups() {
+    let base = empty_v4_preferences_bundle();
+    let mut local = base.clone();
+    local
+        .preferences
+        .as_mut()
+        .unwrap()
+        .groups
+        .get_mut("appearance")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("terminalFontSize".into(), json!(16));
+    let mut remote = base.clone();
+    remote
+        .preferences
+        .as_mut()
+        .unwrap()
+        .groups
+        .get_mut("appearance")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("terminalFontSize".into(), json!(20));
+    assert_eq!(
+        merge_bundles_three_way(&base, &local, &remote, 4).unwrap(),
+        BundleMergeOutcome::Conflicts { count: 1 }
+    );
+    let BundleMergeOutcome::Merged(chosen) = merge_bundles_three_way_with_resolution(
+        &base,
+        &local,
+        &remote,
+        4,
+        Some(BundleConflictResolution::UseRemote),
+    )
+    .unwrap() else {
+        panic!("resolved")
+    };
+    assert_eq!(chosen.preferences, remote.preferences);
 }

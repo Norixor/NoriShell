@@ -55,7 +55,10 @@ onBeforeUnmount(() => { disposed = true; unlisten?.(); exitController?.dispose()
     <NvxTips />
     <div
       class="tool-window__body"
-      :class="{ 'tool-window__body--sftp-file': target?.kind === 'sftpFile' }"
+      :class="{
+        'tool-window__body--host-editor': target?.kind === 'hostEditor',
+        'tool-window__body--sftp-file': target?.kind === 'sftpFile',
+      }"
     >
       <NvxHostEditor
         v-if="target?.kind === 'hostEditor'"
@@ -90,5 +93,6 @@ onBeforeUnmount(() => { disposed = true; unlisten?.(); exitController?.dispose()
 .tool-window { height: 100dvh; display: flex; flex-direction: column; color: var(--nvx-color-text-primary); background: var(--nvx-color-bg-canvas); }
 .tool-window__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-window__body { flex: 1; min-height: 0; overflow: auto; padding: var(--nvx-space-4); }
+.tool-window__body--host-editor { overflow: hidden; padding: 0; }
 .tool-window__body--sftp-file { overflow: hidden; padding: 0; }
 </style>

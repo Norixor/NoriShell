@@ -129,7 +129,7 @@ pub struct RecoveryPassword(Zeroizing<Vec<u8>>);
 impl RecoveryPassword {
     pub fn new(value: impl Into<Vec<u8>>) -> Result<Self> {
         let value = value.into();
-        if !(12..=65_536).contains(&value.len()) {
+        if !(8..=65_536).contains(&value.len()) {
             return Err(SyncCodecError::InvalidRecoveryPassword);
         }
         Ok(Self(Zeroizing::new(value)))
@@ -148,7 +148,14 @@ impl fmt::Debug for RecoveryPassword {
 
 #[cfg(test)]
 mod tests {
-    use super::SyncKey;
+    use super::{RecoveryPassword, SyncKey};
+
+    #[test]
+    fn recovery_password_accepts_eight_byte_passwords_and_existing_utf8_passwords() {
+        assert!(RecoveryPassword::new(b"1234567".to_vec()).is_err());
+        assert!(RecoveryPassword::new(b"12345678".to_vec()).is_ok());
+        assert!(RecoveryPassword::new("密码密码".as_bytes().to_vec()).is_ok());
+    }
 
     #[test]
     fn baseline_digest_is_domain_separated_hmac_sha256() {

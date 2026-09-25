@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "secure-backup",
+  "description": "Offline backup passwords are submitted only by their exact Core-owned prompt window.",
+  "windows": ["secure-backup-*"],
+  "permissions": ["core:window:allow-start-dragging", "secure-backup-commands"]
+}

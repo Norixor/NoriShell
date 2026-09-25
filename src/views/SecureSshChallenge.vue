@@ -21,6 +21,7 @@ const fields = computed(() => {
 const key = computed(() => {
   const value = content.value;
   if (value?.kind === "sshHostKey") return { endpoint: `${value.challenge.endpoint.address}:${value.challenge.endpoint.port}`, algorithm: value.challenge.keyAlgorithm, fingerprint: value.challenge.fingerprintSha256, mismatch: false };
+  if (value?.kind === "sftpHostKey") return { endpoint: value.challenge.endpoint, algorithm: value.challenge.algorithm, fingerprint: value.challenge.fingerprintSha256, mismatch: false };
   if (value?.kind === "metricsHostKey") return { endpoint: value.challenge.hostId, algorithm: value.challenge.algorithm, fingerprint: value.challenge.fingerprintSha256, mismatch: value.challenge.trustedFingerprintSha256 !== null };
   return null;
 });

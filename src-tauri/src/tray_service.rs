@@ -24,6 +24,7 @@ const TRAY_ID: &str = "norishell-main";
 const EVENT: &str = "native-tray-action";
 const MENU_TTL: Duration = Duration::from_secs(120);
 const CLICK_TTL: Duration = Duration::from_secs(60);
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_PENDING: usize = 32;
 const MAX_BINDINGS: usize = 16_384;
 type CoreResult<T> = Result<T, Box<CoreApiError>>;
@@ -60,6 +61,8 @@ struct TrayState {
     panel: panel::PanelState,
     rendered: Option<Projection>,
     rendered_at: Option<Instant>,
+    pending_left_click: Option<Instant>,
+    suppress_next_left_up: bool,
 }
 
 impl TrayState {
@@ -403,6 +406,107 @@ fn handle_click(app: &AppHandle, id: &str) {
     execute_action(app, &service, action);
 }
 
+fn open_main_from_tray(app: &AppHandle) {
+    panel::hide(app);
+    if lifecycle::show_main_window(app).is_err() {
+        emit_failure(app);
+    }
+}
+
+fn handle_left_click(app: &AppHandle, rect: tauri::Rect) {
+    let Some(service) = app.try_state::<NativeTrayService>() else {
+        return;
+    };
+    let now = Instant::now();
+    let mut state = service
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.stopped {
+        return;
+    }
+    // Windows sends a native DoubleClick before the second mouse-up event.
+    if std::mem::take(&mut state.suppress_next_left_up) {
+        return;
+    }
+    if state
+        .pending_left_click
+        .is_some_and(|first| now.duration_since(first) <= DOUBLE_CLICK_INTERVAL)
+    {
+        state.pending_left_click = None;
+        drop(state);
+        open_main_from_tray(app);
+        return;
+    }
+    state.pending_left_click = Some(now);
+    drop(state);
+
+    let handle = app.clone();
+    let inner = Arc::clone(&service.inner);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(DOUBLE_CLICK_INTERVAL).await;
+        let mut state = inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.stopped || state.pending_left_click != Some(now) {
+            return;
+        }
+        state.pending_left_click = None;
+        drop(state);
+        panel::toggle(&handle, rect, now);
+    });
+}
+
+fn handle_native_double_click(app: &AppHandle) {
+    let Some(service) = app.try_state::<NativeTrayService>() else {
+        return;
+    };
+    let mut state = service
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.stopped {
+        return;
+    }
+    state.pending_left_click = None;
+    state.suppress_next_left_up = true;
+    drop(state);
+    open_main_from_tray(app);
+}
+
+fn handle_left_button_down(app: &AppHandle) {
+    let Some(service) = app.try_state::<NativeTrayService>() else {
+        return;
+    };
+    let mut state = service
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.stopped
+        || !state
+            .pending_left_click
+            .is_some_and(|first| first.elapsed() <= DOUBLE_CLICK_INTERVAL)
+    {
+        return;
+    }
+    // macOS emits two ordinary Click events rather than a native DoubleClick.
+    state.pending_left_click = None;
+    state.suppress_next_left_up = true;
+    drop(state);
+    open_main_from_tray(app);
+}
+
+fn handle_right_click(app: &AppHandle) {
+    if let Some(service) = app.try_state::<NativeTrayService>() {
+        service
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending_left_click = None;
+    }
+    panel::hide(app);
+}
+
 fn execute_action(app: &AppHandle, service: &NativeTrayService, action: Action) {
     match action {
         Action::Show => {
@@ -600,16 +704,23 @@ pub(crate) fn install(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         .on_tray_icon_event(|tray, event| match event {
             TrayIconEvent::Click {
                 button: MouseButton::Left,
+                button_state: MouseButtonState::Down,
+                ..
+            } => handle_left_button_down(tray.app_handle()),
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 rect,
                 ..
-            } => {
-                panel::toggle(tray.app_handle(), rect);
-            }
+            } => handle_left_click(tray.app_handle(), rect),
+            TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => handle_native_double_click(tray.app_handle()),
             TrayIconEvent::Click {
                 button: MouseButton::Right,
                 ..
-            } => panel::hide(tray.app_handle()),
+            } => handle_right_click(tray.app_handle()),
             _ => {}
         });
     if let Some(icon) = app.default_window_icon().cloned() {

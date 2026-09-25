@@ -1,6 +1,6 @@
 //! Generic, plugin-scoped SSH sync data exchange broker.
 //!
-//! Plugins own provider login configuration, HTTPS endpoints and their
+//! Plugins own provider login configuration, HTTP(S) endpoints and their
 //! declarative UI. Core owns secure selection, portable serialization,
 //! end-to-end encryption, durable baselines, revision/strong-ETag CAS,
 //! conflict detection and approved local apply. No provider ID or origin is
@@ -20,16 +20,19 @@ use std::{
 };
 
 use norishell_core_api::{
-    PluginSshSyncAccountState, PluginSshSyncBrowserSnapshot, PluginSshSyncCredentialProfile,
-    PluginSshSyncDeleteTarget, PluginSshSyncDifferenceState, PluginSshSyncDownloadSource,
-    PluginSshSyncHttpMethod, PluginSshSyncOperationState, PluginSshSyncRequest,
-    PluginSshSyncScopeMode, PluginSshSyncStableErrorCode, PluginSshSyncStatus,
-    PluginSshSyncUploadTarget, PluginUiFieldId, PluginUiFieldValue, SecretRefId, WireSequence,
+    PluginSshSyncAccountState, PluginSshSyncBrowserSnapshot, PluginSshSyncConflictPolicy,
+    PluginSshSyncCredentialProfile, PluginSshSyncDeleteTarget, PluginSshSyncDifferenceState,
+    PluginSshSyncDownloadSource, PluginSshSyncHttpMethod, PluginSshSyncOperationState,
+    PluginSshSyncRequest, PluginSshSyncScopeMode, PluginSshSyncStableErrorCode,
+    PluginSshSyncStatus, PluginSshSyncUploadTarget, PluginUiFieldId, PluginUiFieldValue,
+    SecretRefId, WireSequence,
 };
 use norishell_ssh_profile_sync::{
-    BundleSchema, PluginExchangeBinding, PortableBundleV1, PortableObjects, SyncKey,
-    canonical_bundle_bytes, create_plugin_exchange_with_key, inspect_plugin_exchange_owner,
-    open_plugin_exchange_with_key, plugin_exchange_vault_key_envelope,
+    BundleConflictResolution, BundleMergeOutcome, BundleSchema, PluginExchangeBinding,
+    PortableBundleV1, PortableObjects, SyncKey, canonical_bundle_bytes,
+    create_plugin_exchange_with_key, inspect_plugin_exchange_data_owner,
+    inspect_plugin_exchange_owner, merge_bundles_three_way_with_policies,
+    open_plugin_exchange_with_key, plugin_exchange_vault_key_envelope, stable_plugin_data_owner,
 };
 use reqwest::{
     Client, StatusCode, Url,
@@ -49,6 +52,7 @@ use crate::plugin_oauth::{
 use crate::ssh_sync_browser_cache::{
     SshSyncBrowserCache, SshSyncBrowserCacheBinding, empty_snapshot,
 };
+use crate::vault_service::SyncKeyRecoveryError;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub(crate) type ActionFence = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -83,7 +87,7 @@ pub(crate) enum SecureSelectionError {
 pub(crate) struct SecureActionContext {
     pub(crate) background: bool,
     pub(crate) plugin_id: String,
-    pub(crate) signer_fingerprint_sha256: String,
+    pub(crate) data_owner_sha256: String,
     pub(crate) profile_id: String,
     pub(crate) remote_origin: Option<String>,
     pub(crate) fence: ActionFence,
@@ -166,6 +170,8 @@ impl std::fmt::Debug for SecureApplyApproval {
 }
 
 pub(crate) struct SyncDirectionReview {
+    /// True only when the secure decision approves the displayed item-level merge plan.
+    pub(crate) merge_plan: bool,
     pub(crate) local_desktop_profile_count: u32,
     pub(crate) remote_desktop_profile_count: u32,
     pub(crate) restore_handle: PendingRestoreHandle,
@@ -175,6 +181,21 @@ pub(crate) struct SyncDirectionReview {
     pub(crate) remote_credential_count: u32,
     pub(crate) conflict_count: u32,
     pub(crate) delete_count: u32,
+    pub(crate) local_compared_at_unix_ms: i64,
+    pub(crate) remote_updated_at_unix_ms: Option<i64>,
+    pub(crate) differences: Vec<norishell_core_api::SshSyncSecureDifference>,
+    pub(crate) difference_total_count: u32,
+    pub(crate) difference_omitted_count: u32,
+}
+
+pub(crate) struct SyncConflictReview {
+    pub(crate) local_desktop_profile_count: u32,
+    pub(crate) remote_desktop_profile_count: u32,
+    pub(crate) local_host_count: u32,
+    pub(crate) local_credential_count: u32,
+    pub(crate) remote_host_count: u32,
+    pub(crate) remote_credential_count: u32,
+    pub(crate) conflict_count: u32,
     pub(crate) local_compared_at_unix_ms: i64,
     pub(crate) remote_updated_at_unix_ms: Option<i64>,
     pub(crate) differences: Vec<norishell_core_api::SshSyncSecureDifference>,
@@ -201,6 +222,11 @@ pub(crate) trait SecureSshSyncUi: Send + Sync {
         context: SecureActionContext,
         review: SyncDirectionReview,
     ) -> BoxFuture<'_, Result<SecureSyncDirection, SecureSelectionError>>;
+    fn choose_conflict_side(
+        &self,
+        context: SecureActionContext,
+        review: SyncConflictReview,
+    ) -> BoxFuture<'_, Result<BundleConflictResolution, SecureSelectionError>>;
     fn approve_remote_reset(
         &self,
         context: SecureActionContext,
@@ -210,14 +236,41 @@ pub(crate) trait SecureSshSyncUi: Send + Sync {
 pub(crate) enum SecureSyncDirection {
     LocalOverRemote,
     RemoteOverLocal(SecureApplyApproval),
+    ApplyMerged(SecureApplyApproval),
+}
+
+/// Core issues this only after verifying the three-way merge, policy, and
+/// fresh local/remote snapshots. The store checks the exact staged payload
+/// again before an unattended local apply.
+pub(crate) struct VerifiedAutomaticMergeApproval {
+    staged_bundle_sha256: String,
+}
+
+impl VerifiedAutomaticMergeApproval {
+    fn new(bundle: &PortableBundleV1) -> Result<Self, BrokerError> {
+        let bytes = canonical_bundle_bytes(bundle).map_err(|_| BrokerError::RemoteDataInvalid)?;
+        Ok(Self {
+            staged_bundle_sha256: sha256_hex(&bytes),
+        })
+    }
+
+    pub(crate) fn matches(&self, bundle: &PortableBundleV1) -> bool {
+        bundle.schema == BundleSchema::V5
+            && canonical_bundle_bytes(bundle)
+                .map(|bytes| sha256_hex(&bytes) == self.staged_bundle_sha256)
+                .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortableStoreError {
     InvalidSelection,
     Stale,
-    Rejected,
-    Internal,
+    Rejected(&'static str),
+    InvalidBundle(&'static str, &'static str),
+    PreferencesUnavailable,
+    Internal(&'static str),
+    Persistence(&'static str, &'static str, Option<i32>),
 }
 
 pub(crate) struct PortableSnapshot {
@@ -309,11 +362,22 @@ pub(crate) struct DurableUploadFence {
     pub(crate) action_revision: SshSyncActionRevision,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PortableUploadCompletionProof {
-    ServerAcknowledged { acknowledged_revision: u64 },
-    ExactBodyObserved { observed_revision: u64 },
-    SupersededByNewerRemote { authenticated_remote_revision: u64 },
+    ServerAcknowledged {
+        acknowledged_revision: u64,
+    },
+    ExactBodyObserved {
+        observed_revision: u64,
+    },
+    SupersededByNewerRemote {
+        authenticated_remote_revision: u64,
+    },
+    ConflictingBodyObservedAtTargetRevision {
+        authenticated_remote_revision: u64,
+        authenticated_remote_body_sha256: String,
+        authenticated_remote_etag: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -387,6 +451,25 @@ pub(crate) trait PortableSshProfileStore: Send + Sync {
         signer_fingerprint_sha256: String,
         profile_id: String,
     ) -> BoxFuture<'_, Result<PortableProfileState, PortableStoreError>>;
+    fn existing_profile_state(
+        &self,
+        plugin_id: String,
+        data_owner_sha256: String,
+        profile_id: String,
+    ) -> BoxFuture<'_, Result<Option<PortableProfileState>, PortableStoreError>>;
+    fn existing_data_owners(
+        &self,
+        plugin_id: String,
+        profile_id: String,
+    ) -> BoxFuture<'_, Result<Vec<String>, PortableStoreError>>;
+    fn migrate_provisional_scope_owner(
+        &self,
+        plugin_id: String,
+        source_owner_sha256: String,
+        target_owner_sha256: String,
+        profile_id: String,
+        expected_state_version: WireSequence,
+    ) -> BoxFuture<'_, Result<(), PortableStoreError>>;
     fn local_counts(
         &self,
         plugin_id: String,
@@ -408,6 +491,7 @@ pub(crate) trait PortableSshProfileStore: Send + Sync {
         base: PortableBundleV1,
         current: PortableBundleV1,
     ) -> BoxFuture<'_, Result<PortableBundleV1, PortableStoreError>>;
+    fn has_pending_preferences(&self) -> BoxFuture<'_, Result<bool, PortableStoreError>>;
     fn configure_scope(
         &self,
         signer_fingerprint_sha256: String,
@@ -507,6 +591,15 @@ pub(crate) trait PortableSshProfileStore: Send + Sync {
         handle: PendingRestoreHandle,
         approval: Option<SecureApplyApproval>,
     ) -> BoxFuture<'_, Result<ApplyResult, PortableStoreError>>;
+    fn apply_verified_merge(
+        &self,
+        plugin_id: String,
+        signer_fingerprint_sha256: String,
+        profile_id: String,
+        handle: PendingRestoreHandle,
+        approval: VerifiedAutomaticMergeApproval,
+        fence: ActionFence,
+    ) -> BoxFuture<'_, Result<ApplyResult, PortableStoreError>>;
 }
 
 struct DownloadedExchange {
@@ -583,13 +676,24 @@ enum BrokerError {
     StateConflict,
     RemoteDataInvalid,
     RemoteFormatUnsupported,
-    OperationRejected,
-    Internal,
+    RecoveryRemoteKeyAuthenticationFailed,
+    RecoveryActionExpired,
+    OperationRejected(&'static str),
+    LocalDataInvalid(&'static str, &'static str),
+    PreferencesUnavailable,
+    LocalKeyUnavailable,
+    OperationBusy,
+    Internal(&'static str),
+    Persistence(&'static str, &'static str, Option<i32>),
 }
 
 #[derive(Clone)]
 pub(crate) struct SshSyncExchangeBroker {
     background: bool,
+    automatic_sync: bool,
+    package_signer_sha256: String,
+    data_owner_sha256: String,
+    authenticated_remote_key: Option<(String, SyncKey)>,
     app_data_directory: Arc<std::path::PathBuf>,
     vault: crate::vault_service::VaultService,
     secure_ui: Arc<dyn SecureSshSyncUi>,
@@ -609,12 +713,15 @@ impl SshSyncExchangeBroker {
     ) -> Self {
         Self {
             background: false,
+            automatic_sync: false,
+            package_signer_sha256: String::new(),
+            data_owner_sha256: String::new(),
+            authenticated_remote_key: None,
             app_data_directory: Arc::new(app_data_directory.as_ref().to_path_buf()),
             vault,
             secure_ui,
             profiles,
             http: Client::builder()
-                .https_only(true)
                 .redirect(Policy::none())
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(HTTP_TIMEOUT)
@@ -625,6 +732,54 @@ impl SshSyncExchangeBroker {
             state: Arc::new(Mutex::new(BrokerState::default())),
             browser_cache: SshSyncBrowserCache::default(),
         }
+    }
+
+    /// Only the host scheduler may enable the background write path. The
+    /// ordinary plugin action broker always uses the interactive path.
+    pub(crate) fn for_automatic_sync(mut self) -> Self {
+        self.automatic_sync = true;
+        self
+    }
+
+    pub(crate) fn vault_unlocked(&self) -> bool {
+        self.vault.is_unlocked()
+    }
+
+    pub(crate) async fn has_established_baseline(
+        &self,
+        plugin_id: &str,
+        signer_fingerprint_sha256: &str,
+        profile_id: &str,
+    ) -> bool {
+        if !self.vault.is_unlocked() {
+            return false;
+        }
+        let Ok(owners) = self
+            .profiles
+            .existing_data_owners(plugin_id.to_owned(), profile_id.to_owned())
+            .await
+        else {
+            return false;
+        };
+        let candidates = if owners.is_empty() {
+            vec![signer_fingerprint_sha256.to_owned()]
+        } else {
+            owners
+        };
+        let mut established = 0;
+        for owner in candidates {
+            let Ok(profile) = self
+                .profiles
+                .existing_profile_state(plugin_id.to_owned(), owner, profile_id.to_owned())
+                .await
+            else {
+                return false;
+            };
+            if profile.is_some_and(|profile| profile.remote_baseline.is_some()) {
+                established += 1;
+            }
+        }
+        established == 1
     }
 
     pub(crate) fn browser_snapshot(
@@ -806,52 +961,53 @@ impl SshSyncExchangeBroker {
         fence: ActionFence,
     ) -> PluginSshSyncStatus {
         self.background = background;
+        self.package_signer_sha256 = signer_fingerprint_sha256.to_owned();
+        self.data_owner_sha256.clear();
+        self.authenticated_remote_key = None;
         let profile_id = request_profile_id(&request).to_owned();
         if !valid_identifier(&profile_id, 160)
             || !valid_identifier(plugin_id, 160)
             || !valid_sha256(signer_fingerprint_sha256)
         {
-            return failed_status(profile_id, BrokerError::OperationRejected);
+            return failed_status(
+                profile_id,
+                BrokerError::OperationRejected("broker.invoke.01"),
+            );
         }
         if !fence() {
-            return failed_status(profile_id, BrokerError::OperationRejected);
+            return failed_status(
+                profile_id,
+                BrokerError::OperationRejected("broker.invoke.02"),
+            );
         }
         if background
             && !matches!(
                 request,
                 PluginSshSyncRequest::Status { .. } | PluginSshSyncRequest::Refresh { .. }
             )
+            && !(self.automatic_sync && matches!(request, PluginSshSyncRequest::Sync { .. }))
         {
             return failed_status(profile_id, BrokerError::InteractionRequired);
         }
         let namespace = namespace(plugin_id, signer_fingerprint_sha256, &profile_id);
-        if let Some(auth) = request_restore_profile(&request) {
-            let service = match self.restore_credential_service(
-                plugin_id,
-                signer_fingerprint_sha256,
-                &profile_id,
-                auth.clone(),
-            ) {
-                Ok(service) => service,
-                Err(error) => return failed_status(profile_id, error),
-            };
-            self.state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .oauth
-                .insert(namespace.clone(), service);
-        }
-        // Status and automatic refresh must not turn a missing/locked Vault into a prompt.
-        if (background || matches!(request, PluginSshSyncRequest::Status { .. }))
-            && let Some(error) = vault_access_error(self.vault.status().state)
-        {
-            let mut status = failed_status(profile_id.clone(), error);
-            status.account_state =
-                self.account_state(plugin_id, signer_fingerprint_sha256, &profile_id);
-            status.operation_state = PluginSshSyncOperationState::NeedsReview;
-            return status;
-        }
         if matches!(request, PluginSshSyncRequest::Status { .. }) {
+            if let Some(auth) = request_restore_profile(&request)
+                && let Err(error) = self.ensure_credential_service(
+                    plugin_id,
+                    signer_fingerprint_sha256,
+                    &profile_id,
+                    auth.clone(),
+                )
+            {
+                return failed_status(profile_id, error);
+            }
+            if let Some(error) = vault_access_error(self.vault.status().state) {
+                let mut status = failed_status(profile_id.clone(), error);
+                status.account_state =
+                    self.account_state(plugin_id, signer_fingerprint_sha256, &profile_id);
+                status.operation_state = PluginSshSyncOperationState::NeedsReview;
+                return status;
+            }
             return self.status(&namespace, &profile_id);
         }
         let (operation, operation_epoch) = {
@@ -860,13 +1016,40 @@ impl SshSyncExchangeBroker {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(operation) = operations.register(plugin_id, &namespace) else {
-                return failed_status(profile_id, BrokerError::OperationRejected);
+                return failed_status(
+                    profile_id,
+                    BrokerError::OperationRejected("broker.invoke.03"),
+                );
             };
             operation
         };
         let _operation = operation.lock().await;
         if !fence() || !self.operation_epoch_current(plugin_id, operation_epoch) {
-            return failed_status(profile_id, BrokerError::OperationRejected);
+            return failed_status(
+                profile_id,
+                BrokerError::OperationRejected("broker.invoke.04"),
+            );
+        }
+        // Restore after the namespace operation lock: a queued request must not
+        // replace the session with a stale refresh-token pointer before an
+        // earlier request finishes rotating that token.
+        if let Some(auth) = request_restore_profile(&request)
+            && let Err(error) = self.ensure_credential_service(
+                plugin_id,
+                signer_fingerprint_sha256,
+                &profile_id,
+                auth.clone(),
+            )
+        {
+            return failed_status(profile_id, error);
+        }
+        // Background operations must not turn a missing/locked Vault into a prompt.
+        if background && let Some(error) = vault_access_error(self.vault.status().state) {
+            let mut status = failed_status(profile_id.clone(), error);
+            status.account_state =
+                self.account_state(plugin_id, signer_fingerprint_sha256, &profile_id);
+            status.operation_state = PluginSshSyncOperationState::NeedsReview;
+            return status;
         }
         let caller_fence = fence;
         let operation_state = Arc::clone(&self.operations);
@@ -891,16 +1074,26 @@ impl SshSyncExchangeBroker {
         if !matches!(
             request,
             PluginSshSyncRequest::Authorize { .. } | PluginSshSyncRequest::Status { .. }
-        ) && let Err(error) = self
-            .ensure_vault_unlocked(
-                plugin_id,
-                signer_fingerprint_sha256,
-                &profile_id,
-                &operation_fence,
-            )
-            .await
-        {
-            return failed_status(profile_id, error);
+        ) {
+            if background {
+                // Background work must never enter the secure prompt chain,
+                // including when the Vault locks after the first state check.
+                if let Some(error) = vault_access_error(self.vault.status().state) {
+                    let mut status = failed_status(profile_id, error);
+                    status.operation_state = PluginSshSyncOperationState::NeedsReview;
+                    return status;
+                }
+            } else if let Err(error) = self
+                .ensure_vault_unlocked(
+                    plugin_id,
+                    signer_fingerprint_sha256,
+                    &profile_id,
+                    &operation_fence,
+                )
+                .await
+            {
+                return failed_status(profile_id, error);
+            }
         }
         let browser_binding = self.browser_binding(
             plugin_id,
@@ -924,9 +1117,37 @@ impl SshSyncExchangeBroker {
                 | PluginSshSyncRequest::Logout { .. }
                 | PluginSshSyncRequest::ConfigureScope { .. }
         );
+        if let Err(error) = self
+            .select_data_owner(plugin_id, &profile_id, &request, &operation_fence)
+            .await
+        {
+            if browser_fetch_operation && let Some(binding) = &browser_binding {
+                self.mark_browser_failed(binding, &operation_fence);
+            }
+            let mut status = failed_status(profile_id, error);
+            status.account_state = account_state_after_result(
+                self.account_state(plugin_id, signer_fingerprint_sha256, &status.profile_id),
+                status.stable_error_code,
+            );
+            if background
+                && matches!(
+                    status.stable_error_code,
+                    Some(
+                        PluginSshSyncStableErrorCode::InteractionRequired
+                            | PluginSshSyncStableErrorCode::AuthorizationExpired
+                    )
+                )
+            {
+                status.operation_state = PluginSshSyncOperationState::NeedsReview;
+            }
+            return status;
+        }
+        let data_owner_sha256 = self.data_owner_sha256.clone();
         let result = match request {
             PluginSshSyncRequest::Status { .. } => unreachable!(),
-            PluginSshSyncRequest::Authorize { .. } => Err(BrokerError::OperationRejected),
+            PluginSshSyncRequest::Authorize { .. } => {
+                Err(BrokerError::OperationRejected("broker.invoke.05"))
+            }
             PluginSshSyncRequest::Login {
                 auth,
                 username_field_id,
@@ -995,7 +1216,7 @@ impl SshSyncExchangeBroker {
             PluginSshSyncRequest::Refresh { source, .. } => {
                 self.refresh(
                     plugin_id,
-                    signer_fingerprint_sha256,
+                    &data_owner_sha256,
                     &profile_id,
                     source,
                     action_revision,
@@ -1007,33 +1228,33 @@ impl SshSyncExchangeBroker {
             PluginSshSyncRequest::Sync {
                 source,
                 destination,
+                conflict_policy,
+                deletion_policy,
                 ..
             } => {
                 self.sync(
                     plugin_id,
-                    signer_fingerprint_sha256,
+                    &data_owner_sha256,
                     &profile_id,
                     source,
                     destination,
                     action_revision,
                     browser_binding.as_ref(),
                     &operation_fence,
+                    self.automatic_sync,
+                    conflict_policy,
+                    deletion_policy,
                 )
                 .await
             }
             PluginSshSyncRequest::ConfigureScope { .. } => {
-                self.configure_scope(
-                    plugin_id,
-                    signer_fingerprint_sha256,
-                    &profile_id,
-                    &operation_fence,
-                )
-                .await
+                self.configure_scope(plugin_id, &data_owner_sha256, &profile_id, &operation_fence)
+                    .await
             }
             PluginSshSyncRequest::ResetRemote { target, .. } => {
                 self.reset_remote(
                     plugin_id,
-                    signer_fingerprint_sha256,
+                    &data_owner_sha256,
                     &profile_id,
                     target,
                     action_revision,
@@ -1073,6 +1294,19 @@ impl SshSyncExchangeBroker {
                 status.stable_error_code,
             );
         }
+        if background
+            && matches!(
+                status.stable_error_code,
+                Some(
+                    PluginSshSyncStableErrorCode::InteractionRequired
+                        | PluginSshSyncStableErrorCode::VaultMissing
+                        | PluginSshSyncStableErrorCode::VaultLocked
+                        | PluginSshSyncStableErrorCode::AuthorizationExpired
+                )
+            )
+        {
+            status.operation_state = PluginSshSyncOperationState::NeedsReview;
+        }
         if operation_fence() {
             self.state
                 .lock()
@@ -1089,6 +1323,212 @@ impl SshSyncExchangeBroker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         operations.epoch_current(plugin_id, expected)
+    }
+
+    async fn select_data_owner(
+        &mut self,
+        plugin_id: &str,
+        profile_id: &str,
+        request: &PluginSshSyncRequest,
+        fence: &ActionFence,
+    ) -> Result<(), BrokerError> {
+        let source = match request {
+            PluginSshSyncRequest::Refresh { source, .. }
+            | PluginSshSyncRequest::Sync { source, .. } => Some(source.clone()),
+            // Reset has its own protected confirmation and ETag-conditional
+            // DELETE. It must remain usable for a damaged remote exchange.
+            PluginSshSyncRequest::ResetRemote { .. }
+            | PluginSshSyncRequest::ConfigureScope { .. } => None,
+            _ => {
+                self.data_owner_sha256 = self.package_signer_sha256.clone();
+                return Ok(());
+            }
+        };
+        if let Some(source) = source
+            && let Some(remote) = self
+                .fetch_exchange(
+                    plugin_id,
+                    &self.package_signer_sha256,
+                    profile_id,
+                    source.clone(),
+                    fence,
+                )
+                .await?
+        {
+            self.data_owner_sha256 = remote.binding.signer_fingerprint_sha256.clone();
+            let key = self
+                .authenticate_data_owner(plugin_id, profile_id, &remote, fence)
+                .await?;
+            let confirmed = self
+                .fetch_exchange(
+                    plugin_id,
+                    &self.package_signer_sha256,
+                    profile_id,
+                    source,
+                    fence,
+                )
+                .await?
+                .ok_or(BrokerError::StateConflict)?;
+            ensure_same_remote(&remote, &confirmed)?;
+            self.authenticated_remote_key = Some((sha256_hex(&remote.bytes), key));
+            self.reconcile_local_data_owner(
+                plugin_id,
+                profile_id,
+                &remote.binding.signer_fingerprint_sha256,
+            )
+            .await?;
+            return Ok(());
+        }
+        let owners = self
+            .profiles
+            .existing_data_owners(plugin_id.to_owned(), profile_id.to_owned())
+            .await
+            .map_err(map_store_error)?;
+        if owners.len() > 1 {
+            let mut established = None;
+            for owner in &owners {
+                let profile = self
+                    .profiles
+                    .existing_profile_state(
+                        plugin_id.to_owned(),
+                        owner.clone(),
+                        profile_id.to_owned(),
+                    )
+                    .await
+                    .map_err(map_store_error)?;
+                if profile.is_some_and(|profile| profile.remote_baseline.is_some())
+                    && established.replace(owner.clone()).is_some()
+                {
+                    return Err(BrokerError::StateConflict);
+                }
+            }
+            self.data_owner_sha256 = established.ok_or(BrokerError::StateConflict)?;
+            return Ok(());
+        }
+        self.data_owner_sha256 = select_local_data_owner(plugin_id, &owners)?;
+        Ok(())
+    }
+
+    async fn authenticate_data_owner(
+        &self,
+        plugin_id: &str,
+        profile_id: &str,
+        remote: &DownloadedExchange,
+        fence: &ActionFence,
+    ) -> Result<SyncKey, BrokerError> {
+        let owner = &remote.binding.signer_fingerprint_sha256;
+        let envelope = plugin_exchange_vault_key_envelope(&remote.bytes, &remote.binding)
+            .map_err(|_| BrokerError::RemoteDataInvalid)?;
+        let existing = self
+            .profiles
+            .existing_profile_state(plugin_id.to_owned(), owner.clone(), profile_id.to_owned())
+            .await
+            .map_err(map_store_error)?;
+        let key = if let Some(binding) = existing
+            .as_ref()
+            .and_then(|state| state.key_binding.as_ref())
+        {
+            if binding.password_wrapped_envelope != envelope {
+                return Err(BrokerError::StateConflict);
+            }
+            let secret = self
+                .vault
+                .read_secret(
+                    &binding.secret_ref_id,
+                    norishell_secret_vault::SecretKind::SshSyncKey,
+                )
+                .map_err(|_| BrokerError::LocalKeyUnavailable)?;
+            let bytes: [u8; 32] = secret
+                .expose()
+                .try_into()
+                .map_err(|_| BrokerError::RemoteDataInvalid)?;
+            SyncKey::from_bytes(bytes)
+        } else {
+            let local = self
+                .vault
+                .export_sync_key_material()
+                .map_err(|_| BrokerError::LocalKeyUnavailable)?;
+            let local_key = SyncKey::from_bytes(*local.key_bytes());
+            if open_plugin_exchange_with_key(&remote.bytes, &local_key, &remote.binding).is_ok() {
+                local_key
+            } else {
+                if self.background {
+                    return Err(BrokerError::InteractionRequired);
+                }
+                let password = self
+                    .secure_ui
+                    .vault_password(self.secure_context(
+                        plugin_id,
+                        owner,
+                        profile_id,
+                        Some(remote.remote_origin.clone()),
+                        fence,
+                    ))
+                    .await
+                    .map_err(map_selection_error)?;
+                if !fence() {
+                    return Err(BrokerError::RecoveryActionExpired);
+                }
+                let material = self
+                    .vault
+                    .open_synchronized_key_material(&envelope, password.as_slice())
+                    .map_err(map_sync_key_recovery_error)?;
+                SyncKey::from_bytes(*material.key_bytes())
+            }
+        };
+        open_plugin_exchange_with_key(&remote.bytes, &key, &remote.binding)
+            .map_err(|_| BrokerError::RemoteDataInvalid)?;
+        if !fence() {
+            return Err(BrokerError::RecoveryActionExpired);
+        }
+        // Authentication alone does not create or bind a local profile.
+        Ok(key)
+    }
+
+    async fn reconcile_local_data_owner(
+        &self,
+        plugin_id: &str,
+        profile_id: &str,
+        owner: &str,
+    ) -> Result<(), BrokerError> {
+        let owners = self
+            .profiles
+            .existing_data_owners(plugin_id.to_owned(), profile_id.to_owned())
+            .await
+            .map_err(map_store_error)?;
+        // An authenticated remote owner may coexist with a provisional owner
+        // created by an earlier package. Keep the latter intact, but do not
+        // let it block the already bound remote profile.
+        if owners.iter().any(|existing_owner| existing_owner == owner) {
+            return Ok(());
+        }
+        match owners.as_slice() {
+            [] => {}
+            [existing_owner] => {
+                let source = self
+                    .profiles
+                    .existing_profile_state(
+                        plugin_id.to_owned(),
+                        existing_owner.clone(),
+                        profile_id.to_owned(),
+                    )
+                    .await
+                    .map_err(map_store_error)?
+                    .ok_or(BrokerError::StateConflict)?;
+                self.profiles
+                    .migrate_provisional_scope_owner(
+                        plugin_id.to_owned(),
+                        existing_owner.clone(),
+                        owner.to_owned(),
+                        profile_id.to_owned(),
+                        source.state_version,
+                    )
+                    .await
+                    .map_err(map_store_error)?;
+            }
+            _ => return Err(BrokerError::StateConflict),
+        }
+        Ok(())
     }
 
     async fn ensure_vault_unlocked(
@@ -1113,7 +1553,9 @@ impl SshSyncExchangeBroker {
                 .await
                 .map_err(map_selection_error)?;
             if !fence() || !self.vault.is_unlocked() {
-                return Err(BrokerError::OperationRejected);
+                return Err(BrokerError::OperationRejected(
+                    "broker.ensure_vault_unlocked.01",
+                ));
             }
             return Ok(());
         }
@@ -1129,14 +1571,18 @@ impl SshSyncExchangeBroker {
             .await
             .map_err(map_selection_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected(
+                "broker.ensure_vault_unlocked.02",
+            ));
         }
         self.profiles
             .unlock_vault_for_operation(password)
             .await
             .map_err(map_store_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected(
+                "broker.ensure_vault_unlocked.03",
+            ));
         }
         Ok(())
     }
@@ -1157,7 +1603,7 @@ impl SshSyncExchangeBroker {
             persist_baseline_exchange_file(&root, &plugin_id, &signer, &profile_id, &bytes)
         })
         .await
-        .map_err(|_| BrokerError::Internal)?
+        .map_err(|_| BrokerError::Internal("broker.persist_baseline_exchange.internal01"))?
     }
 
     async fn load_baseline_exchange(
@@ -1176,7 +1622,7 @@ impl SshSyncExchangeBroker {
             load_baseline_exchange_file(&root, &plugin_id, &signer, &profile_id, &exchange_sha256)
         })
         .await
-        .map_err(|_| BrokerError::Internal)?
+        .map_err(|_| BrokerError::Internal("broker.load_baseline_exchange.internal01"))?
     }
 
     async fn reset_local_remote_state(
@@ -1206,25 +1652,41 @@ impl SshSyncExchangeBroker {
             remove_profile_baseline_files(&root, &plugin_id, &signer, &profile_id)
         })
         .await
-        .map_err(|_| BrokerError::Internal)??;
+        .map_err(|_| BrokerError::Internal("broker.reset_local_remote_state.internal01"))??;
         Ok(profile)
     }
 
-    fn restore_credential_service(
+    fn ensure_credential_service(
         &self,
         plugin_id: &str,
         signer_fingerprint_sha256: &str,
         profile_id: &str,
         auth: PluginSshSyncCredentialProfile,
-    ) -> Result<PluginOAuthService, BrokerError> {
+    ) -> Result<(), BrokerError> {
         let configuration =
             credential_configuration(plugin_id, signer_fingerprint_sha256, profile_id, auth)?;
-        PluginOAuthService::start(
+        let key = namespace(plugin_id, signer_fingerprint_sha256, profile_id);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !reuse_or_restore_credential_service(
+            &mut state.oauth,
+            &key,
             self.app_data_directory.as_ref(),
-            self.vault.clone(),
+            &self.vault,
             configuration,
         )
-        .map_err(map_oauth_error)
+        .map_err(map_oauth_error)?
+        {
+            return Ok(());
+        }
+        state.last.remove(&key);
+        let account_epoch = state.account_epochs.entry(key).or_default();
+        *account_epoch = account_epoch.saturating_add(1).max(1);
+        drop(state);
+        self.browser_cache.invalidate_profile(plugin_id, profile_id);
+        Ok(())
     }
 
     fn status(&self, namespace: &str, profile_id: &str) -> PluginSshSyncStatus {
@@ -1276,13 +1738,13 @@ impl SshSyncExchangeBroker {
         )
         .map_err(map_oauth_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.login.01"));
         }
         let status = await_fenced(service.login(username, password), fence)
             .await?
             .map_err(map_oauth_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.login.02"));
         }
         self.state
             .lock()
@@ -1318,7 +1780,7 @@ impl SshSyncExchangeBroker {
         if password.len() != password_confirmation.len()
             || !bool::from(password.as_bytes().ct_eq(password_confirmation.as_bytes()))
         {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.register.01"));
         }
         let display_name = display_name_field_id
             .as_ref()
@@ -1333,13 +1795,13 @@ impl SshSyncExchangeBroker {
         )
         .map_err(map_oauth_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.register.02"));
         }
         let status = await_fenced(service.register(username, password, display_name), fence)
             .await?
             .map_err(map_oauth_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.register.03"));
         }
         self.state
             .lock()
@@ -1380,7 +1842,9 @@ impl SshSyncExchangeBroker {
         }
         .map_err(map_oauth_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected(
+                "broker.complete_direct_auth.01",
+            ));
         }
         Ok(idle_status(
             profile_id.to_owned(),
@@ -1434,6 +1898,9 @@ impl SshSyncExchangeBroker {
             )
             .await?;
         let Some(remote) = remote else {
+            if !fence() {
+                return Err(BrokerError::OperationRejected("broker.refresh.01"));
+            }
             profile = self
                 .reset_local_remote_state(
                     plugin_id,
@@ -1483,6 +1950,7 @@ impl SshSyncExchangeBroker {
             profile_id,
             &remote,
             &completion_fence,
+            &key,
         )
         .await?;
         profile = next_profile;
@@ -1542,6 +2010,9 @@ impl SshSyncExchangeBroker {
             remote_counts,
         );
         if difference == PluginSshSyncDifferenceState::Equal {
+            if !fence() {
+                return Err(BrokerError::OperationRejected("broker.refresh.02"));
+            }
             let exchange_sha256 = self
                 .persist_baseline_exchange(
                     plugin_id,
@@ -1550,6 +2021,9 @@ impl SshSyncExchangeBroker {
                     &remote.bytes,
                 )
                 .await?;
+            if !fence() {
+                return Err(BrokerError::OperationRejected("broker.refresh.03"));
+            }
             profile = self
                 .profiles
                 .update_remote_baseline(
@@ -1605,7 +2079,7 @@ impl SshSyncExchangeBroker {
             .await
             .map_err(map_selection_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.configure_scope.01"));
         }
         let local = self
             .profiles
@@ -1727,7 +2201,7 @@ impl SshSyncExchangeBroker {
             .await
             .map_err(map_selection_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.reset_remote.01"));
         }
         // The warning can remain open for an arbitrary amount of time. Ask
         // the account service for a fresh token before checking or mutating
@@ -1817,13 +2291,16 @@ impl SshSyncExchangeBroker {
         action_revision: SshSyncActionRevision,
         browser_binding: Option<&SshSyncBrowserCacheBinding>,
         fence: &ActionFence,
+        automatic: bool,
+        conflict_policy: PluginSshSyncConflictPolicy,
+        deletion_policy: PluginSshSyncConflictPolicy,
     ) -> Result<PluginSshSyncStatus, BrokerError> {
         if destination.method != PluginSshSyncHttpMethod::Put
             || destination.if_match.is_some()
             || destination.url != source.url
             || destination.use_oauth != source.use_oauth
         {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.sync.01"));
         }
         let completion_fence = durable_upload_fence(
             &source.url,
@@ -1860,7 +2337,37 @@ impl SshSyncExchangeBroker {
                 fence,
             )
             .await?;
+        if automatic && profile.remote_baseline.is_none() {
+            return Ok(aggregate_status(
+                profile_id,
+                self.account_state(plugin_id, signer_fingerprint_sha256, profile_id),
+                PluginSshSyncOperationState::NeedsReview,
+                &local,
+                None,
+                PluginSshSyncDifferenceState::Different,
+                profile.scope_mode,
+                profile.last_successful_sync_at_unix_ms,
+                remote.as_ref().map(|value| value.http_status),
+                remote.as_ref().map(|value| value.binding.revision),
+                remote.as_ref().map(|value| value.etag.clone()),
+            ));
+        }
         let Some(remote) = remote else {
+            if automatic {
+                return Ok(aggregate_status(
+                    profile_id,
+                    self.account_state(plugin_id, signer_fingerprint_sha256, profile_id),
+                    PluginSshSyncOperationState::NeedsReview,
+                    &local,
+                    Some((0, 0, 0)),
+                    PluginSshSyncDifferenceState::LocalOnly,
+                    profile.scope_mode,
+                    profile.last_successful_sync_at_unix_ms,
+                    Some(StatusCode::NOT_FOUND.as_u16()),
+                    None,
+                    None,
+                ));
+            }
             profile = self
                 .reset_local_remote_state(
                     plugin_id,
@@ -1938,6 +2445,7 @@ impl SshSyncExchangeBroker {
                         fence,
                     ),
                     SyncDirectionReview {
+                        merge_plan: false,
                         restore_handle: restore.handle.clone(),
                         local_desktop_profile_count: local.desktop_profile_count,
                         remote_desktop_profile_count: 0,
@@ -1957,7 +2465,7 @@ impl SshSyncExchangeBroker {
                 .await
                 .map_err(map_selection_error)?;
             if !fence() {
-                return Err(BrokerError::OperationRejected);
+                return Err(BrokerError::OperationRejected("broker.sync.02"));
             }
             let (rechecked, next_revision) = self
                 .fetch_exchange_head(
@@ -2015,6 +2523,9 @@ impl SshSyncExchangeBroker {
                     )
                     .await
                 }
+                SecureSyncDirection::ApplyMerged(_) => {
+                    Err(BrokerError::OperationRejected("broker.sync.03"))
+                }
             };
         };
         let (remote_bundle, profile, key) = self
@@ -2033,6 +2544,7 @@ impl SshSyncExchangeBroker {
             profile_id,
             &remote,
             &completion_fence,
+            &key,
         )
         .await?;
         let remote_counts = (
@@ -2091,6 +2603,9 @@ impl SshSyncExchangeBroker {
             remote_counts,
         );
         if difference == PluginSshSyncDifferenceState::Equal {
+            if !fence() {
+                return Err(BrokerError::OperationRejected("broker.sync.04"));
+            }
             let exchange_sha256 = self
                 .persist_baseline_exchange(
                     plugin_id,
@@ -2099,6 +2614,9 @@ impl SshSyncExchangeBroker {
                     &remote.bytes,
                 )
                 .await?;
+            if !fence() {
+                return Err(BrokerError::OperationRejected("broker.sync.05"));
+            }
             let profile = self
                 .profiles
                 .update_remote_baseline(
@@ -2139,6 +2657,200 @@ impl SshSyncExchangeBroker {
                 Some(remote.etag),
             ));
         }
+        if let Some(base) = base_bundle.as_ref()
+            && base.schema == BundleSchema::V5
+            && local.bundle.schema == BundleSchema::V5
+            && remote_bundle.schema == BundleSchema::V5
+        {
+            if remote.binding.revision >= MAX_EXCHANGE_REVISION {
+                return Err(BrokerError::StateConflict);
+            }
+            let resolution = (conflict_policy == PluginSshSyncConflictPolicy::Newest)
+                .then_some(BundleConflictResolution::Newest);
+            let deletion_resolution = (deletion_policy == PluginSshSyncConflictPolicy::Newest)
+                .then_some(BundleConflictResolution::Newest);
+            let needs_review = |count| {
+                let mut status = aggregate_status(
+                    profile_id,
+                    self.account_state(plugin_id, signer_fingerprint_sha256, profile_id),
+                    PluginSshSyncOperationState::NeedsReview,
+                    &local,
+                    Some(remote_counts),
+                    PluginSshSyncDifferenceState::Conflict,
+                    profile.scope_mode,
+                    profile.last_successful_sync_at_unix_ms,
+                    Some(remote.http_status),
+                    Some(remote.binding.revision),
+                    Some(remote.etag.clone()),
+                );
+                status.conflict_count = count;
+                status
+            };
+            let mut merged = match merge_bundles_three_way_with_policies(
+                base,
+                &local.bundle,
+                &remote_bundle,
+                remote.binding.revision + 1,
+                resolution,
+                deletion_resolution,
+            ) {
+                Ok(value) => value,
+                Err(_) => return Ok(needs_review(1)),
+            };
+            if let BundleMergeOutcome::Conflicts { count } = &merged
+                && !automatic
+            {
+                let report = difference::compare_bundles(&local.bundle, &remote_bundle);
+                let side = self
+                    .secure_ui
+                    .choose_conflict_side(
+                        self.secure_context(
+                            plugin_id,
+                            signer_fingerprint_sha256,
+                            profile_id,
+                            Some(remote.remote_origin.clone()),
+                            fence,
+                        ),
+                        SyncConflictReview {
+                            local_desktop_profile_count: local.desktop_profile_count,
+                            remote_desktop_profile_count: remote_counts.2,
+                            local_host_count: local.host_count,
+                            local_credential_count: local.credential_count,
+                            remote_host_count: remote_counts.0,
+                            remote_credential_count: remote_counts.1,
+                            conflict_count: *count,
+                            local_compared_at_unix_ms: crate::time::unix_time_ms(),
+                            remote_updated_at_unix_ms: remote.remote_updated_at_unix_ms,
+                            differences: report.differences,
+                            difference_total_count: report.total_count,
+                            difference_omitted_count: report.omitted_count,
+                        },
+                    )
+                    .await
+                    .map_err(map_selection_error)?;
+                if !fence() {
+                    return Err(BrokerError::OperationRejected("broker.sync.06"));
+                }
+                merged = match merge_bundles_three_way_with_policies(
+                    base,
+                    &local.bundle,
+                    &remote_bundle,
+                    remote.binding.revision + 1,
+                    Some(side),
+                    Some(side),
+                ) {
+                    Ok(value) => value,
+                    Err(_) => return Ok(needs_review(1)),
+                };
+            }
+            match merged {
+                BundleMergeOutcome::Merged(merged) => {
+                    return self
+                        .sync_merged_bundle(
+                            plugin_id,
+                            signer_fingerprint_sha256,
+                            profile_id,
+                            source_for_recheck,
+                            destination,
+                            action_revision,
+                            browser_binding,
+                            fence,
+                            automatic,
+                            deletion_policy,
+                            local,
+                            profile,
+                            remote,
+                            remote_counts,
+                            key,
+                            base.clone(),
+                            local_sha256,
+                            *merged,
+                        )
+                        .await;
+                }
+                BundleMergeOutcome::Conflicts { count } => {
+                    return Ok(needs_review(count));
+                }
+            }
+        }
+        if automatic {
+            let safe_upload = automatic_upload_safe(
+                profile.remote_baseline.as_ref(),
+                base_bundle.as_ref(),
+                &local.bundle,
+                &remote_bundle,
+                remote.binding.revision,
+                &remote.etag,
+                &remote_sha256,
+            );
+            if !safe_upload {
+                return Ok(aggregate_status(
+                    profile_id,
+                    self.account_state(plugin_id, signer_fingerprint_sha256, profile_id),
+                    PluginSshSyncOperationState::NeedsReview,
+                    &local,
+                    Some(remote_counts),
+                    difference,
+                    profile.scope_mode,
+                    profile.last_successful_sync_at_unix_ms,
+                    Some(remote.http_status),
+                    Some(remote.binding.revision),
+                    Some(remote.etag),
+                ));
+            }
+            let rechecked_remote = self
+                .fetch_exchange(
+                    plugin_id,
+                    signer_fingerprint_sha256,
+                    profile_id,
+                    source_for_recheck,
+                    fence,
+                )
+                .await?
+                .ok_or(BrokerError::StateConflict)?;
+            ensure_same_remote(&remote, &rechecked_remote)?;
+            let mut fresh_local = self
+                .profiles
+                .snapshot_current(
+                    plugin_id.to_owned(),
+                    signer_fingerprint_sha256.to_owned(),
+                    profile_id.to_owned(),
+                    1,
+                )
+                .await
+                .map_err(map_store_error)?;
+            if let Some(base) = base_bundle {
+                fresh_local.bundle = self
+                    .profiles
+                    .prepare_local_merge(
+                        plugin_id.to_owned(),
+                        signer_fingerprint_sha256.to_owned(),
+                        profile_id.to_owned(),
+                        base,
+                        fresh_local.bundle,
+                    )
+                    .await
+                    .map_err(map_store_error)?;
+            }
+            if portable_content_sha256(&fresh_local.bundle, &key)? != local_sha256 {
+                return Err(BrokerError::StateConflict);
+            }
+            return self
+                .push_local(
+                    plugin_id,
+                    signer_fingerprint_sha256,
+                    profile_id,
+                    fresh_local,
+                    profile,
+                    destination,
+                    Some(rechecked_remote),
+                    1,
+                    action_revision,
+                    browser_binding,
+                    fence,
+                )
+                .await;
+        }
         let report = difference::compare_bundles(&local.bundle, &remote_bundle);
         let restore = self
             .profiles
@@ -2170,6 +2882,7 @@ impl SshSyncExchangeBroker {
                     fence,
                 ),
                 SyncDirectionReview {
+                    merge_plan: false,
                     restore_handle: restore.handle.clone(),
                     local_desktop_profile_count: local.desktop_profile_count,
                     remote_desktop_profile_count: remote_counts.2,
@@ -2189,7 +2902,7 @@ impl SshSyncExchangeBroker {
             .await
             .map_err(map_selection_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.sync.07"));
         }
         let rechecked_remote = self
             .fetch_exchange(
@@ -2260,7 +2973,301 @@ impl SshSyncExchangeBroker {
                 )
                 .await
             }
+            SecureSyncDirection::ApplyMerged(_) => {
+                Err(BrokerError::OperationRejected("broker.sync.08"))
+            }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn sync_merged_bundle(
+        &self,
+        plugin_id: &str,
+        signer_fingerprint_sha256: &str,
+        profile_id: &str,
+        source: PluginSshSyncDownloadSource,
+        destination: PluginSshSyncUploadTarget,
+        action_revision: SshSyncActionRevision,
+        browser_binding: Option<&SshSyncBrowserCacheBinding>,
+        fence: &ActionFence,
+        automatic: bool,
+        deletion_policy: PluginSshSyncConflictPolicy,
+        local: PortableSnapshot,
+        profile: PortableProfileState,
+        remote: DownloadedExchange,
+        remote_counts: (u32, u32, u32),
+        key: SyncKey,
+        base: PortableBundleV1,
+        local_sha256: String,
+        merged: PortableBundleV1,
+    ) -> Result<PluginSshSyncStatus, BrokerError> {
+        let old_tombstones = base
+            .tombstones
+            .iter()
+            .map(|value| (value.kind, value.id))
+            .collect::<BTreeSet<_>>();
+        let merged_sha256 = portable_content_sha256(&merged, &key)?;
+        let staged_bundle = difference::with_tombstones_for_missing(&merged, &local.bundle)
+            .map_err(|_| BrokerError::RemoteDataInvalid)?;
+        let merged_tombstones = merged
+            .tombstones
+            .iter()
+            .map(|value| (value.kind, value.id))
+            .collect::<BTreeSet<_>>();
+        if staged_bundle
+            .tombstones
+            .iter()
+            .any(|value| !merged_tombstones.contains(&(value.kind, value.id)))
+        {
+            return Err(BrokerError::StateConflict);
+        }
+        let restore = self
+            .profiles
+            .stage_restore(
+                plugin_id.to_owned(),
+                signer_fingerprint_sha256.to_owned(),
+                profile_id.to_owned(),
+                staged_bundle.clone(),
+                key.clone(),
+            )
+            .await
+            .map_err(map_store_error)?;
+        let _restore_cleanup = StagedRestoreCleanup {
+            profiles: Arc::clone(&self.profiles),
+            handle: restore.handle.clone(),
+        };
+        let mut deleted_ids = merged
+            .tombstones
+            .iter()
+            .filter(|value| !old_tombstones.contains(&(value.kind, value.id)))
+            .map(|value| (value.kind, value.id))
+            .collect::<BTreeSet<_>>();
+        deleted_ids.extend(
+            difference::object_keys(&local.bundle)
+                .difference(&difference::object_keys(&staged_bundle))
+                .copied(),
+        );
+        let delete_count = bounded_count(deleted_ids.len())?.max(restore.delete_count);
+        let deletion_needs_prompt =
+            delete_count > 0 && deletion_policy == PluginSshSyncConflictPolicy::Prompt;
+        if automatic && deletion_needs_prompt {
+            return Ok(aggregate_status(
+                profile_id,
+                self.account_state(plugin_id, signer_fingerprint_sha256, profile_id),
+                PluginSshSyncOperationState::NeedsReview,
+                &local,
+                Some(remote_counts),
+                PluginSshSyncDifferenceState::Conflict,
+                profile.scope_mode,
+                profile.last_successful_sync_at_unix_ms,
+                Some(remote.http_status),
+                Some(remote.binding.revision),
+                Some(remote.etag),
+            ));
+        }
+        if restore.conflict_count > 0 {
+            return Ok(aggregate_status(
+                profile_id,
+                self.account_state(plugin_id, signer_fingerprint_sha256, profile_id),
+                PluginSshSyncOperationState::NeedsReview,
+                &local,
+                Some(remote_counts),
+                PluginSshSyncDifferenceState::Conflict,
+                profile.scope_mode,
+                profile.last_successful_sync_at_unix_ms,
+                Some(remote.http_status),
+                Some(remote.binding.revision),
+                Some(remote.etag),
+            ));
+        }
+        let merge_approval = if deletion_needs_prompt {
+            let report = difference::compare_bundles(&base, &merged);
+            let direction = self
+                .secure_ui
+                .choose_sync_direction(
+                    self.secure_context(
+                        plugin_id,
+                        signer_fingerprint_sha256,
+                        profile_id,
+                        Some(remote.remote_origin.clone()),
+                        fence,
+                    ),
+                    SyncDirectionReview {
+                        merge_plan: true,
+                        restore_handle: restore.handle.clone(),
+                        local_desktop_profile_count: bounded_count(
+                            base.objects.desktop_profiles.len(),
+                        )?,
+                        remote_desktop_profile_count: bounded_count(
+                            merged.objects.desktop_profiles.len(),
+                        )?,
+                        local_host_count: bounded_count(base.objects.hosts.len())?,
+                        local_credential_count: bounded_count(base.objects.credentials.len())?,
+                        remote_host_count: bounded_count(merged.objects.hosts.len())?,
+                        remote_credential_count: bounded_count(merged.objects.credentials.len())?,
+                        conflict_count: report.changed_count,
+                        delete_count,
+                        local_compared_at_unix_ms: crate::time::unix_time_ms(),
+                        remote_updated_at_unix_ms: remote.remote_updated_at_unix_ms,
+                        differences: report.differences,
+                        difference_total_count: report.total_count,
+                        difference_omitted_count: report.omitted_count,
+                    },
+                )
+                .await
+                .map_err(map_selection_error)?;
+            match direction {
+                SecureSyncDirection::ApplyMerged(approval) => Some(approval),
+                _ => {
+                    return Err(BrokerError::OperationRejected(
+                        "broker.sync_merged_bundle.01",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        if !fence() {
+            return Err(BrokerError::OperationRejected(
+                "broker.sync_merged_bundle.02",
+            ));
+        }
+        let rechecked_remote = self
+            .fetch_exchange(
+                plugin_id,
+                signer_fingerprint_sha256,
+                profile_id,
+                source,
+                fence,
+            )
+            .await?
+            .ok_or(BrokerError::StateConflict)?;
+        ensure_same_remote(&remote, &rechecked_remote)?;
+        let mut fresh_local = self
+            .profiles
+            .snapshot_current(
+                plugin_id.to_owned(),
+                signer_fingerprint_sha256.to_owned(),
+                profile_id.to_owned(),
+                merged.revision,
+            )
+            .await
+            .map_err(map_store_error)?;
+        fresh_local.bundle = self
+            .profiles
+            .prepare_local_merge(
+                plugin_id.to_owned(),
+                signer_fingerprint_sha256.to_owned(),
+                profile_id.to_owned(),
+                base,
+                fresh_local.bundle,
+            )
+            .await
+            .map_err(map_store_error)?;
+        if portable_content_sha256(&fresh_local.bundle, &key)? != local_sha256 {
+            return Err(BrokerError::StateConflict);
+        }
+        if merged_sha256 != local_sha256 || merge_approval.is_some() {
+            if let Some(approval) = merge_approval {
+                self.profiles
+                    .apply_staged_restore(
+                        plugin_id.to_owned(),
+                        signer_fingerprint_sha256.to_owned(),
+                        profile_id.to_owned(),
+                        restore.handle.clone(),
+                        Some(approval),
+                    )
+                    .await
+                    .map_err(map_store_error)?;
+            } else {
+                self.profiles
+                    .apply_verified_merge(
+                        plugin_id.to_owned(),
+                        signer_fingerprint_sha256.to_owned(),
+                        profile_id.to_owned(),
+                        restore.handle.clone(),
+                        VerifiedAutomaticMergeApproval::new(&staged_bundle)?,
+                        Arc::clone(fence),
+                    )
+                    .await
+                    .map_err(map_store_error)?;
+            }
+            if !fence() {
+                return Err(BrokerError::OperationRejected(
+                    "broker.sync_merged_bundle.03",
+                ));
+            }
+            // Renderer preferences are committed by an explicit ACK. Keep the
+            // remote baseline and pending upload untouched until that ACK, so
+            // a later sync can recompute the same merge from the old baseline.
+            if self
+                .profiles
+                .has_pending_preferences()
+                .await
+                .map_err(map_store_error)?
+            {
+                return Ok(aggregate_status(
+                    profile_id,
+                    self.account_state(plugin_id, signer_fingerprint_sha256, profile_id),
+                    PluginSshSyncOperationState::NeedsReview,
+                    &local,
+                    Some(remote_counts),
+                    PluginSshSyncDifferenceState::Conflict,
+                    profile.scope_mode,
+                    profile.last_successful_sync_at_unix_ms,
+                    Some(remote.http_status),
+                    Some(remote.binding.revision),
+                    Some(remote.etag),
+                ));
+            }
+            fresh_local = self
+                .profiles
+                .snapshot_current(
+                    plugin_id.to_owned(),
+                    signer_fingerprint_sha256.to_owned(),
+                    profile_id.to_owned(),
+                    merged.revision,
+                )
+                .await
+                .map_err(map_store_error)?;
+            fresh_local.bundle = self
+                .profiles
+                .prepare_local_merge(
+                    plugin_id.to_owned(),
+                    signer_fingerprint_sha256.to_owned(),
+                    profile_id.to_owned(),
+                    merged,
+                    fresh_local.bundle,
+                )
+                .await
+                .map_err(map_store_error)?;
+            if portable_content_sha256(&fresh_local.bundle, &key)? != merged_sha256 {
+                return Err(BrokerError::StateConflict);
+            }
+        }
+        let profile = self
+            .profiles
+            .profile_state(
+                plugin_id.to_owned(),
+                signer_fingerprint_sha256.to_owned(),
+                profile_id.to_owned(),
+            )
+            .await
+            .map_err(map_store_error)?;
+        self.push_local(
+            plugin_id,
+            signer_fingerprint_sha256,
+            profile_id,
+            fresh_local,
+            profile,
+            destination,
+            Some(rechecked_remote),
+            1,
+            action_revision,
+            browser_binding,
+            fence,
+        )
+        .await
     }
 
     async fn fetch_exchange(
@@ -2321,38 +3328,38 @@ impl SshSyncExchangeBroker {
             eprintln!("provider exchange uses an unsupported legacy format");
             return Err(BrokerError::RemoteFormatUnsupported);
         }
-        let (binding, _) =
-            inspect_plugin_exchange_owner(&bytes, plugin_id, signer_fingerprint_sha256, profile_id)
-                .map_err(|error| {
-                    let wire_kind = serde_json::from_slice::<serde_json::Value>(&bytes)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .get("format")
-                                .and_then(serde_json::Value::as_str)
-                                .map(|format| match format {
-                                    "norishell-ssh-vault-exchange-v2" => {
-                                        "legacy-vault-v2".to_owned()
-                                    }
-                                    "norishell-ssh-vault-exchange-v3" => "vault-v3".to_owned(),
-                                    "norishell-ssh-sync-exchange-v2" => "password-v2".to_owned(),
-                                    _ if format.len() <= 96
-                                        && format.bytes().all(|byte| {
-                                            byte.is_ascii_alphanumeric()
-                                                || matches!(byte, b'-' | b'_' | b'.' | b':')
-                                        }) =>
-                                    {
-                                        format.to_owned()
-                                    }
-                                    _ => "unknown-json".to_owned(),
-                                })
-                        })
-                        .unwrap_or_else(|| "not-json".to_owned());
-                    eprintln!(
-                        "provider exchange ownership validation failed ({wire_kind}): {error}"
-                    );
-                    BrokerError::RemoteDataInvalid
-                })?;
+        let (binding, _) = inspect_plugin_exchange_data_owner(&bytes, plugin_id, profile_id)
+            .map_err(|error| {
+                let wire_kind = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("format")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|format| match format {
+                                "norishell-ssh-vault-exchange-v2" => "legacy-vault-v2".to_owned(),
+                                "norishell-ssh-vault-exchange-v3" => "vault-v3".to_owned(),
+                                "norishell-ssh-sync-exchange-v2" => "password-v2".to_owned(),
+                                _ if format.len() <= 96
+                                    && format.bytes().all(|byte| {
+                                        byte.is_ascii_alphanumeric()
+                                            || matches!(byte, b'-' | b'_' | b'.' | b':')
+                                    }) =>
+                                {
+                                    format.to_owned()
+                                }
+                                _ => "unknown-json".to_owned(),
+                            })
+                    })
+                    .unwrap_or_else(|| "not-json".to_owned());
+                eprintln!("provider exchange ownership validation failed ({wire_kind}): {error}");
+                BrokerError::RemoteDataInvalid
+            })?;
+        if !self.data_owner_sha256.is_empty()
+            && binding.signer_fingerprint_sha256 != self.data_owner_sha256
+        {
+            return Err(BrokerError::StateConflict);
+        }
         if header_revision != Some(binding.revision) {
             eprintln!("provider exchange revision header did not match its authenticated body");
             return Err(BrokerError::RemoteDataInvalid);
@@ -2377,6 +3384,7 @@ impl SshSyncExchangeBroker {
         profile_id: &str,
         remote: &DownloadedExchange,
         expected_fence: &DurableUploadFence,
+        key: &SyncKey,
     ) -> Result<(), BrokerError> {
         let Some(attempt) = self
             .profiles
@@ -2393,11 +3401,14 @@ impl SshSyncExchangeBroker {
         if !upload_attempt_matches_fence(&attempt, expected_fence) {
             return Err(BrokerError::StateConflict);
         }
+        open_plugin_exchange_with_key(&remote.bytes, key, &remote.binding)
+            .map_err(|_| BrokerError::RemoteDataInvalid)?;
         let remote_body_sha256 = sha256_hex(&remote.bytes);
         let Some(proof) = authenticated_upload_completion_proof(
             &attempt,
             remote.binding.revision,
             &remote_body_sha256,
+            Some(&remote.etag),
         ) else {
             return Ok(());
         };
@@ -2436,7 +3447,7 @@ impl SshSyncExchangeBroker {
                     &binding.secret_ref_id,
                     norishell_secret_vault::SecretKind::SshSyncKey,
                 )
-                .map_err(|_| BrokerError::OperationRejected)?;
+                .map_err(|_| BrokerError::LocalKeyUnavailable)?;
             let bytes: [u8; 32] = value
                 .expose()
                 .try_into()
@@ -2447,15 +3458,30 @@ impl SshSyncExchangeBroker {
             return Ok((bundle, profile, key));
         }
 
-        let local_material = self
-            .vault
-            .export_sync_key_material()
-            .map_err(|_| BrokerError::OperationRejected)?;
-        let local_key = SyncKey::from_bytes(*local_material.key_bytes());
-        let (bundle, key) =
+        // Owner authentication and import share one invocation. Reuse its key
+        // only for the exact authenticated ciphertext, never across actions.
+        let (bundle, key) = if let Some((digest, key)) = &self.authenticated_remote_key {
+            if !fence() || !self.vault.is_unlocked() {
+                return Err(BrokerError::RecoveryActionExpired);
+            }
+            if digest != &sha256_hex(&remote.bytes) {
+                return Err(BrokerError::StateConflict);
+            }
+            let bundle = open_plugin_exchange_with_key(&remote.bytes, key, &remote.binding)
+                .map_err(|_| BrokerError::RemoteDataInvalid)?;
+            (bundle, key.clone())
+        } else {
+            let local_material = self
+                .vault
+                .export_sync_key_material()
+                .map_err(|_| BrokerError::LocalKeyUnavailable)?;
+            let local_key = SyncKey::from_bytes(*local_material.key_bytes());
             match open_plugin_exchange_with_key(&remote.bytes, &local_key, &remote.binding) {
                 Ok(bundle) => (bundle, local_key),
                 Err(_) => {
+                    if self.background {
+                        return Err(BrokerError::InteractionRequired);
+                    }
                     let password = self
                         .secure_ui
                         .vault_password(self.secure_context(
@@ -2468,19 +3494,20 @@ impl SshSyncExchangeBroker {
                         .await
                         .map_err(map_selection_error)?;
                     if !fence() {
-                        return Err(BrokerError::OperationRejected);
+                        return Err(BrokerError::RecoveryActionExpired);
                     }
                     let material = self
                         .vault
                         .open_synchronized_key_material(&envelope, password.as_slice())
-                        .map_err(|_| BrokerError::OperationRejected)?;
+                        .map_err(map_sync_key_recovery_error)?;
                     let key = SyncKey::from_bytes(*material.key_bytes());
                     let bundle =
                         open_plugin_exchange_with_key(&remote.bytes, &key, &remote.binding)
                             .map_err(|_| BrokerError::RemoteDataInvalid)?;
                     (bundle, key)
                 }
-            };
+            }
+        };
         let secret_ref_id = new_secret_ref_id()?;
         profile = self
             .profiles
@@ -2512,7 +3539,7 @@ impl SshSyncExchangeBroker {
                     &binding.secret_ref_id,
                     norishell_secret_vault::SecretKind::SshSyncKey,
                 )
-                .map_err(|_| BrokerError::OperationRejected)?;
+                .map_err(|_| BrokerError::LocalKeyUnavailable)?;
             let bytes: [u8; 32] = value
                 .expose()
                 .try_into()
@@ -2526,7 +3553,7 @@ impl SshSyncExchangeBroker {
         let material = self
             .vault
             .export_sync_key_material()
-            .map_err(|_| BrokerError::OperationRejected)?;
+            .map_err(|_| BrokerError::LocalKeyUnavailable)?;
         let key = SyncKey::from_bytes(*material.key_bytes());
         let envelope = material.envelope().to_vec();
         profile = self
@@ -2640,11 +3667,14 @@ impl SshSyncExchangeBroker {
             if !upload_attempt_matches_fence(attempt, &completion_fence) {
                 return Err(BrokerError::StateConflict);
             }
+            open_plugin_exchange_with_key(&remote.bytes, &key, &remote.binding)
+                .map_err(|_| BrokerError::RemoteDataInvalid)?;
             let remote_body_sha256 = sha256_hex(&remote.bytes);
             let proof = authenticated_upload_completion_proof(
                 attempt,
                 remote.binding.revision,
                 &remote_body_sha256,
+                Some(&remote.etag),
             );
             if let Some(proof) = proof {
                 self.profiles
@@ -2701,7 +3731,7 @@ impl SshSyncExchangeBroker {
             (bytes, attempt)
         } else {
             let bytes = create_plugin_exchange_with_key(&local.bundle, &key, &envelope, &binding)
-                .map_err(|_| BrokerError::Internal)?;
+                .map_err(|_| BrokerError::Internal("broker.push_local.internal01"))?;
             let body_sha256 = self
                 .persist_baseline_exchange(plugin_id, signer_fingerprint_sha256, profile_id, &bytes)
                 .await?;
@@ -2778,8 +3808,13 @@ impl SshSyncExchangeBroker {
                 )
                 .await??
                 .ok_or(BrokerError::StateConflict)?;
-                let (_, current_etag, current_revision, _remote_updated_at_unix_ms, current_bytes) =
-                    current;
+                let (
+                    current_http_status,
+                    current_etag,
+                    current_revision,
+                    current_updated_at_unix_ms,
+                    current_bytes,
+                ) = current;
                 let current_etag = current_etag
                     .filter(|value| valid_strong_etag(value))
                     .ok_or(BrokerError::RemoteDataInvalid)?;
@@ -2791,10 +3826,28 @@ impl SshSyncExchangeBroker {
                     profile_id,
                 )
                 .map_err(|_| BrokerError::RemoteDataInvalid)?;
-                if current_revision != Some(current_binding.revision)
-                    || current_binding.revision != prior.binding.revision
+                if current_revision != Some(current_binding.revision) {
+                    return Err(BrokerError::RemoteDataInvalid);
+                }
+                if current_binding.revision != prior.binding.revision
                     || current_bytes != prior.bytes
                 {
+                    self.reconcile_upload_attempt_with_remote(
+                        plugin_id,
+                        signer_fingerprint_sha256,
+                        profile_id,
+                        &DownloadedExchange {
+                            http_status: current_http_status,
+                            remote_origin: origin(&url),
+                            etag: current_etag,
+                            remote_updated_at_unix_ms: current_updated_at_unix_ms,
+                            binding: current_binding,
+                            bytes: current_bytes,
+                        },
+                        &completion_fence,
+                        &key,
+                    )
+                    .await?;
                     return Err(BrokerError::StateConflict);
                 }
                 destination.if_match = Some(current_etag);
@@ -2897,7 +3950,9 @@ impl SshSyncExchangeBroker {
             return Err(BrokerError::StateConflict);
         }
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected(
+                "broker.apply_absent_remote.01",
+            ));
         }
         self.profiles
             .apply_staged_restore(
@@ -2910,7 +3965,9 @@ impl SshSyncExchangeBroker {
             .await
             .map_err(map_store_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected(
+                "broker.apply_absent_remote.02",
+            ));
         }
         let mut local = self
             .profiles
@@ -2978,7 +4035,7 @@ impl SshSyncExchangeBroker {
         fence: &ActionFence,
     ) -> Result<PluginSshSyncStatus, BrokerError> {
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.pull_remote.01"));
         }
         if preview.conflict_count > 0 {
             let local = self
@@ -3010,10 +4067,10 @@ impl SshSyncExchangeBroker {
             ));
         }
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.pull_remote.02"));
         }
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.pull_remote.03"));
         }
         self.profiles
             .apply_staged_restore(
@@ -3026,7 +4083,7 @@ impl SshSyncExchangeBroker {
             .await
             .map_err(map_store_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.pull_remote.04"));
         }
         let mut local = self
             .profiles
@@ -3124,7 +4181,7 @@ impl SshSyncExchangeBroker {
             .await?
             .map_err(map_oauth_error)?;
         if !fence() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.logout.01"));
         }
         self.state
             .lock()
@@ -3149,16 +4206,21 @@ impl SshSyncExchangeBroker {
         if !required {
             return Ok(None);
         }
+        let package_signer = if self.package_signer_sha256.is_empty() {
+            signer_fingerprint_sha256
+        } else {
+            &self.package_signer_sha256
+        };
         let service = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .oauth
-            .get(&namespace(plugin_id, signer_fingerprint_sha256, profile_id))
+            .get(&namespace(plugin_id, package_signer, profile_id))
             .cloned()
             .ok_or(BrokerError::AuthorizationExpired)?;
         if !service.allows_resource_url(target_url) {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.token_for.01"));
         }
         await_fenced(service.access_token(), fence)
             .await?
@@ -3175,7 +4237,7 @@ impl SshSyncExchangeBroker {
         expected_next_revision: Option<u64>,
     ) -> Result<(u16, Option<String>, Option<u64>), BrokerError> {
         if Uuid::parse_str(idempotency_key).is_err() {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.upload.01"));
         }
         let url = sync_url(&target.url)?;
         let mut request = match target.method {
@@ -3189,7 +4251,7 @@ impl SshSyncExchangeBroker {
             && let Some(revision) = expected_next_revision
         {
             if !(1..=MAX_EXCHANGE_REVISION).contains(&revision) {
-                return Err(BrokerError::OperationRejected);
+                return Err(BrokerError::OperationRejected("broker.upload.02"));
             }
             request = request.header("X-NoriShell-Expected-Next-Revision", revision.to_string());
         }
@@ -3198,7 +4260,7 @@ impl SshSyncExchangeBroker {
         }
         if let Some(etag) = target.if_match {
             if !valid_etag(&etag) {
-                return Err(BrokerError::OperationRejected);
+                return Err(BrokerError::OperationRejected("broker.upload.03"));
             }
             request = request.header(IF_MATCH, etag);
         }
@@ -3237,7 +4299,7 @@ impl SshSyncExchangeBroker {
         idempotency_key: &str,
     ) -> Result<u16, BrokerError> {
         if Uuid::parse_str(idempotency_key).is_err() || !valid_strong_etag(etag) {
-            return Err(BrokerError::OperationRejected);
+            return Err(BrokerError::OperationRejected("broker.delete_remote.01"));
         }
         let url = sync_url(&target.url)?;
         for attempt in 0..2 {
@@ -3336,15 +4398,38 @@ impl SshSyncExchangeBroker {
         signer_fingerprint_sha256: &str,
         profile_id: &str,
     ) -> PluginSshSyncAccountState {
+        let package_signer = if self.package_signer_sha256.is_empty() {
+            signer_fingerprint_sha256
+        } else {
+            &self.package_signer_sha256
+        };
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .oauth
-            .get(&namespace(plugin_id, signer_fingerprint_sha256, profile_id))
+            .get(&namespace(plugin_id, package_signer, profile_id))
             .map_or(PluginSshSyncAccountState::Disconnected, |oauth| {
                 account_state(oauth.status().account_state)
             })
     }
+}
+
+fn reuse_or_restore_credential_service(
+    oauth: &mut BTreeMap<String, PluginOAuthService>,
+    key: &str,
+    app_data_directory: &Path,
+    vault: &crate::vault_service::VaultService,
+    configuration: PluginOAuthConfiguration,
+) -> Result<bool, NativeAuthError> {
+    if oauth
+        .get(key)
+        .is_some_and(|service| service.matches_configuration(&configuration))
+    {
+        return Ok(false);
+    }
+    let service = PluginOAuthService::start(app_data_directory, vault.clone(), configuration)?;
+    oauth.insert(key.to_owned(), service);
+    Ok(true)
 }
 
 fn baseline_exchange_path(
@@ -3359,7 +4444,9 @@ fn baseline_exchange_path(
         || !valid_identifier(profile_id, 160)
         || !valid_sha256(exchange_sha256)
     {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected(
+            "broker.baseline_exchange_path.01",
+        ));
     }
     let plugin_hash = sha256_hex(plugin_id.as_bytes());
     let owner_hash =
@@ -3388,8 +4475,11 @@ fn persist_baseline_exchange_file(
         profile_id,
         &exchange_sha256,
     )?;
-    let parent = path.parent().ok_or(BrokerError::Internal)?;
-    fs::create_dir_all(parent).map_err(|_| BrokerError::Internal)?;
+    let parent = path.parent().ok_or(BrokerError::Internal(
+        "broker.persist_baseline_exchange_file.internal01",
+    ))?;
+    fs::create_dir_all(parent)
+        .map_err(|_| BrokerError::Internal("broker.persist_baseline_exchange_file.internal02"))?;
     set_private_directory_permissions(parent)?;
     if path.exists() {
         let existing = read_baseline_file(&path)?;
@@ -3415,7 +4505,9 @@ fn persist_baseline_exchange_file(
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&temporary);
-        return Err(BrokerError::Internal);
+        return Err(BrokerError::Internal(
+            "broker.persist_baseline_exchange_file.internal03",
+        ));
     }
     match fs::rename(&temporary, &path) {
         Ok(()) => {}
@@ -3427,7 +4519,9 @@ fn persist_baseline_exchange_file(
         }
         Err(_) => {
             let _ = fs::remove_file(&temporary);
-            return Err(BrokerError::Internal);
+            return Err(BrokerError::Internal(
+                "broker.persist_baseline_exchange_file.internal04",
+            ));
         }
     }
     sync_directory(parent)?;
@@ -3436,7 +4530,9 @@ fn persist_baseline_exchange_file(
 
 fn remove_plugin_baseline_files(root: &Path, plugin_id: &str) -> Result<(), BrokerError> {
     if !valid_identifier(plugin_id, 160) {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected(
+            "broker.remove_plugin_baseline_files.01",
+        ));
     }
     let directory = root
         .join("ssh-sync-baselines")
@@ -3444,7 +4540,9 @@ fn remove_plugin_baseline_files(root: &Path, plugin_id: &str) -> Result<(), Brok
     match fs::remove_dir_all(&directory) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(BrokerError::Internal),
+        Err(_) => Err(BrokerError::Internal(
+            "broker.remove_plugin_baseline_files.internal01",
+        )),
     }
 }
 
@@ -3458,7 +4556,9 @@ fn remove_profile_baseline_files(
         || !valid_sha256(signer_fingerprint_sha256)
         || !valid_identifier(profile_id, 160)
     {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected(
+            "broker.remove_profile_baseline_files.01",
+        ));
     }
     let directory = root
         .join("ssh-sync-baselines")
@@ -3470,10 +4570,16 @@ fn remove_profile_baseline_files(
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(BrokerError::Internal),
+        Err(_) => {
+            return Err(BrokerError::Internal(
+                "broker.remove_profile_baseline_files.internal01",
+            ));
+        }
     };
     for entry in entries {
-        let entry = entry.map_err(|_| BrokerError::Internal)?;
+        let entry = entry.map_err(|_| {
+            BrokerError::Internal("broker.remove_profile_baseline_files.internal02")
+        })?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -3481,11 +4587,17 @@ fn remove_profile_baseline_files(
         if !name.starts_with(&prefix) || !name.ends_with(".exchange") {
             continue;
         }
-        let file_type = entry.file_type().map_err(|_| BrokerError::Internal)?;
+        let file_type = entry.file_type().map_err(|_| {
+            BrokerError::Internal("broker.remove_profile_baseline_files.internal03")
+        })?;
         if !(file_type.is_file() || file_type.is_symlink()) {
-            return Err(BrokerError::Internal);
+            return Err(BrokerError::Internal(
+                "broker.remove_profile_baseline_files.internal04",
+            ));
         }
-        fs::remove_file(entry.path()).map_err(|_| BrokerError::Internal)?;
+        fs::remove_file(entry.path()).map_err(|_| {
+            BrokerError::Internal("broker.remove_profile_baseline_files.internal05")
+        })?;
     }
     sync_directory(&directory)
 }
@@ -3515,15 +4627,17 @@ fn read_baseline_file(path: &Path) -> Result<Vec<u8>, BrokerError> {
     let file = OpenOptions::new()
         .read(true)
         .open(path)
-        .map_err(|_| BrokerError::Internal)?;
-    let metadata = file.metadata().map_err(|_| BrokerError::Internal)?;
+        .map_err(|_| BrokerError::Internal("broker.read_baseline_file.internal01"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| BrokerError::Internal("broker.read_baseline_file.internal02"))?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_DOWNLOAD_BYTES as u64 {
         return Err(BrokerError::RemoteDataInvalid);
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_DOWNLOAD_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| BrokerError::Internal)?;
+        .map_err(|_| BrokerError::Internal("broker.read_baseline_file.internal03"))?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
         return Err(BrokerError::RemoteDataInvalid);
     }
@@ -3533,7 +4647,8 @@ fn read_baseline_file(path: &Path) -> Result<Vec<u8>, BrokerError> {
 #[cfg(unix)]
 fn set_private_directory_permissions(path: &Path) -> Result<(), BrokerError> {
     use std::os::unix::fs::PermissionsExt as _;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| BrokerError::Internal)
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|_| BrokerError::Internal("broker.set_private_directory_permissions.internal01"))
 }
 
 #[cfg(not(unix))]
@@ -3547,7 +4662,7 @@ fn sync_directory(path: &Path) -> Result<(), BrokerError> {
         .read(true)
         .open(path)
         .and_then(|directory| directory.sync_all())
-        .map_err(|_| BrokerError::Internal)
+        .map_err(|_| BrokerError::Internal("broker.sync_directory.internal01"))
 }
 
 #[cfg(not(unix))]
@@ -3585,11 +4700,14 @@ where
 {
     tokio::pin!(future);
     loop {
+        if !fence() {
+            return Err(BrokerError::OperationRejected("broker.await_fenced.01"));
+        }
         tokio::select! {
             result = &mut future => return Ok(result),
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 if !fence() {
-                    return Err(BrokerError::OperationRejected);
+                    return Err(BrokerError::OperationRejected("broker.await_fenced.02"));
                 }
             }
         }
@@ -3610,7 +4728,9 @@ fn credential_configuration(
     resource_origins.sort();
     resource_origins.dedup();
     if resource_origins.is_empty() || resource_origins.len() > 16 {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected(
+            "broker.credential_configuration.01",
+        ));
     }
     let login_url = sync_url(&profile.login_url)?;
     Ok(PluginOAuthConfiguration {
@@ -3638,9 +4758,11 @@ fn credential_field<'a>(
         .iter()
         .filter(|field| field.field_id == *field_id)
         .map(|field| field.value.as_str());
-    let value = matches.next().ok_or(BrokerError::OperationRejected)?;
+    let value = matches
+        .next()
+        .ok_or(BrokerError::OperationRejected("broker.credential_field.01"))?;
     if matches.next().is_some() {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected("broker.credential_field.02"));
     }
     Ok(value)
 }
@@ -3652,7 +4774,7 @@ fn credential_text(
 ) -> Result<Zeroizing<String>, BrokerError> {
     let value = credential_field(fields, field_id)?.trim();
     if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected("broker.credential_text.01"));
     }
     Ok(Zeroizing::new(value.to_owned()))
 }
@@ -3663,7 +4785,9 @@ fn credential_password(
 ) -> Result<Zeroizing<String>, BrokerError> {
     let value = credential_field(fields, field_id)?;
     if !(8..=1_024).contains(&value.len()) || value.contains('\0') {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected(
+            "broker.credential_password.01",
+        ));
     }
     Ok(Zeroizing::new(value.to_owned()))
 }
@@ -3678,7 +4802,7 @@ fn credential_code(
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected("broker.credential_code.01"));
     }
     Ok(Zeroizing::new(value.to_owned()))
 }
@@ -3701,19 +4825,21 @@ fn exchange_binding(
     };
     binding
         .validate()
-        .map_err(|_| BrokerError::OperationRejected)?;
+        .map_err(|_| BrokerError::OperationRejected("broker.exchange_binding.01"))?;
     Ok(binding)
 }
 
 fn sync_url(value: &str) -> Result<Url, BrokerError> {
-    let url = Url::parse(value).map_err(|_| BrokerError::OperationRejected)?;
-    if url.scheme() != "https"
+    let url =
+        Url::parse(value).map_err(|_| BrokerError::OperationRejected("broker.sync_url.01"))?;
+    if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
+        || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected("broker.sync_url.02"));
     }
     Ok(url)
 }
@@ -3751,7 +4877,9 @@ fn map_http_status(status: StatusCode) -> BrokerError {
 fn validate_remote_delete_response(status: StatusCode, body: &[u8]) -> Result<u16, BrokerError> {
     match status {
         StatusCode::NO_CONTENT if body.is_empty() => Ok(status.as_u16()),
-        StatusCode::BAD_REQUEST => Err(BrokerError::OperationRejected),
+        StatusCode::BAD_REQUEST => Err(BrokerError::OperationRejected(
+            "broker.validate_remote_delete_response.01",
+        )),
         StatusCode::UNAUTHORIZED => Err(BrokerError::AuthorizationExpired),
         StatusCode::FORBIDDEN => Err(BrokerError::AccessDenied),
         StatusCode::TOO_MANY_REQUESTS => Err(BrokerError::QuotaExceeded),
@@ -3814,14 +4942,48 @@ fn ensure_same_remote(
     }
 }
 
+fn automatic_upload_safe(
+    baseline: Option<&PortableRemoteBaseline>,
+    base: Option<&PortableBundleV1>,
+    local: &PortableBundleV1,
+    remote: &PortableBundleV1,
+    remote_revision: u64,
+    remote_etag: &str,
+    remote_sha256: &str,
+) -> bool {
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    let Some(base) = base else {
+        return false;
+    };
+    // Legacy bundles carry no preference opinion. Their first V4 upgrade
+    // needs a protected review even when SSH objects have no conflict.
+    baseline.revision == remote_revision
+        && baseline.etag == remote_etag
+        && baseline.content_sha256 == remote_sha256
+        && base.schema == BundleSchema::V4
+        && local.schema == BundleSchema::V4
+        && remote.schema == BundleSchema::V4
+        && base.preferences.is_some()
+        && local.preferences.is_some()
+        && difference::object_keys(base).is_subset(&difference::object_keys(local))
+        && base.tombstones == local.tombstones
+}
+
 fn empty_portable_bundle(revision: u64) -> PortableBundleV1 {
+    // An absent remote has no preference opinion; a V4 snapshot requires
+    // real Core-exported preferences and must not be synthesized here.
     PortableBundleV1 {
         schema: BundleSchema::V3,
         revision,
         objects: PortableObjects::default(),
+        preferences: None,
         secrets: Vec::new(),
         skipped_machine_bound: Vec::new(),
         tombstones: Vec::new(),
+        update_times: Vec::new(),
+        preference_update_times: Default::default(),
     }
 }
 
@@ -3834,7 +4996,8 @@ fn valid_strong_etag(value: &str) -> bool {
 }
 
 fn new_secret_ref_id() -> Result<SecretRefId, BrokerError> {
-    SecretRefId::parse(Uuid::new_v4().to_string()).map_err(|_| BrokerError::Internal)
+    SecretRefId::parse(Uuid::new_v4().to_string())
+        .map_err(|_| BrokerError::Internal("broker.new_secret_ref_id.internal01"))
 }
 
 fn portable_content_sha256(
@@ -3851,7 +5014,7 @@ fn portable_content_sha256(
                 .map(|byte| format!("{byte:02x}"))
                 .collect()
         })
-        .map_err(|_| BrokerError::Internal)
+        .map_err(|_| BrokerError::Internal("broker.portable_content_sha256.internal01"))
 }
 
 fn verify_remote_baseline_invariants(
@@ -3942,6 +5105,7 @@ fn aggregate_status(
         host_count: local.host_count,
         credential_count: local.credential_count,
         conflict_count: u32::from(difference_state == PluginSshSyncDifferenceState::Conflict),
+        diagnostic_code: None,
         stable_error_code: None,
         http_status,
         remote_revision,
@@ -3980,6 +5144,7 @@ fn remote_reset_status(
         host_count: local_counts.0,
         credential_count: local_counts.1,
         conflict_count: 0,
+        diagnostic_code: None,
         stable_error_code: None,
         http_status,
         remote_revision: None,
@@ -3999,6 +5164,15 @@ fn namespace(plugin_id: &str, signer_fingerprint_sha256: &str, profile_id: &str)
     format!("{plugin_id}\0{signer_fingerprint_sha256}\0{profile_id}")
 }
 
+fn select_local_data_owner(plugin_id: &str, owners: &[String]) -> Result<String, BrokerError> {
+    match owners {
+        [] => stable_plugin_data_owner(plugin_id)
+            .map_err(|_| BrokerError::OperationRejected("broker.select_local_data_owner.01")),
+        [owner] if valid_sha256(owner) => Ok(owner.clone()),
+        _ => Err(BrokerError::StateConflict),
+    }
+}
+
 impl SshSyncExchangeBroker {
     fn secure_context(
         &self,
@@ -4011,7 +5185,11 @@ impl SshSyncExchangeBroker {
         SecureActionContext {
             background: self.background,
             plugin_id: plugin_id.to_owned(),
-            signer_fingerprint_sha256: signer_fingerprint_sha256.to_owned(),
+            data_owner_sha256: if self.data_owner_sha256.is_empty() {
+                signer_fingerprint_sha256.to_owned()
+            } else {
+                self.data_owner_sha256.clone()
+            },
             profile_id: profile_id.to_owned(),
             remote_origin,
             fence: fence.clone(),
@@ -4026,7 +5204,9 @@ fn origin(url: &Url) -> String {
 fn normalized_resource_origin(value: &str) -> Result<String, BrokerError> {
     let url = sync_url(value)?;
     if !matches!(url.path(), "" | "/") || url.query().is_some() {
-        return Err(BrokerError::OperationRejected);
+        return Err(BrokerError::OperationRejected(
+            "broker.normalized_resource_origin.01",
+        ));
     }
     Ok(origin(&url))
 }
@@ -4072,6 +5252,7 @@ fn account_state(state: NativeAccountState) -> PluginSshSyncAccountState {
             PluginSshSyncAccountState::NeedsEmailVerification
         }
         NativeAccountState::Connected => PluginSshSyncAccountState::Connected,
+        NativeAccountState::Expired => PluginSshSyncAccountState::Expired,
     }
 }
 
@@ -4090,6 +5271,7 @@ fn idle_status(
         host_count: 0,
         credential_count: 0,
         conflict_count: 0,
+        diagnostic_code: None,
         stable_error_code: None,
         http_status: None,
         remote_revision: None,
@@ -4115,6 +5297,16 @@ fn vault_access_error(state: norishell_core_api::VaultState) -> Option<BrokerErr
     }
 }
 
+fn map_sync_key_recovery_error(error: SyncKeyRecoveryError) -> BrokerError {
+    match error {
+        SyncKeyRecoveryError::VaultUnavailable => BrokerError::VaultLocked,
+        SyncKeyRecoveryError::RemoteKeyAuthenticationFailed => {
+            BrokerError::RecoveryRemoteKeyAuthenticationFailed
+        }
+        SyncKeyRecoveryError::RemoteKeyEnvelopeInvalid => BrokerError::RemoteDataInvalid,
+    }
+}
+
 fn failed_status(profile_id: String, error: BrokerError) -> PluginSshSyncStatus {
     let stable_error_code = match error {
         BrokerError::VaultMissing => PluginSshSyncStableErrorCode::VaultMissing,
@@ -4132,8 +5324,18 @@ fn failed_status(profile_id: String, error: BrokerError) -> PluginSshSyncStatus 
         BrokerError::RemoteFormatUnsupported => {
             PluginSshSyncStableErrorCode::RemoteFormatUnsupported
         }
-        BrokerError::OperationRejected => PluginSshSyncStableErrorCode::OperationRejected,
-        BrokerError::Internal => PluginSshSyncStableErrorCode::Internal,
+        BrokerError::RecoveryRemoteKeyAuthenticationFailed => {
+            PluginSshSyncStableErrorCode::RecoveryRemoteKeyAuthenticationFailed
+        }
+        BrokerError::RecoveryActionExpired => PluginSshSyncStableErrorCode::RecoveryActionExpired,
+        BrokerError::OperationRejected(_) => PluginSshSyncStableErrorCode::OperationRejected,
+        BrokerError::LocalDataInvalid(_, _) => PluginSshSyncStableErrorCode::LocalDataInvalid,
+        BrokerError::PreferencesUnavailable => PluginSshSyncStableErrorCode::PreferencesUnavailable,
+        BrokerError::LocalKeyUnavailable => PluginSshSyncStableErrorCode::LocalKeyUnavailable,
+        BrokerError::OperationBusy => PluginSshSyncStableErrorCode::OperationBusy,
+        BrokerError::Internal(_) | BrokerError::Persistence(..) => {
+            PluginSshSyncStableErrorCode::Internal
+        }
     };
     PluginSshSyncStatus {
         profile_id,
@@ -4150,6 +5352,17 @@ fn failed_status(profile_id: String, error: BrokerError) -> PluginSshSyncStatus 
         host_count: 0,
         credential_count: 0,
         conflict_count: u32::from(matches!(error, BrokerError::StateConflict)),
+        diagnostic_code: match error {
+            BrokerError::OperationRejected(code) | BrokerError::Internal(code) => {
+                Some(code.to_owned())
+            }
+            BrokerError::LocalDataInvalid(stage, reason) => Some(format!("{stage}: {reason}")),
+            BrokerError::Persistence(stage, kind, code) => Some(match code {
+                Some(code) => format!("{stage}: {kind} ({code})"),
+                None => format!("{stage}: {kind}"),
+            }),
+            _ => None,
+        },
         stable_error_code: Some(stable_error_code),
         http_status: None,
         remote_revision: None,
@@ -4177,6 +5390,7 @@ fn cancelled_status(
         .unwrap_or_else(|| idle_status(profile_id, PluginSshSyncAccountState::Disconnected));
     status.operation_state = PluginSshSyncOperationState::Idle;
     status.stable_error_code = None;
+    status.diagnostic_code = None;
     status
 }
 
@@ -4198,16 +5412,16 @@ fn account_state_after_result(
 
 fn map_oauth_error(error: NativeAuthError) -> BrokerError {
     match error {
-        NativeAuthError::AccessDenied | NativeAuthError::CallbackRejected => {
-            BrokerError::AuthorizationDenied
-        }
+        NativeAuthError::AccessDenied => BrokerError::AuthorizationDenied,
+        NativeAuthError::RefreshExpired => BrokerError::AuthorizationExpired,
         NativeAuthError::Network => BrokerError::NetworkUnavailable,
-        NativeAuthError::VaultLocked | NativeAuthError::OperationInProgress => {
-            BrokerError::OperationRejected
+        NativeAuthError::VaultLocked => BrokerError::VaultLocked,
+        NativeAuthError::OperationInProgress => BrokerError::OperationBusy,
+        NativeAuthError::StateUnavailable => {
+            BrokerError::Internal("broker.map_oauth_error.internal01")
         }
-        NativeAuthError::StateUnavailable => BrokerError::Internal,
         NativeAuthError::Protocol => BrokerError::RemoteDataInvalid,
-        NativeAuthError::LocalCommit => BrokerError::Internal,
+        NativeAuthError::LocalCommit => BrokerError::Internal("broker.map_oauth_error.internal02"),
     }
 }
 
@@ -4215,17 +5429,27 @@ fn map_selection_error(error: SecureSelectionError) -> BrokerError {
     match error {
         SecureSelectionError::InteractionRequired => BrokerError::InteractionRequired,
         SecureSelectionError::Cancelled => BrokerError::Cancelled,
-        SecureSelectionError::Unavailable => BrokerError::Internal,
+        SecureSelectionError::Unavailable => {
+            BrokerError::Internal("broker.map_selection_error.internal01")
+        }
     }
 }
 
 fn map_store_error(error: PortableStoreError) -> BrokerError {
     match error {
-        PortableStoreError::InvalidSelection | PortableStoreError::Rejected => {
-            BrokerError::OperationRejected
+        PortableStoreError::InvalidSelection => {
+            BrokerError::OperationRejected("local.selection.invalid")
         }
+        PortableStoreError::Rejected(code) => BrokerError::OperationRejected(code),
+        PortableStoreError::InvalidBundle(stage, reason) => {
+            BrokerError::LocalDataInvalid(stage, reason)
+        }
+        PortableStoreError::PreferencesUnavailable => BrokerError::PreferencesUnavailable,
         PortableStoreError::Stale => BrokerError::StateConflict,
-        PortableStoreError::Internal => BrokerError::Internal,
+        PortableStoreError::Internal(code) => BrokerError::Internal(code),
+        PortableStoreError::Persistence(stage, kind, code) => {
+            BrokerError::Persistence(stage, kind, code)
+        }
     }
 }
 
@@ -4233,6 +5457,7 @@ fn authenticated_upload_completion_proof(
     attempt: &PortableUploadAttempt,
     authenticated_remote_revision: u64,
     remote_body_sha256: &str,
+    remote_etag: Option<&str>,
 ) -> Option<PortableUploadCompletionProof> {
     if remote_body_sha256 == attempt.body_sha256
         && authenticated_remote_revision == attempt.target_revision
@@ -4244,6 +5469,17 @@ fn authenticated_upload_completion_proof(
         Some(PortableUploadCompletionProof::SupersededByNewerRemote {
             authenticated_remote_revision,
         })
+    } else if authenticated_remote_revision == attempt.target_revision
+        && remote_body_sha256 != attempt.body_sha256
+        && let Some(etag) = remote_etag.filter(|value| valid_strong_etag(value))
+    {
+        Some(
+            PortableUploadCompletionProof::ConflictingBodyObservedAtTargetRevision {
+                authenticated_remote_revision,
+                authenticated_remote_body_sha256: remote_body_sha256.to_owned(),
+                authenticated_remote_etag: etag.to_owned(),
+            },
+        )
     } else {
         None
     }
@@ -4315,6 +5551,107 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_data_owner_keeps_one_legacy_namespace_and_rejects_ambiguity() {
+        let plugin_id = "org.example.sync";
+        let legacy = "a".repeat(64);
+        assert_eq!(
+            select_local_data_owner(plugin_id, &[]).unwrap(),
+            stable_plugin_data_owner(plugin_id).unwrap()
+        );
+        assert_eq!(
+            select_local_data_owner(plugin_id, std::slice::from_ref(&legacy)).unwrap(),
+            legacy
+        );
+        assert!(matches!(
+            select_local_data_owner(plugin_id, &["a".repeat(64), "b".repeat(64)]),
+            Err(BrokerError::StateConflict)
+        ));
+        assert!(matches!(
+            select_local_data_owner(plugin_id, &["invalid".to_owned()]),
+            Err(BrokerError::StateConflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_fence_never_polls_network_future() {
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let future = async {
+            polled.store(true, std::sync::atomic::Ordering::SeqCst);
+        };
+        let fence: ActionFence = Arc::new(|| false);
+        assert!(matches!(
+            await_fenced(future, &fence).await,
+            Err(BrokerError::OperationRejected(_))
+        ));
+        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn automatic_upload_rejects_legacy_baselines_deletion_and_remote_drift() {
+        let mut base = empty_portable_bundle(1);
+        base.schema = BundleSchema::V4;
+        base.preferences = Some(norishell_ssh_profile_sync::PortablePreferencesV1 {
+            product: "NoriShell".to_owned(),
+            version: 1,
+            groups: BTreeMap::new(),
+        });
+        let remote = base.clone();
+        let mut local = base.clone();
+        let baseline = PortableRemoteBaseline {
+            revision: 1,
+            etag: "\"current\"".to_owned(),
+            content_sha256: "content".to_owned(),
+            exchange_sha256: "exchange".to_owned(),
+        };
+        assert!(automatic_upload_safe(
+            Some(&baseline),
+            Some(&base),
+            &local,
+            &remote,
+            1,
+            "\"current\"",
+            "content",
+        ));
+        local
+            .tombstones
+            .push(norishell_ssh_profile_sync::PortableTombstone {
+                kind: norishell_ssh_profile_sync::PortableObjectKind::Host,
+                id: norishell_ssh_profile_sync::PortableObjectId::new(),
+            });
+        assert!(!automatic_upload_safe(
+            Some(&baseline),
+            Some(&base),
+            &local,
+            &remote,
+            1,
+            "\"current\"",
+            "content",
+        ));
+        local.tombstones.clear();
+        assert!(!automatic_upload_safe(
+            Some(&baseline),
+            Some(&base),
+            &local,
+            &remote,
+            1,
+            "\"changed\"",
+            "content",
+        ));
+        let mut legacy = base.clone();
+        legacy.schema = BundleSchema::V3;
+        legacy.preferences = None;
+        assert!(!automatic_upload_safe(
+            Some(&baseline),
+            Some(&legacy),
+            &local,
+            &legacy,
+            1,
+            "\"current\"",
+            "content",
+        ));
+    }
 
     #[test]
     fn legacy_format_is_distinct_from_malformed_or_current_data() {
@@ -4423,14 +5760,23 @@ mod tests {
             namespace("org.example.one", &"b".repeat(64), "primary")
         );
         assert!(sync_url("https://sync.example.test/v1/exchange").is_ok());
-        assert!(sync_url("http://sync.example.test/v1/exchange").is_err());
+        assert!(sync_url("http://127.0.0.1:8080/v1/exchange").is_ok());
+        assert!(sync_url("ftp://sync.example.test/v1/exchange").is_err());
         assert!(sync_url("https://user@sync.example.test/v1/exchange").is_err());
+        assert!(sync_url("http://user@127.0.0.1:8080/v1/exchange").is_err());
+        assert!(sync_url("http://127.0.0.1:8080/v1/exchange?token=secret").is_err());
+        assert!(sync_url("http://127.0.0.1:8080/v1/exchange#fragment").is_err());
         assert_eq!(
             normalized_resource_origin("https://sync.example.test").expect("origin"),
             "https://sync.example.test"
         );
         assert!(normalized_resource_origin("https://sync.example.test/path").is_err());
         assert!(normalized_resource_origin("https://sync.example.test?next=x").is_err());
+        assert_eq!(
+            normalized_resource_origin("http://127.0.0.1:8080").expect("HTTP origin"),
+            "http://127.0.0.1:8080"
+        );
+        assert!(normalized_resource_origin("http://127.0.0.1:8080/path").is_err());
 
         let configuration = credential_configuration(
             "org.example.self-hosted",
@@ -4460,6 +5806,90 @@ mod tests {
                 "https://restore.customer.example:8443",
             ]
         );
+    }
+
+    #[test]
+    fn account_service_reuses_same_configuration_and_rebinds_changed_provider() {
+        let directory = tempfile::tempdir().expect("temporary account state");
+        let vault = crate::vault_service::VaultService::start(directory.path());
+        let plugin_id = "org.example.sync";
+        let signer = "a".repeat(64);
+        let profile_id = "primary";
+        let auth = PluginSshSyncCredentialProfile {
+            login_url: "https://auth.example.test/login".to_owned(),
+            registration_url: "https://auth.example.test/register".to_owned(),
+            email_verification_url: "https://auth.example.test/verify".to_owned(),
+            mfa_url: "https://auth.example.test/mfa".to_owned(),
+            token_url: "https://auth.example.test/token".to_owned(),
+            revoke_url: "https://auth.example.test/revoke".to_owned(),
+            client_id: "desktop".to_owned(),
+            scopes: vec!["ssh-sync".to_owned()],
+            resource_origins: vec!["https://sync.example.test".to_owned()],
+        };
+        let configuration = credential_configuration(plugin_id, &signer, profile_id, auth.clone())
+            .expect("account configuration");
+        let key = namespace(plugin_id, &signer, profile_id);
+        let mut oauth = BTreeMap::new();
+        assert!(
+            reuse_or_restore_credential_service(
+                &mut oauth,
+                &key,
+                directory.path(),
+                &vault,
+                configuration.clone(),
+            )
+            .expect("initial restore")
+        );
+        let initial = oauth.get(&key).expect("account service").clone();
+        assert!(
+            !reuse_or_restore_credential_service(
+                &mut oauth,
+                &key,
+                directory.path(),
+                &vault,
+                configuration,
+            )
+            .expect("reuse active service")
+        );
+        assert!(
+            oauth
+                .get(&key)
+                .expect("same service")
+                .shares_runtime_with(&initial)
+        );
+
+        let mut changed_auth = auth;
+        changed_auth.resource_origins = vec!["https://other.example.test".to_owned()];
+        let changed = credential_configuration(plugin_id, &signer, profile_id, changed_auth)
+            .expect("updated configuration");
+        assert!(
+            reuse_or_restore_credential_service(
+                &mut oauth,
+                &key,
+                directory.path(),
+                &vault,
+                changed,
+            )
+            .expect("rebind changed provider")
+        );
+        assert!(
+            !oauth
+                .get(&key)
+                .expect("new service")
+                .shares_runtime_with(&initial)
+        );
+    }
+
+    #[test]
+    fn refresh_rejection_is_an_expired_session_not_bad_credentials() {
+        assert!(matches!(
+            map_oauth_error(NativeAuthError::RefreshExpired),
+            BrokerError::AuthorizationExpired
+        ));
+        assert!(matches!(
+            map_oauth_error(NativeAuthError::AccessDenied),
+            BrokerError::AuthorizationDenied
+        ));
     }
 
     #[test]
@@ -4611,7 +6041,10 @@ mod tests {
             Ok(204)
         ));
         for (status, expected) in [
-            (StatusCode::BAD_REQUEST, BrokerError::OperationRejected),
+            (
+                StatusCode::BAD_REQUEST,
+                BrokerError::OperationRejected("http.badRequest"),
+            ),
             (StatusCode::UNAUTHORIZED, BrokerError::AuthorizationExpired),
             (StatusCode::FORBIDDEN, BrokerError::AccessDenied),
             (StatusCode::CONFLICT, BrokerError::StateConflict),
@@ -4712,7 +6145,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_upload_reconciliation_keeps_same_target_with_different_body() {
+    fn authenticated_upload_reconciliation_retires_conflicting_target_body() {
         let attempt = PortableUploadAttempt {
             canonical_url: "https://sync.example.test/v1/exchange".to_owned(),
             method: PluginSshSyncHttpMethod::Put,
@@ -4730,17 +6163,30 @@ mod tests {
         };
 
         assert_eq!(
-            authenticated_upload_completion_proof(&attempt, 5, &"c".repeat(64)),
+            authenticated_upload_completion_proof(&attempt, 5, &"c".repeat(64), None),
+            None
+        );
+        assert_eq!(
+            authenticated_upload_completion_proof(&attempt, 5, &"c".repeat(64), Some("W/\"5\"")),
             None
         );
         assert!(matches!(
-            authenticated_upload_completion_proof(&attempt, 5, &"b".repeat(64)),
+            authenticated_upload_completion_proof(&attempt, 5, &"c".repeat(64), Some("\"5\"")),
+            Some(
+                PortableUploadCompletionProof::ConflictingBodyObservedAtTargetRevision {
+                    authenticated_remote_revision: 5,
+                    ..
+                }
+            )
+        ));
+        assert!(matches!(
+            authenticated_upload_completion_proof(&attempt, 5, &"b".repeat(64), Some("\"5\"")),
             Some(PortableUploadCompletionProof::ExactBodyObserved {
                 observed_revision: 5
             })
         ));
         assert!(matches!(
-            authenticated_upload_completion_proof(&attempt, 6, &"c".repeat(64)),
+            authenticated_upload_completion_proof(&attempt, 6, &"c".repeat(64), Some("\"6\"")),
             Some(PortableUploadCompletionProof::SupersededByNewerRemote {
                 authenticated_remote_revision: 6
             })

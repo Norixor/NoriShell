@@ -1,14 +1,14 @@
 use std::{
     future::Future,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, AtomicUsize, Ordering},
     },
 };
 
 use norishell_core_api::{
     ApplicationExitRequest, CoreApiError, DesktopWindowCloseBehavior, ExitBlocker, ExitReadiness,
-    WindowCloseRequest,
+    RequestId, WindowCloseRequest,
 };
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuItemKind, PredefinedMenuItem};
@@ -22,7 +22,7 @@ use crate::{
     forward_session_service::ForwardSessionService, host_service::HostService,
     metrics_session_service::MetricsSessionService, plugin_service::PluginService,
     sftp_session_service::SftpSessionService, ssh_session_service::SshSessionService,
-    telnet_session_service::TelnetSessionService,
+    telnet_session_service::TelnetSessionService, tool_window_exit::ToolWindowExitPermit,
 };
 
 type CoreResult<T> = Result<T, Box<CoreApiError>>;
@@ -140,6 +140,11 @@ impl LifecycleState {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct UpdateExitState {
+    permit: Mutex<Option<ToolWindowExitPermit>>,
+}
+
 /// Plugin operations and resources are children of the global session owners.
 /// Finish their cleanup attempt first so the global pass cannot remove the
 /// exact session facts that a plugin still needs to reconcile. The second
@@ -164,8 +169,7 @@ where
 
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        window.show()?;
-        window.set_focus()?;
+        crate::window_first_show::show_if_revealed(&window)?;
     }
     Ok(())
 }
@@ -196,6 +200,10 @@ fn tray_is_available<R: Runtime>(app: &AppHandle<R>) -> bool {
 }
 
 fn keep_main_window_visible<R: Runtime>(window: &Window<R>) {
+    #[cfg(any(windows, target_os = "macos"))]
+    if !crate::window_first_show::was_revealed(window.app_handle(), window.label()) {
+        return;
+    }
     if let Err(error) = window.show() {
         eprintln!("failed to keep main window visible after close refusal: {error}");
     }
@@ -389,6 +397,72 @@ pub fn window_request_close(
     Ok(current_exit_readiness(window.app_handle()))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn shutdown_all_resources<R: Runtime>(
+    request_id: RequestId,
+    app: &AppHandle<R>,
+    sessions: &SshSessionService,
+    metrics: &MetricsSessionService,
+    telnet: &TelnetSessionService,
+    forwards: &ForwardSessionService,
+    sftp: &SftpSessionService,
+    plugins: &PluginService,
+    hosts: &HostService,
+) -> CoreResult<()> {
+    // Every owner receives the same explicit-exit cleanup opportunity even
+    // when a sibling fails. A single residual keeps the application alive.
+    let (plugin_result, (ssh_result, metrics_result, telnet_result, forward_result, sftp_result)) =
+        cleanup_plugins_before_global_owners(plugins.shutdown_all(), || async {
+            tokio::join!(
+                sessions.shutdown_all(request_id.clone()),
+                metrics.shutdown_all(request_id.clone()),
+                telnet.shutdown_all(),
+                forwards.shutdown_all(),
+                sftp.shutdown_all(),
+            )
+        })
+        .await;
+    let cleanup_result = ssh_result.and(metrics_result).and_then(|_| {
+        telnet_result.map_err(|_| {
+            Box::new(CoreApiError::safe_internal(
+                request_id.clone(),
+                Uuid::new_v4().to_string(),
+            ))
+        })
+    });
+    let cleanup_result = cleanup_result.and_then(|_| {
+        forward_result.map(|_| ()).map_err(|_| {
+            Box::new(CoreApiError::safe_internal(
+                request_id.clone(),
+                Uuid::new_v4().to_string(),
+            ))
+        })
+    });
+    let cleanup_result = cleanup_result.and_then(|_| {
+        sftp_result.map_err(|_| {
+            Box::new(CoreApiError::safe_internal(
+                request_id.clone(),
+                Uuid::new_v4().to_string(),
+            ))
+        })
+    });
+    let cleanup_result = cleanup_result.and(plugin_result);
+    let desktop_result =
+        if let Some(desktops) = app.try_state::<crate::desktop_service::DesktopService>() {
+            desktops.shutdown_all().await.map_err(|_| {
+                Box::new(CoreApiError::safe_internal(
+                    request_id.clone(),
+                    Uuid::new_v4().to_string(),
+                ))
+            })
+        } else {
+            Ok(())
+        };
+    cleanup_result.and(desktop_result)?;
+    hosts.shutdown_login_automation_secret_reconciler();
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn application_request_exit(
@@ -437,64 +511,22 @@ pub async fn application_request_exit(
                 return Ok(current);
             }
         }
-        // Every owner receives the same explicit-exit cleanup opportunity even
-        // when a sibling fails. Authorization happens only after all results
-        // are observed, so a single residual keeps the application alive.
-        let (
-            plugin_result,
-            (ssh_result, metrics_result, telnet_result, forward_result, sftp_result),
-        ) = cleanup_plugins_before_global_owners(plugins.shutdown_all(), || async {
-            tokio::join!(
-                sessions.shutdown_all(request.meta.request_id.clone()),
-                metrics.shutdown_all(request.meta.request_id.clone()),
-                telnet.shutdown_all(),
-                forwards.shutdown_all(),
-                sftp.shutdown_all(),
-            )
-        })
-        .await;
-        let cleanup_result = ssh_result.and(metrics_result).and_then(|_| {
-            telnet_result.map_err(|_| {
-                Box::new(CoreApiError::safe_internal(
-                    request.meta.request_id.clone(),
-                    Uuid::new_v4().to_string(),
-                ))
-            })
-        });
-        let cleanup_result = cleanup_result.and_then(|_| {
-            forward_result.map(|_| ()).map_err(|_| {
-                Box::new(CoreApiError::safe_internal(
-                    request.meta.request_id.clone(),
-                    Uuid::new_v4().to_string(),
-                ))
-            })
-        });
-        let cleanup_result = cleanup_result.and_then(|_| {
-            sftp_result.map_err(|_| {
-                Box::new(CoreApiError::safe_internal(
-                    request.meta.request_id.clone(),
-                    Uuid::new_v4().to_string(),
-                ))
-            })
-        });
-        let cleanup_result = cleanup_result.and(plugin_result);
-        let desktop_result =
-            if let Some(desktops) = app.try_state::<crate::desktop_service::DesktopService>() {
-                desktops.shutdown_all().await.map_err(|_| {
-                    Box::new(CoreApiError::safe_internal(
-                        request.meta.request_id.clone(),
-                        Uuid::new_v4().to_string(),
-                    ))
-                })
-            } else {
-                Ok(())
-            };
-        let cleanup_result = cleanup_result.and(desktop_result);
-        if let Err(error) = cleanup_result {
+        if let Err(error) = shutdown_all_resources(
+            request.meta.request_id.clone(),
+            &app,
+            &sessions,
+            &metrics,
+            &telnet,
+            &forwards,
+            &sftp,
+            &plugins,
+            &hosts,
+        )
+        .await
+        {
             lifecycle.cancel_cleanup();
             return Err(error);
         }
-        hosts.shutdown_login_automation_secret_reconciler();
         lifecycle.authorize_exit();
         tool_exit_permit.commit();
         app.exit(0);
@@ -514,7 +546,119 @@ pub async fn application_request_exit(
     })
 }
 
-fn current_exit_readiness<R: Runtime>(app: &AppHandle<R>) -> ExitReadiness {
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn release_update_prepare_install<R: Runtime>(
+    window: WebviewWindow<R>,
+    app: AppHandle<R>,
+    lifecycle: State<'_, LifecycleState>,
+    update_exit: State<'_, UpdateExitState>,
+    sessions: State<'_, SshSessionService>,
+    metrics: State<'_, MetricsSessionService>,
+    telnet: State<'_, TelnetSessionService>,
+    forwards: State<'_, ForwardSessionService>,
+    sftp: State<'_, SftpSessionService>,
+    plugins: State<'_, PluginService>,
+    hosts: State<'_, HostService>,
+) -> CoreResult<ExitReadiness> {
+    let request_id = RequestId::new();
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err(Box::new(CoreApiError::safe_internal(
+            request_id,
+            Uuid::new_v4().to_string(),
+        )));
+    }
+    let readiness = current_exit_readiness(&app);
+    if !readiness.can_exit {
+        return Ok(readiness);
+    }
+    let tool_exit = app.state::<crate::tool_window_exit::ToolWindowExit>();
+    let tool_windows = app.state::<crate::tool_windows::ToolWindows>();
+    let permit = tool_exit.prepare(&app, &tool_windows).await.map_err(|()| {
+        Box::new(CoreApiError {
+            code: "app.tool_window_exit_cancelled".into(),
+            category: norishell_core_api::ErrorCategory::Conflict,
+            retry_strategy: norishell_core_api::RetryStrategy::WaitForUser,
+            message_key: "toolWindows.exitCancelled".into(),
+            params: Default::default(),
+            request_id: Some(request_id.clone()),
+            diagnostic_id: None,
+            conflict: None,
+        })
+    })?;
+    if !lifecycle.begin_cleanup().await {
+        return Err(Box::new(CoreApiError::safe_internal(
+            request_id,
+            Uuid::new_v4().to_string(),
+        )));
+    }
+    let current = current_exit_readiness(&app);
+    if !current.can_exit {
+        lifecycle.cancel_cleanup();
+        return Ok(current);
+    }
+    if let Err(error) = shutdown_all_resources(
+        request_id.clone(),
+        &app,
+        &sessions,
+        &metrics,
+        &telnet,
+        &forwards,
+        &sftp,
+        &plugins,
+        &hosts,
+    )
+    .await
+    {
+        lifecycle.cancel_cleanup();
+        return Err(error);
+    }
+    let mut pending = match update_exit.permit.lock() {
+        Ok(pending) => pending,
+        Err(_) => {
+            lifecycle.cancel_cleanup();
+            return Err(Box::new(CoreApiError::safe_internal(
+                request_id,
+                Uuid::new_v4().to_string(),
+            )));
+        }
+    };
+    if pending.is_some() {
+        lifecycle.cancel_cleanup();
+        return Err(Box::new(CoreApiError::safe_internal(
+            request_id,
+            Uuid::new_v4().to_string(),
+        )));
+    }
+    *pending = Some(permit);
+    Ok(ExitReadiness {
+        can_exit: true,
+        blockers: Vec::new(),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn release_update_allow_relaunch<R: Runtime>(
+    window: WebviewWindow<R>,
+    lifecycle: State<'_, LifecycleState>,
+    update_exit: State<'_, UpdateExitState>,
+) -> Result<(), &'static str> {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err("unavailable");
+    }
+    if update_exit
+        .permit
+        .lock()
+        .map_err(|_| "unavailable")?
+        .is_none()
+    {
+        return Err("unavailable");
+    }
+    lifecycle.authorize_exit();
+    Ok(())
+}
+
+pub(crate) fn current_exit_readiness<R: Runtime>(app: &AppHandle<R>) -> ExitReadiness {
     let sessions = app.state::<SshSessionService>();
     let mut blockers = sessions
         .exit_blockers()

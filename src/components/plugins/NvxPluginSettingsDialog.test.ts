@@ -46,7 +46,17 @@ describe("plugin settings", () => {
       expectedSchemaSha256: "b".repeat(64), expectedRevision: "3", values: { visible: false, limit: 5 },
     });
     expect(usePluginExtensionsStore().refreshPluginContributions).toHaveBeenCalledWith("test.status");
+    expect(wrapper.emitted("saved")?.[0]?.[0]).toMatchObject({ revision: "4" });
     expect(wrapper.emitted("close")).toHaveLength(1);
+  });
+
+  it("focuses the requested settings field after loading", async () => {
+    const wrapper = mount(NvxPluginSettingsDialog, {
+      props: { pluginId: "test.status", pluginName: "Status", initialFieldKey: "limit" },
+      attachTo: document.body, global: { plugins: [i18n], stubs: { Teleport: true } },
+    });
+    await flushPromises();
+    expect(document.activeElement).toBe(wrapper.get('input[type="number"]').element);
   });
 
   it("keeps conflict drafts visible and requires explicit reload", async () => {

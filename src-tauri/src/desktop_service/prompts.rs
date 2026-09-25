@@ -131,9 +131,10 @@ impl Prompts {
         let url = format!("secure-desktop.html?prompt={id}");
         let builder = WebviewWindowBuilder::new(app, label(&id), WebviewUrl::App(url.into()))
             .title("NoriShell");
-        let window = crate::secure_window_frame::apply_secure_window_frame(builder)
-            .build()
-            .map_err(|_| EngineError::Protocol)?;
+        let window =
+            crate::secure_window_frame::apply_secure_window_frame(app, &label(&id), builder)
+                .build()
+                .map_err(|_| EngineError::Protocol)?;
         let pending = self.clone();
         let pending_id = id.clone();
         window.on_window_event(move |event| {
@@ -143,7 +144,7 @@ impl Prompts {
                 prompts.remove(&pending_id);
             }
         });
-        let _ = window.set_focus();
+        let _ = crate::window_first_show::focus_if_revealed(&window);
         let mut decision = tokio::time::timeout(Duration::from_secs(180), receiver)
             .await
             .map_err(|_| EngineError::Timeout)?
@@ -187,7 +188,8 @@ fn validate_vault_decision(
             .as_ref()
             .zip(decision.password_confirmation.as_ref())
             .is_some_and(|(password, confirmation)| {
-                (12..=65_536).contains(&password.len())
+                password.chars().count() >= 8
+                    && password.len() <= 65_536
                     && crate::vault_service::confirmations_match(
                         password.as_bytes(),
                         confirmation.as_bytes(),

@@ -32,6 +32,9 @@ pub struct HardenedVncOptions {
     pub allow_unauthenticated: bool,
     /// Controls both explicit ClientCutText sends and ServerCutText delivery.
     pub clipboard_enabled: bool,
+    /// None follows a known server banner; an explicit version uses that
+    /// handshake only when the server advertises an equal or newer RFB 3.x.
+    pub version: Option<VncVersion>,
 }
 
 /// A session uses two small bounded request queues. Priority traffic is kept
@@ -212,12 +215,13 @@ where
         mut password,
         allow_unauthenticated,
         clipboard_enabled: _,
+        version,
     } = options;
 
     let result = async {
         let mut greeting = [0_u8; 12];
         read_exact(stream, &mut greeting, cancellation).await?;
-        let version = parse_version(greeting)?;
+        let version = negotiate_version(greeting, version)?;
         write_all(stream, version_bytes(version), cancellation).await?;
 
         let security =
@@ -599,6 +603,40 @@ fn parse_version(greeting: [u8; 12]) -> Result<VncVersion, VncError> {
     }
 }
 
+fn negotiate_version(
+    greeting: [u8; 12],
+    requested: Option<VncVersion>,
+) -> Result<VncVersion, VncError> {
+    let Some(requested) = requested else {
+        return parse_version(greeting);
+    };
+    if &greeting[..4] != b"RFB " || greeting[7] != b'.' || greeting[11] != b'\n' {
+        return Err(VncError::Protocol);
+    }
+    let digits = [&greeting[4..7], &greeting[8..11]];
+    if !digits
+        .iter()
+        .all(|part| part.iter().all(u8::is_ascii_digit))
+    {
+        return Err(VncError::Protocol);
+    }
+    let major = u16::from(greeting[4] - b'0') * 100
+        + u16::from(greeting[5] - b'0') * 10
+        + u16::from(greeting[6] - b'0');
+    let minor = u16::from(greeting[8] - b'0') * 100
+        + u16::from(greeting[9] - b'0') * 10
+        + u16::from(greeting[10] - b'0');
+    let minimum = match requested {
+        VncVersion::RFB33 => 3,
+        VncVersion::RFB37 => 7,
+        VncVersion::RFB38 => 8,
+    };
+    if major != 3 || minor < minimum {
+        return Err(VncError::Protocol);
+    }
+    Ok(requested)
+}
+
 fn version_bytes(version: VncVersion) -> &'static [u8; 12] {
     version.into()
 }
@@ -834,6 +872,18 @@ mod tests {
         assert_eq!(parse_version(*b"RFB 003.008\n"), Ok(VncVersion::RFB38));
         assert_eq!(parse_version(*b"NOPE003.008\n"), Err(VncError::Protocol));
         assert_eq!(parse_version(*b"RFB 003.889\n"), Err(VncError::Protocol));
+        assert_eq!(
+            negotiate_version(*b"RFB 003.889\n", Some(VncVersion::RFB33)),
+            Ok(VncVersion::RFB33)
+        );
+        assert_eq!(
+            negotiate_version(*b"RFB 003.003\n", Some(VncVersion::RFB38)),
+            Err(VncError::Protocol)
+        );
+        assert_eq!(
+            negotiate_version(*b"RFB 003.889\n", None),
+            Err(VncError::Protocol)
+        );
         assert!(matches!(
             validate_dimensions(0, 1),
             Err(VncError::ResourceLimit)

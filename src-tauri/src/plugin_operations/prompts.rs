@@ -309,19 +309,22 @@ impl PluginOperationsService {
             service: self.clone(),
             id: id.clone(),
         };
-        let window =
-            crate::secure_window_frame::apply_secure_window_frame(WebviewWindowBuilder::new(
+        let window = crate::secure_window_frame::apply_secure_window_frame(
+            app,
+            &window_label(&id),
+            WebviewWindowBuilder::new(
                 app,
                 window_label(&id),
                 WebviewUrl::App(
                     format!("secure-plugin-remote-approval.html?approvalId={id}").into(),
                 ),
-            ))
-            .title("NoriShell")
-            .resizable(true)
-            .center()
-            .build()
-            .map_err(|_| ())?;
+            ),
+        )
+        .title("NoriShell")
+        .resizable(true)
+        .center()
+        .build()
+        .map_err(|_| ())?;
         let service = self.clone();
         let closed_id = id.clone();
         window.on_window_event(move |event| {
@@ -377,11 +380,19 @@ impl PluginOperationsService {
             .prompts
             .remove(request.approval_id.as_str())
             .ok_or_else(|| rejected(request.meta.request_id.clone()))?;
+        let secret_limit = if matches!(
+            &pending.prompt.content,
+            PluginRemoteApprovalContent::VaultAccess { .. }
+        ) {
+            65_536
+        } else {
+            4_096
+        };
         if secret.is_empty()
-            || secret.len() > 4096
+            || secret.len() > secret_limit
             || confirmation
                 .as_ref()
-                .is_some_and(|value| value.len() > 4096)
+                .is_some_and(|value| value.len() > secret_limit)
             || pending.prompt.state_version != request.expected_state_version
             || pending.prompt.expires_at_unix_ms <= unix_time_ms()
             || pending.remembered_policy.is_some()
@@ -670,6 +681,38 @@ mod tests {
             panic!("wrong private reply");
         };
         assert_eq!(secret.as_slice(), b"test-only-token");
+    }
+
+    #[tokio::test]
+    async fn vault_input_accepts_existing_passwords_above_plugin_credential_limit() {
+        let (_directory, service) = super::super::tests::fixture();
+        let (request, receiver) = insert_prompt(&service, Arc::new(|| true));
+        service
+            .state
+            .lock()
+            .unwrap()
+            .prompts
+            .get_mut(request.approval_id.as_str())
+            .unwrap()
+            .prompt
+            .content = PluginRemoteApprovalContent::VaultAccess { create: false };
+        let password = "x".repeat(4_097);
+        service
+            .submit_credential_input(norishell_core_api::PluginCredentialInputDecisionRequest {
+                meta: request.meta,
+                approval_id: request.approval_id,
+                expected_state_version: request.expected_state_version,
+                secret: password.clone(),
+                confirmation: None,
+            })
+            .unwrap();
+        let PromptReply::VaultInput {
+            password: received, ..
+        } = receiver.await.unwrap().unwrap()
+        else {
+            panic!("wrong private reply");
+        };
+        assert_eq!(received.as_slice(), password.as_bytes());
     }
 
     #[tokio::test]

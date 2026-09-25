@@ -15,11 +15,11 @@ members = [
   "crates/telnet-runtime",
   "src-tauri",
 ]
-exclude = ["vendor/russh", "vendor/russh-sftp", "vendor/vnc-rs", "vendor/picky", "vendor/sspi", "vendor/ironrdp-connector", "vendor/ironrdp-session", "vendor/ironrdp-rdpsnd"]
+exclude = ["vendor/russh", "vendor/russh-sftp", "vendor/vnc-rs", "vendor/picky", "vendor/sspi", "vendor/ironrdp-connector", "vendor/ironrdp-session", "vendor/ironrdp-rdpsnd", "vendor/tauri-plugin-updater"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1-beta"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.97.1"
 license = "GPL-3.0-only"
@@ -64,6 +64,7 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 zeroize = { version = "1.9.0", features = ["derive"] }
 
 [patch.crates-io]
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }
 ironrdp-rdpsnd = { path = "vendor/ironrdp-rdpsnd" }
 ironrdp-session = { path = "vendor/ironrdp-session" }
 ironrdp-connector = { path = "vendor/ironrdp-connector" }

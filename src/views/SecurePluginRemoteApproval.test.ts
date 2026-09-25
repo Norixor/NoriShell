@@ -180,6 +180,9 @@ describe("SecurePluginRemoteApproval", () => {
     await flushPromises();
     expect(wrapper.get("h1").text()).toBe("Create your local Vault");
     expect(wrapper.findComponent(NvxSelect).exists()).toBe(false);
+    await wrapper.get("#plugin-credential-secret").setValue("七个字符不够啊");
+    expect(wrapper.get("#plugin-credential-secret").attributes("aria-invalid")).toBe("true");
+    expect(wrapper.text()).toContain("at least 8 characters");
     await wrapper.get("#plugin-credential-secret").setValue("test-vault-password");
     await wrapper.get("#plugin-vault-confirmation").setValue("wrong-password");
     expect(wrapper.get("footer button:last-child").attributes("disabled")).toBeDefined();

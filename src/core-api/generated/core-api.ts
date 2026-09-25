@@ -2,13 +2,15 @@
 
 export type DesktopProtocol = "rdp" | "vnc";
 
+export type VncProtocolVersion = "auto" | "rfb33" | "rfb37" | "rfb38";
+
 export type DesktopAvailability = { protocol: DesktopProtocol, available: boolean, reasonKey: string | null, presentation: string, };
 
-export type DesktopProfile = { id: string, label: string, protocol: DesktopProtocol, address: string, port: number, username: string, domain: string, hostId: HostId | null, gatewayHostId: HostId | null, credentialRefId: CredentialRefId | null, width: number, height: number, clipboardEnabled: boolean, audioPlaybackEnabled: boolean, revision: WireSequence, };
+export type DesktopProfile = { id: string, label: string, protocol: DesktopProtocol, address: string, port: number, username: string, domain: string, hostId: HostId | null, gatewayHostId: HostId | null, credentialRefId: CredentialRefId | null, width: number, height: number, clipboardEnabled: boolean, audioPlaybackEnabled: boolean, vncProtocolVersion: VncProtocolVersion, revision: WireSequence, };
 
 export type DesktopPasswordStage = { operationId: OperationId, idempotencyKey: string, stagedPasswordId: HostCreatePasswordStageId, };
 
-export type DesktopProfileSaveRequest = { meta: RequestMeta, profile: DesktopProfile, 
+export type DesktopProfileSaveRequest = { meta: RequestMeta, profile: DesktopProfile,
 /**
  * A password staged through the protected Host-create flow. It is accepted only for a
  * first save without an existing credential reference.
@@ -37,7 +39,7 @@ export type DesktopFocusRequest = { meta: RequestMeta, sessionId: string | null,
 
 export type DesktopFrameRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, afterSequence: WireSequence, };
 
-export type DesktopPromptKind = { "kind": "vaultCreate" } | { "kind": "vaultUnlock" } | { "kind": "credentials", username: string, domain: string, } | { "kind": "hostKey", address: string, port: number, algorithm: string, fingerprint: string, } | { "kind": "certificate", address: string, fingerprint: string, } | { "kind": "unencryptedVnc", address: string, gateway: boolean, } | { "kind": "keyboardInteractive", name: string, instruction: string, prompts: Array<string>, echo: Array<boolean>, };
+export type DesktopPromptKind = { "kind": "vaultCreate" } | { "kind": "vaultUnlock" } | { "kind": "credentials", username: string, domain: string, passwordOnly: boolean, } | { "kind": "hostKey", address: string, port: number, algorithm: string, fingerprint: string, } | { "kind": "certificate", address: string, fingerprint: string, } | { "kind": "unencryptedVnc", address: string, gateway: boolean, } | { "kind": "keyboardInteractive", name: string, instruction: string, prompts: Array<string>, echo: Array<boolean>, };
 
 export type DesktopPrompt = { id: string, sessionId: string, label: string, prompt: DesktopPromptKind, };
 
@@ -55,7 +57,7 @@ export type DesktopPreferencesSnapshot = { preferences: DesktopPreferences, revi
 
 export type NativeTrayLocale = "zh-CN" | "en";
 
-export type NativeTrayAction = { "kind": "newTerminal" } | { "kind": "newLocalTerminal" } | { "kind": "quickConnect" } | { "kind": "settings" } | { "kind": "openHost", hostId: HostId, } | { "kind": "focusTerminal", scope: NativeTerminalSessionScope, } | { "kind": "focusSshSession", sessionId: SshSessionId, generation: WireSequence, } | { "kind": "focusLocalSession", sessionId: LocalSessionId, generation: WireSequence, } | { "kind": "focusTelnet", sessionId: string, generation: WireSequence, socketId: string | null, } | { "kind": "focusDesktop", sessionId: string, generation: WireSequence, } | { "kind": "openTunnels", sessionId: ForwardSessionId | null, generation: WireSequence | null, } | { "kind": "openTransfers", transferId: TransferId | null, 
+export type NativeTrayAction = { "kind": "newTerminal" } | { "kind": "newLocalTerminal" } | { "kind": "quickConnect" } | { "kind": "settings" } | { "kind": "openHost", hostId: HostId, } | { "kind": "focusTerminal", scope: NativeTerminalSessionScope, } | { "kind": "focusSshSession", sessionId: SshSessionId, generation: WireSequence, } | { "kind": "focusLocalSession", sessionId: LocalSessionId, generation: WireSequence, } | { "kind": "focusTelnet", sessionId: string, generation: WireSequence, socketId: string | null, } | { "kind": "focusDesktop", sessionId: string, generation: WireSequence, } | { "kind": "openTunnels", sessionId: ForwardSessionId | null, generation: WireSequence | null, } | { "kind": "openTransfers", transferId: TransferId | null,
 /**
  * Minimum revision within the exact two-ended fence; ordinary transfer progress does not invalidate navigation.
  */
@@ -67,11 +69,11 @@ export type NativeTrayActionsReadyRequest = { meta: RequestMeta, locale: NativeT
 
 export type NativeTrayActionEvent = { token: string, };
 
-export type NativeTrayPanelSnapshot = { locale: NativeTrayLocale, 
+export type NativeTrayPanelSnapshot = { locale: NativeTrayLocale,
 /**
  * Empty when status display is disabled; null stats indicate unknown sources, never fabricated zeros.
  */
-stats: Array<NativeTrayPanelStat>, 
+stats: Array<NativeTrayPanelStat>,
 /**
  * A short localized description when status display is enabled and a resource has an error.
  */
@@ -229,7 +231,7 @@ export type PluginWorkflowTaskResult = { taskId: PluginWorkflowTaskId, replies: 
 
 export type PluginWorkflowTaskSnapshot = { task: PluginWorkflowTaskSummary, steps: Array<PluginWorkflowTaskStepSummary>, result?: PluginWorkflowTaskResult, };
 
-export type PluginWorkflowTaskStartRequest = { meta: RequestMeta, pluginId: PluginId, artifactFingerprintSha256: string, expectedPackageSha256: string, expectedStateVersion: WireSequence, instanceGeneration: WireSequence, workflowId: string, inputJson?: string, 
+export type PluginWorkflowTaskStartRequest = { meta: RequestMeta, pluginId: PluginId, artifactFingerprintSha256: string, expectedPackageSha256: string, expectedStateVersion: WireSequence, instanceGeneration: WireSequence, workflowId: string, inputJson?: string,
 /**
  * Opaque, Core-issued file root handles selected before an explicit task
  * start. Core adopts them into the task consumer and gives the Wasm
@@ -245,7 +247,7 @@ export type PluginWorkflowTaskCancelRequest = { meta: RequestMeta, taskId: Plugi
 
 export type PluginWorkflowTaskResumeRequest = { meta: RequestMeta, taskId: PluginWorkflowTaskId, expectedRevision: WireSequence, };
 
-export type WorkflowEvent = { "kind": "start", inputJson?: string, 
+export type WorkflowEvent = { "kind": "start", inputJson?: string,
 /**
  * Opaque source-to-task root handle mapping. It exists only for this
  * in-process start event and is never persisted or replayed.
@@ -256,11 +258,11 @@ export type WorkflowResponse = { stepId?: string, call?: PluginApiCall, complete
 
 export type PluginWorkflowEvent = { taskId: PluginWorkflowTaskId, workflowId: string, event: WorkflowEvent, };
 
-export type PluginAppCommand = { id: string, label: string, targetId: PluginExtensionTargetId, actionId: PluginUiActionId, pageId?: string, 
+export type PluginAppCommand = { id: string, label: string, targetId: PluginExtensionTargetId, actionId: PluginUiActionId, pageId?: string,
 /**
  * Only Alt+Shift+letter is accepted; host binding remains opt-in.
  */
-shortcut: string | null, 
+shortcut: string | null,
 /**
  * A file command invokes the declared action, whose FilePick call still requires native
  * selection and the existing exact-scope approval before a fresh handle is issued.
@@ -287,7 +289,7 @@ export type PluginApiReply = { callId: string, outcome: PluginApiOutcome, };
 
 export type PluginApiOutcome = { "kind": "completed", value: PluginApiValue, } | { "kind": "failed", code: PluginApiErrorCode, };
 
-export type PluginApiValue = { "kind": "appAccepted", } | { "kind": "task", snapshot: PluginWorkflowTaskSnapshot, } | { "kind": "tasks", snapshots: Array<PluginWorkflowTaskSnapshot>, } | { "kind": "serialDevices", devices: Array<PluginSerialDeviceCandidate>, } | { "kind": "serialStarted", handle: string, } | { "kind": "serialSent", handle: string, } | { "kind": "protocolLaunched", launchId: string, } | { "kind": "description", api: PluginApiDescription, } | { "kind": "permissions", grants: Array<PluginCapabilityGrant>, policyRevision: WireSequence | null, 
+export type PluginApiValue = { "kind": "appAccepted", } | { "kind": "task", snapshot: PluginWorkflowTaskSnapshot, } | { "kind": "tasks", snapshots: Array<PluginWorkflowTaskSnapshot>, } | { "kind": "serialDevices", devices: Array<PluginSerialDeviceCandidate>, } | { "kind": "serialStarted", handle: string, } | { "kind": "serialSent", handle: string, } | { "kind": "protocolLaunched", launchId: string, } | { "kind": "description", api: PluginApiDescription, } | { "kind": "permissions", grants: Array<PluginCapabilityGrant>, policyRevision: WireSequence | null,
 /**
  * Only this plugin's non-secret operation summaries are returned.
  */
@@ -403,7 +405,7 @@ export type PluginProtocolLaunchRequest = { meta: RequestMeta, launchId: string,
 
 export type PluginProtocolCatalog = { schemaVersion: number, providers: Array<PluginProtocolProvider>, };
 
-export type PluginProtocolProvider = { id: string, label: PluginSettingLabel, 
+export type PluginProtocolProvider = { id: string, label: PluginSettingLabel,
 /**
  * Non-secret primitive configuration only. Platform validation reuses the
  * existing package settings validator for this schema.
@@ -438,7 +440,7 @@ export type PluginFileOperation = { "kind": "read", rootHandle: string, relative
 
 export type PluginFileResult = { "kind": "read", dataBase64: string, fingerprint: string, eof: boolean, } | { "kind": "written", fingerprint: string, } | { "kind": "listed", entries: Array<PluginFileEntry>, nextCursor?: string, } | { "kind": "renamed", fingerprint: string, } | { "kind": "removed", } | { "kind": "watchStarted", handle: string, };
 
-export type PluginFileEntry = { name: string, kind: PluginFileEntryKind, size?: bigint, 
+export type PluginFileEntry = { name: string, kind: PluginFileEntryKind, size?: bigint,
 /**
  * Directory entries expose their current shallow fingerprint so a subsequent
  * remove or rename can carry an explicit conflict-detection precondition.
@@ -475,11 +477,11 @@ export type PluginSftpObjectPrecondition = { kind: PluginSftpEntryKind, size?: b
 
 export type PluginNetworkEndpointRequest = { endpoint: string, };
 
-export type PreparedNetworkEndpoint = { canonicalUrl: string, scheme: PluginNetworkScheme, host: string, port: number, 
+export type PreparedNetworkEndpoint = { canonicalUrl: string, scheme: PluginNetworkScheme, host: string, port: number,
 /**
  * This path and query come from `endpoint` and remain immutable after approval.
  */
-pathAndQuery: string, 
+pathAndQuery: string,
 /**
  * Every address returned by the one DNS resolution. Core shows these before approval and the
  * driver only dials one member of this frozen set.
@@ -488,14 +490,14 @@ resolvedIps: Array<string>, };
 
 export type PluginNetworkScheme = "http" | "https" | "ws" | "wss" | "tcp" | "udp" | "tls";
 
-export type PluginNetworkStartRequest = { 
+export type PluginNetworkStartRequest = {
 /**
  * Includes connect, TLS handshake and first-response limits. It cannot disable the driver's
  * independent resource and cancellation checks.
  */
 timeoutMs: number, credential?: PluginNetworkCredentialRef, operation: PluginNetworkOperation, };
 
-export type PluginNetworkOperation = { "kind": "http", method: PluginHttpMethod, headers: Array<PluginNetworkHeader>, 
+export type PluginNetworkOperation = { "kind": "http", method: PluginHttpMethod, headers: Array<PluginNetworkHeader>,
 /**
  * Standard base64 without a data-URL prefix. This avoids unbounded JSON number arrays.
  */
@@ -513,7 +515,7 @@ export type PluginNetworkProtocol = "http" | "webSocket" | "tcp" | "udp" | "tls"
 
 export type PluginNetworkErrorCode = "invalidEndpoint" | "resolveFailed" | "connectFailed" | "tlsFailed" | "httpFailed" | "protocolFailed" | "timedOut" | "revoked" | "cancelled" | "unavailable";
 
-export type PluginProcessSendRequest = { handle: string, dataBase64: string, 
+export type PluginProcessSendRequest = { handle: string, dataBase64: string,
 /**
  * Explicit EOF for the approved process stdin. It must not carry data.
  */
@@ -535,7 +537,7 @@ export type PluginRememberPolicy = "exactOperation" | "unavailable" | "unstableT
 
 export type PluginApprovalOperation = "remoteExecute" | "forwardStart" | "forwardStop" | "networkRequest" | "fileAccess" | "sftpRead" | "sftpWrite" | "serialAccess" | "localExecute" | "terminalInput" | "hostMutation" | "hostSession";
 
-export type PluginOperationPermission = { permissionId: string, pluginId: PluginId, operation: PluginApprovalOperation, actionLabel: string, targetLabel: string, createdAtUnixMs: bigint, 
+export type PluginOperationPermission = { permissionId: string, pluginId: PluginId, operation: PluginApprovalOperation, actionLabel: string, targetLabel: string, createdAtUnixMs: bigint,
 /**
  * `None` is an explicit unlimited duration. Finite points are calculated
  * by Core when the user approves, never by a renderer or plugin.
@@ -578,7 +580,7 @@ export type PluginHostScopeReplaceRequest = { meta: RequestMeta, pluginId: Plugi
 
 export type PluginHostMetadataProjection = { hostHandle: PluginHostHandle, label: string, address: string, port: number, username: string | null, favorite: boolean, hostStateVersion: WireSequence, scopeStateVersion: WireSequence, };
 
-export type PluginRemoteOperationRequest = { terminalHandle: string, 
+export type PluginRemoteOperationRequest = { terminalHandle: string,
 /**
  * A JSON-encoded, versioned RemoteOperation from the public operation catalog.
  */
@@ -604,7 +606,7 @@ export type PluginResourceOperation = { "kind": "dockerTerminalOpen", containerI
 
 export type PluginResourceOperationResult = { "kind": "terminalLaunchRequested" } | { "kind": "navigationRequested", request: PluginHostNavigationRequest, } | { "kind": "logsRead", files: Array<PluginLogReadResult>, totalBytes: number, } | { "kind": "forwardStarted", forward: PluginOwnedForwardSummary, } | { "kind": "forwardList", forwards: Array<PluginOwnedForwardSummary>, } | { "kind": "forwardStopped", forward: PluginOwnedForwardSummary, };
 
-export type PluginLogReadRequest = { path: string, 
+export type PluginLogReadRequest = { path: string,
 /**
  * `None` requests the latest bounded window. The returned `next_offset` is used for later
  * incremental reads; a supplied offset remains a decimal string on the JSON wire.
@@ -617,7 +619,7 @@ export type PluginForwardRule = { "kind": "local", localBindAddress: string, loc
 
 export type PluginHostNavigationRequest = { "kind": "sftp", path: string, edit: boolean, };
 
-export type PluginHostNavigationEvent = { operationId: OperationId, pluginId: PluginId, 
+export type PluginHostNavigationEvent = { operationId: OperationId, pluginId: PluginId,
 /**
  * The already-open SFTP subsystem adopted from the selected SSH session. The UI attaches to
  * this exact session/generation and must not open a second Host connection.
@@ -690,11 +692,11 @@ export type PluginTerminalKind = "ssh" | "local";
 
 export type PluginTerminalState = "starting" | "running" | "awaitingUser" | "closing" | "closed" | "failed";
 
-export type PluginTerminalMetadataProjection = { 
+export type PluginTerminalMetadataProjection = {
 /**
  * Opaque hash bound to plugin, target context, session and generation.
  */
-terminalHandle: string, 
+terminalHandle: string,
 /**
  * Stable preset grouping only. Never grants access to, or opens, a connection.
  */
@@ -744,7 +746,7 @@ export type PluginUiFiniteNumber = number;
 
 export type PluginUiChartSeries = { label: string, values: Array<PluginUiFiniteNumber>, };
 
-export type PluginUiNode = { "kind": "stack", nodeId: PluginUiNodeId, direction: PluginUiDirection, align: PluginUiAlign, gap: number, children: Array<PluginUiNodeId>, } | { "kind": "grid", nodeId: PluginUiNodeId, columns: number, 
+export type PluginUiNode = { "kind": "stack", nodeId: PluginUiNodeId, direction: PluginUiDirection, align: PluginUiAlign, gap: number, children: Array<PluginUiNodeId>, } | { "kind": "grid", nodeId: PluginUiNodeId, columns: number,
 /**
  * Optional relative column weights. When present, it must contain one
  * positive bounded value for every column.
@@ -759,16 +761,16 @@ export type PluginExtensionTargetContext = { targetId: PluginExtensionTargetId, 
 
 export type PluginUiContribution = { pluginId: PluginId, pluginName: string, artifactFingerprintSha256: string, packageSha256: string, instanceGeneration: WireSequence, stateVersion: WireSequence, contributionRevision: WireSequence, target: PluginExtensionTargetContext, onOpenActionId?: PluginUiActionId | null, autoRefresh?: PluginUiAutoRefresh | null, routePaths?: Array<string> | null, icon?: string | null, document: PluginUiDocument, };
 
-export type PluginUiTemplate = { targetId: PluginExtensionTargetId, 
+export type PluginUiTemplate = { targetId: PluginExtensionTargetId,
 /**
  * Optional no-field lifecycle hook invoked after the target becomes visible.
  * It is distinct from user-driven document action IDs.
  */
-onOpenActionId?: PluginUiActionId | null, 
+onOpenActionId?: PluginUiActionId | null,
 /**
  * Optional host-scheduled, no-field refresh hook for terminal.footer.
  */
-autoRefresh?: PluginUiAutoRefresh | null, 
+autoRefresh?: PluginUiAutoRefresh | null,
 /**
  * Exact ordinary application paths; absent means every permitted mount.
  */
@@ -780,7 +782,7 @@ export type PluginExtensionTargetDefinition = { targetId: PluginExtensionTargetI
 
 export type PluginExtensionTargetListRequest = { meta: RequestMeta, };
 
-export type PluginTargetContextOpenRequest = { meta: RequestMeta, targetId: PluginExtensionTargetId, 
+export type PluginTargetContextOpenRequest = { meta: RequestMeta, targetId: PluginExtensionTargetId,
 /**
  * Trusted renderer lifecycle key. It is hashed in Core and never sent to
  * the plugin or returned through the public projection.
@@ -791,15 +793,15 @@ export type PluginTargetContextCloseRequest = { meta: RequestMeta, contextHandle
 
 export type PluginUiContributionListRequest = { meta: RequestMeta, target: PluginExtensionTargetContext, };
 
-export type PluginUiActionRequest = { 
+export type PluginUiActionRequest = {
 /**
  * Background invocations may never open protected interaction windows.
  */
 background?: boolean, meta: RequestMeta, pluginId: PluginId, artifactFingerprintSha256: string, expectedPackageSha256: string, instanceGeneration: WireSequence, expectedStateVersion: WireSequence, expectedContributionRevision: WireSequence, targetId: PluginExtensionTargetId, contextHandle: PluginTargetContextHandle, expectedTargetRevision: WireSequence, actionId: PluginUiActionId, fields: Array<PluginUiFieldValue>, hostDomSnapshot: PluginHostDomSnapshot | null, };
 
-export type PluginSshSyncOAuthProfile = { authorizationUrl: string, tokenUrl: string, revokeUrl: string, clientId: string, scopes: Array<string>, 
+export type PluginSshSyncOAuthProfile = { authorizationUrl: string, tokenUrl: string, revokeUrl: string, clientId: string, scopes: Array<string>,
 /**
- * Canonical HTTPS origins that may receive this profile's bearer token.
+ * Canonical HTTP or HTTPS origins that may receive this profile's bearer token.
  * Paths are intentionally excluded so the Core can compare the final
  * parsed request URL without trusting plugin-controlled string prefixes.
  */
@@ -815,12 +817,14 @@ export type PluginSshSyncDownloadSource = { url: string, useOauth: boolean, };
 
 export type PluginSshSyncDeleteTarget = { url: string, useOauth: boolean, };
 
-export type PluginSshSyncRequest = { "action": "status", profileId: string, 
+export type PluginSshSyncConflictPolicy = "prompt" | "newest";
+
+export type PluginSshSyncRequest = { "action": "status", profileId: string,
 /**
  * Provider configuration allows a fresh Core process to restore the
  * Vault-backed session without a password. OAuth profiles omit it.
  */
-auth?: PluginSshSyncCredentialProfile | null, } | { "action": "authorize", profileId: string, oauth: PluginSshSyncOAuthProfile, } | { "action": "login", profileId: string, auth: PluginSshSyncCredentialProfile, usernameFieldId: PluginUiFieldId, passwordFieldId: PluginUiFieldId, } | { "action": "register", profileId: string, auth: PluginSshSyncCredentialProfile, usernameFieldId: PluginUiFieldId, passwordFieldId: PluginUiFieldId, passwordConfirmationFieldId: PluginUiFieldId, displayNameFieldId: PluginUiFieldId | null, } | { "action": "verifyEmail", profileId: string, codeFieldId: PluginUiFieldId, } | { "action": "completeMfa", profileId: string, codeFieldId: PluginUiFieldId, } | { "action": "logout", profileId: string, auth?: PluginSshSyncCredentialProfile | null, } | { "action": "refresh", profileId: string, auth: PluginSshSyncCredentialProfile, source: PluginSshSyncDownloadSource, } | { "action": "sync", profileId: string, auth: PluginSshSyncCredentialProfile, source: PluginSshSyncDownloadSource, destination: PluginSshSyncUploadTarget, } | { "action": "configureScope", profileId: string, } | { "action": "resetRemote", profileId: string, auth: PluginSshSyncCredentialProfile, target: PluginSshSyncDeleteTarget, };
+auth?: PluginSshSyncCredentialProfile | null, } | { "action": "authorize", profileId: string, oauth: PluginSshSyncOAuthProfile, } | { "action": "login", profileId: string, auth: PluginSshSyncCredentialProfile, usernameFieldId: PluginUiFieldId, passwordFieldId: PluginUiFieldId, } | { "action": "register", profileId: string, auth: PluginSshSyncCredentialProfile, usernameFieldId: PluginUiFieldId, passwordFieldId: PluginUiFieldId, passwordConfirmationFieldId: PluginUiFieldId, displayNameFieldId: PluginUiFieldId | null, } | { "action": "verifyEmail", profileId: string, codeFieldId: PluginUiFieldId, } | { "action": "completeMfa", profileId: string, codeFieldId: PluginUiFieldId, } | { "action": "logout", profileId: string, auth?: PluginSshSyncCredentialProfile | null, } | { "action": "refresh", profileId: string, auth: PluginSshSyncCredentialProfile, source: PluginSshSyncDownloadSource, } | { "action": "sync", profileId: string, auth: PluginSshSyncCredentialProfile, source: PluginSshSyncDownloadSource, destination: PluginSshSyncUploadTarget, conflictPolicy: PluginSshSyncConflictPolicy, deletionPolicy: PluginSshSyncConflictPolicy, } | { "action": "configureScope", profileId: string, } | { "action": "resetRemote", profileId: string, auth: PluginSshSyncCredentialProfile, target: PluginSshSyncDeleteTarget, };
 
 export type PluginSshSyncAccountState = "disconnected" | "authorizing" | "needsMfa" | "needsEmailVerification" | "connected" | "expired";
 
@@ -830,13 +834,17 @@ export type PluginSshSyncDifferenceState = "unavailable" | "equal" | "localOnly"
 
 export type PluginSshSyncScopeMode = "allEligible" | "custom";
 
-export type PluginSshSyncStableErrorCode = "vaultMissing" | "vaultLocked" | "interactionRequired" | "authorizationDenied" | "authorizationExpired" | "accessDenied" | "quotaExceeded" | "networkUnavailable" | "serviceUnavailable" | "stateConflict" | "remoteDataInvalid" | "remoteFormatUnsupported" | "operationRejected" | "internal";
+export type PluginSshSyncStableErrorCode = "vaultMissing" | "vaultLocked" | "interactionRequired" | "authorizationDenied" | "authorizationExpired" | "accessDenied" | "quotaExceeded" | "networkUnavailable" | "serviceUnavailable" | "stateConflict" | "remoteDataInvalid" | "remoteFormatUnsupported" | "recoveryRemoteKeyAuthenticationFailed" | "recoveryActionExpired" | "localDataInvalid" | "preferencesUnavailable" | "localKeyUnavailable" | "operationBusy" | "operationRejected" | "internal";
 
-export type PluginSshSyncStatus = { profileId: string, accountState: PluginSshSyncAccountState, operationState: PluginSshSyncOperationState, lastSyncAtUnixMs: bigint | null, hostCount: number, credentialCount: number, conflictCount: number, stableErrorCode: PluginSshSyncStableErrorCode | null, httpStatus: number | null, remoteRevision: bigint | null, etag: string | null, previewId: string | null, exchangeSha256: string | null, localHostCount: number, localCredentialCount: number, remoteHostCount: number | null, remoteCredentialCount: number | null, differenceState: PluginSshSyncDifferenceState | null, scopeMode: PluginSshSyncScopeMode | null, desktopProfileCount: number, localDesktopProfileCount: number, remoteDesktopProfileCount: number | null, };
+export type PluginSshSyncStatus = { profileId: string, accountState: PluginSshSyncAccountState, operationState: PluginSshSyncOperationState, lastSyncAtUnixMs: bigint | null, hostCount: number, credentialCount: number, conflictCount: number, stableErrorCode: PluginSshSyncStableErrorCode | null,
+/**
+ * Fixed failure-site identifier. Contains no input, credentials, or remote body.
+ */
+diagnosticCode?: string, httpStatus: number | null, remoteRevision: bigint | null, etag: string | null, previewId: string | null, exchangeSha256: string | null, localHostCount: number, localCredentialCount: number, remoteHostCount: number | null, remoteCredentialCount: number | null, differenceState: PluginSshSyncDifferenceState | null, scopeMode: PluginSshSyncScopeMode | null, desktopProfileCount: number, localDesktopProfileCount: number, remoteDesktopProfileCount: number | null, };
 
-export type SshSyncSecurePromptKind = "authorizeProvider" | "selectBackup" | "createRecoveryPassword" | "recoverExistingKey" | "createLocalVault" | "unlockSynchronizedVault" | "recoverSynchronizedKey" | "selectRestore" | "approveRestore" | "resolveConflicts" | "chooseSyncDirection" | "resetRemote";
+export type SshSyncSecurePromptKind = "authorizeProvider" | "selectBackup" | "createRecoveryPassword" | "recoverExistingKey" | "createLocalVault" | "unlockSynchronizedVault" | "recoverSynchronizedKey" | "selectRestore" | "approveRestore" | "resolveConflicts" | "chooseSyncDirection" | "approveMergedDeletion" | "resetRemote";
 
-export type SshSyncSecureDifferenceKind = "desktopProfile" | "host" | "identity" | "credential" | "connectionRoute" | "authentication" | "algorithms" | "heartbeat" | "monitoring" | "loginAutomation" | "encryptedSecret";
+export type SshSyncSecureDifferenceKind = "desktopProfile" | "host" | "identity" | "credential" | "connectionRoute" | "authentication" | "algorithms" | "heartbeat" | "monitoring" | "loginAutomation" | "encryptedSecret" | "preferences";
 
 export type SshSyncSecureDifferenceChange = "localOnly" | "remoteOnly" | "changed";
 
@@ -852,15 +860,19 @@ export type SshSyncSecureHost = { hostId: HostId, label: string, endpoint: strin
 
 export type SshSyncSecurePromptGetRequest = { meta: RequestMeta, promptId: string, };
 
-export type SshSyncSecurePrompt = { desktopProfiles: Array<SshSyncSecureDesktopProfile>, desktopProfileCount: number, remoteDesktopProfileCount: number, promptId: string, pluginId: PluginId, profileId: string, remoteOrigin: string | null, kind: SshSyncSecurePromptKind, oauth: SshSyncSecureOAuthSummary | null, hosts: Array<SshSyncSecureHost>, hostCount: number, credentialCount: number, conflictCount: number, updateCount: number, deleteCount: number, remoteHostCount: number, remoteCredentialCount: number, localComparedAtUnixMs: number | null, remoteUpdatedAtUnixMs: number | null, differences: Array<SshSyncSecureDifference>, differenceTotalCount: number, differenceOmittedCount: number, };
+export type SshSyncSecurePrompt = { desktopProfiles: Array<SshSyncSecureDesktopProfile>, desktopProfileCount: number, remoteDesktopProfileCount: number, promptId: string, pluginId: PluginId, profileId: string, remoteOrigin: string | null, kind: SshSyncSecurePromptKind, oauth: SshSyncSecureOAuthSummary | null, hosts: Array<SshSyncSecureHost>, hostCount: number, credentialCount: number, conflictCount: number, updateCount: number, deleteCount: number, remoteHostCount: number, remoteCredentialCount: number, localComparedAtUnixMs: number | null, remoteUpdatedAtUnixMs: number | null, differences: Array<SshSyncSecureDifference>, differenceTotalCount: number, differenceOmittedCount: number,
+/**
+ * Saved local rules removed with deleted hosts; visible only in the protected review.
+ */
+relatedForwardRuleLabels: Array<string>, };
 
-export type SshSyncSecureDecision = "approve" | "cancel" | "keepLocal" | "useRemote";
+export type SshSyncSecureDecision = "approve" | "cancel" | "keepLocal" | "useRemote" | "applyMerged";
 
 export type SshSyncSecureDecisionRequest = { selectedDesktopProfileIds: Array<string>, meta: RequestMeta, promptId: string, decision: SshSyncSecureDecision, selectedHostIds: Array<HostId>, selectedCredentialRefIds: Array<CredentialRefId>, vaultPassword: string | null, vaultPasswordConfirmation?: string, };
 
 export type SshSyncSecureDecisionResponse = { accepted: boolean, };
 
-export type PluginUiActionResponse = { contribution: PluginUiContribution, 
+export type PluginUiActionResponse = { contribution: PluginUiContribution,
 /**
  * Present only for a direct CopyButton action after Core revalidates the
  * separate clipboard.write grant and all action/target fences.
@@ -873,31 +885,31 @@ export type PluginSshSyncBrowserState = "notLoaded" | "ready" | "empty" | "needs
 
 export type PluginSshSyncBrowserCredentialMaterialKind = "password" | "privateKey" | "certificate" | "keyboardInteractive";
 
-export type PluginSshSyncBrowserHost = { 
+export type PluginSshSyncBrowserHost = {
 /**
  * Opaque identifier scoped to the current in-memory cache revision.
  */
-rowId: string, label: string, address: string, port: number, username: string | null, tags: Array<string>, };
+rowId: string, label: string, address: string, port: number, username: string | null, tags: Array<string>, updatedAtUnixMs: number | null, };
 
-export type PluginSshSyncBrowserDesktopProfile = { 
+export type PluginSshSyncBrowserDesktopProfile = {
 /**
  * Opaque identifier scoped to the current in-memory cache revision.
  */
-rowId: string, label: string, protocol: DesktopProtocol, address: string, port: number, username: string, domain: string, };
+rowId: string, label: string, protocol: DesktopProtocol, address: string, port: number, username: string, domain: string, updatedAtUnixMs: number | null, };
 
-export type PluginSshSyncBrowserCredential = { 
+export type PluginSshSyncBrowserCredential = {
 /**
  * Opaque identifier scoped to the current in-memory cache revision.
  */
-rowId: string, label: string, materialKind: PluginSshSyncBrowserCredentialMaterialKind, 
+rowId: string, label: string, materialKind: PluginSshSyncBrowserCredentialMaterialKind,
 /**
  * Opaque row identifiers for returned Hosts that reference this credential.
  */
-hostRowIds: Array<string>, 
+hostRowIds: Array<string>,
 /**
  * Opaque row identifiers for returned remote desktops that reference this credential.
  */
-desktopProfileRowIds: Array<string>, };
+desktopProfileRowIds: Array<string>, updatedAtUnixMs: number | null, };
 
 export type PluginSshSyncBrowserSnapshot = { state: PluginSshSyncBrowserState, profileId: string, cacheRevision: WireSequence, hostCount: number, credentialCount: number, desktopProfileCount: number, hostRowsOmitted: number, credentialRowsOmitted: number, desktopProfileRowsOmitted: number, remoteUpdatedAtUnixMs: number | null, hosts: Array<PluginSshSyncBrowserHost>, credentials: Array<PluginSshSyncBrowserCredential>, desktopProfiles: Array<PluginSshSyncBrowserDesktopProfile>, };
 
@@ -991,7 +1003,7 @@ export type PluginLocalPackagePrepareRequest = { meta: RequestMeta, };
 
 export type PluginLocalPackageCancelRequest = { meta: RequestMeta, preparationId: string, };
 
-export type PluginLocalPackagePreview = { preparationId: string, pluginId: PluginId, name: string, author: string, version: string, packageSize: bigint, packageSha256: string, capabilities: Array<PluginCapability>, currentVersion: string | null, currentStateVersion: WireSequence | null, 
+export type PluginLocalPackagePreview = { preparationId: string, pluginId: PluginId, name: string, author: string, version: string, packageSize: bigint, packageSha256: string, capabilities: Array<PluginCapability>, currentVersion: string | null, currentStateVersion: WireSequence | null,
 /**
  * Only verified publisher continuity can retain installed decisions.
  */
@@ -1033,11 +1045,11 @@ export type PluginHostMessageKind = "initialize" | "invoke" | "uiAction" | "sshS
 
 export type PluginTerminalInputDecision = "approve" | "reject";
 
-export type PluginTerminalInputProposal = { approvalId: PluginInputApprovalId, pluginId: PluginId, pluginName: string, publisher: string, artifactFingerprintSha256: string, packageSha256: string, instanceGeneration: WireSequence, 
+export type PluginTerminalInputProposal = { approvalId: PluginInputApprovalId, pluginId: PluginId, pluginName: string, publisher: string, artifactFingerprintSha256: string, packageSha256: string, instanceGeneration: WireSequence,
 /**
  * Saved Host label when the target originated from a Host record.
  */
-hostLabel: string | null, 
+hostLabel: string | null,
 /**
  * Canonical non-secret endpoint rendered for the approval decision.
  */
@@ -1079,11 +1091,11 @@ export type SshCertificateCriticalOption = { name: string, value: Array<number>,
 
 export type SshCertificateExtension = { name: string, value: Array<number>, recognized: boolean, };
 
-export type SshCertificateMetadata = { source: AgentIdentitySource, certificateBlob: Array<number>, certificateAlgorithm: string, certificateFingerprint: string, 
+export type SshCertificateMetadata = { source: AgentIdentitySource, certificateBlob: Array<number>, certificateAlgorithm: string, certificateFingerprint: string,
 /**
  * Exact unsigned 64-bit OpenSSH serial in canonical decimal form.
  */
-serial: string, subjectPublicKeyBlob: Array<number>, subjectPublicKeyAlgorithm: string, subjectPublicKeyFingerprint: string, caPublicKeyFingerprint: string, keyId: string, validPrincipals: Array<string>, certificateType: SshCertificateType, validAfterUnixSeconds: number, 
+serial: string, subjectPublicKeyBlob: Array<number>, subjectPublicKeyAlgorithm: string, subjectPublicKeyFingerprint: string, caPublicKeyFingerprint: string, keyId: string, validPrincipals: Array<string>, certificateType: SshCertificateType, validAfterUnixSeconds: number,
 /**
  * `None` represents OpenSSH's forever sentinel. Finite values are non-negative Unix seconds.
  */
@@ -1099,7 +1111,7 @@ export type RoutePlanSummary = { hostId: HostId, revision: WireSequence, ingress
 
 export type AuthenticationPlanMode = "identity" | "hostOverride";
 
-export type AuthenticationPlanSummary = { hostId: HostId, revision: WireSequence, mode: AuthenticationPlanMode, 
+export type AuthenticationPlanSummary = { hostId: HostId, revision: WireSequence, mode: AuthenticationPlanMode,
 /**
  * Ordered, bounded references. Empty means that no saved authentication method is ready.
  */
@@ -1109,7 +1121,7 @@ export type AlgorithmCategory = "keyExchange" | "hostKey" | "cipher" | "mac";
 
 export type AlgorithmRisk = "modern" | "legacy" | "weak";
 
-export type AlgorithmCatalogEntry = { 
+export type AlgorithmCatalogEntry = {
 /**
  * Stable Core-owned identifier. This is never an arbitrary SSH name.
  */
@@ -1117,13 +1129,13 @@ stableId: string, category: AlgorithmCategory, algorithmName: string, available:
 
 export type AlgorithmPolicyCatalog = { catalogVersion: string, defaultPolicyId: string, entries: Array<AlgorithmCatalogEntry>, };
 
-export type AlgorithmCompatibilityException = { category: AlgorithmCategory, 
+export type AlgorithmCompatibilityException = { category: AlgorithmCategory,
 /**
  * A catalog-owned stable identifier, never an arbitrary SSH algorithm name.
  */
 exceptionId: string, reason: string | null, };
 
-export type AlgorithmPolicySummary = { hostId: HostId, revision: WireSequence, 
+export type AlgorithmPolicySummary = { hostId: HostId, revision: WireSequence,
 /**
  * References a policy exposed by the Core algorithm catalog. The catalog itself is not stored.
  */
@@ -1141,11 +1153,11 @@ export type DiskResourceId = "root";
 
 export type NetworkResourceId = "aggregateNonLoopback";
 
-export type MonitoringPolicy = { enabled: boolean, sampleIntervalSeconds: number, sampleTimeoutSeconds: number, 
+export type MonitoringPolicy = { enabled: boolean, sampleIntervalMillis: number, sampleTimeoutMillis: number,
 /**
  * Stable identifiers selected from a MetricsProvider result, not shell fragments.
  */
-diskMountIds: Array<DiskResourceId>, 
+diskMountIds: Array<DiskResourceId>,
 /**
  * Stable identifiers selected from a MetricsProvider result, not shell fragments.
  */
@@ -1153,7 +1165,7 @@ networkInterfaceIds: Array<NetworkResourceId>, };
 
 export type MonitoringPolicySummary = { hostId: HostId, revision: WireSequence, policy: MonitoringPolicy, };
 
-export type MonitoringPolicyReplaceResponse = { policy: MonitoringPolicySummary, 
+export type MonitoringPolicyReplaceResponse = { policy: MonitoringPolicySummary,
 /**
  * True only after the Metrics actor accepted the persisted policy and
  * synchronously completed any required worker shutdown.
@@ -1222,12 +1234,12 @@ export type HostCreateRequest = { meta: RequestMeta, label: string, address: str
 
 export type HostCreateLoginAutomationStep = { "kind": "expect", literalText: string, timeoutSeconds: number, } | { "kind": "sendText", text: string, appendEnter: boolean, timeoutSeconds: number, };
 
-export type HostConfiguredCreateRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, label: string, address: string, port: number, username: string | null, identityId: IdentityId | null, favorite: boolean, groupId: HostGroupId | null, tagIds: Array<HostTagId>, ingress: RouteIngress, jumpHostIds: Array<HostId>, authenticationMode: AuthenticationPlanMode, credentialRefIds: Array<CredentialRefId>, algorithmPolicyId: string, compatibilityExceptions: Array<AlgorithmCompatibilityException>, heartbeatPolicy: HeartbeatPolicy, monitoringPolicy: MonitoringPolicy, loginAutomationEnabled: boolean, 
+export type HostConfiguredCreateRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, label: string, address: string, port: number, username: string | null, identityId: IdentityId | null, favorite: boolean, groupId: HostGroupId | null, tagIds: Array<HostTagId>, ingress: RouteIngress, jumpHostIds: Array<HostId>, authenticationMode: AuthenticationPlanMode, credentialRefIds: Array<CredentialRefId>, algorithmPolicyId: string, compatibilityExceptions: Array<AlgorithmCompatibilityException>, heartbeatPolicy: HeartbeatPolicy, monitoringPolicy: MonitoringPolicy, loginAutomationEnabled: boolean,
 /**
  * Explicit confirmation of the exact revision-1 automation saved by this operation.
  * It is invalid when automation is disabled.
  */
-loginAutomationConfirmed: boolean, loginAutomationSteps: Array<HostCreateLoginAutomationStep>, 
+loginAutomationConfirmed: boolean, loginAutomationSteps: Array<HostCreateLoginAutomationStep>,
 /**
  * Optional password staged for this exact operation/idempotency pair. When present, Core
  * creates a dedicated Identity and ready password credential inside the Host transaction.
@@ -1270,7 +1282,7 @@ export type HostOrganizationReplaceRequest = { meta: RequestMeta, hostId: HostId
 
 export type HostFavoriteUpdateRequest = { meta: RequestMeta, hostId: HostId, expectedStateVersion: WireSequence, favorite: boolean, };
 
-export type RecentConnectionListRequest = { meta: RequestMeta, 
+export type RecentConnectionListRequest = { meta: RequestMeta,
 /**
  * Bounded by Core; valid values are 1 through 100.
  */
@@ -1304,7 +1316,7 @@ export type TransientCredentialRef = { credentialRefId: CredentialRefId, expires
 
 export type SshAgentKeyListRequest = { meta: RequestMeta, };
 
-export type SshAgentKeySummary = { 
+export type SshAgentKeySummary = {
 /**
  * Short-lived, one-use handle. It contains no socket path or public-key bytes.
  */
@@ -1350,7 +1362,7 @@ export type MetricsPlatform = "linux" | "macos" | "windows" | "unsupported";
 
 export type MetricFieldState = "available" | "initialBaseline" | "counterReset" | "counterSetChanged" | "noCounterProgress" | "unsupported" | "permissionDenied" | "error";
 
-export type CpuMetric = { state: MetricFieldState, 
+export type CpuMetric = { state: MetricFieldState,
 /**
  * Hundredths of one percent, so 10_000 represents 100%.
  */
@@ -1360,11 +1372,11 @@ export type MemoryMetric = { state: MetricFieldState, usedBytes: MetricByteCount
 
 export type NetworkMetric = { resourceId: NetworkResourceId, state: MetricFieldState, receiveBytesPerSecond: MetricByteCount | null, transmitBytesPerSecond: MetricByteCount | null, };
 
-export type DiskMetric = { resourceId: DiskResourceId, state: MetricFieldState, 
+export type DiskMetric = { resourceId: DiskResourceId, state: MetricFieldState,
 /**
  * Provider-owned identifier. It is display data and never a shell fragment.
  */
-filesystemId: string, 
+filesystemId: string,
 /**
  * Provider-owned verified mount label. It is never interpolated into a command.
  */
@@ -1430,12 +1442,12 @@ export type SshNegotiatedAlgorithms = { routeStage: SshSessionRouteStage, policy
 
 export type SshAlgorithmNegotiationFailure = { category: AlgorithmCategory, clientCandidates: Array<string>, serverCandidates: Array<string>, };
 
-export type SshSessionFailureReason = { code: SshSessionFailureCode, stage: SshSessionFailureStage, 
+export type SshSessionFailureReason = { code: SshSessionFailureCode, stage: SshSessionFailureStage,
 /**
  * Location within the resolved route at which the failure occurred.
  * This never contains credentials or proxy authentication material.
  */
-routeStage: SshSessionRouteStage | null, 
+routeStage: SshSessionRouteStage | null,
 /**
  * Present only for algorithm negotiation failures. Both lists are
  * bounded, de-duplicated protocol names and contain no authentication material.
@@ -1448,7 +1460,7 @@ export type SshSessionSummary = { sessionId: SshSessionId, openAttemptId: SshOpe
 
 export type SshSessionAttachment = { attachmentId: SshAttachmentId, attachAttemptId: SshAttachAttemptId, sessionId: SshSessionId, generation: WireSequence, channelId: SshChannelId | null, viewId: SshViewId, stateRevision: WireSequence, attachmentRevision: WireSequence, attachedAtUnixMs: number, };
 
-export type SshSessionInputLease = { leaseId: SshInputLeaseId, sessionId: SshSessionId, generation: WireSequence, attachmentId: SshAttachmentId, viewId: SshViewId, 
+export type SshSessionInputLease = { leaseId: SshInputLeaseId, sessionId: SshSessionId, generation: WireSequence, attachmentId: SshAttachmentId, viewId: SshViewId,
 /**
  * Epoch of the process-wide terminal input focus broker that issued this
  * lease. Future LocalTerminalSession targets must join the same broker.
@@ -1461,7 +1473,7 @@ export type SshTerminalInputFocusSnapshotRequest = { meta: RequestMeta, };
 
 export type SshTerminalInputFocusSnapshot = { focusEpoch: WireSequence, target: SshTerminalInputFocusTarget | null, lease: SshSessionInputLease | null, };
 
-export type SshTerminalInputFocusChangeRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, expectedFocusEpoch: WireSequence, 
+export type SshTerminalInputFocusChangeRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, expectedFocusEpoch: WireSequence,
 /**
  * `None` atomically clears the old target for a blank Tab, blocking
  * Dialog, or workspace with no writable Pane.
@@ -1494,12 +1506,12 @@ export type TerminalInputFocusChangeRequest = { meta: RequestMeta, operationId: 
 
 export type TerminalInputFocusChangeResponse = { focusEpoch: WireSequence, target: TerminalInputFocusTarget | null, lease: TerminalInputLease | null, };
 
-export type SshSessionOpenRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, openAttemptId: SshOpenAttemptId, attachAttemptId: SshAttachAttemptId, target: SshSessionTarget, 
+export type SshSessionOpenRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, openAttemptId: SshOpenAttemptId, attachAttemptId: SshAttachAttemptId, target: SshSessionTarget,
 /**
  * A saved authentication choice is represented only by CredentialRefId.
  * SecretRefId and plaintext authentication material are not accepted.
  */
-credentialRefId: CredentialRefId | null, 
+credentialRefId: CredentialRefId | null,
 /**
  * One-time Core-owned authorization emitted only after a protected plugin
  * Host session approval. Normal user launches always send `None`.
@@ -1612,13 +1624,13 @@ export type NativeTerminalSettingsGetRequest = { meta: RequestMeta, };
 
 export type NativeTerminalSettingsReplaceRequest = { meta: RequestMeta, expectedSettingsRevision: WireSequence, settings: NativeTerminalSettings, };
 
-export type NativeTerminalSettingsSnapshot = { settings: NativeTerminalSettings, settingsRevision: WireSequence, 
+export type NativeTerminalSettingsSnapshot = { settings: NativeTerminalSettings, settingsRevision: WireSequence,
 /**
  * False means encrypted persistence was selected but the Vault is locked
  * or requires reload. Pausing or disabling capture does not change this
  * storage-readability fact, so the user can resume without data loss.
  */
-historyAvailable: boolean, 
+historyAvailable: boolean,
 /**
  * A previous encrypted write failed. Core keeps a bounded latest snapshot
  * and retries on a later mutation; settings can also trim or clear the
@@ -1632,7 +1644,7 @@ export type NativeTerminalLocalInputFence = { sessionId: LocalSessionId, expecte
 
 export type NativeTerminalInputFence = { "kind": "ssh", "payload": NativeTerminalSshInputFence } | { "kind": "local", "payload": NativeTerminalLocalInputFence };
 
-export type NativeTerminalEnableRequest = { meta: RequestMeta, inputFence: NativeTerminalInputFence, shellKind: NativeTerminalShellKind, 
+export type NativeTerminalEnableRequest = { meta: RequestMeta, inputFence: NativeTerminalInputFence, shellKind: NativeTerminalShellKind,
 /**
  * Shell hooks can only be safely installed after the user explicitly
  * confirms that the current terminal is at an empty interactive prompt.
@@ -1641,24 +1653,24 @@ confirmedEmptyPrompt: boolean, };
 
 export type NativeTerminalSessionScope = { "kind": "ssh", sessionId: SshSessionId, generation: WireSequence, channelId: SshChannelId, paneId: SshViewId, } | { "kind": "local", sessionId: LocalSessionId, generation: WireSequence, ptyId: LocalPtyId, paneId: LocalViewId, };
 
-export type NativeTerminalSessionStatus = { session: NativeTerminalSessionScope, shellKind: NativeTerminalShellKind, captureState: NativeTerminalCaptureState, failureCode: NativeTerminalCaptureFailureCode | null, activity: NativeTerminalActivity, 
+export type NativeTerminalSessionStatus = { session: NativeTerminalSessionScope, shellKind: NativeTerminalShellKind, captureState: NativeTerminalCaptureState, failureCode: NativeTerminalCaptureFailureCode | null, activity: NativeTerminalActivity,
 /**
  * True when the Core-owned script installed for this session sends
  * command text in its private OSC start frame. This mode is snapshotted
  * at enable time so notification-only sessions never emit command text.
  */
-capturesCommand: boolean, historyPaused: boolean, promptObserved: boolean, 
+capturesCommand: boolean, historyPaused: boolean, promptObserved: boolean,
 /**
  * Advances for every valid shell prompt hook, including a prompt reached
  * after an empty line or cancelled edit. It is independent of completion
  * delivery so the renderer can safely reset append-only suggestions.
  */
-promptSequence: WireSequence, 
+promptSequence: WireSequence,
 /**
  * The session's writer sequence at the exact prompt hook. A delayed
  * snapshot must not be mistaken for an empty current input line.
  */
-promptInputSequence: WireSequence, 
+promptInputSequence: WireSequence,
 /**
  * The focused lease input epoch at that prompt, if the exact pane still
  * held a lease. The renderer compares it before offering an auto-append.
@@ -1669,7 +1681,7 @@ export type NativeTerminalCommandCompletion = { cursor: WireSequence, eventId: N
 
 export type NativeTerminalSnapshotRequest = { meta: RequestMeta, afterCompletionCursor: WireSequence | null, };
 
-export type NativeTerminalSnapshot = { schemaVersion: number, snapshotRevision: WireSequence, historyPaused: boolean, historyPersistenceFailed: boolean, completionCursor: WireSequence, sessions: Array<NativeTerminalSessionStatus>, 
+export type NativeTerminalSnapshot = { schemaVersion: number, snapshotRevision: WireSequence, historyPaused: boolean, historyPersistenceFailed: boolean, completionCursor: WireSequence, sessions: Array<NativeTerminalSessionStatus>,
 /**
  * Only completions strictly after `afterCompletionCursor` are included.
  * The command text never appears in this projection.
@@ -1862,11 +1874,11 @@ export type SftpSessionFailure = { code: SftpFailureCode, stage: string, message
 
 export type SftpParentSshSession = { sessionId: SshSessionId, generation: WireSequence, };
 
-export type SftpSessionSummary = { sessionId: SftpSessionId, 
+export type SftpSessionSummary = { sessionId: SftpSessionId,
 /**
  * Present when the parent SSH session was opened from a saved Host.
  */
-hostId: HostId | null, 
+hostId: HostId | null,
 /**
  * Present for a subsystem borrowed from an already-open user SSH session.
  */
@@ -1880,7 +1892,7 @@ export type SftpLocalBoundaryRegisterRequest = { meta: RequestMeta, kind: SftpLo
 
 export type SftpLocalBoundary = { token: string, kind: SftpLocalBoundaryKind, displayName: string, size: number | null, };
 
-export type SftpLocalDirectoryCapability = { directoryRef: string, revision: WireSequence, displayName: string, 
+export type SftpLocalDirectoryCapability = { directoryRef: string, revision: WireSequence, displayName: string,
 /**
  * A bounded, valid UTF-8 local path which can be registered again after
  * this opaque capability expires. It is absent for paths which cannot be
@@ -1938,7 +1950,7 @@ export type SftpFileTailResult = { sessionId: SftpSessionId, generation: WireSeq
 
 export type SftpArchiveSource = { path: SftpRemotePath, precondition: SftpRemoteObjectPrecondition, archiveName: string, };
 
-export type SftpFileMutation = { "kind": "createDirectory", path: SftpRemotePath, } | { "kind": "createEmptyFile", path: SftpRemotePath, } | { "kind": "writeText", path: SftpRemotePath, precondition: SftpRemoteObjectPrecondition, text: string, } | { "kind": "renameNoReplace", source: SftpRemotePath, target: SftpRemotePath, sourcePrecondition: SftpRemoteObjectPrecondition, } | { "kind": "delete", path: SftpRemotePath, precondition: SftpRemoteObjectPrecondition, irreversibleConfirmed: boolean, } | { "kind": "createZip", sources: Array<SftpArchiveSource>, target: SftpRemotePath, } | { "kind": "extractZip", source: SftpRemotePath, sourcePrecondition: SftpRemoteObjectPrecondition, targetDirectory: SftpRemotePath, } | { "kind": "downloadUrl", url: string, target: SftpRemotePath, };
+export type SftpFileMutation = { "kind": "createDirectory", path: SftpRemotePath, } | { "kind": "createEmptyFile", path: SftpRemotePath, } | { "kind": "writeText", path: SftpRemotePath, precondition: SftpRemoteObjectPrecondition, text: string, } | { "kind": "renameNoReplace", source: SftpRemotePath, target: SftpRemotePath, sourcePrecondition: SftpRemoteObjectPrecondition, } | { "kind": "delete", path: SftpRemotePath, precondition: SftpRemoteObjectPrecondition, irreversibleConfirmed: boolean, } | { "kind": "setPermissions", path: SftpRemotePath, precondition: SftpRemoteObjectPrecondition, expectedPermissionBits: number, mode: number, } | { "kind": "createZip", sources: Array<SftpArchiveSource>, target: SftpRemotePath, } | { "kind": "extractZip", source: SftpRemotePath, sourcePrecondition: SftpRemoteObjectPrecondition, targetDirectory: SftpRemotePath, } | { "kind": "downloadUrl", url: string, target: SftpRemotePath, };
 
 export type SftpFileMutationRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, sessionId: SftpSessionId, expectedGeneration: WireSequence, mutation: SftpFileMutation, };
 
@@ -1982,11 +1994,11 @@ export type SftpTransferIntentCleanupRetainRequest = { meta: RequestMeta, operat
 
 export type SftpTransferState = "queued" | "preparing" | "transferring" | "verifying" | "committing" | "completed" | "pausedByDisconnect" | "cancelling" | "cancelled" | "failed";
 
-export type SftpTransferFailureCode = "targetExists" | "unsafeReplaceUnsupported" | "permissionDenied" | "transportLost" | "lengthMismatch" | "cleanupIncomplete" | "unsupportedPathEncoding" | "protocol";
+export type SftpTransferFailureCode = "targetExists" | "unsafeReplaceUnsupported" | "commitOutcomeUncertain" | "permissionDenied" | "transportLost" | "lengthMismatch" | "cleanupIncomplete" | "unsupportedPathEncoding" | "protocol";
 
 export type SftpCleanupResidual = { "kind": "remoteTemporaryTarget", path: SftpRemotePath, displayPath: string, } | { "kind": "localTemporaryTarget", displayName: string, } | { "kind": "unknown", displayName: string, };
 
-export type SftpTransferSummary = { transferId: TransferId, sessionId: SftpSessionId, generation: WireSequence, direction: SftpTransferDirection, source: SftpTransferEndpoint, target: SftpTransferEndpoint, expectedBytes: number, transferredBytes: number, bytesPerSecond: number | null, remainingSeconds: number | null, stateRevision: WireSequence, state: SftpTransferState, failureCode: SftpTransferFailureCode | null, cleanupResidual: SftpCleanupResidual | null, };
+export type SftpTransferSummary = { transferId: TransferId, sessionId: SftpSessionId, generation: WireSequence, direction: SftpTransferDirection, source: SftpTransferEndpoint, target: SftpTransferEndpoint, expectedBytes: number, transferredBytes: number, bytesPerSecond: number | null, remainingSeconds: number | null, stateRevision: WireSequence, state: SftpTransferState, commitOutcome: SftpTransferCommitOutcome, failureCode: SftpTransferFailureCode | null, cleanupResidual: SftpCleanupResidual | null, };
 
 export type SftpTransferEnqueueRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, transferId: TransferId, sessionId: SftpSessionId, expectedGeneration: WireSequence, direction: SftpTransferDirection, source: SftpTransferEndpoint, target: SftpTransferEndpoint, expectedBytes: number, conflictPolicy: SftpConflictPolicy, };
 
@@ -2016,7 +2028,7 @@ export type TerminalWorkspaceLayoutReplaceRequest = { meta: RequestMeta, expecte
 
 export type VaultState = "missing" | "locked" | "unlocked" | "requiresReload";
 
-export type VaultUnlockPolicy = "currentSession" | "automatic";
+export type VaultUnlockPolicy = "currentSession" | "automatic" | "automaticLocal";
 
 export type VaultAutoUnlockFailure = "secureStorageUnavailable" | "deviceKeyMissing" | "deviceUnlockRejected";
 
@@ -2030,7 +2042,7 @@ export type VaultUnlockRequest = { meta: RequestMeta, password: string, };
 
 export type VaultLockRequest = { meta: RequestMeta, };
 
-export type VaultAutoUnlockEnableRequest = { meta: RequestMeta, password: string, };
+export type VaultAutoUnlockEnableRequest = { meta: RequestMeta, password: string, policy?: VaultUnlockPolicy, };
 
 export type VaultAutoUnlockDisableRequest = { meta: RequestMeta, };
 
@@ -2038,7 +2050,7 @@ export type VaultChangePasswordRequest = { meta: RequestMeta, currentPassword: s
 
 export type WindowCloseRequest = { meta: RequestMeta, };
 
-export type ApplicationExitRequest = { meta: RequestMeta, 
+export type ApplicationExitRequest = { meta: RequestMeta,
 /**
  * Set only after the user reviewed the active resource list and
  * explicitly confirmed that those resources may be disconnected.

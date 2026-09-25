@@ -33,8 +33,8 @@ const card: ServerOverviewCard = {
     revision: "1",
     policy: {
       enabled: false,
-      sampleIntervalSeconds: 15,
-      sampleTimeoutSeconds: 5,
+      sampleIntervalMillis: 1500,
+      sampleTimeoutMillis: 5000,
       diskMountIds: ["root"],
       networkInterfaceIds: ["aggregateNonLoopback"],
     },

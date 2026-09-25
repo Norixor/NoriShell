@@ -108,9 +108,9 @@ impl ToolWindowExit {
         Ok(())
     }
 
-    pub(crate) async fn prepare(
+    pub(crate) async fn prepare<R: tauri::Runtime>(
         &self,
-        app: &tauri::AppHandle,
+        app: &tauri::AppHandle<R>,
         windows: &ToolWindows,
     ) -> Result<ToolWindowExitPermit, ()> {
         // Starting the attempt fences window creation before taking the live inventory.
@@ -137,8 +137,9 @@ impl ToolWindowExit {
                 continue;
             };
             // An unresponsive renderer or failed event delivery cancels the exit, never the draft.
-            window.show().map_err(|_| ())?;
-            window.set_focus().map_err(|_| ())?;
+            if !crate::window_first_show::show_if_revealed(&window).map_err(|_| ())? {
+                return Err(());
+            }
             window
                 .emit(
                     "tool-window-exit-requested",

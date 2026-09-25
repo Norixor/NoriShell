@@ -369,9 +369,9 @@ fn map_storage_error(error: AppPersistenceError, fence: &ResourceFence) -> Plugi
             PluginApiErrorCode::InvalidRequest
         }
         AppPersistenceError::NotFound => PluginApiErrorCode::NotFound,
-        AppPersistenceError::Conflict | AppPersistenceError::IdempotencyConflict => {
-            PluginApiErrorCode::Conflict
-        }
+        AppPersistenceError::Conflict
+        | AppPersistenceError::IdempotencyConflict
+        | AppPersistenceError::DatabaseNotFresh => PluginApiErrorCode::Conflict,
         AppPersistenceError::UnsupportedSchema(_)
         | AppPersistenceError::KnownHostMismatch { .. }
         | AppPersistenceError::KnownHostAlgorithmChanged { .. }

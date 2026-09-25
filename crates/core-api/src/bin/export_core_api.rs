@@ -7,6 +7,7 @@ fn declarations() -> String {
     let config = Config::default();
     let declarations = [
         DesktopProtocol::decl(&config),
+        VncProtocolVersion::decl(&config),
         DesktopAvailability::decl(&config),
         DesktopProfile::decl(&config),
         DesktopPasswordStage::decl(&config),
@@ -347,6 +348,7 @@ fn declarations() -> String {
         PluginSshSyncUploadTarget::decl(&config),
         PluginSshSyncDownloadSource::decl(&config),
         PluginSshSyncDeleteTarget::decl(&config),
+        PluginSshSyncConflictPolicy::decl(&config),
         PluginSshSyncRequest::decl(&config),
         PluginSshSyncAccountState::decl(&config),
         PluginSshSyncOperationState::decl(&config),
@@ -957,7 +959,7 @@ fn declarations() -> String {
         COMMAND_WINDOW_REQUEST_CLOSE,
         COMMAND_APPLICATION_REQUEST_EXIT,
     );
-    generated
+    let generated = generated
         .replace(
             "  sshTerminalOpen:",
             &format!(
@@ -1030,7 +1032,13 @@ fn declarations() -> String {
             &format!(
                 "  nativeTerminalSettingsGet: {COMMAND_NATIVE_TERMINAL_SETTINGS_GET:?},\n  nativeTerminalSettingsReplace: {COMMAND_NATIVE_TERMINAL_SETTINGS_REPLACE:?},\n  nativeTerminalEnable: {COMMAND_NATIVE_TERMINAL_ENABLE:?},\n  nativeTerminalSnapshot: {COMMAND_NATIVE_TERMINAL_SNAPSHOT:?},\n  nativeTerminalHistoryList: {COMMAND_NATIVE_TERMINAL_HISTORY_LIST:?},\n  nativeTerminalHistoryDelete: {COMMAND_NATIVE_TERMINAL_HISTORY_DELETE:?},\n  nativeTerminalHistoryClear: {COMMAND_NATIVE_TERMINAL_HISTORY_CLEAR:?},\n  nativeTerminalHistoryPause: {COMMAND_NATIVE_TERMINAL_HISTORY_PAUSE:?},\n  terminalWorkspaceLayoutGet:"
             ),
-        )
+        );
+    generated
+        .lines()
+        .map(|line| line.trim_end_matches([' ', '\t']))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 fn main() -> ExitCode {

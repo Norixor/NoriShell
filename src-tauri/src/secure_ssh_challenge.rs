@@ -1,6 +1,8 @@
 //! Isolated SSH identity and keyboard-interactive decisions, fenced by the owning actors.
 use crate::{metrics_session_service as metrics, ssh_session_service as ssh};
 use norishell_core_api::*;
+use norishell_ssh_domain::Endpoint;
+use norishell_ssh_transport::ObservedHostKey;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -27,9 +29,17 @@ pub enum ChallengeTarget {
 #[serde(tag = "kind", content = "challenge", rename_all = "camelCase")]
 pub enum ChallengeContent {
     SshHostKey(SshHostKeyChallenge),
+    SftpHostKey(SftpHostKeyChallenge),
     SshKeyboard(SshKeyboardInteractiveChallenge),
     MetricsHostKey(MetricsHostKeyChallenge),
     MetricsKeyboard(MetricsKeyboardInteractiveChallenge),
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpHostKeyChallenge {
+    endpoint: String,
+    algorithm: String,
+    fingerprint_sha256: String,
 }
 #[derive(Clone, Serialize)]
 pub struct ChallengePrompt {
@@ -398,6 +408,110 @@ impl Drop for Guard {
         }
     }
 }
+
+fn open_challenge_window(app: &AppHandle, id: &str) -> Result<WebviewWindow, String> {
+    let path = format!("secure-ssh-challenge.html?prompt={id}");
+    let expected = app
+        .config()
+        .build
+        .dev_url
+        .as_ref()
+        .and_then(|url| url.join(&path).ok());
+    let query = format!("prompt={id}");
+    let child = crate::secure_window_frame::apply_secure_window_frame(
+        app,
+        &label(id),
+        WebviewWindowBuilder::new(app, label(id), WebviewUrl::App(path.into())).title("NoriShell"),
+    )
+    .on_navigation(move |url| {
+        (cfg!(debug_assertions) && expected.as_ref().is_some_and(|e| e == url))
+            || (((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+                || (matches!(url.scheme(), "http" | "https")
+                    && url.host_str() == Some("tauri.localhost")
+                    && url.port().is_none()))
+                && url.path() == "/secure-ssh-challenge.html"
+                && url.query() == Some(query.as_str()))
+    })
+    .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+    .build()
+    .map_err(|_| "secureChallengeUnavailable".to_owned())?;
+    let cancel_app = app.clone();
+    let cancel_id = id.to_owned();
+    child.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed)
+            && let Ok(mut pending) = cancel_app
+                .state::<SecureSshChallengeService>()
+                .pending
+                .lock()
+        {
+            pending.remove(&cancel_id);
+        }
+    });
+    let _ = crate::window_first_show::focus_if_revealed(&child);
+    Ok(child)
+}
+
+pub(crate) async fn prompt_sftp_host_key(
+    app: &AppHandle,
+    operation_id: &str,
+    endpoint: &Endpoint,
+    observed: &ObservedHostKey,
+) -> bool {
+    if app.get_webview_window("main").is_none() {
+        return false;
+    }
+    let id = uuid::Uuid::now_v7().to_string();
+    let (sender, mut receiver) = oneshot::channel();
+    let prompt = ChallengePrompt {
+        id: id.clone(),
+        content: ChallengeContent::SftpHostKey(SftpHostKeyChallenge {
+            endpoint: format!("{}:{}", endpoint.normalized_address(), endpoint.port()),
+            algorithm: observed.algorithm.clone(),
+            fingerprint_sha256: observed.fingerprint_sha256.clone(),
+        }),
+    };
+    {
+        let service = app.state::<SecureSshChallengeService>();
+        let Ok(mut pending) = service.pending.lock() else {
+            return false;
+        };
+        let key = format!("sftp-host:{operation_id}");
+        if pending.values().any(|entry| entry.key == key) {
+            return false;
+        }
+        pending.insert(
+            id.clone(),
+            Pending {
+                prompt,
+                key,
+                sender: Some(sender),
+            },
+        );
+    }
+    let _guard = Guard {
+        app: app.clone(),
+        id: id.clone(),
+        target: None,
+    };
+    if open_challenge_window(app, &id).is_err() {
+        return false;
+    }
+    let deadline = tokio::time::sleep(Duration::from_secs(180));
+    tokio::pin!(deadline);
+    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    loop {
+        tokio::select! {
+            value = &mut receiver => break value.is_ok_and(|answer| answer.approved && answer.answers.is_empty() && app.get_webview_window("main").is_some()),
+            _ = &mut deadline => break false,
+            _ = tick.tick() => {
+                if app.get_webview_window("main").is_none() || app.get_webview_window(&label(&id)).is_none() {
+                    break false;
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn secure_ssh_challenge_open(
     target: ChallengeTarget,
@@ -436,43 +550,7 @@ pub async fn secure_ssh_challenge_open(
         id: id.clone(),
         target: Some(target.clone()),
     };
-    let path = format!("secure-ssh-challenge.html?prompt={id}");
-    let expected = app
-        .config()
-        .build
-        .dev_url
-        .as_ref()
-        .and_then(|url| url.join(&path).ok());
-    let query = format!("prompt={id}");
-    let child = crate::secure_window_frame::apply_secure_window_frame(
-        WebviewWindowBuilder::new(&app, label(&id), WebviewUrl::App(path.into()))
-            .title("NoriShell"),
-    )
-    .on_navigation(move |url| {
-        (cfg!(debug_assertions) && expected.as_ref().is_some_and(|e| e == url))
-            || (((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
-                || (matches!(url.scheme(), "http" | "https")
-                    && url.host_str() == Some("tauri.localhost")
-                    && url.port().is_none()))
-                && url.path() == "/secure-ssh-challenge.html"
-                && url.query() == Some(query.as_str()))
-    })
-    .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-    .build()
-    .map_err(|_| "secureChallengeUnavailable")?;
-    let cancel_app = app.clone();
-    let cancel_id = id.clone();
-    child.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed)
-            && let Ok(mut pending) = cancel_app
-                .state::<SecureSshChallengeService>()
-                .pending
-                .lock()
-        {
-            pending.remove(&cancel_id);
-        }
-    });
-    let _ = child.set_focus();
+    let _child = open_challenge_window(&app, &id)?;
     let deadline = tokio::time::sleep(Duration::from_secs(180));
     tokio::pin!(deadline);
     let mut tick = tokio::time::interval(Duration::from_millis(500));

@@ -332,17 +332,21 @@ impl PluginService {
                 Some(proposal.state_version),
             ));
         }
-        crate::secure_window_frame::apply_secure_window_frame(WebviewWindowBuilder::new(
+        crate::secure_window_frame::apply_secure_window_frame(
             app,
-            secure_terminal_input_window_label(&proposal.approval_id),
-            WebviewUrl::App(
-                format!(
-                    "secure-plugin-terminal-input.html?approvalId={}",
-                    proposal.approval_id.as_str()
-                )
-                .into(),
+            &secure_terminal_input_window_label(&proposal.approval_id),
+            WebviewWindowBuilder::new(
+                app,
+                secure_terminal_input_window_label(&proposal.approval_id),
+                WebviewUrl::App(
+                    format!(
+                        "secure-plugin-terminal-input.html?approvalId={}",
+                        proposal.approval_id.as_str()
+                    )
+                    .into(),
+                ),
             ),
-        ))
+        )
         .title("NoriShell")
         .resizable(true)
         .center()

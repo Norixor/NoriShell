@@ -4,6 +4,9 @@
 //! that random key encrypts the payload. An optional, vault-bound device slot
 //! may wrap the same master key with a separate random key held by the
 //! operating-system secure store; the Vault password is never stored there.
+//! A separately explicit local auto-unlock mode may instead persist the exact
+//! password bytes in an app-private file. Its helpers deliberately add no
+//! encryption or replacement key and return zeroizing buffers on read.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -47,7 +50,7 @@ const MAX_VAULT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const KDF_MEMORY_KIB: u32 = 64 * 1024;
 const KDF_ITERATIONS: u32 = 3;
 const KDF_PARALLELISM: u32 = 1;
-const MIN_PASSWORD_BYTES: usize = 12;
+const MIN_PASSWORD_CHARACTERS: usize = 8;
 pub const MAX_SECRET_BATCH_ENTRIES: usize = 1_024;
 pub const MAX_SECRET_BATCH_VALUE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PASSWORD_BYTES: usize = 64 * 1024;
@@ -96,15 +99,202 @@ const fn windows_acl_inheritance(kind: PrivateObjectKind) -> u32 {
 
 pub type Result<T> = std::result::Result<T, VaultError>;
 
+/// Fingerprints a locked Vault's encrypted file and its filesystem identity.
+/// A caller may display a destructive reset confirmation based on this value.
+pub fn fingerprint_locked_vault(path: impl AsRef<Path>) -> Result<[u8; 32]> {
+    let path = path.as_ref();
+    verify_private_parent_directory(path)?;
+    let _lock = VaultLock::acquire(path)?;
+    locked_vault_fingerprint(path)
+}
+
+/// Deletes only the Vault file that was fingerprinted before confirmation.
+/// The lock file remains in place so other processes cannot acquire a new
+/// lock inode while this operation is in progress.
+pub fn remove_locked_vault_if_unchanged(path: impl AsRef<Path>, expected: &[u8; 32]) -> Result<()> {
+    remove_locked_vault_if_unchanged_with(path.as_ref(), expected, sync_parent_directory)
+}
+
+fn remove_locked_vault_if_unchanged_with<F>(
+    path: &Path,
+    expected: &[u8; 32],
+    after_remove: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    verify_private_parent_directory(path)?;
+    let _lock = VaultLock::acquire(path)?;
+    let actual = locked_vault_fingerprint(path)?;
+    if !bool::from(actual.ct_eq(expected)) {
+        return Err(VaultError::VaultChanged);
+    }
+    fs::remove_file(path)?;
+    let parent = path
+        .parent()
+        .ok_or(VaultError::InvalidEnvelope("vault path has no parent"))?;
+    after_remove(parent).map_err(VaultError::CommitStateUnknown)
+}
+
+fn locked_vault_fingerprint(path: &Path) -> Result<[u8; 32]> {
+    let file = open_existing_regular_file(path, true)?;
+    let metadata = file.metadata()?;
+    let identity = file_identity(&file)?;
+    if metadata.len() > MAX_VAULT_FILE_BYTES {
+        return Err(VaultError::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_VAULT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_VAULT_FILE_BYTES {
+        return Err(VaultError::TooLarge);
+    }
+    let current = open_existing_regular_file(path, true)?;
+    if file_identity(&current)? != identity {
+        return Err(VaultError::VaultChanged);
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"norishell-locked-vault-reset-v1\0");
+    digest.update(identity.0.to_le_bytes());
+    digest.update(identity.1.to_le_bytes());
+    digest.update(&bytes);
+    Ok(digest.finalize().into())
+}
+
+#[cfg(unix)]
+fn file_identity(file: &File) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(file: &File) -> Result<(u64, u64)> {
+    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: the live File owns the handle and info is a correctly sized output buffer.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
+        return Err(VaultError::Io(std::io::Error::last_os_error()));
+    }
+    let info = unsafe { info.assume_init() };
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    Ok((u64::from(info.dwVolumeSerialNumber), index))
+}
+
+/// Atomically writes bytes into the Vault's private directory.
+///
+/// This is suitable for non-secret control records as well as local
+/// auto-unlock material. Callers that persist a secret remain responsible for
+/// choosing a zeroizing representation before and after this boundary.
+pub fn write_private_file(path: impl AsRef<Path>, contents: &[u8]) -> Result<()> {
+    match atomic_write(path.as_ref(), contents) {
+        Ok(()) => Ok(()),
+        Err(AtomicWriteError::BeforeCommit(error)) => Err(error),
+        Err(AtomicWriteError::CommitStateUnknown(error)) => {
+            Err(VaultError::CommitStateUnknown(error))
+        }
+    }
+}
+
+/// Reads a bounded regular file from the Vault's private directory without
+/// following a final symlink or Windows reparse point.
+///
+/// The file itself may contain a non-secret control record, so this helper
+/// validates the parent directory but does not require a private file ACL.
+/// [`read_local_auto_unlock_password`] applies that stricter file check.
+pub fn read_bounded_file_in_private_directory(
+    path: impl AsRef<Path>,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>> {
+    read_bounded_regular_file(path.as_ref(), maximum_bytes, false)
+}
+
+/// Persists an explicitly approved local auto-unlock password as raw bytes.
+///
+/// The caller owns the approval boundary. This deliberately does not encrypt
+/// or transform the password: it only uses the Vault private-directory and
+/// atomic-write rules so startup can later supply the same bytes to
+/// [`UnlockedVault::unlock`].
+pub fn write_local_auto_unlock_password(path: impl AsRef<Path>, password: &[u8]) -> Result<()> {
+    validate_local_auto_unlock_password(password)?;
+    write_private_file(path, password)
+}
+
+/// Removes password staging files left by a process that stopped before the
+/// atomic replace. These files contain the same plaintext as the final file.
+pub fn cleanup_local_auto_unlock_password_staging(path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
+    ensure_private_parent_directory(path)?;
+    let parent = path.parent().ok_or(VaultError::InvalidEnvelope(
+        "local auto-unlock password path has no parent",
+    ))?;
+    let name =
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(VaultError::InvalidEnvelope(
+                "local auto-unlock password file name is invalid",
+            ))?;
+    let prefix = format!(".{name}.");
+    let mut removed = false;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(id) = file_name
+            .strip_prefix(&prefix)
+            .and_then(|value| value.strip_suffix(".staging"))
+        else {
+            continue;
+        };
+        if Uuid::parse_str(id).is_ok_and(|parsed| parsed.hyphenated().to_string() == id) {
+            fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        sync_parent_directory(parent)?;
+    }
+    Ok(())
+}
+
+/// Reads an explicitly approved local auto-unlock password from a bounded,
+/// private regular file. The returned material is zeroized when dropped.
+pub fn read_local_auto_unlock_password(path: impl AsRef<Path>) -> Result<Zeroizing<Vec<u8>>> {
+    let path = path.as_ref();
+    verify_private_parent_directory(path)?;
+    let file = open_existing_regular_file(path, true)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_PASSWORD_BYTES as u64 {
+        return Err(VaultError::TooLarge);
+    }
+    let mut password = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    file.take(MAX_PASSWORD_BYTES as u64 + 1)
+        .read_to_end(&mut password)?;
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(VaultError::TooLarge);
+    }
+    validate_local_auto_unlock_password(&password)?;
+    Ok(password)
+}
+
 #[derive(Debug, Error)]
 pub enum VaultError {
     #[error("vault already exists")]
     AlreadyExists,
+    #[error("vault file changed since reset confirmation")]
+    VaultChanged,
     #[error("vault is locked by another process")]
     Locked,
     #[error("vault password is incorrect or the ciphertext was modified")]
     AuthenticationFailed,
-    #[error("vault password must contain at least 12 UTF-8 bytes")]
+    #[error("vault password must contain at least 8 characters")]
     WeakPassword,
     #[error("vault directory permissions are not private")]
     InsecurePermissions,
@@ -300,7 +490,7 @@ struct SecretEntry {
 /// Encrypted command-history data stored inside the existing Vault payload.
 /// It has no relationship to a `SecretRef`, and is intentionally excluded from
 /// the portable SSH-sync envelope.
-#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommandHistoryEntry {
     #[zeroize(skip)]
@@ -353,6 +543,16 @@ impl std::fmt::Debug for CommandHistoryPayload {
             .field("entry_count", &self.entries.len())
             .finish()
     }
+}
+
+/// Non-secret outcome of merging a separately authenticated Vault envelope.
+/// Imported secrets receive new references and are not bound to local metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VaultMergeSummary {
+    pub imported_secrets: usize,
+    pub imported_history_entries: usize,
+    pub skipped_history_entries: usize,
+    pub renamed_history_entries: usize,
 }
 
 impl std::fmt::Debug for SecretEntry {
@@ -432,6 +632,64 @@ pub struct VaultSyncKeyMaterial {
     vault_id: Uuid,
     key: Zeroizing<[u8; KEY_BYTES]>,
     envelope: Vec<u8>,
+}
+
+/// A fully authenticated Vault envelope that has not yet been written to a
+/// local Vault path.
+///
+/// The type keeps the original encrypted bytes so committing it preserves the
+/// entire envelope exactly, including every `SecretRef` and command-history
+/// entry. It intentionally has no device or auto-unlock material because that
+/// data lives in separate local files.
+pub struct PreparedEncryptedVaultImport {
+    encrypted_envelope: Zeroizing<Vec<u8>>,
+    vault_id: Uuid,
+    kdf: KdfHeader,
+    wrapped_vault_key: CiphertextSection,
+    vault_master_key: Zeroizing<[u8; KEY_BYTES]>,
+    payload: VaultPayloadV1,
+}
+
+impl PreparedEncryptedVaultImport {
+    /// Atomically creates the encrypted envelope only when `path` has no
+    /// filesystem entry. The no-replace commit is authoritative; the earlier
+    /// metadata checks only provide a stable conflict result for callers.
+    pub fn commit_if_missing(self, path: impl AsRef<Path>) -> Result<UnlockedVault> {
+        let path = path.as_ref().to_path_buf();
+        if path_has_entry(&path)? {
+            return Err(VaultError::AlreadyExists);
+        }
+        ensure_private_parent_directory(&path)?;
+        let lock = VaultLock::acquire(&path)?;
+        if path_has_entry(&path)? {
+            return Err(VaultError::AlreadyExists);
+        }
+
+        let Self {
+            encrypted_envelope,
+            vault_id,
+            kdf,
+            wrapped_vault_key,
+            vault_master_key,
+            payload,
+        } = self;
+        match atomic_create_if_missing(&path, encrypted_envelope.as_slice()) {
+            Ok(()) => Ok(UnlockedVault {
+                path,
+                vault_id,
+                kdf,
+                wrapped_vault_key,
+                vault_master_key,
+                payload,
+                poisoned: false,
+                _lock: lock,
+            }),
+            Err(AtomicWriteError::BeforeCommit(error)) => Err(error),
+            Err(AtomicWriteError::CommitStateUnknown(error)) => {
+                Err(VaultError::CommitStateUnknown(error))
+            }
+        }
+    }
 }
 
 impl VaultSyncKeyMaterial {
@@ -633,15 +891,7 @@ impl UnlockedVault {
         ensure_private_parent_directory(&path)?;
         let lock = VaultLock::acquire(&path)?;
         let envelope = read_envelope(&path)?;
-        validate_envelope(&envelope)?;
-        let mut key_encryption_key = Zeroizing::new([0_u8; KEY_BYTES]);
-        derive_key(password, &envelope.kdf, &mut key_encryption_key)?;
-        let vault_master_key = unwrap_vault_key(&envelope, &key_encryption_key)?;
-        let payload = decrypt_payload(&envelope, &vault_master_key)?;
-        if payload.schema_version != PAYLOAD_SCHEMA_VERSION {
-            return Err(VaultError::InvalidEnvelope("unsupported payload schema"));
-        }
-        validate_payload_entries(&payload)?;
+        let (vault_master_key, payload) = unlock_vault_envelope(&envelope, password)?;
         Ok(Self {
             path,
             vault_id: envelope.vault_id,
@@ -663,7 +913,6 @@ impl UnlockedVault {
         ensure_private_parent_directory(&path)?;
         let lock = VaultLock::acquire(&path)?;
         let envelope = read_envelope(&path)?;
-        validate_envelope(&envelope)?;
         let slot: DeviceUnlockEnvelope =
             serde_json::from_slice(&read_bounded(slot_path.as_ref())?)?;
         validate_device_unlock_envelope(&slot)?;
@@ -710,6 +959,152 @@ impl UnlockedVault {
             key: Zeroizing::new(*self.vault_master_key),
             envelope,
         })
+    }
+
+    /// Returns the exact authenticated Vault envelope currently persisted on
+    /// disk. The caller must explicitly protect this encrypted backup material
+    /// before it leaves the Core process.
+    ///
+    /// Export is restricted to a usable unlocked instance, which already owns
+    /// the Vault process lock. This prevents a concurrent payload write from
+    /// producing a mixed backup.
+    pub fn export_encrypted_envelope(&self) -> Result<Vec<u8>> {
+        self.ensure_usable()?;
+        let encrypted_envelope = read_bounded_regular_file(
+            &self.path,
+            usize::try_from(MAX_VAULT_FILE_BYTES).unwrap_or(usize::MAX),
+            true,
+        )?;
+        parse_encrypted_vault_envelope(&encrypted_envelope)?;
+        Ok(encrypted_envelope)
+    }
+
+    /// Merges every secret and command-history entry from an authenticated
+    /// source envelope into this Vault in one atomic payload replacement.
+    ///
+    /// Each source secret receives a fresh reference, even when the source
+    /// reference is absent from this Vault. Callers must pass every reference
+    /// reserved by their local metadata, including dormant or pending records,
+    /// so an imported secret can never silently bind to an existing owner.
+    /// Reimporting the same envelope imports its secrets again; history entries
+    /// with identical IDs and content are skipped. The target Vault ID, master
+    /// key, password wrap, and existing secret references are preserved.
+    pub fn merge_encrypted_envelope(
+        &mut self,
+        encrypted_envelope: &[u8],
+        source_password: &[u8],
+        reserved_refs: &[SecretRef],
+    ) -> Result<VaultMergeSummary> {
+        self.merge_encrypted_envelope_using(
+            encrypted_envelope,
+            source_password,
+            reserved_refs,
+            Self::persist,
+        )
+    }
+
+    fn merge_encrypted_envelope_using<F>(
+        &mut self,
+        encrypted_envelope: &[u8],
+        source_password: &[u8],
+        reserved_refs: &[SecretRef],
+        persist: F,
+    ) -> Result<VaultMergeSummary>
+    where
+        F: FnOnce(&mut Self) -> Result<()>,
+    {
+        self.ensure_usable()?;
+        let source_envelope = parse_encrypted_vault_envelope(encrypted_envelope)?;
+        let (_, source_payload) = unlock_vault_envelope(&source_envelope, source_password)?;
+        let VaultPayloadV1 {
+            entries: source_entries,
+            command_history: mut source_history,
+            ..
+        } = source_payload;
+
+        let mut summary = VaultMergeSummary::default();
+        let mut merged_history = self.payload.command_history.clone();
+        let mut history_ids = merged_history
+            .entries
+            .iter()
+            .map(|entry| entry.entry_id)
+            .collect::<BTreeSet<_>>();
+        for mut entry in source_history.entries.drain(..) {
+            if let Some(existing) = merged_history
+                .entries
+                .iter()
+                .find(|existing| existing.entry_id == entry.entry_id)
+            {
+                if *existing == entry {
+                    summary.skipped_history_entries += 1;
+                    continue;
+                }
+                loop {
+                    let replacement = Uuid::new_v4();
+                    if history_ids.insert(replacement) {
+                        entry.entry_id = replacement;
+                        break;
+                    }
+                }
+                summary.renamed_history_entries += 1;
+            } else {
+                history_ids.insert(entry.entry_id);
+            }
+            merged_history.entries.push(entry);
+            summary.imported_history_entries += 1;
+        }
+        validate_command_history(&merged_history)?;
+
+        let source_refs = source_entries.keys().copied().collect::<BTreeSet<_>>();
+        let mut used_refs = self
+            .payload
+            .entries
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        used_refs.extend(reserved_refs.iter().copied());
+        used_refs.extend(source_refs);
+        let mut imported = Vec::with_capacity(source_entries.len());
+        for (_, entry) in source_entries {
+            loop {
+                let secret_ref = SecretRef::new();
+                if used_refs.insert(secret_ref) {
+                    imported.push((secret_ref, entry));
+                    break;
+                }
+            }
+        }
+        summary.imported_secrets = imported.len();
+        if summary.imported_secrets == 0 && summary.imported_history_entries == 0 {
+            return Ok(summary);
+        }
+
+        let previous_revision = self.payload.revision;
+        let next_revision = previous_revision
+            .checked_add(1)
+            .ok_or(VaultError::InvalidEnvelope("revision overflow"))?;
+        let imported_refs = imported
+            .iter()
+            .map(|(secret_ref, _)| *secret_ref)
+            .collect::<Vec<_>>();
+        for (secret_ref, entry) in imported {
+            self.payload.entries.insert(secret_ref, entry);
+        }
+        let previous_history = std::mem::replace(&mut self.payload.command_history, merged_history);
+        self.payload.revision = next_revision;
+        if let Err(error) = persist(self) {
+            if matches!(error, VaultError::CommitStateUnknown(_)) {
+                self.poisoned = true;
+            } else {
+                for secret_ref in imported_refs {
+                    self.payload.entries.remove(&secret_ref);
+                }
+                self.payload.command_history = previous_history;
+                self.payload.revision = previous_revision;
+            }
+            return Err(error);
+        }
+        Ok(summary)
     }
 
     #[must_use]
@@ -1096,6 +1491,29 @@ impl UnlockedVault {
     }
 }
 
+/// Validates an exact encrypted Vault envelope against the originating Vault
+/// password without writing a local Vault file.
+///
+/// The returned preparation owns both the authenticated plaintext projection
+/// and the original ciphertext bytes. [`PreparedEncryptedVaultImport::commit_if_missing`]
+/// can therefore write the original envelope verbatim only after callers have
+/// completed their own fail-closed local policy transition.
+pub fn prepare_encrypted_vault_import(
+    encrypted_envelope: &[u8],
+    vault_password: &[u8],
+) -> Result<PreparedEncryptedVaultImport> {
+    let envelope = parse_encrypted_vault_envelope(encrypted_envelope)?;
+    let (vault_master_key, payload) = unlock_vault_envelope(&envelope, vault_password)?;
+    Ok(PreparedEncryptedVaultImport {
+        encrypted_envelope: Zeroizing::new(encrypted_envelope.to_vec()),
+        vault_id: envelope.vault_id,
+        kdf: envelope.kdf,
+        wrapped_vault_key: envelope.wrapped_vault_key,
+        vault_master_key,
+        payload,
+    })
+}
+
 /// Opens a sync key envelope with the same password used by the originating
 /// Vault. This does not create, replace or unlock a local Vault.
 pub fn open_sync_key_material(
@@ -1156,7 +1574,10 @@ fn new_kdf_header() -> Result<KdfHeader> {
 }
 
 fn validate_new_password(password: &[u8]) -> Result<()> {
-    if password.len() < MIN_PASSWORD_BYTES {
+    if std::str::from_utf8(password)
+        .map(|value| value.chars().count() < MIN_PASSWORD_CHARACTERS)
+        .unwrap_or(true)
+    {
         return Err(VaultError::WeakPassword);
     }
     Ok(())
@@ -1279,7 +1700,35 @@ fn validate_secret_value(kind: SecretKind, value: &[u8]) -> Result<()> {
 
 fn read_envelope(path: &Path) -> Result<VaultEnvelope> {
     let bytes = read_bounded(path)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    parse_encrypted_vault_envelope(&bytes)
+}
+
+fn parse_encrypted_vault_envelope(encrypted_envelope: &[u8]) -> Result<VaultEnvelope> {
+    if encrypted_envelope.is_empty() {
+        return Err(VaultError::InvalidEnvelope("vault envelope is empty"));
+    }
+    if encrypted_envelope.len() as u64 > MAX_VAULT_FILE_BYTES {
+        return Err(VaultError::TooLarge);
+    }
+    let envelope: VaultEnvelope = serde_json::from_slice(encrypted_envelope)?;
+    validate_envelope(&envelope)?;
+    Ok(envelope)
+}
+
+fn unlock_vault_envelope(
+    envelope: &VaultEnvelope,
+    password: &[u8],
+) -> Result<(Zeroizing<[u8; KEY_BYTES]>, VaultPayloadV1)> {
+    validate_envelope(envelope)?;
+    let mut key_encryption_key = Zeroizing::new([0_u8; KEY_BYTES]);
+    derive_key(password, &envelope.kdf, &mut key_encryption_key)?;
+    let vault_master_key = unwrap_vault_key(envelope, &key_encryption_key)?;
+    let payload = decrypt_payload(envelope, &vault_master_key)?;
+    if payload.schema_version != PAYLOAD_SCHEMA_VERSION {
+        return Err(VaultError::InvalidEnvelope("unsupported payload schema"));
+    }
+    validate_payload_entries(&payload)?;
+    Ok((vault_master_key, payload))
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {
@@ -1297,6 +1746,20 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn validate_local_auto_unlock_password(password: &[u8]) -> Result<()> {
+    if password.is_empty() {
+        return Err(VaultError::InvalidEnvelope(
+            "local auto-unlock password must not be empty",
+        ));
+    }
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(VaultError::InvalidEnvelope(
+            "local auto-unlock password exceeds the supported size",
+        ));
+    }
+    Ok(())
+}
+
 fn current_envelope_digest(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
@@ -1310,6 +1773,9 @@ fn validate_envelope(envelope: &VaultEnvelope) -> Result<()> {
     }
     if envelope.format_version != FORMAT_VERSION {
         return Err(VaultError::UnsupportedFormat(envelope.format_version));
+    }
+    if envelope.vault_id.is_nil() {
+        return Err(VaultError::InvalidEnvelope("vault ID must not be nil"));
     }
     validate_kdf_parameters(&envelope.kdf)?;
     validate_ciphertext_section(&envelope.wrapped_vault_key)?;
@@ -1623,6 +2089,13 @@ fn ensure_private_parent_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::symlink_metadata(parent)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(VaultError::InvalidEnvelope(
+                "vault parent must be a regular directory",
+            ));
+        }
         if created {
             fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         }
@@ -1636,12 +2109,45 @@ fn ensure_private_parent_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Checks an existing parent without changing its permissions. Reads must
+/// reject a weak path instead of repairing one supplied by another process.
+fn verify_private_parent_directory(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or(VaultError::InvalidEnvelope("vault path has no parent"))?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(VaultError::InvalidEnvelope(
+            "vault parent must be a regular directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(VaultError::InsecurePermissions);
+        }
+    }
+    #[cfg(windows)]
+    windows_acl::verify_directory(parent)?;
+    Ok(())
+}
+
 fn lock_path(vault_path: &Path) -> Result<PathBuf> {
     let name = vault_path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or(VaultError::InvalidEnvelope("vault file name is invalid"))?;
     Ok(vault_path.with_file_name(format!(".{name}.lock")))
+}
+
+fn path_has_entry(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(VaultError::Io(error)),
+    }
 }
 
 fn open_private_file(path: &Path, create_new: bool) -> Result<File> {
@@ -1656,6 +2162,7 @@ fn open_private_file(path: &Path, create_new: bool) -> Result<File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {
@@ -1672,6 +2179,13 @@ fn open_private_file(path: &Path, create_new: bool) -> Result<File> {
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     let file = options.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(VaultError::InvalidEnvelope(
+            "vault file must be a regular file",
+        ));
+    }
+    #[cfg(windows)]
+    windows_acl::reject_file_reparse_point(&file)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1717,6 +2231,83 @@ fn open_existing_private_file(path: &Path) -> Result<File> {
     #[cfg(windows)]
     windows_acl::secure_file(&file)?;
     Ok(file)
+}
+
+fn read_bounded_regular_file(
+    path: &Path,
+    maximum_bytes: usize,
+    require_private_file: bool,
+) -> Result<Vec<u8>> {
+    verify_private_parent_directory(path)?;
+    let file = open_existing_regular_file(path, require_private_file)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > maximum_bytes as u64 {
+        return Err(VaultError::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let read_limit = u64::try_from(maximum_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    file.take(read_limit).read_to_end(&mut bytes)?;
+    if bytes.len() > maximum_bytes {
+        return Err(VaultError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+fn open_existing_regular_file(path: &Path, require_private_file: bool) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::{fs::OpenOptionsExt, fs::PermissionsExt};
+
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() {
+            return Err(VaultError::InvalidEnvelope(
+                "vault file must be a regular file",
+            ));
+        }
+        if require_private_file && metadata.permissions().mode() & 0o077 != 0 {
+            return Err(VaultError::InsecurePermissions);
+        }
+        Ok(file)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+        };
+
+        options
+            .access_mode(FILE_GENERIC_READ | READ_CONTROL | WRITE_DAC | WRITE_OWNER)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(path)?;
+        if !file.metadata()?.file_type().is_file() {
+            return Err(VaultError::InvalidEnvelope(
+                "vault file must be a regular file",
+            ));
+        }
+        if require_private_file {
+            windows_acl::verify_file(&file)?;
+        } else {
+            windows_acl::reject_file_reparse_point(&file)?;
+        }
+        Ok(file)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(VaultError::InvalidEnvelope(
+                "vault file must be a regular file",
+            ));
+        }
+        options.open(path).map_err(VaultError::Io)
+    }
 }
 
 #[cfg(windows)]
@@ -1834,8 +2425,51 @@ mod windows_acl {
         secure_handle(&directory, PrivateObjectKind::Directory)
     }
 
+    pub(super) fn verify_directory(path: &Path) -> io::Result<()> {
+        let directory = OpenOptions::new()
+            .read(true)
+            .access_mode(FILE_GENERIC_READ | READ_CONTROL | WRITE_DAC | WRITE_OWNER)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        verify_private_handle(&directory, PrivateObjectKind::Directory)
+    }
+
     pub(super) fn secure_file(file: &File) -> io::Result<()> {
         secure_handle(file, PrivateObjectKind::File)
+    }
+
+    pub(super) fn verify_file(file: &File) -> io::Result<()> {
+        verify_private_handle(file, PrivateObjectKind::File)
+    }
+
+    pub(super) fn reject_file_reparse_point(file: &File) -> io::Result<()> {
+        reject_reparse_point(file.as_raw_handle())
+    }
+
+    fn verify_private_handle(file: &File, kind: PrivateObjectKind) -> io::Result<()> {
+        let handle: HANDLE = file.as_raw_handle();
+        reject_reparse_point(handle)?;
+        let current_user = CurrentUserSid::query()?;
+        let mut system_sid =
+            [0_usize; (SECURITY_MAX_SID_SIZE as usize).div_ceil(size_of::<usize>())];
+        let mut system_sid_bytes = SECURITY_MAX_SID_SIZE;
+        if unsafe {
+            CreateWellKnownSid(
+                WinLocalSystemSid,
+                null_mut(),
+                system_sid.as_mut_ptr().cast(),
+                &mut system_sid_bytes,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        verify_handle(
+            handle,
+            kind,
+            current_user.as_ptr(),
+            system_sid.as_mut_ptr().cast::<c_void>(),
+        )
     }
 
     fn secure_handle(file: &File, kind: PrivateObjectKind) -> io::Result<()> {
@@ -2038,6 +2672,63 @@ fn atomic_write(path: &Path, contents: &[u8]) -> std::result::Result<(), AtomicW
     atomic_write_with(path, contents, sync_parent_directory)
 }
 
+/// Commits a new file without ever replacing an existing directory entry.
+///
+/// A hard link from a same-directory, fsynced staging file is the portable
+/// no-replace primitive: it succeeds only while `path` is absent. The staging
+/// name is random and created with `create_new`, so neither the final path nor
+/// the staging path is opened with truncation semantics.
+fn atomic_create_if_missing(
+    path: &Path,
+    contents: &[u8],
+) -> std::result::Result<(), AtomicWriteError> {
+    atomic_create_if_missing_with(path, contents, sync_parent_directory)
+}
+
+fn atomic_create_if_missing_with<F>(
+    path: &Path,
+    contents: &[u8],
+    after_create: F,
+) -> std::result::Result<(), AtomicWriteError>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    ensure_private_parent_directory(path).map_err(AtomicWriteError::BeforeCommit)?;
+    let parent = path.parent().ok_or({
+        AtomicWriteError::BeforeCommit(VaultError::InvalidEnvelope("vault path has no parent"))
+    })?;
+    let name = path.file_name().and_then(|name| name.to_str()).ok_or({
+        AtomicWriteError::BeforeCommit(VaultError::InvalidEnvelope("vault file name is invalid"))
+    })?;
+    let temporary_path = parent.join(format!(".{name}.{}.staging", Uuid::new_v4()));
+    let mut temporary =
+        open_private_file(&temporary_path, true).map_err(AtomicWriteError::BeforeCommit)?;
+    if let Err(error) = (|| -> std::io::Result<()> {
+        temporary.write_all(contents)?;
+        temporary.flush()?;
+        temporary.sync_all()
+    })() {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(AtomicWriteError::BeforeCommit(VaultError::Io(error)));
+    }
+    drop(temporary);
+
+    if let Err(error) = fs::hard_link(&temporary_path, path) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(AtomicWriteError::BeforeCommit(
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                VaultError::AlreadyExists
+            } else {
+                VaultError::Io(error)
+            },
+        ));
+    }
+    if let Err(error) = fs::remove_file(&temporary_path) {
+        return Err(AtomicWriteError::CommitStateUnknown(error));
+    }
+    after_create(parent).map_err(AtomicWriteError::CommitStateUnknown)
+}
+
 fn atomic_write_with<F>(
     path: &Path,
     contents: &[u8],
@@ -2123,6 +2814,152 @@ mod tests {
 
     fn vault_path(directory: &tempfile::TempDir) -> PathBuf {
         directory.path().join("vault").join("vault.nvx")
+    }
+
+    #[test]
+    fn locked_vault_reset_deletes_only_the_confirmed_file_and_keeps_its_lock() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        let vault = UnlockedVault::create(&path, PASSWORD).expect("create vault");
+        drop(vault);
+
+        let fingerprint = fingerprint_locked_vault(&path).expect("fingerprint");
+        remove_locked_vault_if_unchanged(&path, &fingerprint).expect("remove vault");
+        assert!(!path.exists());
+        assert!(lock_path(&path).expect("lock path").exists());
+    }
+
+    #[test]
+    fn locked_vault_reset_rejects_changed_bytes_and_same_bytes_on_a_new_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        let vault = UnlockedVault::create(&path, PASSWORD).expect("create vault");
+        drop(vault);
+        let original = fs::read(&path).expect("original bytes");
+        let fingerprint = fingerprint_locked_vault(&path).expect("fingerprint");
+
+        write_private_file(&path, b"changed encrypted file").expect("replace bytes");
+        assert!(matches!(
+            remove_locked_vault_if_unchanged(&path, &fingerprint),
+            Err(VaultError::VaultChanged)
+        ));
+        assert!(path.exists());
+
+        write_private_file(&path, &original).expect("restore same bytes on new inode");
+        assert!(matches!(
+            remove_locked_vault_if_unchanged(&path, &fingerprint),
+            Err(VaultError::VaultChanged)
+        ));
+        assert_eq!(fs::read(&path).expect("unchanged replacement"), original);
+    }
+
+    #[test]
+    fn locked_vault_reset_rejects_an_occupied_lock() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        let vault = UnlockedVault::create(&path, PASSWORD).expect("create vault");
+        let expected = [0_u8; 32];
+        assert!(matches!(
+            fingerprint_locked_vault(&path),
+            Err(VaultError::Locked)
+        ));
+        assert!(matches!(
+            remove_locked_vault_if_unchanged(&path, &expected),
+            Err(VaultError::Locked)
+        ));
+        assert!(path.exists());
+        drop(vault);
+    }
+
+    #[test]
+    fn locked_vault_reset_rejects_oversized_file_without_removing_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        ensure_private_parent_directory(&path).expect("private directory");
+        let file = open_private_file(&path, true).expect("vault file");
+        file.set_len(MAX_VAULT_FILE_BYTES + 1)
+            .expect("oversized file");
+        drop(file);
+
+        assert!(matches!(
+            fingerprint_locked_vault(&path),
+            Err(VaultError::TooLarge)
+        ));
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locked_vault_reset_rejects_symlinks_non_regular_and_public_files() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        ensure_private_parent_directory(&path).expect("private directory");
+        let target = path.with_file_name("other.nvx");
+        fs::write(&target, b"private target").expect("target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("private target");
+        symlink(&target, &path).expect("symlink");
+        let expected = [0_u8; 32];
+        assert!(fingerprint_locked_vault(&path).is_err());
+        assert!(remove_locked_vault_if_unchanged(&path, &expected).is_err());
+        assert!(path.is_symlink());
+        fs::remove_file(&path).expect("remove symlink");
+
+        fs::create_dir(&path).expect("non regular path");
+        assert!(matches!(
+            fingerprint_locked_vault(&path),
+            Err(VaultError::InvalidEnvelope(_))
+        ));
+        fs::remove_dir(&path).expect("remove directory");
+
+        fs::write(&path, b"public file").expect("public file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("public permissions");
+        assert!(matches!(
+            fingerprint_locked_vault(&path),
+            Err(VaultError::InsecurePermissions)
+        ));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn locked_vault_reset_reports_unknown_state_after_unlink_if_directory_sync_fails() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        let vault = UnlockedVault::create(&path, PASSWORD).expect("create vault");
+        drop(vault);
+        let fingerprint = fingerprint_locked_vault(&path).expect("fingerprint");
+
+        let error = remove_locked_vault_if_unchanged_with(&path, &fingerprint, |_| {
+            Err(std::io::Error::other("injected directory sync failure"))
+        })
+        .expect_err("report uncertain removal");
+        assert!(matches!(error, VaultError::CommitStateUnknown(_)));
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locked_vault_reset_rejects_a_symlinked_lock_or_parent() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+        ensure_private_parent_directory(&path).expect("private directory");
+        fs::write(&path, b"encrypted file").expect("vault file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private file");
+
+        let lock = lock_path(&path).expect("lock path");
+        symlink(&path, &lock).expect("symlink lock");
+        assert!(fingerprint_locked_vault(&path).is_err());
+        assert!(remove_locked_vault_if_unchanged(&path, &[0_u8; 32]).is_err());
+        assert!(path.exists());
+        fs::remove_file(&lock).expect("remove symlink lock");
+
+        let alias = directory.path().join("vault-alias");
+        symlink(path.parent().expect("parent"), &alias).expect("symlink parent");
+        assert!(fingerprint_locked_vault(alias.join("vault.nvx")).is_err());
+        assert!(path.exists());
     }
 
     #[test]
@@ -2810,6 +3647,354 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_envelope_import_preserves_every_payload_record_and_reference() {
+        let source_directory = tempfile::tempdir().expect("source tempdir");
+        let source_path = vault_path(&source_directory);
+        let history = CommandHistoryPayload {
+            schema_version: COMMAND_HISTORY_SCHEMA_VERSION,
+            entries: vec![CommandHistoryEntry {
+                entry_id: Uuid::now_v7(),
+                scope: "host:example".to_owned(),
+                command: "sensitive command history".to_owned(),
+                completed_at_unix_ms: 123,
+                elapsed_millis: 456,
+                exit_code: Some(0),
+            }],
+        };
+        let (vault_id, secret_ref, encrypted_envelope) = {
+            let mut source = UnlockedVault::create(&source_path, PASSWORD).expect("create source");
+            let secret_ref = source
+                .insert_secret(SecretKind::LoginAutomation, b"login secret")
+                .expect("insert secret");
+            source
+                .replace_command_history(history.clone())
+                .expect("persist history");
+            let encrypted_envelope = source
+                .export_encrypted_envelope()
+                .expect("export exact encrypted envelope");
+            assert_eq!(
+                encrypted_envelope,
+                fs::read(&source_path).expect("read source envelope")
+            );
+            (source.vault_id(), secret_ref, encrypted_envelope)
+        };
+
+        let target_directory = tempfile::tempdir().expect("target tempdir");
+        let target_path = vault_path(&target_directory);
+        let imported = prepare_encrypted_vault_import(&encrypted_envelope, PASSWORD)
+            .expect("validate source password")
+            .commit_if_missing(&target_path)
+            .expect("commit fresh target");
+
+        assert_eq!(imported.vault_id(), vault_id);
+        assert_eq!(
+            fs::read(&target_path).expect("read target envelope"),
+            encrypted_envelope
+        );
+        assert_eq!(
+            imported
+                .read_secret(secret_ref, SecretKind::LoginAutomation)
+                .expect("read preserved secret")
+                .expect("secret remains present")
+                .expose(),
+            b"login secret"
+        );
+        let restored_history = imported.command_history().expect("read history");
+        assert_eq!(restored_history.entries.len(), 1);
+        assert_eq!(
+            restored_history.entries[0].entry_id,
+            history.entries[0].entry_id
+        );
+        assert_eq!(restored_history.entries[0].scope, history.entries[0].scope);
+        assert_eq!(
+            restored_history.entries[0].command,
+            history.entries[0].command
+        );
+    }
+
+    #[test]
+    fn vault_merge_authenticates_source_and_preserves_target_password_and_refs() {
+        let source_directory = tempfile::tempdir().expect("source tempdir");
+        let source_path = vault_path(&source_directory);
+        let (source_ref, source_envelope) = {
+            let mut source = UnlockedVault::create(&source_path, NEW_PASSWORD).expect("source");
+            let source_ref = source
+                .insert_secret(SecretKind::Password, b"source password")
+                .expect("source secret");
+            (
+                source_ref,
+                source.export_encrypted_envelope().expect("export"),
+            )
+        };
+        let target_directory = tempfile::tempdir().expect("target tempdir");
+        let target_path = vault_path(&target_directory);
+        let mut target = UnlockedVault::create(&target_path, PASSWORD).expect("target");
+        let target_id = target.vault_id();
+        let target_ref = target
+            .insert_secret(SecretKind::PrivateKey, b"target private key")
+            .expect("target secret");
+        let reserved_ref = SecretRef::new();
+        let before = fs::read(&target_path).expect("target bytes");
+        assert!(matches!(
+            target.merge_encrypted_envelope(&source_envelope, b"wrong password", &[reserved_ref]),
+            Err(VaultError::AuthenticationFailed)
+        ));
+        assert_eq!(fs::read(&target_path).expect("unchanged bytes"), before);
+        assert_eq!(target.entry_count(), 1);
+
+        let summary = target
+            .merge_encrypted_envelope(&source_envelope, NEW_PASSWORD, &[reserved_ref])
+            .expect("merge");
+        assert_eq!(summary.imported_secrets, 1);
+        assert_eq!(summary.imported_history_entries, 0);
+        assert_eq!(target.vault_id(), target_id);
+        assert_eq!(target.entry_count(), 2);
+        assert!(!target.payload.entries.contains_key(&source_ref));
+        assert!(!target.payload.entries.contains_key(&reserved_ref));
+        assert_eq!(
+            target
+                .read_secret(target_ref, SecretKind::PrivateKey)
+                .expect("read target")
+                .expect("target exists")
+                .expose(),
+            b"target private key"
+        );
+        drop(target);
+        let reopened = UnlockedVault::unlock(&target_path, PASSWORD).expect("original password");
+        assert_eq!(reopened.vault_id(), target_id);
+        assert_eq!(reopened.entry_count(), 2);
+        drop(reopened);
+        assert!(matches!(
+            UnlockedVault::unlock(&target_path, NEW_PASSWORD),
+            Err(VaultError::AuthenticationFailed)
+        ));
+    }
+
+    #[test]
+    fn vault_merge_reimports_secrets_and_resolves_history_id_collisions() {
+        let shared_id = Uuid::new_v4();
+        let same_id = Uuid::new_v4();
+        let new_id = Uuid::new_v4();
+        let make_entry = |entry_id, command: &str| CommandHistoryEntry {
+            entry_id,
+            scope: "local".to_owned(),
+            command: command.to_owned(),
+            completed_at_unix_ms: 10,
+            elapsed_millis: 20,
+            exit_code: Some(0),
+        };
+        let source_directory = tempfile::tempdir().expect("source tempdir");
+        let source_path = vault_path(&source_directory);
+        let source_envelope = {
+            let mut source = UnlockedVault::create(&source_path, NEW_PASSWORD).expect("source");
+            source
+                .insert_secret(SecretKind::Password, b"source secret")
+                .expect("secret");
+            source
+                .replace_command_history(CommandHistoryPayload {
+                    schema_version: COMMAND_HISTORY_SCHEMA_VERSION,
+                    entries: vec![
+                        make_entry(shared_id, "source command"),
+                        make_entry(same_id, "identical command"),
+                        make_entry(new_id, "new command"),
+                    ],
+                })
+                .expect("source history");
+            source.export_encrypted_envelope().expect("export")
+        };
+        let target_directory = tempfile::tempdir().expect("target tempdir");
+        let target_path = vault_path(&target_directory);
+        let mut target = UnlockedVault::create(&target_path, PASSWORD).expect("target");
+        target
+            .replace_command_history(CommandHistoryPayload {
+                schema_version: COMMAND_HISTORY_SCHEMA_VERSION,
+                entries: vec![
+                    make_entry(shared_id, "target command"),
+                    make_entry(same_id, "identical command"),
+                ],
+            })
+            .expect("target history");
+        let first = target
+            .merge_encrypted_envelope(&source_envelope, NEW_PASSWORD, &[])
+            .expect("first merge");
+        assert_eq!(first.imported_secrets, 1);
+        assert_eq!(first.imported_history_entries, 2);
+        assert_eq!(first.skipped_history_entries, 1);
+        assert_eq!(first.renamed_history_entries, 1);
+        let first_refs = target
+            .payload
+            .entries
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let history = target.command_history().expect("merged history");
+        assert_eq!(history.entries.len(), 4);
+        assert_eq!(history.entries[0], make_entry(shared_id, "target command"));
+        assert!(
+            history
+                .entries
+                .iter()
+                .any(|entry| { entry.command == "source command" && entry.entry_id != shared_id })
+        );
+
+        let second = target
+            .merge_encrypted_envelope(&source_envelope, NEW_PASSWORD, &[])
+            .expect("second merge");
+        assert_eq!(second.imported_secrets, 1);
+        assert_eq!(second.imported_history_entries, 1);
+        assert_eq!(second.skipped_history_entries, 2);
+        assert_eq!(second.renamed_history_entries, 1);
+        assert_eq!(target.entry_count(), 2);
+        assert!(first_refs.is_subset(&target.payload.entries.keys().copied().collect()));
+        assert_eq!(target.command_history().expect("history").entries.len(), 5);
+    }
+
+    #[test]
+    fn vault_merge_rolls_back_definite_failure_and_poisons_uncertain_commit() {
+        let source_directory = tempfile::tempdir().expect("source tempdir");
+        let source_path = vault_path(&source_directory);
+        let source_envelope = {
+            let mut source = UnlockedVault::create(&source_path, NEW_PASSWORD).expect("source");
+            source
+                .insert_secret(SecretKind::Password, b"source secret")
+                .expect("secret");
+            source.export_encrypted_envelope().expect("export")
+        };
+        let target_directory = tempfile::tempdir().expect("target tempdir");
+        let target_path = vault_path(&target_directory);
+        let mut target = UnlockedVault::create(&target_path, PASSWORD).expect("target");
+        let before = fs::read(&target_path).expect("target bytes");
+        let initial_revision = target.revision();
+        let error = target
+            .merge_encrypted_envelope_using(&source_envelope, NEW_PASSWORD, &[], |_| {
+                Err(VaultError::Io(std::io::Error::other("before commit")))
+            })
+            .expect_err("definite failure");
+        assert!(matches!(error, VaultError::Io(_)));
+        assert_eq!(target.revision(), initial_revision);
+        assert_eq!(target.entry_count(), 0);
+        assert!(!target.requires_reload());
+        assert_eq!(fs::read(&target_path).expect("target bytes"), before);
+
+        let error = target
+            .merge_encrypted_envelope_using(&source_envelope, NEW_PASSWORD, &[], |_| {
+                Err(VaultError::CommitStateUnknown(std::io::Error::other(
+                    "after replace",
+                )))
+            })
+            .expect_err("uncertain commit");
+        assert!(matches!(error, VaultError::CommitStateUnknown(_)));
+        assert!(target.requires_reload());
+        assert!(matches!(
+            target.command_history(),
+            Err(VaultError::ReloadRequired)
+        ));
+    }
+
+    #[test]
+    fn vault_merge_rejects_combined_history_over_limit_without_changing_target() {
+        let make_entry = || CommandHistoryEntry {
+            entry_id: Uuid::new_v4(),
+            scope: "local".to_owned(),
+            command: "safe command".to_owned(),
+            completed_at_unix_ms: 1,
+            elapsed_millis: 1,
+            exit_code: None,
+        };
+        let source_directory = tempfile::tempdir().expect("source tempdir");
+        let source_path = vault_path(&source_directory);
+        let source_envelope = {
+            let mut source = UnlockedVault::create(&source_path, NEW_PASSWORD).expect("source");
+            source
+                .replace_command_history(CommandHistoryPayload {
+                    schema_version: COMMAND_HISTORY_SCHEMA_VERSION,
+                    entries: vec![make_entry(), make_entry()],
+                })
+                .expect("source history");
+            source.export_encrypted_envelope().expect("export")
+        };
+        let target_directory = tempfile::tempdir().expect("target tempdir");
+        let target_path = vault_path(&target_directory);
+        let mut target = UnlockedVault::create(&target_path, PASSWORD).expect("target");
+        target
+            .replace_command_history(CommandHistoryPayload {
+                schema_version: COMMAND_HISTORY_SCHEMA_VERSION,
+                entries: (0..MAX_COMMAND_HISTORY_ENTRIES - 1)
+                    .map(|_| make_entry())
+                    .collect(),
+            })
+            .expect("target history");
+        let before = fs::read(&target_path).expect("target bytes");
+        let revision = target.revision();
+        assert!(matches!(
+            target.merge_encrypted_envelope(&source_envelope, NEW_PASSWORD, &[]),
+            Err(VaultError::InvalidEnvelope(
+                "command history exceeds entry limit"
+            ))
+        ));
+        assert_eq!(target.revision(), revision);
+        assert_eq!(target.entry_count(), 0);
+        assert_eq!(
+            target.command_history().expect("history").entries.len(),
+            1999
+        );
+        assert_eq!(fs::read(&target_path).expect("target bytes"), before);
+    }
+
+    #[test]
+    fn encrypted_envelope_import_validates_before_writing_and_never_replaces() {
+        let source_directory = tempfile::tempdir().expect("source tempdir");
+        let source_path = vault_path(&source_directory);
+        let encrypted_envelope = {
+            let source = UnlockedVault::create(&source_path, PASSWORD).expect("create source");
+            source
+                .export_encrypted_envelope()
+                .expect("export encrypted envelope")
+        };
+
+        let target_directory = tempfile::tempdir().expect("target tempdir");
+        let target_path = vault_path(&target_directory);
+        assert!(matches!(
+            prepare_encrypted_vault_import(&encrypted_envelope, b"wrong vault password"),
+            Err(VaultError::AuthenticationFailed)
+        ));
+        assert!(
+            !target_path.parent().expect("target parent").exists(),
+            "a password failure must not create a target Vault directory"
+        );
+        assert!(matches!(
+            prepare_encrypted_vault_import(b"{", PASSWORD),
+            Err(VaultError::Serialization(_))
+        ));
+
+        let existing = UnlockedVault::create(&target_path, NEW_PASSWORD).expect("create target");
+        let original = fs::read(&target_path).expect("read target envelope");
+        drop(existing);
+        let error = prepare_encrypted_vault_import(&encrypted_envelope, PASSWORD)
+            .expect("prepare valid import")
+            .commit_if_missing(&target_path)
+            .expect_err("existing Vault must not be replaced");
+        assert!(matches!(error, VaultError::AlreadyExists));
+        assert_eq!(
+            fs::read(&target_path).expect("read unchanged target"),
+            original
+        );
+    }
+
+    #[test]
+    fn fresh_create_reports_unknown_durability_after_the_no_replace_commit() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = vault_path(&directory);
+
+        let error = atomic_create_if_missing_with(&path, b"new", |_| {
+            Err(std::io::Error::other("injected parent sync failure"))
+        })
+        .expect_err("must report uncertain create");
+        assert!(matches!(error, AtomicWriteError::CommitStateUnknown(_)));
+        assert_eq!(fs::read(path).expect("read committed file"), b"new");
+    }
+
+    #[test]
     fn windows_acl_policy_allows_only_the_user_and_local_system() {
         assert_eq!(
             WINDOWS_PRIVATE_ACL_PRINCIPALS,
@@ -2896,11 +4081,121 @@ mod tests {
     }
 
     #[test]
+    fn local_auto_unlock_password_stays_raw_and_zeroizing_on_read() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("vault").join("auto-unlock.password");
+
+        write_local_auto_unlock_password(&path, PASSWORD).expect("write local password");
+        assert_eq!(fs::read(&path).expect("read raw local file"), PASSWORD);
+        let password = read_local_auto_unlock_password(&path).expect("read local password");
+        assert_eq!(password.as_slice(), PASSWORD);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                fs::metadata(&path)
+                    .expect("local password metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn removes_only_abandoned_local_password_staging_files() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("vault").join("auto-unlock.password");
+        write_local_auto_unlock_password(&path, PASSWORD).expect("write local password");
+        let vault_directory = path.parent().expect("vault directory");
+        let abandoned =
+            vault_directory.join(format!(".auto-unlock.password.{}.staging", Uuid::new_v4()));
+        fs::write(&abandoned, NEW_PASSWORD).expect("simulate crash before replace");
+        let unrelated = vault_directory.join(".other.00000000-0000-0000-0000-000000000001.staging");
+        fs::write(&unrelated, b"not ours").expect("create unrelated staging");
+
+        cleanup_local_auto_unlock_password_staging(&path).expect("remove abandoned copy");
+        assert!(!abandoned.exists());
+        assert!(unrelated.exists());
+        assert_eq!(fs::read(&path).expect("read active password"), PASSWORD);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_auto_unlock_password_rejects_unsafe_file_objects() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vault_directory = directory.path().join("vault");
+        fs::create_dir(&vault_directory).expect("create vault directory");
+        fs::set_permissions(&vault_directory, fs::Permissions::from_mode(0o700))
+            .expect("make vault directory private");
+
+        let target = vault_directory.join("target");
+        fs::write(&target, PASSWORD).expect("write target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+            .expect("make target private");
+        let symlink_path = vault_directory.join("auto-unlock.password");
+        symlink(&target, &symlink_path).expect("create symlink");
+        assert!(read_local_auto_unlock_password(&symlink_path).is_err());
+        fs::remove_file(&symlink_path).expect("remove symlink");
+
+        let directory_path = vault_directory.join("auto-unlock.password");
+        fs::create_dir(&directory_path).expect("create non-regular file");
+        assert!(matches!(
+            read_local_auto_unlock_password(&directory_path),
+            Err(VaultError::InvalidEnvelope(_))
+        ));
+        fs::remove_dir(&directory_path).expect("remove non-regular file");
+
+        write_local_auto_unlock_password(&directory_path, PASSWORD).expect("write local password");
+        fs::set_permissions(&directory_path, fs::Permissions::from_mode(0o644))
+            .expect("make local password public");
+        assert!(matches!(
+            read_local_auto_unlock_password(&directory_path),
+            Err(VaultError::InsecurePermissions)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_auto_unlock_password_rejects_fifo_without_blocking() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("vault").join("auto-unlock.password");
+        ensure_private_parent_directory(&path).expect("private directory");
+        let c_path = CString::new(path.as_os_str().as_bytes()).expect("path without NUL");
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            read_local_auto_unlock_password(&path),
+            Err(VaultError::InvalidEnvelope(_))
+        ));
+        assert!(matches!(
+            read_bounded_file_in_private_directory(&path, 256),
+            Err(VaultError::InvalidEnvelope(_))
+        ));
+    }
+
+    #[test]
     fn rejects_a_weak_new_password() {
         let directory = tempfile::tempdir().expect("tempdir");
         let error = UnlockedVault::create(vault_path(&directory), b"short")
             .expect_err("weak password rejected");
         assert!(matches!(error, VaultError::WeakPassword));
+    }
+
+    #[test]
+    fn new_password_requires_eight_unicode_characters() {
+        assert!(matches!(
+            validate_new_password("七个字符不够啊".as_bytes()),
+            Err(VaultError::WeakPassword)
+        ));
+        assert!(validate_new_password("八个字符已经够了".as_bytes()).is_ok());
+        assert!(validate_new_password(b"12345678").is_ok());
     }
 
     #[test]

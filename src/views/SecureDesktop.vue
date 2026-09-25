@@ -6,6 +6,7 @@ import NvxSecureWindow from "../components/layout/NvxSecureWindow.vue";
 import { NvxButton, NvxField, NvxInlineNotice, NvxInput } from "../components/ui";
 import { desktopClient } from "../core-api/desktop-client";
 import type { DesktopPrompt } from "../core-api/generated/core-api";
+import { MIN_NEW_SECRET_PASSWORD_CHARACTERS, passwordCharacterCount } from "../password-policy";
 const { t } = useI18n();
 const prompt = ref<DesktopPrompt | null>(null);
 const loading = ref(true);
@@ -21,10 +22,14 @@ const answers = ref<string[]>([]);
 
 const id = new URLSearchParams(window.location.search).get("prompt") ?? "";
 const isVaultCreate = computed(() => prompt.value?.prompt.kind === "vaultCreate");
+const passwordTooShort = computed(() => isVaultCreate.value && !!password.value
+  && passwordCharacterCount(password.value) < MIN_NEW_SECRET_PASSWORD_CHARACTERS);
+const confirmationMismatch = computed(() => isVaultCreate.value && !!passwordConfirmation.value
+  && password.value !== passwordConfirmation.value);
 const canApprove = computed(() => (
   !isVaultCreate.value
   || (
-    new TextEncoder().encode(password.value).byteLength >= 12
+    passwordCharacterCount(password.value) >= MIN_NEW_SECRET_PASSWORD_CHARACTERS
     && password.value === passwordConfirmation.value
   )
 ));
@@ -44,8 +49,8 @@ async function decide(approved: boolean) {
   const request = desktopClient.decide({
     id,
     approved,
-    username: approved && prompt.value.prompt.kind === "credentials" ? username.value : null,
-    domain: approved && prompt.value.prompt.kind === "credentials" ? domain.value : null,
+    username: approved && prompt.value.prompt.kind === "credentials" && !prompt.value.prompt.passwordOnly ? username.value : null,
+    domain: approved && prompt.value.prompt.kind === "credentials" && !prompt.value.prompt.passwordOnly ? domain.value : null,
     password: approved && ["credentials", "vaultCreate", "vaultUnlock"].includes(prompt.value.prompt.kind)
       ? password.value
       : null,
@@ -113,6 +118,7 @@ onBeforeUnmount(clear);
       <template v-if="prompt.prompt.kind === 'credentials'">
         <p>{{ t('desktop.credentials') }}</p>
         <NvxField
+          v-if="!prompt.prompt.passwordOnly"
           for-id="desktop-secure-user"
           :label="t('desktop.username')"
         >
@@ -124,6 +130,7 @@ onBeforeUnmount(clear);
           />
         </NvxField>
         <NvxField
+          v-if="!prompt.prompt.passwordOnly"
           for-id="desktop-secure-domain"
           :label="t('desktop.domain')"
         >
@@ -154,6 +161,7 @@ onBeforeUnmount(clear);
         <NvxField
           for-id="desktop-vault-password"
           :label="t('desktop.vaultPassword')"
+          :hint="t('desktop.vaultUnlock')"
         >
           <NvxInput
             id="desktop-vault-password"
@@ -171,6 +179,8 @@ onBeforeUnmount(clear);
         <NvxField
           for-id="desktop-vault-password"
           :label="t('desktop.vaultPassword')"
+          :hint="t('desktop.vaultMinimum')"
+          :error="passwordTooShort ? t('desktop.vaultTooShort') : undefined"
         >
           <NvxInput
             id="desktop-vault-password"
@@ -179,12 +189,15 @@ onBeforeUnmount(clear);
             autocomplete="new-password"
             :disabled="pending"
             :maxlength="4096"
+            :invalid="passwordTooShort"
             @keydown.enter="decide(true)"
           />
         </NvxField>
         <NvxField
           for-id="desktop-vault-password-confirmation"
           :label="t('desktop.vaultPasswordConfirmation')"
+          :hint="t('desktop.vaultConfirmationHint')"
+          :error="confirmationMismatch ? t('desktop.vaultMismatch') : undefined"
         >
           <NvxInput
             id="desktop-vault-password-confirmation"
@@ -193,6 +206,7 @@ onBeforeUnmount(clear);
             autocomplete="new-password"
             :disabled="pending"
             :maxlength="4096"
+            :invalid="confirmationMismatch"
             @keydown.enter="decide(true)"
           />
         </NvxField>

@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils";
+import { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 
 import NvxCodeEditor from "./NvxCodeEditor.vue";
@@ -42,6 +43,29 @@ describe("NvxCodeEditor", () => {
     expect(editor.findPrevious()).toBe(true);
     expect(editor.updateSearch("missing")).toBe(false);
     expect(editor.updateSearch("")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("keeps live-follow selection at the newest text on initial load, append, and rotation", async () => {
+    const wrapper = mount(NvxCodeEditor, {
+      props: {
+        modelValue: "first\nsecond\n",
+        followEnd: true,
+        label: "Follow log",
+      },
+    });
+    const view = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement);
+    expect(view?.state.selection.main.head).toBe("first\nsecond\n".length);
+
+    await wrapper.setProps({ modelValue: "first\nsecond\nthird\n" });
+    expect(view?.state.selection.main.head).toBe("first\nsecond\nthird\n".length);
+
+    await wrapper.setProps({ modelValue: "rotated\n" });
+    expect(view?.state.selection.main.head).toBe("rotated\n".length);
+
+    await wrapper.setProps({ followEnd: false, modelValue: "rotated\nmore\n" });
+    await wrapper.setProps({ followEnd: true });
+    expect(view?.state.selection.main.head).toBe("rotated\nmore\n".length);
     wrapper.unmount();
   });
 });

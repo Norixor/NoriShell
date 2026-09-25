@@ -151,6 +151,47 @@ pub(crate) fn compare_bundles(
         |_| None,
     );
 
+    // A pre-V4 bundle has no opinion about application preferences. Report
+    // present groups without describing the absent side as a deletion.
+    let local_preferences = local.preferences.as_ref().map(|value| &value.groups);
+    let remote_preferences = remote.preferences.as_ref().map(|value| &value.groups);
+    let preference_groups = local_preferences
+        .into_iter()
+        .flat_map(|groups| groups.keys())
+        .chain(
+            remote_preferences
+                .into_iter()
+                .flat_map(|groups| groups.keys()),
+        )
+        .collect::<BTreeSet<_>>();
+    for group in preference_groups {
+        let local_value = local
+            .preferences
+            .as_ref()
+            .and_then(|value| value.groups.get(group.as_str()));
+        let remote_value = remote
+            .preferences
+            .as_ref()
+            .and_then(|value| value.groups.get(group.as_str()));
+        let change = match (local_value, remote_value) {
+            (Some(left), Some(right)) if left != right => {
+                Some(SshSyncSecureDifferenceChange::Changed)
+            }
+            (Some(_), None) => Some(SshSyncSecureDifferenceChange::LocalOnly),
+            (None, Some(_)) => Some(SshSyncSecureDifferenceChange::RemoteOnly),
+            _ => None,
+        };
+        if let Some(change) = change {
+            collector.add(SshSyncSecureDifference {
+                kind: SshSyncSecureDifferenceKind::Preferences,
+                change,
+                label: group.to_owned(),
+                local_summary: None,
+                remote_summary: None,
+            });
+        }
+    }
+
     add_tombstone_only_differences(&mut collector, local, remote);
     collector.finish()
 }
@@ -164,7 +205,15 @@ pub(crate) fn with_tombstones_for_missing(
     current: &PortableBundleV1,
 ) -> norishell_ssh_profile_sync::Result<PortableBundleV1> {
     let mut result = target.clone();
-    result.schema = norishell_ssh_profile_sync::BundleSchema::V3;
+    result.schema = match target.schema {
+        norishell_ssh_profile_sync::BundleSchema::V5 => {
+            norishell_ssh_profile_sync::BundleSchema::V5
+        }
+        norishell_ssh_profile_sync::BundleSchema::V4 => {
+            norishell_ssh_profile_sync::BundleSchema::V4
+        }
+        _ => norishell_ssh_profile_sync::BundleSchema::V3,
+    };
     let target_ids = object_keys(target);
     let current_ids = object_keys(current);
     // Historical tombstones may remain in the cloud baseline, but must not delete local objects outside this operation's scope.
@@ -189,11 +238,20 @@ pub(crate) fn with_tombstones_for_missing(
         .tombstones
         .sort_by_key(|value| (value.kind, value.id));
     result.tombstones.dedup();
+    let staged_ids = object_keys(&result)
+        .into_iter()
+        .chain(result.tombstones.iter().map(|value| (value.kind, value.id)))
+        .collect::<BTreeSet<_>>();
+    result
+        .update_times
+        .retain(|value| staged_ids.contains(&(value.kind, value.id)));
     result.validate()?;
     Ok(result)
 }
 
-fn object_keys(bundle: &PortableBundleV1) -> BTreeSet<(PortableObjectKind, PortableObjectId)> {
+pub(crate) fn object_keys(
+    bundle: &PortableBundleV1,
+) -> BTreeSet<(PortableObjectKind, PortableObjectId)> {
     bundle
         .objects
         .hosts
@@ -527,7 +585,29 @@ fn secure_kind(kind: PortableObjectKind) -> SshSyncSecureDifferenceKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use norishell_ssh_profile_sync::{BundleSchema, PortableObjects};
+    use norishell_ssh_profile_sync::{
+        BundleSchema, PortableItemUpdateTime, PortableObjects, PortablePreferencesV1,
+    };
+
+    fn v5(mut value: PortableBundleV1) -> PortableBundleV1 {
+        let groups = serde_json::json!({
+            "application": {"themePreference":null,"locale":null,"uiZoom":null,"terminalStartupBehavior":null,"newTerminalBehavior":null,"singlePaneTabCloseBehavior":null},
+            "appearance": {"terminalThemeMode":null,"terminalFontFamily":null,"terminalFontSize":null,"terminalFontWeight":null,"terminalBoldFontWeight":null,"terminalLineHeight":null,"terminalLetterSpacing":null,"terminalCursorStyle":null,"terminalCursorBlink":null,"customTerminalPalette":null,"customTerminalPaletteName":null},
+            "interaction": {"interaction":null,"pasteWarning":null},
+            "highlights": {"enabled":null,"rules":null},
+            "shortcuts": {"version":null,"bindings":null},
+            "files": {"browser":null,"rememberLastDirectory":null},
+            "desktop": {"windowCloseBehavior":null,"trayShowStatus":null,"trayRecentLimit":null,"trayShowHostNames":null,"notificationBackgroundOnly":null,"notificationFailureOnly":null,"notifyTransferCompleted":null,"notifyTransferFailed":null,"notifyDisconnected":null},
+            "commandNotifications": {"notificationsEnabled":null,"notificationThresholdSeconds":null}
+        });
+        value.schema = BundleSchema::V5;
+        value.preferences = Some(PortablePreferencesV1 {
+            product: "NoriShell".into(),
+            version: 1,
+            groups: serde_json::from_value(groups).expect("groups"),
+        });
+        value
+    }
 
     fn bundle(hosts: Vec<PortableHost>) -> PortableBundleV1 {
         PortableBundleV1 {
@@ -537,9 +617,12 @@ mod tests {
                 hosts,
                 ..PortableObjects::default()
             },
+            preferences: None,
             secrets: Vec::new(),
             skipped_machine_bound: Vec::new(),
             tombstones: Vec::new(),
+            update_times: Vec::new(),
+            preference_update_times: BTreeMap::new(),
         }
     }
 
@@ -563,6 +646,33 @@ mod tests {
                 .expect("monitor"),
             login_automation_id: None,
         }
+    }
+
+    #[test]
+    fn preference_differences_expose_group_only_and_legacy_absence_is_not_deletion() {
+        let mut local = bundle(Vec::new());
+        local.preferences = Some(PortablePreferencesV1 {
+            product: "NoriShell".to_owned(),
+            version: 1,
+            groups: BTreeMap::from([(
+                "application".to_owned(),
+                serde_json::json!({"themePreference":"dark"}),
+            )]),
+        });
+        let remote = bundle(Vec::new());
+        let report = compare_bundles(&local, &remote);
+        assert_eq!(report.total_count, 1);
+        assert_eq!(
+            report.differences[0].kind,
+            SshSyncSecureDifferenceKind::Preferences
+        );
+        assert_eq!(
+            report.differences[0].change,
+            SshSyncSecureDifferenceChange::LocalOnly
+        );
+        assert_eq!(report.differences[0].label, "application");
+        assert!(report.differences[0].local_summary.is_none());
+        assert!(report.differences[0].remote_summary.is_none());
     }
 
     #[test]
@@ -600,6 +710,37 @@ mod tests {
                 .iter()
                 .any(|value| value.id == in_scope)
         );
+    }
+
+    #[test]
+    fn v5_mirror_plan_keeps_schema_and_drops_out_of_scope_tombstone_clock() {
+        let in_scope = PortableObjectId::from_uuid(uuid::Uuid::new_v4()).expect("id");
+        let old_tombstone = PortableObjectId::from_uuid(uuid::Uuid::new_v4()).expect("id");
+        let mut current = v5(bundle(Vec::new()));
+        current
+            .objects
+            .identities
+            .push(norishell_ssh_profile_sync::PortableIdentity {
+                id: in_scope,
+                label: "in scope".into(),
+                username: None,
+                credential_ids: Vec::new(),
+            });
+        let mut remote = v5(bundle(Vec::new()));
+        remote.tombstones.push(PortableTombstone {
+            kind: PortableObjectKind::Identity,
+            id: old_tombstone,
+        });
+        remote.update_times.push(PortableItemUpdateTime {
+            kind: PortableObjectKind::Identity,
+            id: old_tombstone,
+            update_time_unix_ms: 1_000,
+        });
+        let staged = with_tombstones_for_missing(&remote, &current).expect("staged V5");
+        assert_eq!(staged.schema, BundleSchema::V5);
+        assert_eq!(staged.tombstones.len(), 1);
+        assert_eq!(staged.tombstones[0].id, in_scope);
+        assert!(staged.update_times.is_empty());
     }
 
     #[test]

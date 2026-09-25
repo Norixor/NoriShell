@@ -67,8 +67,8 @@ function snapshot(withChallenge = false): ServerOverviewSnapshot {
         revision: "1",
         policy: {
           enabled: withChallenge,
-          sampleIntervalSeconds: 15,
-          sampleTimeoutSeconds: 5,
+          sampleIntervalMillis: 1500,
+          sampleTimeoutMillis: 5000,
           diskMountIds: ["root"],
           networkInterfaceIds: ["aggregateNonLoopback"],
         },

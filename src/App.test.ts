@@ -20,6 +20,8 @@ const hooks = vi.hoisted(() => ({
   notification: undefined as undefined | ((event: { payload: NativeTerminalNotificationClick }) => void),
   runtimeInvalidated: undefined as undefined | ((event: { payload: { pluginId: string } }) => void),
   runtimeReady: undefined as undefined | ((event: { payload: InstalledPluginSummary }) => void),
+  preferencesPending: vi.fn().mockResolvedValue(null),
+  preferencesResolve: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
@@ -39,6 +41,7 @@ vi.mock("vue-i18n", async (importOriginal) => ({
 vi.mock("./stores/ui", () => ({
   useUiStore: () => ({ applyPreferences: vi.fn(), locale: "zh-CN", uiZoom: 100, appliedUiZoom: 100, setUiZoom: vi.fn().mockResolvedValue(true) }),
 }));
+vi.mock("./stores/appUpdate", () => ({ useAppUpdateStore: () => ({ checkForUpdates: vi.fn().mockResolvedValue(undefined) }) }));
 vi.mock("./core-api/native-tray", () => ({ readyNativeTrayActions: vi.fn().mockResolvedValue([]), takeNativeTrayAction: vi.fn() }));
 vi.mock("./core-api/native-notifications", () => ({ setNativeNotificationContext: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("./core-api/client", () => ({
@@ -51,6 +54,11 @@ vi.mock("./core-api/client", () => ({
 }));
 vi.mock("./terminal-workspace-persistence", () => ({
   requestExitAfterTerminalWorkspaceFlush: hooks.flushAndExit,
+}));
+vi.mock("./ssh-sync-preferences-bridge", () => ({
+  startSshSyncPreferencesBridge: vi.fn().mockResolvedValue(() => {}),
+  getPendingSshSyncPreferences: hooks.preferencesPending,
+  resolvePendingSshSyncPreferences: hooks.preferencesResolve,
 }));
 
 const PluginTargetStub = defineComponent({
@@ -95,7 +103,7 @@ async function mountApplication(path = "/terminal") {
           template:
             '<section v-if="modelValue"><h1>{{ title }}</h1><p>{{ description }}</p><slot /><slot name="actions" /></section>',
         },
-        NvxButton: { template: "<button><slot /></button>" },
+        NvxButton: { props: ["disabled"], template: '<button :disabled="disabled"><slot /></button>' },
       },
     },
   });
@@ -131,6 +139,48 @@ describe("application exit failure", () => {
     expect(wrapper.text()).toContain("lifecycle.cleanupFailedTitle");
     expect(wrapper.text()).toContain("lifecycle.cleanupFailed");
     expect(wrapper.text()).toContain("lifecycle.retryCleanupAndQuit");
+  });
+});
+
+describe("synchronized preference review", () => {
+  it("shows unresolved groups and waits for an explicit resolution", async () => {
+    hooks.preferencesPending.mockResolvedValue({
+      id: "review-1",
+      ready: true,
+      expected: { product: "NoriShell", version: 1, groups: {} },
+      desired: { product: "NoriShell", version: 1, groups: {} },
+      results: { appearance: "conflict" },
+    });
+    const { wrapper } = await mountApplication();
+    expect(wrapper.text()).toContain("plugins.sshSyncPreferencesReview.title");
+    expect(hooks.preferencesResolve).not.toHaveBeenCalled();
+
+    await wrapper.find(".app-sync-preferences-banner button").trigger("click");
+    expect(wrapper.text()).toContain("plugins.sshSyncPreferencesReview.states.conflict");
+    hooks.preferencesPending.mockResolvedValue(null);
+    const keepLocal = wrapper.findAll("button").find((button) => button.text().includes("plugins.sshSyncPreferencesReview.keepLocal"));
+    expect(keepLocal).toBeDefined();
+    await keepLocal!.trigger("click");
+    await flushPromises();
+    expect(hooks.preferencesResolve).toHaveBeenCalledWith("keepLocal");
+    expect(wrapper.find(".app-sync-preferences-banner").exists()).toBe(false);
+  });
+
+  it("allows only clearing an unconfirmed prepared restore", async () => {
+    hooks.preferencesPending.mockResolvedValue({
+      id: "prepared-1",
+      ready: false,
+      expected: { product: "NoriShell", version: 1, groups: {} },
+      desired: { product: "NoriShell", version: 1, groups: {} },
+      results: {},
+    });
+    const { wrapper } = await mountApplication();
+    await wrapper.find(".app-sync-preferences-banner button").trigger("click");
+    expect(wrapper.text()).toContain("plugins.sshSyncPreferencesReview.preparedDescription");
+    const button = (key: string) => wrapper.findAll("button").find((item) => item.text().includes(`plugins.sshSyncPreferencesReview.${key}`));
+    expect(button("retry")?.attributes("disabled")).toBeDefined();
+    expect(button("useRemote")?.attributes("disabled")).toBeDefined();
+    expect(button("keepLocal")?.attributes("disabled")).toBeUndefined();
   });
 });
 

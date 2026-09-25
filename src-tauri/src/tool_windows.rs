@@ -132,8 +132,7 @@ pub(crate) async fn tool_window_open(
     };
     if existing {
         if let Some(child) = app.get_webview_window(&label) {
-            child.unminimize().map_err(|_| "unavailable")?;
-            child.set_focus().map_err(|_| "unavailable")?;
+            crate::window_first_show::show_if_revealed(&child).map_err(|_| "unavailable")?;
         }
         return Ok(());
     }
@@ -157,7 +156,7 @@ pub(crate) async fn tool_window_open(
                         && url.query().is_none())
             })
             .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
-    let child = crate::secure_window_frame::apply_secure_window_frame(builder)
+    let child = crate::secure_window_frame::apply_secure_window_frame(&app, &label, builder)
         .inner_size(1000.0, 760.0)
         .min_inner_size(640.0, 480.0)
         .build();
@@ -189,7 +188,7 @@ pub(crate) async fn tool_window_open(
             exit.destroyed(&label);
         }
     });
-    child.set_focus().map_err(|_| "unavailable".into())
+    crate::window_first_show::focus_if_revealed(&child).map_err(|_| "unavailable".into())
 }
 #[tauri::command]
 pub(crate) fn tool_window_get(

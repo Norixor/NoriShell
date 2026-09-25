@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, useId, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { getPluginSettings, parseCoreApiError, replacePluginSettings, resetPluginSettings } from "../../core-api/client";
@@ -8,8 +8,8 @@ import { usePluginExtensionsStore } from "../../stores/pluginExtensions";
 import { useTipsStore } from "../../stores/tips";
 import { NvxButton, NvxCheckbox, NvxDialog, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
 
-const props = defineProps<{ pluginId: string; pluginName: string }>();
-const emit = defineEmits<{ close: [] }>();
+const props = defineProps<{ pluginId: string; pluginName: string; initialFieldKey?: string }>();
+const emit = defineEmits<{ close: []; saved: [snapshot: PluginSettingsSnapshot] }>();
 const { locale, t } = useI18n();
 const extensions = usePluginExtensionsStore();
 const tips = useTipsStore();
@@ -77,6 +77,7 @@ async function save(reset = false) {
     draft.value = { ...updated.values };
     tips.show({ scope: `plugin-settings:${current.pluginId}`, tone: "success",
       title: t(reset ? "plugins.settings.resetDone" : "plugins.settings.saved") });
+    emit("saved", updated);
     if (!reset) emit("close");
   } catch (cause) {
     if (disposed || requestGeneration !== generation) return;
@@ -89,6 +90,12 @@ async function save(reset = false) {
 }
 
 watch(() => props.pluginId, () => { busy.value = false; void load(); }, { immediate: true });
+watch(snapshot, async (current) => {
+  if (!current || !props.initialFieldKey
+    || !current.schema.fields.some((field) => field.key === props.initialFieldKey)) return;
+  await nextTick();
+  if (!disposed) document.getElementById(`${id}-${props.initialFieldKey}`)?.focus();
+});
 onBeforeUnmount(() => { disposed = true; generation += 1; });
 </script>
 
@@ -150,6 +157,7 @@ onBeforeUnmount(() => { disposed = true; generation += 1; });
             <NvxInput
               v-else
               :id="`${id}-${field.key}`"
+              :data-nvx-dialog-initial-focus="initialFieldKey === field.key ? '' : undefined"
               :model-value="String(draft[field.key] ?? '')"
               :type="field.type === 'number' ? 'number' : 'text'"
               :min="field.type === 'number' ? field.min ?? undefined : undefined"

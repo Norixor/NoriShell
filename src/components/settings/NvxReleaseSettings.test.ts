@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
+import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { releasesEn } from "../../locales/releases";
@@ -8,16 +9,22 @@ const api = vi.hoisted(() => ({
   getVersion: vi.fn(),
   invoke: vi.fn(),
   openUrl: vi.fn(),
+  checkUpdate: vi.fn(),
+  relaunch: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: api.getVersion }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: api.openUrl }));
+vi.mock("@tauri-apps/plugin-updater", () => ({ check: api.checkUpdate }));
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: api.relaunch }));
 
 import NvxReleaseSettings from "./NvxReleaseSettings.vue";
 
 function mountSettings() {
+  const pinia = createPinia();
+  setActivePinia(pinia);
   return mount(NvxReleaseSettings, {
-    global: { plugins: [createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn } } })] },
+    global: { plugins: [pinia, createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn } } })] },
   });
 }
 
@@ -35,6 +42,7 @@ describe("release settings", () => {
       currentVersion: "0.1.0",
       status: "upToDate",
       latestVersion: null,
+      supportsAutoInstall: true,
       releaseUrl: "https://github.com/Norixor/NoriShell/releases",
     });
     api.openUrl.mockResolvedValue(undefined);
@@ -63,6 +71,7 @@ describe("release settings", () => {
       currentVersion: "0.1.0-beta.1",
       status: "updateAvailable",
       latestVersion: "0.1.0",
+      supportsAutoInstall: true,
       releaseUrl: "https://example.invalid/untrusted-release-url",
     });
     const wrapper = mountSettings();
@@ -76,11 +85,41 @@ describe("release settings", () => {
     expect(api.openUrl).toHaveBeenCalledWith("https://github.com/Norixor/NoriShell/releases");
   });
 
+  it("offers the portable Windows edition a manual ZIP update", async () => {
+    api.invoke.mockResolvedValueOnce({
+      currentVersion: "0.1.2",
+      status: "updateAvailable",
+      latestVersion: "0.1.3",
+      supportsAutoInstall: false,
+    });
+    const wrapper = mountSettings();
+    await button(wrapper, "Check for updates").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Download the new ZIP and replace it manually");
+    expect(wrapper.findAll("button").some((item) => item.text().includes("Update and restart"))).toBe(false);
+    expect(wrapper.findAll("button").some((item) => item.text().includes("Download on GitHub"))).toBe(true);
+  });
+
+  it("offers prereleases a manual download without an in-app install action", async () => {
+    api.invoke.mockResolvedValueOnce({
+      currentVersion: "0.1.2-beta.1",
+      status: "updateAvailable",
+      latestVersion: "0.1.2-beta.2",
+      supportsAutoInstall: false,
+    });
+    const wrapper = mountSettings();
+    await button(wrapper, "Check for updates").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Download prereleases manually from GitHub");
+    expect(wrapper.findAll("button").some((item) => item.text().includes("Update and restart"))).toBe(false);
+  });
+
   it("distinguishes an empty published list from an up-to-date release", async () => {
     api.invoke.mockResolvedValueOnce({
       currentVersion: "0.1.0",
       status: "noRelease",
       latestVersion: null,
+      supportsAutoInstall: true,
       releaseUrl: "https://github.com/Norixor/NoriShell/releases",
     });
     const wrapper = mountSettings();

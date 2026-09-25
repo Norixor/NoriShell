@@ -15,6 +15,7 @@ mod native_notification_service;
 mod native_notifications;
 mod native_terminal;
 mod native_terminal_scripts;
+mod offline_backup_service;
 mod openssh_import_service;
 mod overview_service;
 mod plugin_api;
@@ -47,6 +48,7 @@ mod ssh_session_service;
 mod ssh_sync_browser_cache;
 mod ssh_sync_exchange;
 mod ssh_sync_exchange_local;
+mod ssh_sync_preferences;
 #[allow(dead_code)]
 mod telnet_session_service;
 mod terminal_focus_broker;
@@ -56,6 +58,7 @@ mod tool_windows;
 mod transient_credential_service;
 mod tray_service;
 mod vault_service;
+mod window_first_show;
 mod window_frame;
 #[cfg(windows)]
 #[allow(dead_code)]
@@ -70,8 +73,8 @@ pub fn run_plugin_host_if_requested() -> Option<i32> {
 }
 
 use lifecycle::{
-    LifecycleState, application_menu, application_request_exit, handle_application_menu_event,
-    hide_window_on_close, install_tray, window_request_close,
+    LifecycleState, UpdateExitState, application_menu, application_request_exit,
+    handle_application_menu_event, hide_window_on_close, install_tray, window_request_close,
 };
 
 macro_rules! production_invoke_handler {
@@ -218,6 +221,9 @@ macro_rules! production_invoke_handler {
             desktop_preferences::desktop_preferences_get,
             desktop_preferences::desktop_preferences_replace,
             release_check::release_check,
+            release_check::release_update_readiness,
+            lifecycle::release_update_prepare_install,
+            lifecycle::release_update_allow_relaunch,
             telnet_session_service::telnet_terminal_open,
             telnet_session_service::telnet_terminal_snapshot,
             plugin_service::protocol_terminal::plugin_protocol_launch_list,
@@ -249,7 +255,6 @@ macro_rules! production_invoke_handler {
             forward_session_service::forward_session_snapshot,
             forward_session_service::forward_session_stop,
             forward_session_service::forward_cleanup_retain,
-            sftp_session_service::sftp_session_open,
             sftp_session_service::sftp_session_snapshot,
             sftp_session_service::sftp_session_disconnect,
             sftp_session_service::sftp_local_boundary_register,
@@ -313,6 +318,7 @@ impl ProductionInvokeRuntime for tauri::Wry {
             window_frame::window_standalone_action,
             window_frame::window_set_native_header_height,
             window_frame::window_set_windows_maximize_hit_region,
+            window_first_show::window_renderer_ready,
             plugin_service::plugin_local_package_prepare,
             plugin_service::plugin_host_approval_open,
             plugin_service::plugin_host_approval_get,
@@ -330,10 +336,22 @@ impl ProductionInvokeRuntime for tauri::Wry {
             plugin_service::isolated::plugin_isolated_bridge,
             ssh_sync_exchange_local::ssh_sync_secure_prompt_get,
             ssh_sync_exchange_local::ssh_sync_secure_prompt_decide,
+            ssh_sync_preferences::ssh_sync_preferences_publish,
+            ssh_sync_preferences::ssh_sync_preferences_pending_get,
+            ssh_sync_preferences::ssh_sync_preferences_apply_ack,
+            ssh_sync_preferences::ssh_sync_preferences_retry_pending,
             host_service::private_key_file_import,
             window_request_close,
             application_request_exit,
             json_export::native_json_export,
+            offline_backup_service::offline_backup_export,
+            offline_backup_service::offline_backup_open,
+            offline_backup_service::offline_backup_preview,
+            offline_backup_service::offline_backup_apply,
+            offline_backup_service::offline_backup_discard,
+            offline_backup_service::offline_backup_secure_get,
+            offline_backup_service::offline_backup_secure_submit,
+            offline_backup_service::offline_backup_secure_cancel,
             secure_credential_service::secure_credential_open,
             secure_credential_service::secure_credential_get,
             secure_credential_service::secure_credential_submit,
@@ -342,10 +360,12 @@ impl ProductionInvokeRuntime for tauri::Wry {
             secure_ssh_challenge::secure_ssh_challenge_get,
             secure_ssh_challenge::secure_ssh_challenge_submit,
             secure_ssh_challenge::secure_ssh_challenge_cancel,
+            sftp_session_service::sftp_session_open,
             secure_vault_service::secure_vault_open,
             secure_vault_service::secure_vault_ensure_for_host,
             secure_vault_service::secure_vault_get,
             secure_vault_service::secure_vault_submit,
+            secure_vault_service::secure_vault_reset,
             secure_vault_service::secure_vault_cancel,
             tool_window_exit::tool_window_exit_reply,
             tool_windows::tool_window_open,
@@ -363,10 +383,8 @@ impl ProductionInvokeRuntime for tauri::Wry {
 #[cfg(test)]
 impl ProductionInvokeRuntime for tauri::test::MockRuntime {
     fn with_production_invoke_handler(builder: tauri::Builder<Self>) -> tauri::Builder<Self> {
-        // The mock runtime cannot extract the Wry-specific window/AppHandle
-        // parameters of the four native lifecycle commands. The complete
-        // runtime-neutral production registry, including every SSH wrapper,
-        // remains shared with `run()` through the macro above.
+        // The mock runtime cannot extract Wry-specific window/AppHandle
+        // parameters. Runtime-neutral commands remain shared with `run()`.
         production_invoke_handler!(builder)
     }
 }
@@ -393,10 +411,18 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .menu(application_menu)
         .on_menu_event(handle_application_menu_event)
         .manage(LifecycleState::default())
+        .manage(UpdateExitState::default())
+        .manage(window_first_show::WindowFirstShow::default())
         .setup(|app| {
+            #[cfg(any(windows, target_os = "macos"))]
+            if let Some(window) = app.get_webview_window("main") {
+                window_first_show::schedule_fallback(app.handle(), window.label(), true);
+            }
             #[cfg(target_os = "macos")]
             if let Some(main_window) = app.get_webview_window("main") {
                 window_frame::install_macos_header_bridge(&main_window)
@@ -450,10 +476,14 @@ pub fn run() {
                     ssh_agent_service.clone(),
                     native_terminal_service.clone(),
                 );
+            let ssh_sync_preferences =
+                ssh_sync_preferences::SshSyncPreferencesService::new(&app_data_directory)
+                    .map_err(std::io::Error::other)?;
             let ssh_sync_local = ssh_sync_exchange_local::NoriShellSshSyncLocalAdapter::new(
                 app.handle().clone(),
                 host_service.clone(),
                 vault_service.clone(),
+                ssh_sync_preferences.clone(),
             );
             let ssh_sync_broker = ssh_sync_exchange::SshSyncExchangeBroker::new(
                 &app_data_directory,
@@ -531,6 +561,7 @@ pub fn run() {
             app.manage(tool_windows::ToolWindows::default());
             app.manage(tool_window_exit::ToolWindowExit::default());
             app.manage(secure_vault_service::SecureVaultService::default());
+            app.manage(offline_backup_service::OfflineBackupService::default());
             app.manage(secure_credential_service::SecureCredentialService::default());
             app.manage(secure_ssh_challenge::SecureSshChallengeService::default());
             app.manage(desktop_preferences_service);
@@ -545,6 +576,7 @@ pub fn run() {
             );
             app.manage(native_terminal_service);
             app.manage(ssh_sync_local);
+            app.manage(ssh_sync_preferences);
             app.manage(transient_credential_service);
             app.manage(ssh_agent_service);
             app.manage(openssh_import_service::OpenSshImportService::default());
@@ -587,9 +619,14 @@ pub fn run() {
                     }
                 });
             }
+            plugin_service.start_auto_sync();
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(any(windows, target_os = "macos"))]
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window_first_show::forget(window.app_handle(), window.label());
+            }
             #[cfg(target_os = "macos")]
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 window_frame::cleanup_macos_header_bridge();
@@ -602,8 +639,25 @@ pub fn run() {
             }
             hide_window_on_close(window, event);
         });
+    let context = tauri::generate_context!();
+    #[cfg(any(windows, target_os = "macos"))]
+    let mut context = context;
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Some(main) = context
+        .config_mut()
+        .app
+        .windows
+        .iter_mut()
+        .find(|window| window.label == "main")
+    {
+        main.visible = false;
+        #[cfg(windows)]
+        {
+            main.background_color = Some(secure_window_frame::WINDOWS_INITIAL_CANVAS);
+        }
+    }
     let app = with_production_invoke_handler(builder)
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("NoriShell desktop runtime failed");
 
     app.run(|app, event| match event {

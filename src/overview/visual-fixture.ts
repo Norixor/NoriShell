@@ -42,8 +42,8 @@ function card(
       revision: "1",
       policy: {
         enabled: true,
-        sampleIntervalSeconds: 15,
-        sampleTimeoutSeconds: 5,
+        sampleIntervalMillis: 1500,
+        sampleTimeoutMillis: 5000,
         diskMountIds: ["root"],
         networkInterfaceIds: ["aggregateNonLoopback"],
       },
@@ -113,11 +113,11 @@ function card(
 export const overviewVisualFixture: ServerOverviewSnapshot = {
   snapshotRevision: "1",
   cards: [
-    card(1, "优优科技公司生产环境核心服务器", "47.93.189.24", "production", "生产环境", "connected", 1_400, 48, 40),
-    card(2, "生产应用 01", "10.0.1.11", "production", "生产环境", "connected", 4_200, 43, 59),
-    card(3, "生产数据库", "10.0.1.21", "production", "生产环境", "degraded", 6_800, 72, 66),
-    card(4, "预发布网关", "10.0.2.10", "staging", "预发布", "connected", 2_600, 38, 31),
-    card(5, "预发布应用", "10.0.2.11", "staging", "预发布", "disconnected", 0, 0, 0),
-    card(6, "备份节点", "10.0.3.18", "infrastructure", "基础设施", "connected", 1_800, 51, 76),
+    card(1, "Production Core", "203.0.113.10", "production", "Production", "connected", 1_400, 48, 40),
+    card(2, "Production App 01", "10.0.1.11", "production", "Production", "connected", 4_200, 43, 59),
+    card(3, "Production Database", "10.0.1.21", "production", "Production", "degraded", 6_800, 72, 66),
+    card(4, "Staging Gateway", "10.0.2.10", "staging", "Staging", "connected", 2_600, 38, 31),
+    card(5, "Staging App", "10.0.2.11", "staging", "Staging", "disconnected", 0, 0, 0),
+    card(6, "Backup Node", "10.0.3.18", "infrastructure", "Infrastructure", "connected", 1_800, 51, 76),
   ],
 };

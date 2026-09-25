@@ -12,6 +12,7 @@ export default tseslint.config(
       "src-tauri/target/**",
       "src/core-api/generated/**",
       "src-tauri/gen/**",
+      "vendor/tauri-plugin-updater/**",
     ],
   },
   eslint.configs.recommended,

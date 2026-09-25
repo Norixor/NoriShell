@@ -3,7 +3,7 @@
 use norishell_desktop_protocol::{
     DesktopInput, EngineCommand, EngineControl, EngineError, EngineEvent, EventSink,
 };
-use norishell_vnc_client::{VncOptions, run};
+use norishell_vnc_client::{VncOptions, VncVersion, run};
 use std::{env, error::Error, fs, path::Path, sync::Arc, time::Duration};
 use tokio::{
     net::TcpStream,
@@ -25,10 +25,17 @@ fn required(name: &str) -> String {
 }
 
 fn options(password: String) -> VncOptions {
+    let version = match env::var("QA_VNC_VERSION").ok().as_deref() {
+        Some("3.3") => Some(VncVersion::RFB33),
+        Some("3.7") => Some(VncVersion::RFB37),
+        Some("3.8") => Some(VncVersion::RFB38),
+        _ => None,
+    };
     VncOptions {
         password: Zeroizing::new(password),
         allow_unauthenticated: false,
         clipboard_enabled: false,
+        version,
     }
 }
 
@@ -148,8 +155,10 @@ async fn successful_session(address: &str, password: String) -> Result<(), Box<d
         println!("VNC frame retained at {path}");
     }
 
-    send_key(&commands, true).await?;
-    send_key(&commands, false).await?;
+    if env::var_os("QA_SKIP_INPUT").is_none() {
+        send_key(&commands, true).await?;
+        send_key(&commands, false).await?;
+    }
     stop_tx.send(true)?;
     match timeout(WAIT, task).await?? {
         Err(EngineError::Cancelled) => Ok(()),
@@ -171,6 +180,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "failed-auth observation skipped"
     };
     successful_session(&address, password).await?;
-    println!("VNC QA smoke passed: {failed_auth}, frame, input, close");
+    let input = if env::var_os("QA_SKIP_INPUT").is_some() {
+        "input observation skipped"
+    } else {
+        "input"
+    };
+    println!("VNC QA smoke passed: {failed_auth}, frame, {input}, close");
     Ok(())
 }

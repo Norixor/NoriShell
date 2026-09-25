@@ -218,18 +218,18 @@ fn position(
         ) as i32,
     )
 }
-pub(super) fn toggle(app: &AppHandle, rect: tauri::Rect) {
+pub(super) fn toggle(app: &AppHandle, rect: tauri::Rect, clicked_at: Instant) {
     let handle = app.clone();
     // Tauri executes run_on_main_thread immediately when already on the main thread. Leave the native event
     // callback before queueing UI work, avoiding reentrant tray callbacks during Windows WebView2 creation.
     tauri::async_runtime::spawn(async move {
         let main = handle.clone();
         let _ = handle.run_on_main_thread(move || {
-            let _ = show_or_hide(&main, rect);
+            let _ = show_or_hide(&main, rect, clicked_at);
         });
     });
 }
-fn show_or_hide(app: &AppHandle, rect: tauri::Rect) -> tauri::Result<()> {
+fn show_or_hide(app: &AppHandle, rect: tauri::Rect, clicked_at: Instant) -> tauri::Result<()> {
     {
         let service = app.state::<NativeTrayService>();
         let mut state = service
@@ -239,13 +239,10 @@ fn show_or_hide(app: &AppHandle, rect: tauri::Rect) -> tauri::Result<()> {
         if state.stopped {
             return Ok(());
         }
-        // A tray click usually triggers blur before Up; the same click must not reopen the panel.
-        if state
-            .panel
-            .blurred_at
-            .take()
-            .is_some_and(|time| time.elapsed() < Duration::from_millis(350))
-        {
+        // Compare against the click time because single-click handling waits for a possible double-click.
+        if state.panel.blurred_at.take().is_some_and(|time| {
+            clicked_at.saturating_duration_since(time) < Duration::from_millis(350)
+        }) {
             return Ok(());
         }
     }
@@ -265,7 +262,7 @@ fn show_or_hide(app: &AppHandle, rect: tauri::Rect) -> tauri::Result<()> {
             .dev_url
             .as_ref()
             .and_then(|url| url.join("tray-panel.html").ok());
-        let window =
+        let builder =
             WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("tray-panel.html".into()))
                 .title("NoriShell")
                 .inner_size(380.0, 560.0)
@@ -285,8 +282,12 @@ fn show_or_hide(app: &AppHandle, rect: tauri::Rect) -> tauri::Result<()> {
                             && url.path() == "/tray-panel.html"
                             && url.query().is_none())
                 })
-                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-                .build()?;
+                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+        #[cfg(windows)]
+        let builder = builder.background_color(crate::secure_window_frame::WINDOWS_INITIAL_CANVAS);
+        #[cfg(any(windows, target_os = "macos"))]
+        crate::window_first_show::schedule_fallback(app, LABEL, false);
+        let window = builder.build()?;
         let handle = app.clone();
         window.on_window_event(move |event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -332,8 +333,13 @@ fn show_or_hide(app: &AppHandle, rect: tauri::Rect) -> tauri::Result<()> {
         window.set_size(PhysicalSize::new(size.0, size.1))?;
         window.set_position(PhysicalPosition::new(x, y))?;
     }
-    window.show()?;
-    window.set_focus()?;
+    #[cfg(any(windows, target_os = "macos"))]
+    crate::window_first_show::positioned(&window);
+    #[cfg(any(windows, target_os = "macos"))]
+    if !crate::window_first_show::was_revealed(app, LABEL) {
+        return Ok(());
+    }
+    crate::window_first_show::show_if_revealed(&window)?;
     Ok(())
 }
 

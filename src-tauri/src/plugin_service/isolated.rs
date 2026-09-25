@@ -184,8 +184,10 @@ impl PluginService {
                 },
             );
         }
-        let result =
-            crate::secure_window_frame::apply_secure_window_frame(WebviewWindowBuilder::new(
+        let result = crate::secure_window_frame::apply_secure_window_frame(
+            &app,
+            &label,
+            WebviewWindowBuilder::new(
                 &app,
                 &label,
                 WebviewUrl::App(
@@ -195,13 +197,14 @@ impl PluginService {
                     )
                     .into(),
                 ),
-            ))
-            .title(format!("NoriShell — {}", surface.title))
-            .inner_size(f64::from(surface.width), f64::from(surface.height))
-            .min_inner_size(480.0, 360.0)
-            .resizable(true)
-            .center()
-            .build();
+            ),
+        )
+        .title(format!("NoriShell — {}", surface.title))
+        .inner_size(f64::from(surface.width), f64::from(surface.height))
+        .min_inner_size(480.0, 360.0)
+        .resizable(true)
+        .center()
+        .build();
         let window = match result {
             Ok(window) => window,
             Err(_) => {
@@ -528,7 +531,9 @@ pub(crate) async fn plugin_isolated_bridge(
     service: State<'_, PluginService>,
     window: WebviewWindow,
 ) -> CoreResult<PluginIsolatedBridgeResponse> {
-    service.isolated_bridge(&window, request).await
+    // This broker has the same large async state as declarative plugin actions.
+    // Allocate it when polled by the runtime, not in the UI thread's IPC future.
+    Box::pin(service.isolated_bridge(&window, request)).await
 }
 
 /// Guest HTML has its own response policy; the trusted wrapper keeps script-src 'self'.

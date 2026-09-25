@@ -162,10 +162,12 @@ impl PluginService {
     ) -> CoreResult<PluginApprovalId> {
         let snapshot = self.prepare_special_permission(request.clone())?;
         let label = secure_special_permission_window_label(&snapshot.approval_id);
-        let opened =
-            crate::secure_window_frame::apply_secure_window_frame(WebviewWindowBuilder::new(
+        let opened = crate::secure_window_frame::apply_secure_window_frame(
+            &app,
+            &label,
+            WebviewWindowBuilder::new(
                 &app,
-                label,
+                label.clone(),
                 WebviewUrl::App(
                     format!(
                         "secure-plugin-permission.html?approvalId={}",
@@ -173,13 +175,14 @@ impl PluginService {
                     )
                     .into(),
                 ),
-            ))
-            .title("NoriShell")
-            .inner_size(760.0, 760.0)
-            .min_inner_size(640.0, 620.0)
-            .resizable(true)
-            .center()
-            .build();
+            ),
+        )
+        .title("NoriShell")
+        .inner_size(760.0, 760.0)
+        .min_inner_size(640.0, 620.0)
+        .resizable(true)
+        .center()
+        .build();
         let window = match opened {
             Ok(window) => window,
             Err(_) => {

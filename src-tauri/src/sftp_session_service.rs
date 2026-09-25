@@ -40,7 +40,7 @@ use std::{
     path::Path,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -65,7 +65,7 @@ use russh_sftp::{
     protocol::{FileAttributes as RemoteFileAttributes, OpenFlags},
 };
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{AppHandle, State, WebviewWindow};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, watch};
 use zeroize::Zeroizing;
@@ -457,6 +457,14 @@ pub(crate) enum FileMutationPlan {
         kind: DeleteKind,
         precondition: RemoteObjectPrecondition,
     },
+    SetPermissions {
+        operation: OperationFence,
+        generation: SftpGeneration,
+        path: RemotePath,
+        precondition: RemoteObjectPrecondition,
+        expected_permission_bits: u32,
+        mode: u32,
+    },
     CreateZip {
         operation: OperationFence,
         generation: SftpGeneration,
@@ -532,6 +540,7 @@ pub(crate) enum TransferState {
 pub(crate) enum TransferFailureCode {
     TargetExists,
     UnsafeReplaceUnsupported,
+    CommitOutcomeUncertain,
     PermissionDenied,
     TransportLost,
     LengthMismatch,
@@ -604,6 +613,7 @@ pub(crate) struct TransferRecord {
     pub(crate) conflict_policy: ConflictPolicy,
     pub(crate) state: TransferState,
     pub(crate) state_revision: u64,
+    pub(crate) commit_outcome: wire::SftpTransferCommitOutcome,
     pub(crate) temporary_target: Option<TemporaryTarget>,
     pub(crate) target_existed: bool,
     pub(crate) safe_commit_supported: bool,
@@ -858,11 +868,11 @@ pub(crate) struct DirectoryPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteTransferPreparationFacts {
     pub(crate) target_existed: bool,
+    pub(crate) target_precondition: Option<RemoteObjectPrecondition>,
     pub(crate) temporary_target_existed: bool,
     pub(crate) temporary_target_length: Option<u64>,
-    /// The current SFTP v3 adapter can use the OpenSSH hardlink extension for
-    /// atomic no-replace, but cannot prove an atomic replacement of an
-    /// existing target.
+    /// An existing regular target can only be replaced when the server
+    /// advertises the OpenSSH atomic POSIX rename extension.
     pub(crate) safe_commit_supported: bool,
 }
 
@@ -982,6 +992,7 @@ where
             | FileMutationPlan::WriteText { generation, .. }
             | FileMutationPlan::RenameNoReplace { generation, .. }
             | FileMutationPlan::DeleteConfirmed { generation, .. }
+            | FileMutationPlan::SetPermissions { generation, .. }
             | FileMutationPlan::CreateZip { generation, .. }
             | FileMutationPlan::ExtractZip { generation, .. }
             | FileMutationPlan::DownloadUrl { generation, .. } => *generation,
@@ -1168,6 +1179,39 @@ where
                             .await
                     }
                 }
+            }
+            FileMutationPlan::SetPermissions {
+                path,
+                precondition,
+                expected_permission_bits,
+                mode,
+                ..
+            } => {
+                let path = remote_path_utf8(path)?;
+                let metadata = self
+                    .bounded_protocol(self.transport.client().symlink_metadata(path))
+                    .await?;
+                if !remote_permissions_match(&metadata, precondition, *expected_permission_bits) {
+                    return Err(SftpRuntimeError::Conflict.into());
+                }
+                let updated_bits = replace_rwx_permission_bits(*expected_permission_bits, *mode);
+                self.bounded_protocol(self.transport.client().set_metadata(
+                    path,
+                    RemoteFileAttributes {
+                        permissions: Some(updated_bits),
+                        ..Default::default()
+                    },
+                ))
+                .await?;
+                let updated = self
+                    .bounded_protocol(self.transport.client().symlink_metadata(path))
+                    .await?;
+                if remote_precondition_from_metadata(&updated) != *precondition
+                    || updated.permissions != Some(updated_bits)
+                {
+                    return Err(SftpRuntimeError::Conflict.into());
+                }
+                Ok(())
             }
             FileMutationPlan::CreateZip {
                 operation,
@@ -1363,7 +1407,11 @@ where
                     OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
                 ))
                 .await?;
-            self.bounded_protocol(file.write_all(bytes)).await?;
+            // Large archives must make progress under per-request timeouts, not one
+            // deadline covering the entire SFTP upload.
+            for chunk in bytes.chunks(TRANSFER_CHUNK_BYTES) {
+                self.bounded_protocol(file.write_all(chunk)).await?;
+            }
             self.bounded_protocol(file.sync_all()).await?;
             let written = self.bounded_protocol(file.metadata()).await?.len();
             self.bounded_protocol(file.close()).await?;
@@ -1374,9 +1422,13 @@ where
         }
         .await;
         if let Err(error) = write_result {
-            let _ = self
-                .cleanup_temporary_target(generation, &temporary_target)
-                .await;
+            if !matches!(
+                self.cleanup_temporary_target(generation, &temporary_target)
+                    .await,
+                Ok(CleanupOutcome::Cleaned)
+            ) {
+                return Err(SftpRuntimeError::CleanupIncomplete.into());
+            }
             return Err(error);
         }
         let linked = self
@@ -1385,12 +1437,28 @@ where
                     .client()
                     .hardlink(temporary_path, target_path),
             )
-            .await
-            .map_err(|_| SftpRuntimeError::Conflict)?;
+            .await;
+        let linked = match linked {
+            Ok(linked) => linked,
+            Err(error) => {
+                if !matches!(
+                    self.cleanup_temporary_target(generation, &temporary_target)
+                        .await,
+                    Ok(CleanupOutcome::Cleaned)
+                ) {
+                    return Err(SftpRuntimeError::CleanupIncomplete.into());
+                }
+                return Err(error);
+            }
+        };
         if !linked {
-            let _ = self
-                .cleanup_temporary_target(generation, &temporary_target)
-                .await;
+            if !matches!(
+                self.cleanup_temporary_target(generation, &temporary_target)
+                    .await,
+                Ok(CleanupOutcome::Cleaned)
+            ) {
+                return Err(SftpRuntimeError::CleanupIncomplete.into());
+            }
             return Err(SftpRuntimeError::UnsafeReplaceUnsupported.into());
         }
         self.bounded_protocol(self.transport.client().remove_file(temporary_path))
@@ -1575,9 +1643,7 @@ where
             .map_err(|_| SftpRuntimeError::CleanupIncomplete)?)
     }
 
-    /// Reads target/temp existence and length from the SFTP server. The v3
-    /// adapter reports safe commit as unsupported instead of inferring it from
-    /// a successful ordinary rename.
+    /// Reads target/temp facts and the server's advertised commit capability.
     pub(crate) async fn inspect_transfer_targets(
         &self,
         generation: SftpGeneration,
@@ -1593,6 +1659,14 @@ where
         let target_existed = self
             .bounded_protocol(self.transport.client().try_exists(target))
             .await?;
+        let target_precondition = if target_existed {
+            let metadata = self
+                .bounded_protocol(self.transport.client().symlink_metadata(target))
+                .await?;
+            Some(remote_precondition_from_metadata(&metadata))
+        } else {
+            None
+        };
         let temporary_target_existed = self
             .bounded_protocol(self.transport.client().try_exists(temporary_target))
             .await?;
@@ -1609,9 +1683,13 @@ where
         };
         Ok(RemoteTransferPreparationFacts {
             target_existed,
+            safe_commit_supported: target_precondition.as_ref().is_some_and(|precondition| {
+                precondition.kind == RemoteEntryKind::File
+                    && self.transport.client().supports_posix_rename()
+            }),
+            target_precondition,
             temporary_target_existed,
             temporary_target_length,
-            safe_commit_supported: false,
         })
     }
 
@@ -1664,8 +1742,16 @@ where
             .await?;
         let mut limited = (&mut source).take((maximum_bytes as u64).saturating_add(1));
         let mut bytes = Vec::with_capacity(maximum_bytes.min(64 * 1024));
-        self.bounded_protocol(limited.read_to_end(&mut bytes))
-            .await?;
+        // The byte cap remains global, while each protocol read gets its own
+        // timeout so a valid large ZIP input does not fail after 20 seconds.
+        let mut chunk = [0_u8; TRANSFER_CHUNK_BYTES];
+        loop {
+            let count = self.bounded_protocol(limited.read(&mut chunk)).await?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+        }
         let _ = self.bounded_protocol(source.close()).await;
         if bytes.len() > maximum_bytes {
             return Err(SftpRuntimeError::InvalidInput.into());
@@ -2311,6 +2397,33 @@ impl SftpSessionActor {
         })
     }
 
+    pub(crate) fn set_permissions(
+        &self,
+        operation: OperationFence,
+        generation: SftpGeneration,
+        path: RemotePath,
+        precondition: RemoteObjectPrecondition,
+        expected_permission_bits: u32,
+        mode: u32,
+    ) -> SftpRuntimeResult<FileMutationPlan> {
+        self.require_ready(generation)?;
+        if !matches!(
+            precondition.kind,
+            RemoteEntryKind::File | RemoteEntryKind::Directory
+        ) || mode > 0o777
+        {
+            return Err(SftpRuntimeError::InvalidInput);
+        }
+        Ok(FileMutationPlan::SetPermissions {
+            operation,
+            generation,
+            path,
+            precondition,
+            expected_permission_bits,
+            mode,
+        })
+    }
+
     pub(crate) fn create_zip(
         &self,
         operation: OperationFence,
@@ -2424,6 +2537,7 @@ impl SftpSessionActor {
             conflict_policy,
             state: TransferState::Queued,
             state_revision: 1,
+            commit_outcome: wire::SftpTransferCommitOutcome::NotCommitted,
             temporary_target: None,
             target_existed: false,
             safe_commit_supported: false,
@@ -2605,6 +2719,7 @@ impl SftpSessionActor {
             });
         }
         record.temporary_target = None;
+        record.commit_outcome = wire::SftpTransferCommitOutcome::Committed;
         transfer_transition(record, TransferState::Completed, None);
         Ok(())
     }
@@ -2617,7 +2732,10 @@ impl SftpSessionActor {
         let record = self.transfer_mut(transfer_id, generation)?;
         if matches!(
             record.state,
-            TransferState::Completed | TransferState::Cancelled | TransferState::Cancelling
+            TransferState::Committing
+                | TransferState::Completed
+                | TransferState::Cancelled
+                | TransferState::Cancelling
         ) {
             return Err(SftpRuntimeError::InvalidState);
         }
@@ -2638,6 +2756,11 @@ impl SftpSessionActor {
         ) {
             return Err(SftpRuntimeError::InvalidState);
         }
+        record.commit_outcome = if failure == TransferFailureCode::CommitOutcomeUncertain {
+            wire::SftpTransferCommitOutcome::Uncertain
+        } else {
+            wire::SftpTransferCommitOutcome::NotCommitted
+        };
         transfer_transition(
             record,
             if failure == TransferFailureCode::TransportLost {
@@ -2664,6 +2787,11 @@ impl SftpSessionActor {
         ) {
             return Err(SftpRuntimeError::InvalidState);
         }
+        record.commit_outcome = if failure == TransferFailureCode::CommitOutcomeUncertain {
+            wire::SftpTransferCommitOutcome::Uncertain
+        } else {
+            wire::SftpTransferCommitOutcome::NotCommitted
+        };
         let failure = match cleanup {
             CleanupOutcome::Cleaned => {
                 record.temporary_target = None;
@@ -2725,6 +2853,7 @@ impl SftpSessionActor {
         if record.state != TransferState::Failed
             || record.failure_code != Some(TransferFailureCode::CleanupIncomplete)
             || record.cleanup_residual.is_none()
+            || record.commit_outcome == wire::SftpTransferCommitOutcome::Uncertain
         {
             return Err(SftpRuntimeError::InvalidState);
         }
@@ -2839,7 +2968,8 @@ impl SftpSessionActor {
         if !matches!(
             record.state,
             TransferState::Failed | TransferState::PausedByDisconnect
-        ) {
+        ) || record.commit_outcome == wire::SftpTransferCommitOutcome::Uncertain
+        {
             return Err(SftpRuntimeError::InvalidState);
         }
         if let CleanupOutcome::Residual { opaque_location } = cleanup {
@@ -2858,6 +2988,7 @@ impl SftpSessionActor {
         record.target_existed = false;
         record.safe_commit_supported = false;
         record.cleanup_residual = None;
+        record.commit_outcome = wire::SftpTransferCommitOutcome::NotCommitted;
         transfer_transition(record, TransferState::Queued, None);
         Ok(())
     }
@@ -2977,15 +3108,19 @@ impl SftpSessionActor {
         for record in self.transfers.values_mut() {
             if matches!(
                 record.state,
-                TransferState::Preparing
-                    | TransferState::Transferring
-                    | TransferState::Verifying
-                    | TransferState::Committing
+                TransferState::Preparing | TransferState::Transferring | TransferState::Verifying
             ) {
                 transfer_transition(
                     record,
                     TransferState::PausedByDisconnect,
                     Some(TransferFailureCode::TransportLost),
+                );
+            } else if record.state == TransferState::Committing {
+                record.commit_outcome = wire::SftpTransferCommitOutcome::Uncertain;
+                transfer_transition(
+                    record,
+                    TransferState::Failed,
+                    Some(TransferFailureCode::CommitOutcomeUncertain),
                 );
             } else if record.state == TransferState::Cancelling {
                 record.cleanup_residual = record
@@ -3139,6 +3274,18 @@ fn mutation_fingerprint(request: &wire::SftpFileMutationRequest) -> Vec<u8> {
             field(&mut output, &path.bytes);
             precondition(&mut output, expected);
             output.push(u8::from(*irreversible_confirmed));
+        }
+        wire::SftpFileMutation::SetPermissions {
+            path,
+            precondition: expected,
+            expected_permission_bits,
+            mode,
+        } => {
+            output.push(9);
+            field(&mut output, &path.bytes);
+            precondition(&mut output, expected);
+            output.extend_from_slice(&expected_permission_bits.to_be_bytes());
+            output.extend_from_slice(&mode.to_be_bytes());
         }
         wire::SftpFileMutation::CreateZip { sources, target } => {
             output.push(6);
@@ -3398,14 +3545,18 @@ fn map_transport_failure(error: &TransportError) -> SftpFailureCode {
     }
 }
 
+type UnknownSftpHostKeyCapture = Arc<StdMutex<Option<(Endpoint, ObservedHostKey)>>>;
+
 #[derive(Clone)]
 struct TrustedSftpHostKeyVerifier {
     hosts: HostService,
+    unknown_capture: Option<UnknownSftpHostKeyCapture>,
 }
 
 impl HostKeyVerifier for TrustedSftpHostKeyVerifier {
     fn verify(&self, endpoint: Endpoint, observed: ObservedHostKey) -> VerifyFuture {
         let hosts = self.hosts.clone();
+        let unknown_capture = self.unknown_capture.clone();
         Box::pin(async move {
             match hosts.observe_known_host(
                 endpoint.normalized_address(),
@@ -3422,7 +3573,14 @@ impl HostKeyVerifier for TrustedSftpHostKeyVerifier {
                     )
                     .map(|_| TransportHostKeyDecision::Trusted)
                     .map_err(|_| TransportError::HostKeyVerificationFailed),
-                Ok(KnownHostObservation::Unknown(_)) => Ok(TransportHostKeyDecision::Rejected),
+                Ok(KnownHostObservation::Unknown(_)) => {
+                    if let Some(capture) = unknown_capture
+                        && let Ok(mut pending) = capture.lock()
+                    {
+                        *pending = Some((endpoint, observed));
+                    }
+                    Ok(TransportHostKeyDecision::Rejected)
+                }
                 Ok(KnownHostObservation::Mismatch { trusted, .. })
                 | Ok(KnownHostObservation::AlgorithmChanged { trusted, .. }) => {
                     Ok(TransportHostKeyDecision::Mismatch {
@@ -4198,8 +4356,39 @@ impl SftpSessionService {
     pub(crate) async fn open(
         &self,
         request: &wire::SftpSessionOpenRequest,
+        unknown_capture: Option<UnknownSftpHostKeyCapture>,
     ) -> Result<wire::SftpSessionSummary, SftpProductionError> {
-        self.open_with_connection_gate(request, None, None).await
+        self.open_with_connection_gate(request, None, None, unknown_capture)
+            .await
+    }
+
+    async fn trust_observed_for_open(
+        &self,
+        request: &wire::SftpSessionOpenRequest,
+        summary: &wire::SftpSessionSummary,
+        endpoint: &Endpoint,
+        observed: &ObservedHostKey,
+    ) -> bool {
+        let records = self.records.lock().await;
+        let Some(record) = records.get(request.session_id.as_str()) else {
+            return false;
+        };
+        if record.open_operation_id != request.operation_id.as_str()
+            || record.actor.summary().generation.map(SftpGeneration::get)
+                != Some(summary.generation.get())
+            || record.actor.summary().state != SftpSessionState::Failed
+            || record.actor.summary().failure_code != Some(SftpFailureCode::HostKeyRejected)
+        {
+            return false;
+        }
+        self.hosts
+            .trust_known_host(
+                endpoint.normalized_address(),
+                endpoint.port(),
+                &observed.algorithm,
+                &observed.public_key_blob,
+            )
+            .is_ok()
     }
 
     /// The regular UI entry does not carry a separately approved full profile
@@ -4210,6 +4399,7 @@ impl SftpSessionService {
         request: &wire::SftpSessionOpenRequest,
         expected_connection_revision: Option<&str>,
         admission_fence: Option<&(dyn Fn() -> bool + Send + Sync)>,
+        unknown_capture: Option<UnknownSftpHostKeyCapture>,
     ) -> Result<wire::SftpSessionSummary, SftpProductionError> {
         if request.idempotency_key.trim().is_empty() {
             return Err(SftpRuntimeError::InvalidInput.into());
@@ -4270,6 +4460,7 @@ impl SftpSessionService {
         let generation = actor.start(profile.revision_token.clone())?;
         let verifier = Arc::new(TrustedSftpHostKeyVerifier {
             hosts: self.hosts.clone(),
+            unknown_capture,
         });
         let mut interaction = NonInteractiveSftpConnectionInteraction;
         let connection = match factory.connect(profile, verifier, &mut interaction).await {
@@ -5772,6 +5963,19 @@ impl SftpSessionService {
                         irreversible_confirmed,
                     )?
                 }
+                wire::SftpFileMutation::SetPermissions {
+                    path,
+                    precondition,
+                    expected_permission_bits,
+                    mode,
+                } => record.actor.set_permissions(
+                    operation,
+                    generation,
+                    RemotePath::parse(path.bytes)?,
+                    decode_remote_precondition(precondition),
+                    expected_permission_bits,
+                    mode,
+                )?,
                 wire::SftpFileMutation::CreateZip { sources, target } => {
                     let sources = sources
                         .into_iter()
@@ -7713,6 +7917,9 @@ impl SftpSessionService {
                 return Err(SftpRuntimeError::InvalidState.into());
             }
             let transfer = transfer.clone();
+            if transfer.commit_outcome == wire::SftpTransferCommitOutcome::Uncertain {
+                return Err(SftpRuntimeError::InvalidState.into());
+            }
             let can_verify_upload = transfer.state == TransferState::PausedByDisconnect
                 && transfer.direction == TransferDirection::Upload
                 && transfer.transferred_bytes > 0
@@ -7931,6 +8138,7 @@ impl SftpSessionService {
                 || transfer.state != TransferState::Failed
                 || transfer.failure_code != Some(TransferFailureCode::CleanupIncomplete)
                 || transfer.cleanup_residual.is_none()
+                || transfer.commit_outcome == wire::SftpTransferCommitOutcome::Uncertain
             {
                 return Err(SftpRuntimeError::Conflict.into());
             }
@@ -7963,6 +8171,7 @@ impl SftpSessionService {
         let profile = factory.resolve_saved_host(&host_id, request.expected_host_state_version)?;
         let verifier = Arc::new(TrustedSftpHostKeyVerifier {
             hosts: self.hosts.clone(),
+            unknown_capture: None,
         });
         let mut interaction = NonInteractiveSftpConnectionInteraction;
         let connection = factory.connect(profile, verifier, &mut interaction).await?;
@@ -8143,15 +8352,33 @@ impl SftpSessionService {
                 SftpHeartbeatLiveness::Disabled => {
                     tokio::select! {
                         biased;
-                        _ = wait_for_true(&mut cancel) => TransferTaskOutcome::Cancelled,
+                        _ = wait_for_true(&mut cancel) => {
+                            if self.transfer_commit_started(&session_key, &transfer_id).await {
+                                TransferTaskOutcome::Finished(execution.as_mut().await)
+                            } else {
+                                TransferTaskOutcome::Cancelled
+                            }
+                        },
                         result = &mut execution => TransferTaskOutcome::Finished(result),
                     }
                 }
                 SftpHeartbeatLiveness::Watching(mut lost) => {
                     tokio::select! {
                         biased;
-                        _ = wait_for_true(&mut cancel) => TransferTaskOutcome::Cancelled,
-                        _ = wait_for_true(&mut lost) => TransferTaskOutcome::TransportLost,
+                        _ = wait_for_true(&mut cancel) => {
+                            if self.transfer_commit_started(&session_key, &transfer_id).await {
+                                TransferTaskOutcome::Finished(execution.as_mut().await)
+                            } else {
+                                TransferTaskOutcome::Cancelled
+                            }
+                        },
+                        _ = wait_for_true(&mut lost) => {
+                            if self.transfer_commit_started(&session_key, &transfer_id).await {
+                                TransferTaskOutcome::Finished(execution.as_mut().await)
+                            } else {
+                                TransferTaskOutcome::TransportLost
+                            }
+                        },
                         result = &mut execution => TransferTaskOutcome::Finished(result),
                     }
                 }
@@ -8186,6 +8413,7 @@ impl SftpSessionService {
                     failure,
                     TransferFailureCode::TransportLost
                         | TransferFailureCode::Protocol
+                        | TransferFailureCode::CommitOutcomeUncertain
                         | TransferFailureCode::CleanupIncomplete
                 );
                 let cleanup = if failure == TransferFailureCode::TransportLost {
@@ -8275,6 +8503,19 @@ impl SftpSessionService {
         control.finished.send_replace(true);
         self.start_next_queued_transfer(&session_key).await;
         self.start_next_remote_copy().await;
+    }
+
+    async fn transfer_commit_started(&self, session_key: &str, transfer_id: &TransferId) -> bool {
+        let records = self.records.lock().await;
+        records.get(session_key).is_some_and(|record| {
+            record.actor.transfers().any(|transfer| {
+                &transfer.transfer_id == transfer_id
+                    && matches!(
+                        transfer.state,
+                        TransferState::Committing | TransferState::Completed
+                    )
+            })
+        })
     }
 
     async fn bounded_transfer_cleanup(
@@ -8380,6 +8621,7 @@ impl SftpSessionService {
             };
             let temporary_target = remote_temporary_target(target, transfer_id)
                 .map_err(|_| TransferFailureCode::UnsupportedPathEncoding)?;
+            let mut target_precondition = None;
             if plan.resume_from == 0 {
                 let facts = live
                     .inspect_transfer_targets(plan.generation, target, &temporary_target)
@@ -8394,6 +8636,7 @@ impl SftpSessionService {
                         return Err(TransferFailureCode::CleanupIncomplete);
                     }
                 }
+                target_precondition = facts.target_precondition.clone();
                 {
                     let mut records = self.records.lock().await;
                     let record = records
@@ -8481,31 +8724,60 @@ impl SftpSessionService {
                 .await?;
             let final_path = remote_path_utf8(target)
                 .map_err(|_| TransferFailureCode::UnsupportedPathEncoding)?;
-            let hardlinked = bounded_transfer_io(
-                live.transport.client().hardlink(temporary_path, final_path),
-                TransferFailureCode::TargetExists,
-            )
-            .await?;
-            if !hardlinked {
-                let _ = live
-                    .cleanup_temporary_target(plan.generation, &temporary_target)
-                    .await;
-                return Err(TransferFailureCode::UnsafeReplaceUnsupported);
-            }
+            let atomic_replace = if let Some(expected) = target_precondition {
+                // SFTP v3 has no compare-and-swap rename. Reject observed
+                // changes, while the POSIX extension provides atomic replace.
+                let current = bounded_transfer_io(
+                    live.transport.client().symlink_metadata(final_path),
+                    TransferFailureCode::TargetExists,
+                )
+                .await?;
+                if remote_precondition_from_metadata(&current) != expected {
+                    return Err(TransferFailureCode::TargetExists);
+                }
+                let replaced = tokio::time::timeout(
+                    SFTP_PROTOCOL_OPERATION_TIMEOUT,
+                    live.transport
+                        .client()
+                        .posix_rename(temporary_path, final_path),
+                )
+                .await
+                .map_err(|_| TransferFailureCode::CommitOutcomeUncertain)?
+                .map_err(|_| TransferFailureCode::CommitOutcomeUncertain)?;
+                if !replaced {
+                    return Err(TransferFailureCode::UnsafeReplaceUnsupported);
+                }
+                true
+            } else {
+                let hardlinked = bounded_transfer_io(
+                    live.transport.client().hardlink(temporary_path, final_path),
+                    TransferFailureCode::TargetExists,
+                )
+                .await?;
+                if !hardlinked {
+                    return Err(TransferFailureCode::UnsafeReplaceUnsupported);
+                }
+                false
+            };
             let final_length = bounded_transfer_io(
                 live.transport.client().symlink_metadata(final_path),
-                TransferFailureCode::Protocol,
+                if atomic_replace {
+                    TransferFailureCode::CommitOutcomeUncertain
+                } else {
+                    TransferFailureCode::Protocol
+                },
             )
             .await?
             .len();
-            if bounded_transfer_io(
-                live.transport.client().remove_file(temporary_path),
-                TransferFailureCode::CleanupIncomplete,
-            )
-            .await
-            .is_err()
-            {
-                return Err(TransferFailureCode::CleanupIncomplete);
+            if atomic_replace && final_length != plan.expected_bytes {
+                return Err(TransferFailureCode::CommitOutcomeUncertain);
+            }
+            if !atomic_replace {
+                bounded_transfer_io(
+                    live.transport.client().remove_file(temporary_path),
+                    TransferFailureCode::CleanupIncomplete,
+                )
+                .await?;
             }
             self.complete_transfer(
                 session_key,
@@ -8513,8 +8785,8 @@ impl SftpSessionService {
                 plan.generation,
                 CommitFacts {
                     final_length,
-                    atomic_no_replace: true,
-                    atomic_replace: false,
+                    atomic_no_replace: !atomic_replace,
+                    atomic_replace,
                 },
             )
             .await
@@ -9223,15 +9495,60 @@ type CoreResult<T> = Result<T, Box<wire::CoreApiError>>;
 
 #[tauri::command]
 pub(crate) async fn sftp_session_open(
-    request: wire::SftpSessionOpenRequest,
+    mut request: wire::SftpSessionOpenRequest,
     service: State<'_, SftpSessionService>,
     lifecycle: State<'_, LifecycleState>,
+    app: AppHandle,
+    window: WebviewWindow,
 ) -> CoreResult<wire::SftpSessionSummary> {
+    if window.label() != "main" {
+        return Err(map_sftp_core_error(
+            request.meta.request_id,
+            SftpRuntimeError::InvalidInput.into(),
+        ));
+    }
     let _creation_permit = lifecycle.acquire_resource_creation(request.meta.request_id.clone())?;
-    service
-        .open(&request)
+    let request_id = request.meta.request_id.clone();
+    let capture = Arc::new(StdMutex::new(None));
+    for attempt in 0..=6 {
+        let summary = service
+            .open(&request, Some(capture.clone()))
+            .await
+            .map_err(|error| map_sftp_core_error(request_id.clone(), error))?;
+        if summary.failure.as_ref().map(|failure| failure.code)
+            != Some(wire::SftpFailureCode::HostKeyRejected)
+            || attempt == 6
+        {
+            return Ok(summary);
+        }
+        let unknown = capture.lock().ok().and_then(|mut capture| capture.take());
+        let Some((endpoint, observed)) = unknown else {
+            return Ok(summary);
+        };
+        if !crate::secure_ssh_challenge::prompt_sftp_host_key(
+            &app,
+            request.operation_id.as_str(),
+            &endpoint,
+            &observed,
+        )
         .await
-        .map_err(|error| map_sftp_core_error(request.meta.request_id, error))
+        {
+            return Ok(summary);
+        }
+        if !service
+            .trust_observed_for_open(&request, &summary, &endpoint, &observed)
+            .await
+        {
+            return Err(map_sftp_core_error(
+                request_id,
+                SftpRuntimeError::Conflict.into(),
+            ));
+        }
+        request.meta.request_id = wire::RequestId::new();
+        request.operation_id = wire::OperationId::new();
+        request.idempotency_key = uuid::Uuid::now_v7().to_string();
+    }
+    unreachable!()
 }
 
 #[tauri::command]
@@ -9896,10 +10213,14 @@ fn map_transfer_summary(
             TransferState::Cancelled => wire::SftpTransferState::Cancelled,
             TransferState::Failed => wire::SftpTransferState::Failed,
         },
+        commit_outcome: transfer.commit_outcome,
         failure_code: transfer.failure_code.map(|code| match code {
             TransferFailureCode::TargetExists => wire::SftpTransferFailureCode::TargetExists,
             TransferFailureCode::UnsafeReplaceUnsupported => {
                 wire::SftpTransferFailureCode::UnsafeReplaceUnsupported
+            }
+            TransferFailureCode::CommitOutcomeUncertain => {
+                wire::SftpTransferFailureCode::CommitOutcomeUncertain
             }
             TransferFailureCode::PermissionDenied => {
                 wire::SftpTransferFailureCode::PermissionDenied
@@ -9928,11 +10249,7 @@ fn merge_legacy_intent_summary(
     summary.state_revision = legacy.state_revision;
     summary.state = legacy.state;
     summary.failure_code = legacy.failure_code;
-    summary.commit_outcome = if legacy.state == wire::SftpTransferState::Completed {
-        wire::SftpTransferCommitOutcome::Committed
-    } else {
-        wire::SftpTransferCommitOutcome::NotCommitted
-    };
+    summary.commit_outcome = legacy.commit_outcome;
     summary.cleanup_residual = legacy
         .cleanup_residual
         .as_ref()
@@ -10005,6 +10322,9 @@ fn remote_copy_failure(failure: TransferFailureCode) -> RemoteCopyExecutionFailu
             TransferFailureCode::TargetExists => wire::SftpTransferFailureCode::TargetExists,
             TransferFailureCode::UnsafeReplaceUnsupported => {
                 wire::SftpTransferFailureCode::UnsafeReplaceUnsupported
+            }
+            TransferFailureCode::CommitOutcomeUncertain => {
+                wire::SftpTransferFailureCode::CommitOutcomeUncertain
             }
             TransferFailureCode::PermissionDenied => {
                 wire::SftpTransferFailureCode::PermissionDenied
@@ -10149,6 +10469,19 @@ fn remote_precondition_from_metadata(metadata: &RemoteFileAttributes) -> RemoteO
     }
 }
 
+fn remote_permissions_match(
+    metadata: &RemoteFileAttributes,
+    precondition: &RemoteObjectPrecondition,
+    expected_permission_bits: u32,
+) -> bool {
+    remote_precondition_from_metadata(metadata) == *precondition
+        && metadata.permissions == Some(expected_permission_bits)
+}
+
+fn replace_rwx_permission_bits(original: u32, mode: u32) -> u32 {
+    (original & !0o777) | mode
+}
+
 fn map_cleanup_residual(transfer: &TransferRecord) -> Option<wire::SftpCleanupResidual> {
     let residual = transfer.cleanup_residual.as_ref()?;
     Some(match transfer.temporary_target.as_ref() {
@@ -10280,6 +10613,18 @@ fn map_sftp_core_error(
     request_id: wire::RequestId,
     error: SftpProductionError,
 ) -> Box<wire::CoreApiError> {
+    let code = match &error {
+        SftpProductionError::Runtime(SftpRuntimeError::Conflict) => "sftp.conflict",
+        SftpProductionError::Runtime(SftpRuntimeError::InvalidInput) => "sftp.invalid_input",
+        SftpProductionError::Runtime(SftpRuntimeError::UnsafeReplaceUnsupported) => {
+            "sftp.unsafe_no_replace_unsupported"
+        }
+        SftpProductionError::Runtime(SftpRuntimeError::CleanupIncomplete) => {
+            "sftp.cleanup_incomplete"
+        }
+        SftpProductionError::Runtime(SftpRuntimeError::LengthMismatch) => "sftp.length_mismatch",
+        _ => "sftp.operation_failed",
+    };
     let (category, retry_strategy) = match &error {
         SftpProductionError::Runtime(SftpRuntimeError::InvalidInput)
         | SftpProductionError::NonUtf8RemotePath => {
@@ -10301,7 +10646,7 @@ fn map_sftp_core_error(
         ),
     };
     Box::new(wire::CoreApiError {
-        code: "sftp.operation_failed".to_owned(),
+        code: code.to_owned(),
         category,
         retry_strategy,
         message_key: "errors.sftp.operationFailed".to_owned(),
@@ -10440,6 +10785,27 @@ mod tests {
     use std::os::unix::ffi::OsStrExt as _;
 
     use super::*;
+
+    #[test]
+    fn file_mutation_errors_keep_actionable_public_codes() {
+        for (failure, code) in [
+            (SftpRuntimeError::Conflict, "sftp.conflict"),
+            (SftpRuntimeError::InvalidInput, "sftp.invalid_input"),
+            (
+                SftpRuntimeError::UnsafeReplaceUnsupported,
+                "sftp.unsafe_no_replace_unsupported",
+            ),
+            (
+                SftpRuntimeError::CleanupIncomplete,
+                "sftp.cleanup_incomplete",
+            ),
+            (SftpRuntimeError::LengthMismatch, "sftp.length_mismatch"),
+        ] {
+            let mapped = map_sftp_core_error(wire::RequestId::new(), failure.into());
+            assert_eq!(mapped.code, code);
+            assert!(mapped.params.is_empty());
+        }
+    }
 
     #[test]
     fn vault_recovery_classifies_only_credential_failures() {
@@ -11189,6 +11555,89 @@ mod tests {
     }
 
     #[test]
+    fn permission_plan_accepts_only_regular_files_and_directories_with_rwx_modes() {
+        let (actor, generation) = actor();
+        let path = RemotePath::parse(b"/srv/file".to_vec()).unwrap();
+        let precondition = RemoteObjectPrecondition {
+            kind: RemoteEntryKind::File,
+            size: Some(42),
+            modified_at_unix_ms: Some(1_000),
+        };
+        assert!(matches!(
+            actor.set_permissions(
+                operation("chmod-valid"),
+                generation,
+                path.clone(),
+                precondition.clone(),
+                0o100640,
+                0o600,
+            ),
+            Ok(FileMutationPlan::SetPermissions { .. })
+        ));
+        assert!(matches!(
+            actor.set_permissions(
+                operation("chmod-dir"),
+                generation,
+                path.clone(),
+                RemoteObjectPrecondition {
+                    kind: RemoteEntryKind::Directory,
+                    ..precondition.clone()
+                },
+                0o40750,
+                0o700,
+            ),
+            Ok(FileMutationPlan::SetPermissions { .. })
+        ));
+        assert_eq!(
+            actor.set_permissions(
+                operation("chmod-special"),
+                generation,
+                path.clone(),
+                precondition.clone(),
+                0o100640,
+                0o4755,
+            ),
+            Err(SftpRuntimeError::InvalidInput)
+        );
+        assert_eq!(
+            actor.set_permissions(
+                operation("chmod-link"),
+                generation,
+                path,
+                RemoteObjectPrecondition {
+                    kind: RemoteEntryKind::Symlink,
+                    ..precondition
+                },
+                0o120777,
+                0o600,
+            ),
+            Err(SftpRuntimeError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn permission_precondition_detects_mode_change_without_size_or_mtime_change() {
+        let precondition = RemoteObjectPrecondition {
+            kind: RemoteEntryKind::File,
+            size: Some(42),
+            modified_at_unix_ms: Some(1_000),
+        };
+        let metadata = RemoteFileAttributes {
+            permissions: Some(0o100600),
+            size: Some(42),
+            mtime: Some(1),
+            ..Default::default()
+        };
+        assert!(!remote_permissions_match(
+            &metadata,
+            &precondition,
+            0o100640
+        ));
+        assert!(remote_permissions_match(&metadata, &precondition, 0o100600));
+        assert_eq!(replace_rwx_permission_bits(0o104600, 0o640), 0o104640);
+    }
+
+    #[test]
     fn default_conflict_policy_never_overwrites_existing_target() {
         let (mut actor, generation) = actor();
         let id = upload(&mut actor, generation, ConflictPolicy::default());
@@ -11256,6 +11705,75 @@ mod tests {
             Err(SftpRuntimeError::InvalidState)
         );
         assert_eq!(actor.transfers[&id].state, TransferState::Completed);
+    }
+
+    #[test]
+    fn committing_transfer_cannot_cancel_or_resume_after_transport_loss() {
+        let (mut actor, generation) = actor();
+        let id = upload(&mut actor, generation, ConflictPolicy::ReplaceSafely);
+        actor.begin_transfer(&id, generation).unwrap();
+        actor
+            .transfer_prepared(&id, generation, remote_temp(), true, true)
+            .unwrap();
+        actor.record_progress(&id, generation, 8).unwrap();
+        actor.begin_verification(&id, generation, 8).unwrap();
+        actor.begin_commit(&id, generation).unwrap();
+
+        assert_eq!(
+            actor.begin_cancel(&id, generation),
+            Err(SftpRuntimeError::InvalidState)
+        );
+        actor.transport_lost(generation).unwrap();
+        assert_eq!(actor.transfers[&id].state, TransferState::Failed);
+        assert_eq!(
+            actor.transfers[&id].failure_code,
+            Some(TransferFailureCode::CommitOutcomeUncertain)
+        );
+        assert_eq!(
+            actor.transfers[&id].commit_outcome,
+            wire::SftpTransferCommitOutcome::Uncertain
+        );
+    }
+
+    #[test]
+    fn uncertain_commit_remains_uncertain_if_temporary_cleanup_fails() {
+        let (mut actor, generation) = actor();
+        let id = upload(&mut actor, generation, ConflictPolicy::ReplaceSafely);
+        actor.begin_transfer(&id, generation).unwrap();
+        actor
+            .transfer_prepared(&id, generation, remote_temp(), true, true)
+            .unwrap();
+        actor.record_progress(&id, generation, 8).unwrap();
+        actor.begin_verification(&id, generation, 8).unwrap();
+        actor.begin_commit(&id, generation).unwrap();
+
+        actor
+            .fail_transfer_after_cleanup(
+                &id,
+                generation,
+                TransferFailureCode::CommitOutcomeUncertain,
+                CleanupOutcome::Residual {
+                    opaque_location: "/srv/.app.bin.norishell-part".to_owned(),
+                },
+            )
+            .unwrap();
+        let transfer = &actor.transfers[&id];
+        assert_eq!(
+            transfer.failure_code,
+            Some(TransferFailureCode::CleanupIncomplete)
+        );
+        assert_eq!(
+            transfer.commit_outcome,
+            wire::SftpTransferCommitOutcome::Uncertain
+        );
+        assert_eq!(
+            actor.resolve_cleanup_residual(&id, generation),
+            Err(SftpRuntimeError::InvalidState)
+        );
+        assert_eq!(
+            actor.restart_transfer(&id, generation, CleanupOutcome::Cleaned),
+            Err(SftpRuntimeError::InvalidState)
+        );
     }
 
     #[test]

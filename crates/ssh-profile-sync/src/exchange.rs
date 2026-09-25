@@ -16,9 +16,19 @@ const EXCHANGE_FORMAT: &str = "norishell-ssh-sync-exchange-v2";
 const VAULT_EXCHANGE_FORMAT: &str = "norishell-ssh-vault-exchange-v3";
 const MAX_EXCHANGE_BYTES: usize = 96 * 1024 * 1024;
 
-/// Public, non-secret binding chosen by a sync plugin. Core binds the encrypted
-/// package to the requesting plugin and that plugin's provider/account profile;
-/// neither value grants access to another plugin's exchange object.
+/// Stable data namespace for new exchanges. Package hashes remain separate
+/// authorization identities and must never be substituted by this value there.
+pub fn stable_plugin_data_owner(plugin_id: &str) -> Result<String> {
+    validate_identifier(plugin_id, 160)?;
+    Ok(sha256_hex(
+        format!("norishell:ssh-sync-owner:v1\0{plugin_id}").as_bytes(),
+    ))
+}
+
+/// Public, non-secret Core binding for one sync plugin and provider profile.
+/// The signer-shaped field is the stable data owner for new exchanges and the
+/// original package hash for legacy exchanges. It is never an authorization
+/// identity; both formats bind it into the authenticated ciphertext.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginExchangeBinding {
     pub plugin_id: String,
@@ -122,11 +132,15 @@ pub fn create_plugin_exchange(
     binding: &PluginExchangeBinding,
 ) -> Result<Vec<u8>> {
     binding.validate()?;
-    if bundle.schema != BundleSchema::V3 || bundle.revision != binding.revision {
+    if !matches!(
+        bundle.schema,
+        BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5
+    ) || bundle.revision != binding.revision
+    {
         return Err(SyncCodecError::BindingMismatch);
     }
     let key_version = 1;
-    let object_binding = new_object_binding(binding, key_version);
+    let object_binding = new_object_binding(binding, key_version, bundle.schema);
     let owner = RecoveryOwnerBinding {
         application_id: "norishell".to_owned(),
         account_id: binding.owner_id(),
@@ -167,15 +181,17 @@ pub fn create_plugin_exchange_with_key(
     binding: &PluginExchangeBinding,
 ) -> Result<Vec<u8>> {
     binding.validate()?;
-    if bundle.schema != BundleSchema::V3
-        || bundle.revision != binding.revision
+    if !matches!(
+        bundle.schema,
+        BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5
+    ) || bundle.revision != binding.revision
         || vault_key_envelope.is_empty()
         || vault_key_envelope.len() > 64 * 1024
     {
         return Err(SyncCodecError::BindingMismatch);
     }
     let key_version = 1;
-    let object_binding = new_object_binding(binding, key_version);
+    let object_binding = new_object_binding(binding, key_version, bundle.schema);
     let encrypted = encrypt_bundle_for_service(bundle, key, &object_binding)?;
     let wire = ExchangeWire {
         format: VAULT_EXCHANGE_FORMAT.to_owned(),
@@ -226,6 +242,22 @@ pub fn inspect_plugin_exchange_owner(
     profile_id: &str,
 ) -> Result<(PluginExchangeBinding, PluginExchangeSummary)> {
     let wire = parse_wire(bytes)?;
+    inspect_wire_owner(
+        wire,
+        bytes,
+        plugin_id,
+        signer_fingerprint_sha256,
+        profile_id,
+    )
+}
+
+fn inspect_wire_owner(
+    wire: ExchangeWire,
+    bytes: &[u8],
+    plugin_id: &str,
+    signer_fingerprint_sha256: &str,
+    profile_id: &str,
+) -> Result<(PluginExchangeBinding, PluginExchangeSummary)> {
     let binding = PluginExchangeBinding {
         plugin_id: plugin_id.to_owned(),
         signer_fingerprint_sha256: signer_fingerprint_sha256.to_owned(),
@@ -245,6 +277,19 @@ pub fn inspect_plugin_exchange_owner(
         exchange_sha256: sha256_hex(bytes),
     };
     Ok((binding, summary))
+}
+
+/// Discovers the owner recorded by a legacy package-bound exchange. The
+/// result is untrusted until the caller opens the encrypted body with the
+/// sync key; only plugin and profile are selected by the caller here.
+pub fn inspect_plugin_exchange_data_owner(
+    bytes: &[u8],
+    plugin_id: &str,
+    profile_id: &str,
+) -> Result<(PluginExchangeBinding, PluginExchangeSummary)> {
+    let wire = parse_wire(bytes)?;
+    let signer = wire.owner.signer_fingerprint_sha256.clone();
+    inspect_wire_owner(wire, bytes, plugin_id, &signer, profile_id)
 }
 
 /// Returns the opaque Vault key envelope from a v3 exchange after validating
@@ -354,8 +399,12 @@ fn validate_wire_common(wire: &ExchangeWire, expected: &PluginExchangeBinding) -
     Ok(())
 }
 
-fn new_object_binding(binding: &PluginExchangeBinding, key_version: u32) -> SyncObjectBinding {
-    object_binding_for_schema(binding, key_version, BundleSchema::V3)
+fn new_object_binding(
+    binding: &PluginExchangeBinding,
+    key_version: u32,
+    schema: BundleSchema,
+) -> SyncObjectBinding {
+    object_binding_for_schema(binding, key_version, schema)
 }
 
 fn authenticated_object_binding(
@@ -364,9 +413,9 @@ fn authenticated_object_binding(
     schema: BundleSchema,
 ) -> Result<SyncObjectBinding> {
     match schema {
-        // Existing authenticated exchanges use V2. V3 is the only schema that
-        // may be emitted by this version, while all other values fail closed.
-        BundleSchema::V2 | BundleSchema::V3 => {
+        // Older authenticated exchanges remain readable, while current writes
+        // bind the current schema into the AEAD associated data.
+        BundleSchema::V2 | BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5 => {
             Ok(object_binding_for_schema(binding, key_version, schema))
         }
         BundleSchema::V1 => Err(SyncCodecError::BindingMismatch),
@@ -455,8 +504,10 @@ mod tests {
 
     use crate::{
         PluginExchangeBinding, RecoveryPassword, SyncKey, create_plugin_exchange,
-        create_plugin_exchange_with_key, inspect_plugin_exchange, inspect_plugin_exchange_owner,
-        open_plugin_exchange, open_plugin_exchange_with_key, plugin_exchange_vault_key_envelope,
+        create_plugin_exchange_with_key, inspect_plugin_exchange,
+        inspect_plugin_exchange_data_owner, inspect_plugin_exchange_owner, open_plugin_exchange,
+        open_plugin_exchange_with_key, plugin_exchange_vault_key_envelope,
+        stable_plugin_data_owner,
     };
 
     use super::PortableBundleV1;
@@ -466,6 +517,9 @@ mod tests {
             schema: crate::BundleSchema::V3,
             revision: 1,
             objects: crate::PortableObjects::default(),
+            preferences: None,
+            update_times: Vec::new(),
+            preference_update_times: Default::default(),
             secrets: Vec::new(),
             skipped_machine_bound: Vec::new(),
             tombstones: Vec::new(),
@@ -594,6 +648,64 @@ mod tests {
                 "primary",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn data_owner_is_stable_across_package_hashes_and_legacy_requires_key() {
+        let stable = stable_plugin_data_owner("org.example.sync").expect("stable owner");
+        assert_eq!(stable.len(), 64);
+        assert_ne!(stable, binding().signer_fingerprint_sha256);
+        assert_ne!(stable, stable_plugin_data_owner("org.other.sync").unwrap());
+
+        let key = SyncKey::from_bytes([7_u8; 32]);
+        let legacy = create_plugin_exchange_with_key(&empty_bundle(), &key, b"opaque", &binding())
+            .expect("legacy package exchange");
+        let (owner, _) = inspect_plugin_exchange_data_owner(&legacy, "org.example.sync", "primary")
+            .expect("legacy metadata");
+        assert_eq!(
+            owner.signer_fingerprint_sha256,
+            binding().signer_fingerprint_sha256
+        );
+        assert!(
+            open_plugin_exchange_with_key(&legacy, &SyncKey::from_bytes([8_u8; 32]), &owner)
+                .is_err()
+        );
+        assert_eq!(
+            open_plugin_exchange_with_key(&legacy, &key, &owner).unwrap(),
+            empty_bundle()
+        );
+        assert!(inspect_plugin_exchange_data_owner(&legacy, "org.other.sync", "primary").is_err());
+        assert!(inspect_plugin_exchange_data_owner(&legacy, "org.example.sync", "other").is_err());
+        let mut forged: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        forged["owner"]["signerFingerprintSha256"] = "b".repeat(64).into();
+        forged["binding"]["accountId"] = format!(
+            "plugin:{}:{}:signer:{}:profile:{}:{}",
+            "org.example.sync".len(),
+            "org.example.sync",
+            "b".repeat(64),
+            "primary".len(),
+            "primary",
+        )
+        .into();
+        let forged_bytes = serde_json::to_vec(&forged).unwrap();
+        let (forged_owner, _) =
+            inspect_plugin_exchange_data_owner(&forged_bytes, "org.example.sync", "primary")
+                .expect("self-consistent metadata is not cryptographic proof");
+        assert!(open_plugin_exchange_with_key(&forged_bytes, &key, &forged_owner).is_err());
+
+        let mut current = binding();
+        current.signer_fingerprint_sha256 = stable;
+        let stable_exchange =
+            create_plugin_exchange_with_key(&empty_bundle(), &key, b"opaque", &current)
+                .expect("stable exchange");
+        let (selected, _) =
+            inspect_plugin_exchange_data_owner(&stable_exchange, "org.example.sync", "primary")
+                .expect("stable metadata");
+        assert_eq!(selected, current);
+        assert_eq!(
+            open_plugin_exchange_with_key(&stable_exchange, &key, &selected).unwrap(),
+            empty_bundle()
         );
     }
 

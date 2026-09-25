@@ -532,7 +532,12 @@ impl Actor {
             return Err(validation_error(request_id));
         }
         let key = host_id.as_str().to_owned();
+        let host_key_now_trusted = self
+            .sessions
+            .get(&key)
+            .is_some_and(|record| paused_host_key_now_trusted(record, &self.hosts));
         if !force
+            && !host_key_now_trusted
             && self.sessions.get(&key).is_some_and(|record| {
                 paused_session_can_be_reused(
                     record,
@@ -1160,7 +1165,7 @@ impl Actor {
         record.consecutive_failures = record.consecutive_failures.saturating_add(1);
         let delay = backoff_delay(
             record.consecutive_failures,
-            record.monitoring_policy.sample_interval_seconds,
+            record.monitoring_policy.sample_interval_millis,
         );
         let next_retry_at_unix_ms =
             unix_time_ms().saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX));
@@ -1519,7 +1524,7 @@ async fn run_metrics_worker(
         {
             return;
         }
-        let interval = Duration::from_secs(u64::from(policy.sample_interval_seconds));
+        let interval = Duration::from_millis(u64::from(policy.sample_interval_millis));
         let next_due = cycle_started + interval;
         tokio::select! {
             biased;
@@ -1605,9 +1610,8 @@ fn unavailable_state(reason: MetricUnavailableReason) -> MetricFieldState {
 }
 
 fn validate_supported_selection(policy: &MonitoringPolicy) -> Result<(), ()> {
-    let bounds_supported = (5..=300).contains(&policy.sample_interval_seconds)
-        && (2..=30).contains(&policy.sample_timeout_seconds)
-        && policy.sample_timeout_seconds < policy.sample_interval_seconds;
+    let bounds_supported = (1_500..=300_000).contains(&policy.sample_interval_millis)
+        && (500..=30_000).contains(&policy.sample_timeout_millis);
     let disk_supported = policy.disk_mount_ids.as_slice() == [DiskResourceId::Root];
     let network_supported =
         policy.network_interface_ids.as_slice() == [NetworkResourceId::AggregateNonLoopback];
@@ -1822,18 +1826,35 @@ fn paused_session_can_be_reused(
         )
 }
 
+fn paused_host_key_now_trusted(record: &SessionRecord, hosts: &HostService) -> bool {
+    record
+        .active_host_key_challenge
+        .as_ref()
+        .is_some_and(|active| {
+            matches!(
+                hosts.observe_known_host(
+                    active.endpoint.normalized_address(),
+                    active.endpoint.port(),
+                    &active.observed.algorithm,
+                    &active.observed.public_key_blob,
+                ),
+                Ok(KnownHostObservation::Trusted(_))
+            )
+        })
+}
+
 fn mark_snapshot_stale(record: &mut SessionRecord) {
     if let Some(snapshot) = record.summary.latest_snapshot.as_mut() {
         snapshot.stale = true;
     }
 }
 
-fn backoff_delay(consecutive_failures: u32, sample_interval_seconds: u32) -> Duration {
+fn backoff_delay(consecutive_failures: u32, sample_interval_millis: u32) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(8);
-    let base = u64::from(sample_interval_seconds).max(5);
-    Duration::from_secs(
+    let base = u64::from(sample_interval_millis).max(5_000);
+    Duration::from_millis(
         base.saturating_mul(1_u64 << exponent)
-            .min(MAX_BACKOFF_SECONDS),
+            .min(MAX_BACKOFF_SECONDS * 1_000),
     )
 }
 
@@ -1973,8 +1994,8 @@ mod tests {
     use super::{
         Actor, ConnectTask, KEYBOARD_INTERACTIVE_ANSWER_MAX_BYTES, KeyboardInteractiveRequest,
         MAX_BACKOFF_SECONDS, WorkerFailure, backoff_delay, generation_matches, mark_snapshot_stale,
-        metric_snapshot_from, new_record, paused_session_can_be_reused,
-        validate_supported_selection, wait_for_stop,
+        metric_snapshot_from, new_record, paused_host_key_now_trusted,
+        paused_session_can_be_reused, validate_supported_selection, wait_for_stop,
     };
     use crate::{
         host_service::HostService, ssh_agent_service::SshAgentService,
@@ -1984,8 +2005,8 @@ mod tests {
     fn policy(enabled: bool) -> MonitoringPolicy {
         MonitoringPolicy {
             enabled,
-            sample_interval_seconds: 15,
-            sample_timeout_seconds: 5,
+            sample_interval_millis: 1500,
+            sample_timeout_millis: 5000,
             disk_mount_ids: vec![DiskResourceId::Root],
             network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
         }
@@ -2128,9 +2149,12 @@ mod tests {
 
     #[test]
     fn backoff_is_exponential_and_capped() {
-        assert_eq!(backoff_delay(1, 15).as_secs(), 15);
-        assert_eq!(backoff_delay(5, 15).as_secs(), 240);
-        assert_eq!(backoff_delay(u32::MAX, 15).as_secs(), MAX_BACKOFF_SECONDS);
+        assert_eq!(backoff_delay(1, 15_000).as_secs(), 15);
+        assert_eq!(backoff_delay(5, 15_000).as_secs(), 240);
+        assert_eq!(
+            backoff_delay(u32::MAX, 15_000).as_secs(),
+            MAX_BACKOFF_SECONDS
+        );
     }
 
     #[test]
@@ -2329,6 +2353,18 @@ mod tests {
         let summary = &actor.sessions[host_id.as_str()].summary;
         assert_eq!(summary.state, MetricsSessionState::NeedsHostKeyReview);
         assert!(summary.host_key_challenge.is_some());
+        assert!(!paused_host_key_now_trusted(
+            &actor.sessions[host_id.as_str()],
+            &actor.hosts
+        ));
+        actor
+            .hosts
+            .trust_known_host("metrics.example", 22, "ssh-ed25519", &[1, 2, 3])
+            .expect("trust observed key from another feature");
+        assert!(paused_host_key_now_trusted(
+            &actor.sessions[host_id.as_str()],
+            &actor.hosts
+        ));
     }
 
     #[tokio::test]

@@ -115,10 +115,18 @@ function replaceDocument(value: string, followEnd: boolean) {
     changes: appendOnly
       ? { from: current.length, insert: value.slice(current.length) }
       : { from: 0, to: current.length, insert: value },
-    selection: appendOnly ? { anchor: value.length } : undefined,
+    selection: followEnd ? { anchor: value.length } : undefined,
     scrollIntoView: followEnd,
   });
   applyingExternalValue = false;
+}
+
+function scrollToEnd() {
+  if (!editor) return;
+  editor.dispatch({
+    selection: { anchor: editor.state.doc.length },
+    scrollIntoView: true,
+  });
 }
 
 onMounted(() => {
@@ -141,10 +149,12 @@ onMounted(() => {
       }),
     ],
   });
+  if (props.followEnd) scrollToEnd();
   void loadLanguage(props.filename);
 });
 
 watch(() => props.modelValue, (value) => replaceDocument(value, props.followEnd));
+watch(() => props.followEnd, (enabled) => { if (enabled) scrollToEnd(); });
 watch(() => props.readonly, (readonly) => {
   editor?.dispatch({ effects: editableCompartment.reconfigure(editableExtensions(readonly)) });
 });

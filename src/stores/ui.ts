@@ -75,9 +75,18 @@ function readPreferences(): StoredUiPreferences {
   }
 }
 
+// Visual fixtures are intentionally isolated from a user's persisted language choice.
+// They are only available in development builds and exist for shareable product screenshots.
+function isVisualFixture() {
+  return import.meta.env.DEV
+    && (new URLSearchParams(window.location.search).has("visualFixture")
+      || window.location.hash.includes("visualFixture="));
+}
+
 export const useUiStore = defineStore("ui", () => {
   const appTheme = useAppThemeStore();
   const stored = readPreferences();
+  const visualFixture = isVisualFixture();
   const storedTerminalAppearance = parseStoredTerminalAppearance(stored);
   const themePreference = ref<ThemePreference>(
     parseThemePreference(stored.themePreference, stored.theme),
@@ -89,9 +98,9 @@ export const useUiStore = defineStore("ui", () => {
   const uiZoom = ref<UiZoom>(isUiZoom(stored.uiZoom) ? stored.uiZoom : 100);
   const appliedUiZoom = ref<UiZoom>(100);
   const uiZoomBusy = ref(false);
-  const localePreference = ref<LocalePreference>(
-    stored.locale === "en" || stored.locale === "zh-CN" ? stored.locale : "system",
-  );
+  const localePreference = ref<LocalePreference>(visualFixture
+    ? "en"
+    : (stored.locale === "en" || stored.locale === "zh-CN" ? stored.locale : "system"));
   const systemLanguages = ref<readonly string[]>(navigator.languages);
   const locale = computed(() => resolveLocale(localePreference.value, systemLanguages.value));
   const updateSystemLanguage = () => {

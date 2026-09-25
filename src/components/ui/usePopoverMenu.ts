@@ -1,4 +1,4 @@
-import type { ComponentPublicInstance } from "vue";
+import type { ComponentPublicInstance, CSSProperties } from "vue";
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 interface ComponentTrigger {
@@ -9,15 +9,17 @@ interface ComponentTrigger {
   * Centralizes the host Popover Menu lifecycle for opening, focus, keyboard interaction, and outside dismissal.
   * Each calling component still owns its menu actions and visible items.
  */
-export function usePopoverMenu() {
+export function usePopoverMenu(options: { enabled?: boolean } = {}) {
   const root = ref<HTMLElement | null>(null);
   const trigger = ref<HTMLElement | ComponentTrigger | null>(null);
+  const viewportPanel = ref<HTMLElement | null>(null);
+  const viewportPanelStyle = ref<CSSProperties>({ visibility: "hidden" });
   const open = ref(false);
   let visibilityObserver: ResizeObserver | null = null;
 
   function menuItems() {
     return Array.from(
-      root.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [],
+      (viewportPanel.value ?? root.value)?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [],
     );
   }
 
@@ -35,18 +37,57 @@ export function usePopoverMenu() {
     else trigger.value = element && "$el" in element ? element as ComponentTrigger : null;
   }
 
+  function viewportPanelRef(element: Element | ComponentPublicInstance | null) {
+    viewportPanel.value = element instanceof HTMLElement ? element : null;
+  }
+
+  async function positionViewportPanel() {
+    await nextTick();
+    const anchor = triggerElement()?.getBoundingClientRect();
+    const panel = viewportPanel.value;
+    if (!open.value || !anchor || !panel) return;
+
+    const margin = 8;
+    const gap = 4;
+    const width = panel.getBoundingClientRect().width;
+    const height = panel.getBoundingClientRect().height;
+    const below = window.innerHeight - anchor.bottom - margin;
+    const above = anchor.top - margin;
+    const top = below < height && above > below
+      ? Math.max(margin, anchor.top - height - gap)
+      : Math.min(anchor.bottom + gap, window.innerHeight - height - margin);
+    viewportPanelStyle.value = {
+      top: `${Math.max(margin, top)}px`,
+      left: `${Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin))}px`,
+    };
+  }
+
   function closeMenu(restoreFocus = false) {
     open.value = false;
+    viewportPanelStyle.value = { visibility: "hidden" };
     if (restoreFocus) void nextTick(() => triggerElement()?.focus());
   }
 
   function toggleMenu() {
     open.value = !open.value;
-    if (open.value) void nextTick(() => menuItems()[0]?.focus());
+    if (open.value) void (async () => {
+      await nextTick();
+      if (viewportPanel.value) {
+        await positionViewportPanel();
+        await nextTick();
+      }
+      menuItems()[0]?.focus();
+    })();
+    else viewportPanelStyle.value = { visibility: "hidden" };
   }
 
   function handleDocumentPointerDown(event: PointerEvent) {
-    if (open.value && !root.value?.contains(event.target as Node)) closeMenu();
+    if (open.value && !root.value?.contains(event.target as Node) && !viewportPanel.value?.contains(event.target as Node)) closeMenu();
+  }
+
+  function dismissForViewportChange(event: Event) {
+    if (event.target instanceof Node && viewportPanel.value?.contains(event.target)) return;
+    if (viewportPanel.value && open.value) closeMenu();
   }
 
   function handleDocumentKeyDown(event: KeyboardEvent) {
@@ -72,8 +113,11 @@ export function usePopoverMenu() {
   }
 
   onMounted(() => {
+    if (options.enabled === false) return;
     document.addEventListener("pointerdown", handleDocumentPointerDown);
     document.addEventListener("keydown", handleDocumentKeyDown);
+    window.addEventListener("resize", dismissForViewportChange);
+    window.addEventListener("scroll", dismissForViewportChange, true);
     if (typeof ResizeObserver !== "undefined" && root.value) {
       visibilityObserver = new ResizeObserver(() => {
         if (open.value && root.value && getComputedStyle(root.value).display === "none") closeMenu();
@@ -83,10 +127,13 @@ export function usePopoverMenu() {
   });
 
   onBeforeUnmount(() => {
+    if (options.enabled === false) return;
     document.removeEventListener("pointerdown", handleDocumentPointerDown);
     document.removeEventListener("keydown", handleDocumentKeyDown);
+    window.removeEventListener("resize", dismissForViewportChange);
+    window.removeEventListener("scroll", dismissForViewportChange, true);
     visibilityObserver?.disconnect();
   });
 
-  return { rootRef, triggerRef, open, closeMenu, toggleMenu, handleMenuKeyDown };
+  return { rootRef, triggerRef, viewportPanelRef, viewportPanelStyle, open, closeMenu, toggleMenu, handleMenuKeyDown };
 }

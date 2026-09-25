@@ -1588,13 +1588,24 @@ pub(crate) fn replace_password_credential(
     let CredentialRecordDetails::Password { secret_ref_id } = &record.details else {
         return Err(invalid_credential_error(request_id));
     };
+    // Invalidate the old sync clock before the Vault write. If either write
+    // fails, another device must review this secret instead of trusting an
+    // earlier timestamp for new Vault contents.
+    service
+        .repository()
+        .invalidate_ssh_sync_secret_time(secret_ref_id.as_str())
+        .map_err(|error| map_persistence_error(request_id.clone(), error))?;
     vault
         .replace_secret(&VaultSecretInsert {
             secret_ref_id: secret_ref_id.clone(),
             kind: SecretKind::Password,
             value: secret,
         })
-        .map_err(|error| map_vault_error(request_id, error))?;
+        .map_err(|error| map_vault_error(request_id.clone(), error))?;
+    service
+        .repository()
+        .record_ssh_sync_secret_time(secret_ref_id.as_str())
+        .map_err(|error| map_persistence_error(request_id, error))?;
     Ok(credential_summary(&record))
 }
 
@@ -1750,7 +1761,9 @@ pub(crate) fn map_persistence_error(
             RetryStrategy::RefreshSnapshot,
             "errors.sshMetadata.notFound",
         ),
-        AppPersistenceError::Conflict | AppPersistenceError::IdempotencyConflict => (
+        AppPersistenceError::Conflict
+        | AppPersistenceError::IdempotencyConflict
+        | AppPersistenceError::DatabaseNotFresh => (
             "ssh_metadata.conflict",
             ErrorCategory::Conflict,
             RetryStrategy::RefreshSnapshot,
@@ -2002,6 +2015,7 @@ mod tests {
             height: 720,
             clipboard_enabled: false,
             audio_playback_enabled: false,
+            vnc_protocol_version: norishell_core_api::VncProtocolVersion::Auto,
             revision: WireSequence::new(0),
         };
         let saved = service

@@ -17,6 +17,7 @@ describe("NvxTerminalPaneOverflowMenu", () => {
         sessionActionLabel: "断开",
         sessionActionDanger: true,
       },
+      attachTo: document.body,
       global: { plugins: [i18n] },
     });
 
@@ -25,15 +26,21 @@ describe("NvxTerminalPaneOverflowMenu", () => {
     await trigger.trigger("click");
 
     expect(trigger.attributes("aria-expanded")).toBe("true");
-    expect(wrapper.get('[role="menu"]').isVisible()).toBe(true);
-    expect(wrapper.findAll('[role="menuitem"]')).toHaveLength(6);
+    const menu = document.querySelector<HTMLElement>('.terminal-pane-overflow-menu__popover');
+    expect(menu).not.toBeNull();
+    expect(menu?.parentElement).toBe(document.body);
+    expect(menu?.querySelectorAll('[role="menuitem"]')).toHaveLength(6);
 
-    await wrapper.get('button[role="menuitem"]:nth-of-type(5)').trigger("click");
+    menu?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')[4]?.click();
+    await wrapper.vm.$nextTick();
     expect(wrapper.emitted("session")).toHaveLength(1);
     await trigger.trigger("click");
-    await wrapper.get('button[role="menuitem"]:last-child').trigger("click");
+    document.querySelector<HTMLElement>('.terminal-pane-overflow-menu__popover')
+      ?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')[5]?.click();
+    await wrapper.vm.$nextTick();
     expect(wrapper.emitted("close")).toHaveLength(1);
-    expect(wrapper.find('[role="menu"]').exists()).toBe(false);
+    expect(document.querySelector('.terminal-pane-overflow-menu__popover')).toBeNull();
+    wrapper.unmount();
   });
 
   it("keeps copy disabled without a selection and closes on Escape", async () => {
@@ -49,11 +56,11 @@ describe("NvxTerminalPaneOverflowMenu", () => {
     });
 
     await wrapper.get('button[aria-label="更多终端操作"]').trigger("click");
-    expect(wrapper.get('button[role="menuitem"]:nth-child(2)').attributes()).toHaveProperty("disabled");
+    expect(document.querySelector<HTMLButtonElement>('.terminal-pane-overflow-menu__popover button[role="menuitem"]:nth-child(2)')?.disabled).toBe(true);
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await wrapper.vm.$nextTick();
-    expect(wrapper.find('[role="menu"]').exists()).toBe(false);
+    expect(document.querySelector('.terminal-pane-overflow-menu__popover')).toBeNull();
     wrapper.unmount();
   });
 });

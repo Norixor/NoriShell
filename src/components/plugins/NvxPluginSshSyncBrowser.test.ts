@@ -32,11 +32,11 @@ function snapshot(overrides: Partial<PluginSshSyncBrowserSnapshot> = {}): Plugin
     state: "ready", profileId: "primary", cacheRevision: "1", hostCount: 2, credentialCount: 1, desktopProfileCount: 1,
     hostRowsOmitted: 0, credentialRowsOmitted: 0, desktopProfileRowsOmitted: 0, remoteUpdatedAtUnixMs: null,
     hosts: [
-      { rowId: "h1", label: "Production", address: "192.0.2.10", port: 22, username: "deploy", tags: ["prod"] },
-      { rowId: "h2", label: "Staging", address: "2001:db8::2", port: 2222, username: null, tags: [] },
+      { rowId: "h1", label: "Production", address: "192.0.2.10", port: 22, username: "deploy", tags: ["prod"], updatedAtUnixMs: 1727000000000 },
+      { rowId: "h2", label: "Staging", address: "2001:db8::2", port: 2222, username: null, tags: [], updatedAtUnixMs: null },
     ],
-    credentials: [{ rowId: "c1", label: "Deploy key", materialKind: "privateKey", hostRowIds: ["h1"], desktopProfileRowIds: ["d1"] }],
-    desktopProfiles: [{ rowId: "d1", label: "Production desktop", protocol: "rdp", address: "192.0.2.20", port: 3389, username: "administrator", domain: "EXAMPLE" }],
+    credentials: [{ rowId: "c1", label: "Deploy key", materialKind: "privateKey", hostRowIds: ["h1"], desktopProfileRowIds: ["d1"], updatedAtUnixMs: 1727000000000 }],
+    desktopProfiles: [{ rowId: "d1", label: "Production desktop", protocol: "rdp", address: "192.0.2.20", port: 3389, username: "administrator", domain: "EXAMPLE", updatedAtUnixMs: 1727000000000 }],
     ...overrides,
   };
 }
@@ -130,8 +130,8 @@ describe("NvxPluginSshSyncBrowser", () => {
   it("shows real totals and explicitly identifies bounded omitted rows and associations", async () => {
     mocks.read.mockResolvedValue(snapshot({ hostCount: 12, hostRowsOmitted: 10, desktopProfileCount: 12, desktopProfileRowsOmitted: 10,
       credentials: [
-        { rowId: "c1", label: "Deploy key", materialKind: "privateKey", hostRowIds: ["h1"], desktopProfileRowIds: ["d1"] },
-        { rowId: "c2", label: "Other key", materialKind: "privateKey", hostRowIds: [], desktopProfileRowIds: [] },
+        { rowId: "c1", label: "Deploy key", materialKind: "privateKey", hostRowIds: ["h1"], desktopProfileRowIds: ["d1"], updatedAtUnixMs: 1727000000000 },
+        { rowId: "c2", label: "Other key", materialKind: "privateKey", hostRowIds: [], desktopProfileRowIds: [], updatedAtUnixMs: null },
       ], credentialCount: 2,
     }));
     const wrapper = render();
@@ -150,9 +150,28 @@ describe("NvxPluginSshSyncBrowser", () => {
     expect(wrapper.get(".ssh-sync-browser__omitted").text()).toContain("10");
   });
 
+  it("sorts names and real item timestamps locally, retaining unknown timestamps last", async () => {
+    const wrapper = render();
+    await flushPromises();
+    await tab(wrapper, 1);
+    expect(wrapper.findAll("tbody tr")[0]!.text()).toContain("Production");
+    await wrapper.findAll("thead button")[0]!.trigger("click");
+    expect(wrapper.findAll("tbody tr")[0]!.text()).toContain("Staging");
+    expect(wrapper.findAll("th")[0]!.attributes("aria-sort")).toBe("descending");
+    await wrapper.findAll("thead button")[3]!.trigger("click");
+    expect(wrapper.findAll("tbody tr")[0]!.text()).toContain("Production");
+    expect(wrapper.findAll("tbody tr")[1]!.findAll("td")[4]!.text()).toBe("—");
+    await wrapper.findAll("thead button")[3]!.trigger("click");
+    expect(wrapper.findAll("tbody tr")[0]!.text()).toContain("Production");
+    expect(wrapper.text()).toContain("Cloud copy");
+    expect(wrapper.text()).not.toContain("Online");
+    expect(mocks.read).toHaveBeenCalledTimes(1);
+    expect(wrapper.emitted("action")).toBeUndefined();
+  });
+
   it("paginates cached rows without requests or plugin actions", async () => {
     const hosts = Array.from({ length: 26 }, (_, index) => ({
-      rowId: `h${index}`, label: `Host ${index}`, address: "192.0.2.1", port: 22, username: null, tags: [],
+      rowId: `h${index}`, label: `Host ${index}`, address: "192.0.2.1", port: 22, username: null, tags: [], updatedAtUnixMs: null,
     }));
     mocks.read.mockResolvedValue(snapshot({ hosts, hostCount: 26 }));
     const wrapper = render();
@@ -178,7 +197,7 @@ describe("NvxPluginSshSyncBrowser", () => {
     expect(wrapper.findAll(".ssh-sync-browser__count")[0]!.text()).toBe(state === "empty" ? "0" : "—");
   });
 
-  it("clears matching invalidation, ignores unrelated owners, and drops a late read without polling", async () => {
+  it("reloads on matching invalidation and ignores stale reads across the pre/post refresh events", async () => {
     const wrapper = render();
     await flushPromises();
     await tab(wrapper, 1);
@@ -188,16 +207,29 @@ describe("NvxPluginSshSyncBrowser", () => {
     invalidate({ pluginId: "org.fixture", profileId: "another-profile" });
     await flushPromises();
     expect(wrapper.text()).toContain("Production");
+    expect(mocks.read).toHaveBeenCalledTimes(1);
+
+    const beforeRefresh = deferred<PluginSshSyncBrowserSnapshot>();
+    const afterRefresh = deferred<PluginSshSyncBrowserSnapshot>();
+    mocks.read.mockReturnValueOnce(beforeRefresh.promise).mockReturnValueOnce(afterRefresh.promise);
     invalidate({ pluginId: "org.fixture", profileId: "primary" });
     await flushPromises();
     expect(wrapper.text()).not.toContain("Production");
-    expect(mocks.read).toHaveBeenCalledTimes(1);
-    const wait = deferred<PluginSshSyncBrowserSnapshot>();
-    mocks.read.mockReturnValue(wait.promise);
-    await wrapper.setProps({ contribution: { ...contribution(), contributionRevision: "4" } });
+    expect(mocks.read).toHaveBeenCalledTimes(2);
+
     invalidate({ pluginId: null, profileId: null });
-    wait.resolve(snapshot());
     await flushPromises();
+    expect(mocks.read).toHaveBeenCalledTimes(3);
+    beforeRefresh.resolve(snapshot());
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("Production");
+    afterRefresh.resolve(snapshot({
+      cacheRevision: "2", hostCount: 1, hosts: [
+        { rowId: "h3", label: "Refreshed", address: "192.0.2.30", port: 22, username: null, tags: [], updatedAtUnixMs: null },
+      ],
+    }));
+    await flushPromises();
+    expect(wrapper.text()).toContain("Refreshed");
     expect(wrapper.text()).not.toContain("Production");
   });
 

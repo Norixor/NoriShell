@@ -39,6 +39,8 @@ pub struct PluginSshSyncBrowserHost {
     pub port: u16,
     pub username: Option<String>,
     pub tags: Vec<String>,
+    #[ts(type = "number | null")]
+    pub updated_at_unix_ms: Option<i64>,
 }
 
 /// Non-secret remote-desktop metadata scoped to the current in-memory cache revision.
@@ -55,6 +57,8 @@ pub struct PluginSshSyncBrowserDesktopProfile {
     pub port: u16,
     pub username: String,
     pub domain: String,
+    #[ts(type = "number | null")]
+    pub updated_at_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -68,6 +72,8 @@ pub struct PluginSshSyncBrowserCredential {
     pub host_row_ids: Vec<String>,
     /// Opaque row identifiers for returned remote desktops that reference this credential.
     pub desktop_profile_row_ids: Vec<String>,
+    #[ts(type = "number | null")]
+    pub updated_at_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

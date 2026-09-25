@@ -35,6 +35,7 @@ const props = defineProps<{
   menuItem?: boolean;
   pageTitleNodeId?: string | null;
   contribution?: PluginUiContribution;
+  dialogCloseRequest?: { nodeId: string } | null;
 }>();
 
 const emit = defineEmits<{
@@ -55,6 +56,23 @@ const iconActionRow = computed(() => {
   return kinds.includes("icon") && kinds.includes("text")
     && kinds.some((kind) => kind === "button" || kind === "copyButton");
 });
+
+const pageHeadingRow = computed(() => node.value?.kind === "stack"
+  && node.value.direction === "horizontal" && props.pageTitleNodeId
+  && node.value.children.includes(props.pageTitleNodeId));
+function isCompactBar(candidate: PluginUiNode | undefined) {
+  if (candidate?.kind !== "section" || candidate.title || candidate.children.length !== 1) return false;
+  const content = props.nodeById[candidate.children[0]!];
+  return content?.kind === "stack" && content.direction === "horizontal"
+    && content.children.some((id) => props.nodeById[id]?.kind === "status");
+}
+const compactBar = computed(() => isCompactBar(node.value));
+const compactBarRow = computed(() => Object.values(props.nodeById).some((parent) => (
+  isCompactBar(parent) && "children" in parent && parent.children.includes(props.nodeId)
+)));
+const iconTextRow = computed(() => node.value?.kind === "stack" && node.value.direction === "horizontal"
+  && node.value.children.length === 2 && node.value.children.some((id) => props.nodeById[id]?.kind === "icon")
+  && node.value.children.some((id) => props.nodeById[id]?.kind === "text"));
 
 const layoutStyle = computed<CSSProperties>(() => {
   const current = node.value;
@@ -156,6 +174,10 @@ watch(
   { flush: "post" },
 );
 
+watch(() => props.dialogCloseRequest, (request) => {
+  if (request?.nodeId === props.nodeId && node.value?.kind === "dialog") closeDialog();
+});
+
 onBeforeUnmount(clearDialogRegistration);
 </script>
 
@@ -168,6 +190,9 @@ onBeforeUnmount(clearDialogRegistration);
         `plugin-ui-node--${node.kind}`,
         { 'plugin-ui-node--horizontal': node.kind === 'stack' && node.direction === 'horizontal',
           'plugin-ui-node--icon-action-row': iconActionRow,
+          'plugin-ui-node--page-heading-row': pageHeadingRow,
+          'plugin-ui-node--compact-bar-row': compactBarRow,
+          'plugin-ui-node--icon-text-row': iconTextRow,
           'plugin-ui-node--grid-equal': node.kind === 'grid' && node.columnWeights?.length !== node.columns },
       ]"
       :style="layoutStyle"
@@ -179,6 +204,7 @@ onBeforeUnmount(clearDialogRegistration);
         :node-by-id="nodeById"
         :page-title-node-id="pageTitleNodeId"
         :contribution="contribution"
+        :dialog-close-request="dialogCloseRequest"
         :values="values"
         :busy="busy"
         :actions-blocked="actionsBlocked"
@@ -192,6 +218,7 @@ onBeforeUnmount(clearDialogRegistration);
     <section
       v-else-if="node.kind === 'section'"
       class="plugin-ui-node plugin-ui-node--section"
+      :class="{ 'plugin-ui-node--compact-bar': compactBar }"
     >
       <h3 v-if="node.title">
         {{ node.title }}
@@ -203,6 +230,7 @@ onBeforeUnmount(clearDialogRegistration);
         :node-by-id="nodeById"
         :page-title-node-id="pageTitleNodeId"
         :contribution="contribution"
+        :dialog-close-request="dialogCloseRequest"
         :values="values"
         :busy="busy"
         :actions-blocked="actionsBlocked"
@@ -226,6 +254,7 @@ onBeforeUnmount(clearDialogRegistration);
         :node-by-id="nodeById"
         :page-title-node-id="pageTitleNodeId"
         :contribution="contribution"
+        :dialog-close-request="dialogCloseRequest"
         :values="values"
         :busy="busy"
         :actions-blocked="actionsBlocked"
@@ -248,6 +277,7 @@ onBeforeUnmount(clearDialogRegistration);
           :node-by-id="nodeById"
           :page-title-node-id="pageTitleNodeId"
           :contribution="contribution"
+          :dialog-close-request="dialogCloseRequest"
           :values="values"
           :busy="busy"
           :actions-blocked="actionsBlocked"
@@ -503,6 +533,7 @@ onBeforeUnmount(clearDialogRegistration);
             :node-by-id="nodeById"
             :page-title-node-id="pageTitleNodeId"
             :contribution="contribution"
+            :dialog-close-request="dialogCloseRequest"
             :values="values"
             :busy="busy"
             :actions-blocked="actionsBlocked"
@@ -526,6 +557,7 @@ onBeforeUnmount(clearDialogRegistration);
           :node-by-id="nodeById"
           :page-title-node-id="pageTitleNodeId"
           :contribution="contribution"
+          :dialog-close-request="dialogCloseRequest"
           :values="values"
           :busy="busy"
           :actions-blocked="actionsBlocked"
@@ -551,6 +583,7 @@ onBeforeUnmount(clearDialogRegistration);
           :node-by-id="nodeById"
           :page-title-node-id="pageTitleNodeId"
           :contribution="contribution"
+          :dialog-close-request="dialogCloseRequest"
           :values="values"
           :busy="busy"
           :actions-blocked="actionsBlocked"
@@ -570,6 +603,11 @@ onBeforeUnmount(clearDialogRegistration);
 .plugin-ui-node__disclosure,
 .plugin-ui-node__dialog-content { min-width: 0; max-width: 100%; }
 .plugin-ui-node--layout > * { min-width: 0; }
+.plugin-ui-node--page-heading-row { justify-content: space-between; }
+.plugin-ui-node--compact-bar { padding: var(--nvx-space-2) var(--nvx-space-3); }
+.plugin-ui-node--compact-bar-row { min-height: 38px; }
+.plugin-ui-node--compact-bar-row > .plugin-ui-node--icon-text-row { flex: 1 1 180px; }
+.plugin-ui-node--compact-bar-row > :not(:last-child):not(.plugin-ui-node--icon-text-row) { padding-inline-end: var(--nvx-space-4); border-inline-end: var(--nvx-border-width) solid var(--nvx-color-border); }
 .plugin-ui-node--grid { grid-template-columns: var(--plugin-ui-grid-columns); }
 .plugin-ui-node--grid-equal { grid-template-columns: repeat(auto-fit, minmax(min(100%, max(12rem, calc((100% - (var(--plugin-ui-grid-count) - 1) * var(--plugin-ui-grid-gap)) / var(--plugin-ui-grid-count)))), 1fr)); }
 .plugin-ui-node--horizontal > .plugin-ui-node__field { flex: 1 1 12rem; }
@@ -585,6 +623,7 @@ onBeforeUnmount(clearDialogRegistration);
 .plugin-ui-node__checkbox :deep(.nvx-checkbox__content) { min-width: 0; }
 .plugin-ui-node__checkbox :deep(input) { flex-shrink: 0; }
 .plugin-ui-node--section { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; max-width: 100%; container: plugin-content / inline-size; gap: var(--nvx-space-4); padding: var(--nvx-space-5); border: var(--nvx-border-width) solid var(--nvx-color-border); border-radius: var(--nvx-radius-md); background: var(--nvx-color-bg-surface); }
+.plugin-ui-node--section.plugin-ui-node--compact-bar { padding: var(--nvx-space-2) var(--nvx-space-3); }
 .plugin-ui-node--section h3 { overflow-wrap: anywhere; }
 .plugin-ui-node--section h3 { margin: 0; font-size: var(--nvx-font-size-md); font-weight: var(--nvx-font-weight-semibold); }
 .plugin-ui-node__divider { width: 100%; margin: var(--nvx-space-2) 0; border: 0; border-top: var(--nvx-border-width) solid var(--nvx-color-border); }

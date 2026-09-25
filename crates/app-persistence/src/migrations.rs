@@ -526,80 +526,7 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         current = 34;
     }
     if current == 34 {
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             ALTER TABLE plugin_capability_grants RENAME TO plugin_capability_grants_v34;
-             CREATE TABLE plugin_capability_grants (
-               plugin_id TEXT NOT NULL REFERENCES plugin_installations(plugin_id) ON DELETE CASCADE,
-               signer_fingerprint_sha256 TEXT NOT NULL CHECK(length(signer_fingerprint_sha256) = 64),
-               major_version INTEGER NOT NULL CHECK(major_version >= 0),
-               capability TEXT NOT NULL CHECK(capability IN
-                 ('ui.panel', 'ui.navigation', 'ui.page', 'ui.webview.isolated',
-                  'ui.hostDom.observe', 'ui.hostDom.mutate', 'ui.hostCss',
-                  'clipboard.write', 'terminal.metadata', 'terminal.observe',
-                  'terminal.annotation', 'terminal.proposeInput', 'terminal.requestInput',
-                  'host.metadata.read', 'host.mutation.propose', 'host.session.request',
-                  'remote.inspect', 'remote.exec.request',
-                  'network.domain', 'local.files', 'local.process', 'storage.plugin',
-                  'sftp.read', 'sftp.write', 'credentials.plugin', 'metrics.read', 'ssh.sync')),
-               granted INTEGER NOT NULL CHECK(granted IN (0, 1)),
-               state_version INTEGER NOT NULL CHECK(state_version >= 1),
-               updated_at_ms INTEGER NOT NULL,
-               artifact_sha256 TEXT,
-               app_version_major INTEGER,
-               app_version_minor INTEGER,
-               secure_surface_contract_revision INTEGER,
-               PRIMARY KEY(plugin_id, signer_fingerprint_sha256, major_version, capability),
-               CHECK(
-                 (artifact_sha256 IS NULL AND app_version_major IS NULL
-                   AND app_version_minor IS NULL AND secure_surface_contract_revision IS NULL)
-                 OR
-                 (artifact_sha256 IS NOT NULL AND app_version_major IS NOT NULL
-                   AND app_version_minor IS NOT NULL
-                   AND secure_surface_contract_revision IS NOT NULL
-                   AND length(artifact_sha256) = 64 AND artifact_sha256 = lower(artifact_sha256)
-                   AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'
-                   AND app_version_major >= 0 AND app_version_minor >= 0
-                   AND secure_surface_contract_revision >= 1)
-               )
-             ) STRICT;
-             INSERT INTO plugin_capability_grants
-               (plugin_id, signer_fingerprint_sha256, major_version, capability,
-                granted, state_version, updated_at_ms, artifact_sha256,
-                app_version_major, app_version_minor, secure_surface_contract_revision)
-             SELECT plugin_id, signer_fingerprint_sha256, major_version, capability,
-                granted, state_version, updated_at_ms, artifact_sha256,
-                app_version_major, app_version_minor, secure_surface_contract_revision
-             FROM plugin_capability_grants_v34;
-             DROP TABLE plugin_capability_grants_v34;
-             CREATE TABLE plugin_credentials (
-               handle TEXT PRIMARY KEY CHECK(length(handle) = 36),
-               plugin_id TEXT NOT NULL CHECK(length(plugin_id) BETWEEN 1 AND 160),
-               signer_fingerprint_sha256 TEXT NOT NULL
-                 CHECK(length(signer_fingerprint_sha256) = 64
-                   AND signer_fingerprint_sha256 = lower(signer_fingerprint_sha256)
-                   AND signer_fingerprint_sha256 NOT GLOB '*[^0-9a-f]*'),
-               secret_ref_id TEXT NOT NULL UNIQUE CHECK(length(secret_ref_id) = 36),
-               operation_id TEXT NOT NULL CHECK(length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 128),
-               idempotency_key TEXT NOT NULL CHECK(length(CAST(idempotency_key AS BLOB)) BETWEEN 1 AND 128),
-               label TEXT NOT NULL CHECK(length(CAST(label AS BLOB)) BETWEEN 1 AND 128),
-               origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 2048),
-               injection_kind TEXT NOT NULL CHECK(injection_kind IN ('bearer', 'header')),
-               header_name TEXT CHECK(length(CAST(header_name AS BLOB)) BETWEEN 1 AND 128),
-               revision INTEGER NOT NULL CHECK(revision >= 1),
-               state TEXT NOT NULL CHECK(state IN ('pending_vault', 'ready', 'cleanup_pending', 'revoked')),
-               created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
-               updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
-               UNIQUE(plugin_id, signer_fingerprint_sha256, operation_id),
-               UNIQUE(plugin_id, signer_fingerprint_sha256, idempotency_key),
-               CHECK((injection_kind = 'bearer' AND header_name IS NULL)
-                 OR (injection_kind = 'header' AND header_name IS NOT NULL))
-             ) STRICT;
-             CREATE INDEX plugin_credentials_owner_state
-               ON plugin_credentials(plugin_id, signer_fingerprint_sha256, state, created_at_ms);
-             PRAGMA user_version = 35;
-             COMMIT;",
-        )?;
+        migrate_v34_to_v35(connection)?;
         current = 35;
     }
     if current == 35 {
@@ -830,7 +757,231 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
     }
     if current == 41 {
         migrate_v41_to_v42(connection)?;
+        current = 42;
     }
+    if current == 42 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE offline_import_sagas (
+               attempt_id TEXT PRIMARY KEY,
+               archive_sha256 TEXT NOT NULL CHECK(length(archive_sha256) = 64),
+               plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256) = 64),
+               secret_ref_ids_json TEXT NOT NULL CHECK(length(CAST(secret_ref_ids_json AS BLOB)) BETWEEN 2 AND 262144)
+             ) STRICT;
+             PRAGMA user_version = 43;
+             COMMIT;",
+        )?;
+        current = 43;
+    }
+    if current == 43 {
+        connection.execute_batch(
+            "PRAGMA defer_foreign_keys = ON;
+             BEGIN IMMEDIATE;
+             ALTER TABLE host_monitoring_policies RENAME TO host_monitoring_policies_v43;
+             CREATE TABLE host_monitoring_policies (
+               host_id TEXT PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE,
+               revision INTEGER NOT NULL CHECK(revision >= 1),
+               enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+               sample_interval_millis INTEGER NOT NULL
+                 CHECK(sample_interval_millis BETWEEN 1500 AND 300000),
+               sample_timeout_millis INTEGER NOT NULL
+                 CHECK(sample_timeout_millis BETWEEN 500 AND 30000),
+               created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+             ) STRICT;
+             INSERT INTO host_monitoring_policies
+               (host_id, revision, enabled, sample_interval_millis,
+                sample_timeout_millis, created_at_ms, updated_at_ms)
+             SELECT host_id, revision, enabled,
+               CASE WHEN sample_interval_seconds = 15 THEN 1500
+                 ELSE sample_interval_seconds * 1000 END,
+               sample_timeout_seconds * 1000, created_at_ms, updated_at_ms
+             FROM host_monitoring_policies_v43;
+             DROP TABLE host_monitoring_policies_v43;
+             PRAGMA user_version = 44;
+             COMMIT;",
+        )?;
+        current = 44;
+    }
+    if current == 44 {
+        migrate_v44_to_v45(connection)?;
+    }
+    Ok(())
+}
+
+fn migrate_v34_to_v35(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE plugin_capability_grants RENAME TO plugin_capability_grants_v34;
+         CREATE TABLE plugin_capability_grants (
+           plugin_id TEXT NOT NULL REFERENCES plugin_installations(plugin_id) ON DELETE CASCADE,
+           signer_fingerprint_sha256 TEXT NOT NULL CHECK(length(signer_fingerprint_sha256) = 64),
+           major_version INTEGER NOT NULL CHECK(major_version >= 0),
+           capability TEXT NOT NULL CHECK(capability IN
+             ('ui.panel', 'ui.navigation', 'ui.page', 'ui.webview.isolated',
+              'ui.hostDom.observe', 'ui.hostDom.mutate', 'ui.hostCss',
+              'clipboard.write', 'terminal.metadata', 'terminal.observe',
+              'terminal.annotation', 'terminal.proposeInput', 'terminal.requestInput',
+              'host.metadata.read', 'host.mutation.propose', 'host.session.request',
+              'remote.inspect', 'remote.exec.request',
+              'network.domain', 'local.files', 'local.process', 'storage.plugin',
+              'sftp.read', 'sftp.write', 'credentials.plugin', 'metrics.read', 'ssh.sync')),
+           granted INTEGER NOT NULL CHECK(granted IN (0, 1)),
+           state_version INTEGER NOT NULL CHECK(state_version >= 1),
+           updated_at_ms INTEGER NOT NULL,
+           artifact_sha256 TEXT,
+           app_version_major INTEGER,
+           app_version_minor INTEGER,
+           secure_surface_contract_revision INTEGER,
+           PRIMARY KEY(plugin_id, signer_fingerprint_sha256, major_version, capability),
+           CHECK(
+             (artifact_sha256 IS NULL AND app_version_major IS NULL
+               AND app_version_minor IS NULL AND secure_surface_contract_revision IS NULL)
+             OR
+             (artifact_sha256 IS NOT NULL AND app_version_major IS NOT NULL
+               AND app_version_minor IS NOT NULL
+               AND secure_surface_contract_revision IS NOT NULL
+               AND length(artifact_sha256) = 64 AND artifact_sha256 = lower(artifact_sha256)
+               AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'
+               AND app_version_major >= 0 AND app_version_minor >= 0
+               AND secure_surface_contract_revision >= 1)
+           )
+         ) STRICT;
+         INSERT INTO plugin_capability_grants
+           (plugin_id, signer_fingerprint_sha256, major_version, capability,
+            granted, state_version, updated_at_ms, artifact_sha256,
+            app_version_major, app_version_minor, secure_surface_contract_revision)
+         SELECT plugin_id, signer_fingerprint_sha256, major_version, capability,
+            granted, state_version, updated_at_ms, artifact_sha256,
+            app_version_major, app_version_minor, secure_surface_contract_revision
+         FROM plugin_capability_grants_v34;
+         DROP TABLE plugin_capability_grants_v34;
+         CREATE TABLE plugin_credentials (
+           handle TEXT PRIMARY KEY CHECK(length(handle) = 36),
+           plugin_id TEXT NOT NULL CHECK(length(plugin_id) BETWEEN 1 AND 160),
+           signer_fingerprint_sha256 TEXT NOT NULL
+             CHECK(length(signer_fingerprint_sha256) = 64
+               AND signer_fingerprint_sha256 = lower(signer_fingerprint_sha256)
+               AND signer_fingerprint_sha256 NOT GLOB '*[^0-9a-f]*'),
+           secret_ref_id TEXT NOT NULL UNIQUE CHECK(length(secret_ref_id) = 36),
+           operation_id TEXT NOT NULL CHECK(length(CAST(operation_id AS BLOB)) BETWEEN 1 AND 128),
+           idempotency_key TEXT NOT NULL CHECK(length(CAST(idempotency_key AS BLOB)) BETWEEN 1 AND 128),
+           label TEXT NOT NULL CHECK(length(CAST(label AS BLOB)) BETWEEN 1 AND 128),
+           origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 2048),
+           injection_kind TEXT NOT NULL CHECK(injection_kind IN ('bearer', 'header')),
+           header_name TEXT CHECK(length(CAST(header_name AS BLOB)) BETWEEN 1 AND 128),
+           revision INTEGER NOT NULL CHECK(revision >= 1),
+           state TEXT NOT NULL CHECK(state IN ('pending_vault', 'ready', 'cleanup_pending', 'revoked')),
+           created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+           updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0),
+           UNIQUE(plugin_id, signer_fingerprint_sha256, operation_id),
+           UNIQUE(plugin_id, signer_fingerprint_sha256, idempotency_key),
+           CHECK((injection_kind = 'bearer' AND header_name IS NULL)
+             OR (injection_kind = 'header' AND header_name IS NOT NULL))
+         ) STRICT;
+         CREATE INDEX plugin_credentials_owner_state
+           ON plugin_credentials(plugin_id, signer_fingerprint_sha256, state, created_at_ms);
+         PRAGMA user_version = 35;
+         COMMIT;",
+    )?;
+    Ok(())
+}
+
+/// A local edit clock survives row deletion and can be replaced with the
+/// authenticated source clock in the same transaction as a remote restore.
+fn migrate_v44_to_v45(connection: &Connection) -> Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE ssh_sync_local_item_times (
+           object_kind TEXT NOT NULL CHECK(object_kind IN (
+             'host', 'identity', 'credential', 'secret', 'desktop_profile', 'route',
+             'authentication_plan', 'algorithm_policy', 'heartbeat_policy',
+             'monitoring_policy', 'login_automation'
+           )),
+           local_object_id TEXT NOT NULL CHECK(length(local_object_id) = 36),
+           update_time_unix_ms INTEGER NOT NULL CHECK(update_time_unix_ms >= 0),
+           deleted INTEGER NOT NULL CHECK(deleted IN (0, 1)),
+           PRIMARY KEY(object_kind, local_object_id)
+         ) STRICT;",
+    )?;
+    for (kind, table, id_column) in [
+        ("host", "hosts", "id"),
+        ("identity", "identities", "id"),
+        ("credential", "credential_refs", "id"),
+        ("route", "host_route_plans", "host_id"),
+        (
+            "authentication_plan",
+            "host_authentication_plans",
+            "host_id",
+        ),
+        ("algorithm_policy", "host_algorithm_policies", "host_id"),
+        ("heartbeat_policy", "host_heartbeat_policies", "host_id"),
+        ("monitoring_policy", "host_monitoring_policies", "host_id"),
+        ("login_automation", "host_login_automations", "host_id"),
+    ] {
+        transaction.execute_batch(&format!(
+            "INSERT INTO ssh_sync_local_item_times
+               (object_kind, local_object_id, update_time_unix_ms, deleted)
+             SELECT '{kind}', {id_column}, updated_at_ms, 0 FROM {table}
+             WHERE updated_at_ms > 0;"
+        ))?;
+        install_local_item_time_triggers(&transaction, kind, table, id_column, true)?;
+    }
+    // Pre-existing desktop profiles have no recorded edit time. Leave them
+    // unknown until the next real edit; migration time is not an edit time.
+    install_local_item_time_triggers(
+        &transaction,
+        "desktop_profile",
+        "desktop_profiles",
+        "id",
+        false,
+    )?;
+    transaction.pragma_update(None, "user_version", 45)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn install_local_item_time_triggers(
+    transaction: &rusqlite::Transaction<'_>,
+    kind: &str,
+    table: &str,
+    id_column: &str,
+    has_timestamp: bool,
+) -> Result<()> {
+    let write_time = if has_timestamp {
+        "NEW.updated_at_ms"
+    } else {
+        "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)"
+    };
+    for event in ["INSERT", "UPDATE"] {
+        let predicate = if has_timestamp {
+            "WHEN NEW.updated_at_ms > 0"
+        } else {
+            ""
+        };
+        transaction.execute_batch(&format!(
+            "CREATE TRIGGER ssh_sync_clock_{table}_{event} AFTER {event} ON {table} {predicate}
+             BEGIN
+               INSERT INTO ssh_sync_local_item_times
+                 (object_kind, local_object_id, update_time_unix_ms, deleted)
+               VALUES ('{kind}', NEW.{id_column}, {write_time}, 0)
+               ON CONFLICT(object_kind, local_object_id) DO UPDATE SET
+                 update_time_unix_ms = excluded.update_time_unix_ms,
+                 deleted = 0;
+             END;"
+        ))?;
+    }
+    transaction.execute_batch(&format!(
+        "CREATE TRIGGER ssh_sync_clock_{table}_DELETE AFTER DELETE ON {table}
+         BEGIN
+           INSERT INTO ssh_sync_local_item_times
+             (object_kind, local_object_id, update_time_unix_ms, deleted)
+           VALUES ('{kind}', OLD.{id_column},
+             CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 1)
+           ON CONFLICT(object_kind, local_object_id) DO UPDATE SET
+             update_time_unix_ms = excluded.update_time_unix_ms,
+             deleted = 1;
+         END;"
+    ))?;
     Ok(())
 }
 
@@ -2811,7 +2962,7 @@ mod remote_capability_migration_tests {
             )
             .unwrap();
 
-        migrate(&connection).unwrap();
+        migrate_v34_to_v35(&connection).unwrap();
         let preserved: (String, i64) = connection
             .query_row(
                 "SELECT capability, state_version FROM plugin_capability_grants",
@@ -2854,7 +3005,7 @@ mod remote_capability_migration_tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, crate::SCHEMA_VERSION);
+        assert_eq!(version, 35);
     }
 
     #[test]

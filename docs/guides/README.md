@@ -7,6 +7,7 @@ Choose a guide for your task. Plugin authors can build a first visible plugin wi
 | 文档 / Guide | 中文 | English |
 | --- | --- | --- |
 | 用户指南 / User guides | [安装、权限与外观](users/README.zh-CN.md) | [Installation, permissions, and appearance](users/README.en.md) |
+| 自建同步 / Self-hosted sync | [部署与使用](users/self-host-sync.zh-CN.md) | [Deploy and use](users/self-host-sync.en.md) |
 | 插件开发 / Plugin development | [完整开发目录](developers/README.zh-CN.md) | [Complete development guide](developers/README.en.md) |
 | 快速开始 / Quick start | [第一个可见插件](developers/start/quickstart.zh-CN.md) | [Your first visible plugin](developers/start/quickstart.en.md) |
 | API 参考 / API reference | [35 个方法与类型](plugin-api/README.zh-CN.md) | [35 methods and their types](plugin-api/README.en.md) |

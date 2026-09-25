@@ -207,7 +207,7 @@ const monitoringRevision = ref("1");
 
 const monitoringEnabled = ref(false);
 
-const monitoringIntervalSeconds = ref("15");
+const monitoringIntervalSeconds = ref("1.5");
 
 const monitoringTimeoutSeconds = ref("5");
 
@@ -784,21 +784,24 @@ function heartbeatDraftPolicy(): HeartbeatPolicy | null {
 function monitoringDraftPolicy(): MonitoringPolicy | null {
   const sampleIntervalSeconds = Number(monitoringIntervalSeconds.value);
   const sampleTimeoutSeconds = Number(monitoringTimeoutSeconds.value);
+  const sampleIntervalMillis = Math.round(sampleIntervalSeconds * 1000);
+  const sampleTimeoutMillis = Math.round(sampleTimeoutSeconds * 1000);
   if (
-    !Number.isInteger(sampleIntervalSeconds)
-    || sampleIntervalSeconds < 5
+    !Number.isFinite(sampleIntervalSeconds)
+    || Math.abs(sampleIntervalMillis / 1000 - sampleIntervalSeconds) > 1e-9
+    || sampleIntervalSeconds < 1.5
     || sampleIntervalSeconds > 300
-    || !Number.isInteger(sampleTimeoutSeconds)
-    || sampleTimeoutSeconds < 2
+    || !Number.isFinite(sampleTimeoutSeconds)
+    || Math.abs(sampleTimeoutMillis / 1000 - sampleTimeoutSeconds) > 1e-9
+    || sampleTimeoutSeconds < 0.5
     || sampleTimeoutSeconds > 30
-    || sampleTimeoutSeconds >= sampleIntervalSeconds
   ) {
     return null;
   }
   return {
     enabled: monitoringEnabled.value,
-    sampleIntervalSeconds,
-    sampleTimeoutSeconds,
+    sampleIntervalMillis,
+    sampleTimeoutMillis,
     diskMountIds: ["root"],
     networkInterfaceIds: ["aggregateNonLoopback"],
   };
@@ -820,7 +823,7 @@ function resetAdvancedConfigDraft() {
   applyHeartbeatPolicy({ mode: "disabled" });
   monitoringRevision.value = "1";
   monitoringEnabled.value = false;
-  monitoringIntervalSeconds.value = "15";
+  monitoringIntervalSeconds.value = "1.5";
   monitoringTimeoutSeconds.value = "5";
   monitoringRuntimePending.value = false;
 }
@@ -860,8 +863,8 @@ async function loadSavedAdvancedConfig(host: HostSummary) {
     applyHeartbeatPolicy(config.heartbeatPolicy.policy);
     monitoringRevision.value = config.monitoringPolicy.revision;
     monitoringEnabled.value = config.monitoringPolicy.policy.enabled;
-    monitoringIntervalSeconds.value = String(config.monitoringPolicy.policy.sampleIntervalSeconds);
-    monitoringTimeoutSeconds.value = String(config.monitoringPolicy.policy.sampleTimeoutSeconds);
+    monitoringIntervalSeconds.value = String(config.monitoringPolicy.policy.sampleIntervalMillis / 1000);
+    monitoringTimeoutSeconds.value = String(config.monitoringPolicy.policy.sampleTimeoutMillis / 1000);
     applyRouteSummary(config);
     applyLoginAutomationSummary(config);
     rememberAdvancedFingerprints();
@@ -2430,8 +2433,9 @@ onMounted(async () => {
                     id="monitoring-interval"
                     v-model="monitoringIntervalSeconds"
                     type="number"
-                    :min="5"
+                    :min="1.5"
                     :max="300"
+                    :step="0.001"
                     :disabled="!monitoringEnabled"
                   />
                 </NvxField>
@@ -2443,8 +2447,9 @@ onMounted(async () => {
                     id="monitoring-timeout"
                     v-model="monitoringTimeoutSeconds"
                     type="number"
-                    :min="2"
+                    :min="0.5"
                     :max="30"
+                    :step="0.001"
                     :disabled="!monitoringEnabled"
                   />
                 </NvxField>
@@ -2764,7 +2769,7 @@ onMounted(async () => {
 <style scoped>
 .host-editor-surface { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .host-editor-surface > .hosts-editor { flex: 1; height: auto; }
-.host-editor-actions { display: flex; justify-content: flex-end; gap: var(--nvx-space-2); padding: var(--nvx-space-4) var(--nvx-space-5); border-top: var(--nvx-border-width) solid var(--nvx-color-border); }
+.host-editor-actions { display: flex; justify-content: flex-end; gap: var(--nvx-space-2); padding: var(--nvx-space-3) var(--nvx-space-5); border-top: var(--nvx-border-width) solid var(--nvx-color-border); }
 
 .hosts-dialog__endpoint-row {
   display: grid;
@@ -2786,7 +2791,7 @@ onMounted(async () => {
 
 .hosts-editor {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: 224px minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -2796,7 +2801,7 @@ onMounted(async () => {
   display: grid;
   align-content: start;
   gap: var(--nvx-space-1);
-  padding: var(--nvx-space-5) var(--nvx-space-3);
+  padding: var(--nvx-space-4) var(--nvx-space-3);
   border-right: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
   background: var(--nvx-color-bg-subtle);
 }
@@ -2804,7 +2809,7 @@ onMounted(async () => {
 .hosts-editor__nav-item {
   display: flex;
   width: 100%;
-  min-height: 42px;
+  min-height: 38px;
   gap: var(--nvx-space-3);
   align-items: center;
   padding: 0 var(--nvx-space-3);
@@ -2836,10 +2841,10 @@ onMounted(async () => {
 .hosts-editor__content {
   display: grid;
   align-content: start;
-  gap: var(--nvx-space-4);
+  gap: var(--nvx-space-3);
   min-width: 0;
   overflow-y: auto;
-  padding: var(--nvx-space-6) var(--nvx-space-8);
+  padding: var(--nvx-space-4) var(--nvx-space-5);
 }
 
 .hosts-editor__content > h3,
@@ -3218,7 +3223,7 @@ onMounted(async () => {
   }
 
   .hosts-editor__content {
-    padding: var(--nvx-space-5);
+    padding: var(--nvx-space-3) var(--nvx-space-4);
   }
 
   .hosts-agent__identity .hosts-dialog__create-row,

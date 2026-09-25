@@ -11,6 +11,7 @@ export interface SecureChallengePrompt {
   id: string;
   content:
     | { kind: "sshHostKey"; challenge: SshHostKeyChallenge }
+    | { kind: "sftpHostKey"; challenge: { endpoint: string; algorithm: string; fingerprintSha256: string } }
     | { kind: "sshKeyboard"; challenge: SshKeyboardInteractiveChallenge }
     | { kind: "metricsHostKey"; challenge: MetricsHostKeyChallenge }
     | { kind: "metricsKeyboard"; challenge: MetricsKeyboardInteractiveChallenge };

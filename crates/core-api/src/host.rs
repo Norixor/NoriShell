@@ -386,8 +386,8 @@ impl NetworkResourceId {
 #[serde(rename_all = "camelCase")]
 pub struct MonitoringPolicy {
     pub enabled: bool,
-    pub sample_interval_seconds: u32,
-    pub sample_timeout_seconds: u32,
+    pub sample_interval_millis: u32,
+    pub sample_timeout_millis: u32,
     /// Stable identifiers selected from a MetricsProvider result, not shell fragments.
     pub disk_mount_ids: Vec<DiskResourceId>,
     /// Stable identifiers selected from a MetricsProvider result, not shell fragments.
@@ -1649,8 +1649,8 @@ mod tests {
     fn monitoring_resource_ids_reject_unknown_wire_values() {
         let valid = serde_json::json!({
             "enabled": true,
-            "sampleIntervalSeconds": 15,
-            "sampleTimeoutSeconds": 5,
+            "sampleIntervalMillis": 1500,
+            "sampleTimeoutMillis": 5000,
             "diskMountIds": ["root"],
             "networkInterfaceIds": ["aggregateNonLoopback"]
         });

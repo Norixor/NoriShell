@@ -6,14 +6,19 @@ use crate::{
     },
     host_service::HostService,
     ssh_sync_exchange_local::NoriShellSshSyncLocalAdapter,
-    vault_service::VaultService,
+    vault_service::{VaultService, VaultServiceError},
 };
 use norishell_core_api::{
     HostId, RequestMeta, VaultAutoUnlockEnableRequest, VaultCreateRequest, VaultState, VaultStatus,
-    VaultUnlockRequest, WireSequence,
+    VaultUnlockPolicy, VaultUnlockRequest, WireSequence,
 };
+use norishell_secret_vault::VaultError;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Mutex, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};
@@ -22,29 +27,40 @@ use zeroize::{Zeroize, Zeroizing};
 #[serde(rename_all = "camelCase")]
 pub enum SecureVaultMode {
     EnsureUnlocked,
+    UnlockSavedLocal,
     EnableAutoUnlock,
+    EnableLocalAutoUnlock,
 }
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SecureVaultKind {
     Create,
     Unlock,
     EnableAutoUnlock,
+    EnableLocalAutoUnlock,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecureVaultPrompt {
     id: String,
     kind: SecureVaultKind,
+    can_reset: bool,
 }
-struct Answer {
+struct PasswordAnswer {
     password: Zeroizing<String>,
     confirmation: Zeroizing<String>,
     confirmed: bool,
 }
+enum Answer {
+    Password(PasswordAnswer),
+    Reset,
+}
 struct Pending {
     prompt: SecureVaultPrompt,
     sender: oneshot::Sender<Answer>,
+    owner_label: String,
+    reset_fingerprint: Option<[u8; 32]>,
+    expires_at: Instant,
 }
 #[derive(Default)]
 pub struct SecureVaultService {
@@ -88,15 +104,21 @@ fn kind_for(
     status: &VaultStatus,
 ) -> Result<Option<SecureVaultKind>, String> {
     match mode {
-        SecureVaultMode::EnsureUnlocked => Ok(match status.state {
-            VaultState::Missing => Some(SecureVaultKind::Create),
-            VaultState::Locked | VaultState::RequiresReload => Some(SecureVaultKind::Unlock),
-            VaultState::Unlocked => None,
-        }),
-        SecureVaultMode::EnableAutoUnlock if status.state == VaultState::Unlocked => {
+        SecureVaultMode::EnsureUnlocked | SecureVaultMode::UnlockSavedLocal => {
+            Ok(match status.state {
+                VaultState::Missing => Some(SecureVaultKind::Create),
+                VaultState::Locked | VaultState::RequiresReload => Some(SecureVaultKind::Unlock),
+                VaultState::Unlocked => None,
+            })
+        }
+        SecureVaultMode::EnableAutoUnlock if status.state != VaultState::Missing => {
             Ok(Some(SecureVaultKind::EnableAutoUnlock))
         }
         SecureVaultMode::EnableAutoUnlock => Err("secureVaultStateChanged".into()),
+        SecureVaultMode::EnableLocalAutoUnlock if status.state != VaultState::Missing => {
+            Ok(Some(SecureVaultKind::EnableLocalAutoUnlock))
+        }
+        SecureVaultMode::EnableLocalAutoUnlock => Err("secureVaultStateChanged".into()),
     }
 }
 
@@ -162,10 +184,38 @@ pub async fn secure_vault_open(
     if !allowed_caller(&app, window.label()) {
         return Err("secureVaultDenied".into());
     }
+    let mode = if matches!(mode, SecureVaultMode::UnlockSavedLocal) {
+        if window.label() != "main" {
+            return Err("secureVaultDenied".into());
+        }
+        if vault.unlock_with_saved_local_password().is_ok() {
+            if ssh_sync.reconcile_after_vault_unlock().await.is_err() {
+                eprintln!(
+                    "SSH sync cleanup remains pending after Vault unlock; background reconciliation will retry"
+                );
+            }
+            let _ = app.emit_to("main", "native-tray-vault-changed", ());
+            return Ok(true);
+        }
+        // A missing, unsafe or stale local file falls back to the ordinary
+        // protected password prompt without changing the saved policy.
+        SecureVaultMode::EnsureUnlocked
+    } else {
+        mode
+    };
     let initial = vault.status();
+    if vault.requires_restart_after_reset() {
+        return Err("secureVaultRestartRequired".into());
+    }
     let Some(kind) = kind_for(mode, &initial)? else {
         return Ok(true);
     };
+    let reset_fingerprint =
+        if kind == SecureVaultKind::Unlock && initial.state == VaultState::Locked {
+            vault.locked_reset_fingerprint().ok()
+        } else {
+            None
+        };
     let id = uuid::Uuid::now_v7().to_string();
     let (sender, receiver) = oneshot::channel();
     service
@@ -178,8 +228,12 @@ pub async fn secure_vault_open(
                 prompt: SecureVaultPrompt {
                     id: id.clone(),
                     kind,
+                    can_reset: reset_fingerprint.is_some(),
                 },
                 sender,
+                owner_label: window.label().to_owned(),
+                reset_fingerprint,
+                expires_at: Instant::now() + Duration::from_secs(180),
             },
         );
     let _guard = PromptGuard {
@@ -195,11 +249,14 @@ pub async fn secure_vault_open(
         .and_then(|url| url.join(&prompt_path).ok());
     let expected_query = format!("prompt={id}");
     let window_height = match kind {
-        SecureVaultKind::Unlock => 320.0,
-        SecureVaultKind::Create => 400.0,
-        SecureVaultKind::EnableAutoUnlock => 420.0,
+        SecureVaultKind::Unlock => 380.0,
+        SecureVaultKind::Create => 460.0,
+        SecureVaultKind::EnableAutoUnlock => 500.0,
+        SecureVaultKind::EnableLocalAutoUnlock => 540.0,
     };
     let child = crate::secure_window_frame::apply_secure_window_frame(
+        &app,
+        &label(&id),
         WebviewWindowBuilder::new(
             &app,
             label(&id),
@@ -230,7 +287,7 @@ pub async fn secure_vault_open(
             pending.remove(&cancel_id);
         }
     });
-    let _ = child.set_focus();
+    let _ = crate::window_first_show::focus_if_revealed(&child);
     // Expiry and owner teardown cancel only pending interaction, never an accepted mutation.
     let mut receiver = receiver;
     let deadline = tokio::time::sleep(Duration::from_secs(180));
@@ -238,7 +295,7 @@ pub async fn secure_vault_open(
     let mut owner_check = tokio::time::interval(Duration::from_millis(250));
     let owner_valid =
         || app.get_webview_window(window.label()).is_some() && allowed_caller(&app, window.label());
-    let mut answer = loop {
+    let answer = loop {
         tokio::select! {
             response = &mut receiver => {
                 let Ok(answer) = response else { return Ok(false); };
@@ -253,6 +310,10 @@ pub async fn secure_vault_open(
     if !owner_valid() {
         return Ok(false);
     }
+    let Answer::Password(mut answer) = answer else {
+        let _ = app.emit_to("main", "native-tray-vault-changed", ());
+        return Ok(false);
+    };
     if vault.status() != initial {
         return Err("secureVaultStateChanged".into());
     }
@@ -277,14 +338,19 @@ pub async fn secure_vault_open(
             )
             .await
         }
-        SecureVaultKind::EnableAutoUnlock => {
+        SecureVaultKind::EnableAutoUnlock | SecureVaultKind::EnableLocalAutoUnlock => {
             if !answer.confirmed {
                 let mut password = password;
                 password.zeroize();
                 return Err("secureVaultDenied".into());
             }
             crate::vault_service::vault_auto_unlock_enable(
-                VaultAutoUnlockEnableRequest { meta, password },
+                VaultAutoUnlockEnableRequest {
+                    meta,
+                    password,
+                    policy: (kind == SecureVaultKind::EnableLocalAutoUnlock)
+                        .then_some(VaultUnlockPolicy::AutomaticLocal),
+                },
                 vault,
             )
         }
@@ -317,7 +383,7 @@ pub fn secure_vault_submit(
     window: WebviewWindow,
     service: State<'_, SecureVaultService>,
 ) -> Result<(), String> {
-    let answer = Answer {
+    let answer = PasswordAnswer {
         password: Zeroizing::new(password),
         confirmation: Zeroizing::new(password_confirmation),
         confirmed,
@@ -337,8 +403,53 @@ pub fn secure_vault_submit(
         .ok_or("secureVaultExpired")?;
     pending
         .sender
-        .send(answer)
+        .send(Answer::Password(answer))
         .map_err(|_| "secureVaultExpired".into())
+}
+#[tauri::command]
+pub fn secure_vault_reset(
+    id: String,
+    phrase: String,
+    confirmed: bool,
+    window: WebviewWindow,
+    app: AppHandle,
+    service: State<'_, SecureVaultService>,
+    vault: State<'_, VaultService>,
+) -> Result<(), String> {
+    require_window(&window, &id)?;
+    if phrase != "RESET" || !confirmed {
+        return Err("secureVaultDenied".into());
+    }
+    let mut pending = service
+        .pending
+        .lock()
+        .map_err(|_| "secureVaultUnavailable")?;
+    let entry = pending.get(&id).ok_or("secureVaultExpired")?;
+    if entry.prompt.kind != SecureVaultKind::Unlock
+        || !entry.prompt.can_reset
+        || entry.expires_at <= Instant::now()
+        || entry.sender.is_closed()
+        || app.get_webview_window(&entry.owner_label).is_none()
+        || !allowed_caller(&app, &entry.owner_label)
+    {
+        return Err("secureVaultExpired".into());
+    }
+    let expected = entry
+        .reset_fingerprint
+        .as_ref()
+        .ok_or("secureVaultDenied")?;
+    vault
+        .reset_local_locked_vault(expected)
+        .map_err(|error| match error {
+            VaultServiceError::Vault(VaultError::VaultChanged) => "secureVaultResetChanged",
+            VaultServiceError::Vault(VaultError::CommitStateUnknown(_)) => {
+                "secureVaultResetUncertain"
+            }
+            _ => "secureVaultResetFailed",
+        })?;
+    let entry = pending.remove(&id).ok_or("secureVaultExpired")?;
+    let _ = entry.sender.send(Answer::Reset);
+    Ok(())
 }
 #[tauri::command]
 pub fn secure_vault_cancel(
@@ -396,20 +507,25 @@ mod tests {
     }
 
     #[test]
-    fn automatic_unlock_confirmation_requires_an_unlocked_vault() {
-        for state in [
-            VaultState::Missing,
-            VaultState::Locked,
-            VaultState::RequiresReload,
-        ] {
-            assert!(kind_for(SecureVaultMode::EnableAutoUnlock, &status(state)).is_err());
-        }
-        assert!(matches!(
-            kind_for(
+    fn automatic_unlock_confirmation_accepts_one_password_while_locked() {
+        for (mode, kind) in [
+            (
                 SecureVaultMode::EnableAutoUnlock,
-                &status(VaultState::Unlocked)
+                SecureVaultKind::EnableAutoUnlock,
             ),
-            Ok(Some(SecureVaultKind::EnableAutoUnlock))
-        ));
+            (
+                SecureVaultMode::EnableLocalAutoUnlock,
+                SecureVaultKind::EnableLocalAutoUnlock,
+            ),
+        ] {
+            assert!(kind_for(mode, &status(VaultState::Missing)).is_err());
+            for state in [
+                VaultState::Locked,
+                VaultState::RequiresReload,
+                VaultState::Unlocked,
+            ] {
+                assert_eq!(kind_for(mode, &status(state)).unwrap(), Some(kind));
+            }
+        }
     }
 }

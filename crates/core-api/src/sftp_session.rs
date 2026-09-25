@@ -411,6 +411,12 @@ pub enum SftpFileMutation {
         precondition: SftpRemoteObjectPrecondition,
         irreversible_confirmed: bool,
     },
+    SetPermissions {
+        path: SftpRemotePath,
+        precondition: SftpRemoteObjectPrecondition,
+        expected_permission_bits: u32,
+        mode: u32,
+    },
     CreateZip {
         sources: Vec<SftpArchiveSource>,
         target: SftpRemotePath,
@@ -704,6 +710,7 @@ pub enum SftpTransferState {
 pub enum SftpTransferFailureCode {
     TargetExists,
     UnsafeReplaceUnsupported,
+    CommitOutcomeUncertain,
     PermissionDenied,
     TransportLost,
     LengthMismatch,
@@ -750,6 +757,7 @@ pub struct SftpTransferSummary {
     pub remaining_seconds: Option<u64>,
     pub state_revision: WireSequence,
     pub state: SftpTransferState,
+    pub commit_outcome: SftpTransferCommitOutcome,
     pub failure_code: Option<SftpTransferFailureCode>,
     pub cleanup_residual: Option<SftpCleanupResidual>,
 }
@@ -865,5 +873,25 @@ mod tests {
             encoded["precondition"]["modifiedAtUnixMs"],
             1_700_000_000_000_i64
         );
+    }
+
+    #[test]
+    fn permission_mutation_wire_carries_original_bits_and_requested_rwx_mode() {
+        let mutation = SftpFileMutation::SetPermissions {
+            path: SftpRemotePath {
+                bytes: b"/srv/file".to_vec(),
+            },
+            precondition: SftpRemoteObjectPrecondition {
+                kind: SftpRemoteEntryKind::File,
+                size: Some(42),
+                modified_at_unix_ms: Some(1_700_000_000_000),
+            },
+            expected_permission_bits: 0o100640,
+            mode: 0o600,
+        };
+        let encoded = serde_json::to_value(mutation).expect("serialize permission mutation");
+        assert_eq!(encoded["kind"], "setPermissions");
+        assert_eq!(encoded["expectedPermissionBits"], 0o100640);
+        assert_eq!(encoded["mode"], 0o600);
     }
 }

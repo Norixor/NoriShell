@@ -8,11 +8,16 @@ import type {
 } from "../../core-api/generated/core-api";
 import NvxPluginUiNode from "./NvxPluginUiNode.vue";
 
+interface PluginUiActionResult {
+  contribution: PluginUiContribution;
+  closeDialogOnSuccess?: boolean;
+}
+
 const props = defineProps<{
   contribution: PluginUiContribution;
   busy: boolean;
   actionsBlocked?: boolean;
-  requestAction?: (actionId: string, fields: PluginUiFieldValue[]) => Promise<PluginUiContribution | null>;
+  requestAction?: (actionId: string, fields: PluginUiFieldValue[]) => Promise<PluginUiActionResult | null>;
 }>();
 
 const emit = defineEmits<{
@@ -20,6 +25,7 @@ const emit = defineEmits<{
 }>();
 
 const values = ref<Record<string, string>>({});
+const dialogCloseRequest = ref<{ nodeId: string } | null>(null);
 const compact = inject("nvx-plugin-tool-panel-compact", false);
 const nodeById = computed(() => Object.fromEntries(
   props.contribution.document.nodes.map((node) => [nodeId(node), node]),
@@ -56,6 +62,7 @@ const fieldEditVersions = new Map<string, number>();
 interface PendingAction {
   identity: string;
   contributionRevision: string;
+  dialogNodeId: string | null;
   fieldVersions: Map<string, number>;
 }
 let pendingAction: PendingAction | null = null;
@@ -95,14 +102,18 @@ function nearestDialog(nodeIdentifier: string) {
   return null;
 }
 
-function fieldIdsForAction(actionId: string) {
-  const actionNode = props.contribution.document.nodes.find((node) => (
+function actionNodeFor(actionId: string) {
+  return props.contribution.document.nodes.find((node) => (
     (node.kind === "button" || node.kind === "copyButton") && node.actionId === actionId
   ) || (
     node.kind === "table" && node.rows.some((row) => row.actionId === actionId)
   ) || (
     node.kind === "tree" && treeHasAction(node.items, actionId)
   ));
+}
+
+function fieldIdsForAction(actionId: string) {
+  const actionNode = actionNodeFor(actionId);
   if (!actionNode) return new Set<string>();
   const actionDialog = nearestDialog(actionNode.nodeId);
   return new Set(props.contribution.document.nodes.flatMap((node) => {
@@ -198,6 +209,7 @@ function invoke(actionId: string) {
   const action: PendingAction | null = props.requestAction ? {
     identity: contributionIdentity(props.contribution),
     contributionRevision: props.contribution.contributionRevision,
+    dialogNodeId: nearestDialog(actionNodeFor(actionId)?.nodeId ?? ""),
     fieldVersions: new Map(fields.map(({ fieldId }) => [fieldId, fieldEditVersions.get(fieldId) ?? 0])),
   } : null;
   pendingAction = action;
@@ -221,19 +233,22 @@ function invoke(actionId: string) {
   void completeAction(action, Promise.resolve().then(() => requestAction(actionId, fields)));
 }
 
-async function completeAction(action: PendingAction, request: Promise<PluginUiContribution | null>) {
+async function completeAction(action: PendingAction, request: Promise<PluginUiActionResult | null>) {
   try {
     const result = await request;
     await nextTick();
     if (disposed || pendingAction !== action || !result
-      || contributionIdentity(result) !== action.identity
+      || contributionIdentity(result.contribution) !== action.identity
       || contributionIdentity(props.contribution) !== action.identity
-      || result.contributionRevision !== props.contribution.contributionRevision
-      || BigInt(result.contributionRevision) !== BigInt(action.contributionRevision) + 1n) return;
+      || result.contribution.contributionRevision !== props.contribution.contributionRevision
+      || BigInt(result.contribution.contributionRevision) !== BigInt(action.contributionRevision) + 1n) return;
     const unchangedSubmittedFields = new Set([...action.fieldVersions].flatMap(([fieldId, version]) => (
       (fieldEditVersions.get(fieldId) ?? 0) === version ? [fieldId] : []
     )));
     reconcileFields(true, unchangedSubmittedFields);
+    if (result.closeDialogOnSuccess && action.dialogNodeId) {
+      dialogCloseRequest.value = { nodeId: action.dialogNodeId };
+    }
   } catch {
     // The host owns action feedback. A failed or stale reply keeps the draft.
   } finally {
@@ -267,6 +282,7 @@ onBeforeUnmount(() => { disposed = true; pendingAction = null; });
       :node-by-id="nodeById"
       :page-title-node-id="pageTitleNodeId"
       :contribution="contribution"
+      :dialog-close-request="dialogCloseRequest"
       :values="values"
       :busy="busy"
       :actions-blocked="actionsBlocked"

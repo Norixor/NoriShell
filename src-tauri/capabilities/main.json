@@ -15,6 +15,10 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "clipboard-manager:allow-read-text",
+    "updater:allow-check",
+    "updater:allow-download",
+    "updater:allow-install",
+    "process:allow-restart",
     "main-window-commands",
     {
       "identifier": "opener:allow-open-url",

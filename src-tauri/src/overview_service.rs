@@ -324,8 +324,8 @@ mod tests {
                 revision: WireSequence::new(1),
                 policy: MonitoringPolicy {
                     enabled: false,
-                    sample_interval_seconds: 15,
-                    sample_timeout_seconds: 5,
+                    sample_interval_millis: 1500,
+                    sample_timeout_millis: 5000,
                     disk_mount_ids: vec![DiskResourceId::Root],
                     network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
                 },

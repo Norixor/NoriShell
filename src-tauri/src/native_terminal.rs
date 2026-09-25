@@ -2403,6 +2403,73 @@ mod tests {
     }
 
     #[test]
+    fn vault_merge_reloads_encrypted_history_and_rejects_stale_persistence() {
+        const PASSWORD: &[u8] = b"correct horse battery staple";
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source = VaultService::start(directory.path().join("source-vault"));
+        source
+            .create_for_tests(PASSWORD)
+            .expect("create source Vault");
+        let source_epoch = source.with_vault_availability(|availability, _| availability.epoch);
+        let mut imported = history_payload_with_command("imported command");
+        imported.entries[0].completed_at_unix_ms = unix_time_ms();
+        source
+            .replace_command_history_at_epoch(imported, source_epoch)
+            .expect("save source history");
+        let envelope = source
+            .export_encrypted_envelope()
+            .expect("export source Vault");
+
+        let target = VaultService::start(directory.path().join("target-vault"));
+        target
+            .create_for_tests(PASSWORD)
+            .expect("create target Vault");
+        let old_epoch = target.with_vault_availability(|availability, _| availability.epoch);
+        let mut existing = history_payload_with_command("existing command");
+        existing.entries[0].completed_at_unix_ms = unix_time_ms();
+        target
+            .replace_command_history_at_epoch(existing.clone(), old_epoch)
+            .expect("save target history");
+
+        let settings_directory = directory.path().join("settings");
+        write_settings(
+            &settings_directory.join(SETTINGS_FILE_NAME),
+            &PersistedSettings {
+                settings: NativeTerminalSettings {
+                    history_enabled: true,
+                    persist_encrypted: true,
+                    ..NativeTerminalSettings::default()
+                },
+                settings_revision: 1,
+            },
+        )
+        .expect("enable encrypted history");
+        let terminal = NativeTerminalService::start(&settings_directory, target.clone());
+        target.set_availability_observer(terminal.availability_observer());
+        assert_eq!(terminal.inner.state.lock().expect("state").history.len(), 1);
+
+        target
+            .merge_encrypted_envelope(&envelope, PASSWORD, &[])
+            .expect("merge backup Vault");
+        let history = terminal.inner.state.lock().expect("state").history.clone();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .any(|entry| entry.command == "existing command")
+        );
+        assert!(
+            history
+                .iter()
+                .any(|entry| entry.command == "imported command")
+        );
+        assert!(matches!(
+            target.replace_command_history_at_epoch(existing, old_epoch),
+            Err(crate::vault_service::VaultServiceError::AvailabilityChanged)
+        ));
+    }
+
+    #[test]
     fn history_eligibility_honors_leading_whitespace_and_secret_boundaries() {
         assert!(should_store_history("git status"));
         assert!(!should_store_history(" git status"));
