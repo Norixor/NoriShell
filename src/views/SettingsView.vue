@@ -34,7 +34,9 @@ import NvxNativeNotificationSettings from "../components/settings/NvxNativeNotif
 import NvxReleaseSettings from "../components/settings/NvxReleaseSettings.vue";
 import IdentitiesSettingsView from "./IdentitiesSettingsView.vue";
 import KnownHostsSettingsView from "./KnownHostsSettingsView.vue";
+import OfflineBackup from "./OfflineBackup.vue";
 import { useNativeTerminalStore } from "../stores/nativeTerminal";
+import { useAppUpdateStore } from "../stores/appUpdate";
 
 import { NvxPluginExtensionTarget } from "../components/plugins";
 import {
@@ -56,7 +58,7 @@ import {
   setPluginLocale,
   listHostCatalog,
 } from "../core-api/client";
-import { requestSecureVault } from "../core-api/secure-vault-client";
+import { requestSecureVault, type SecureVaultMode } from "../core-api/secure-vault-client";
 import type { VaultStatus } from "../core-api/generated/core-api";
 import { resolveLocale, type LocalePreference } from "../locales";
 import { useTipsStore } from "../stores/tips";
@@ -94,6 +96,7 @@ const route = useRoute();
 const ui = useUiStore();
 const tips = useTipsStore();
 const nativeTerminal = useNativeTerminalStore();
+const appUpdate = useAppUpdateStore();
 
 const securityLinks = [
   { key: "hostKeys", icon: ShieldCheck, section: "knownHosts" },
@@ -230,7 +233,16 @@ const vaultPolicyOptions = computed(() => [
     value: "automatic",
     label: t("sshSettings.vault.policies.automatic"),
   },
+  {
+    value: "automaticLocal",
+    label: t("sshSettings.vault.policies.automaticLocal"),
+  },
 ]);
+const vaultPolicyHint = computed(() => t(
+  vaultStatus.value?.unlockPolicy === "automaticLocal"
+    ? "sshSettings.vault.localLockHint"
+    : "sshSettings.vault.policyHint",
+));
 
 const vaultStateLabel = computed(() => {
   if (vaultStatusLoading.value) return t("sshSettings.vault.states.loading");
@@ -246,8 +258,18 @@ const vaultStateTone = computed(() => {
 
 const autoUnlockFailureMessage = computed(() => {
   const failure = vaultStatus.value?.autoUnlockFailure;
-  return failure ? t(`sshSettings.vault.autoUnlockFailures.${failure}`) : "";
+  if (!failure) return "";
+
+  const policy = vaultStatus.value?.unlockPolicy === "automaticLocal"
+    ? "automaticLocal"
+    : "automatic";
+  const key = `sshSettings.vault.autoUnlockFailures.${policy}.${failure}`;
+  return te(key) ? t(key) : t(`sshSettings.vault.autoUnlockFailures.automatic.${failure}`);
 });
+
+const autoUnlockRepairPolicy = computed(() => (
+  vaultStatus.value?.unlockPolicy === "automaticLocal" ? "automaticLocal" : "automatic"
+));
 
 const terminalFontOptions = computed(() => [
   {
@@ -400,10 +422,14 @@ onMounted(async () => {
 
 async function openVaultAccess() {
   if (vaultActionLoading.value || vaultStatusLoading.value) return;
-  await runSecureVault("ensureUnlocked");
+  await runSecureVault(
+    vaultStatus.value?.state !== "missing" && vaultStatus.value?.unlockPolicy === "automaticLocal"
+      ? "unlockSavedLocal"
+      : "ensureUnlocked",
+  );
 }
 
-async function runSecureVault(mode: "ensureUnlocked" | "enableAutoUnlock") {
+async function runSecureVault(mode: SecureVaultMode) {
   vaultActionLoading.value = true;
   vaultActionError.value = "";
   try {
@@ -418,15 +444,18 @@ async function runSecureVault(mode: "ensureUnlocked" | "enableAutoUnlock") {
 }
 
 async function setVaultPolicy(value: string) {
-  const repairsFailedAutomatic = value === "automatic"
-    && vaultStatus.value?.autoUnlockFailure != null;
+  const repairsFailedAutoUnlock = (
+    (value === "automatic" || value === "automaticLocal")
+    && value === vaultStatus.value?.unlockPolicy
+    && vaultStatus.value?.autoUnlockFailure != null
+  );
   if (
-    (value === vaultStatus.value?.unlockPolicy && !repairsFailedAutomatic)
+    (value === vaultStatus.value?.unlockPolicy && !repairsFailedAutoUnlock)
     || vaultActionLoading.value
   ) return;
   vaultActionError.value = "";
-  if (value === "automatic") {
-    await runSecureVault("enableAutoUnlock");
+  if (value === "automatic" || value === "automaticLocal") {
+    await runSecureVault(value === "automatic" ? "enableAutoUnlock" : "enableLocalAutoUnlock");
     return;
   }
   if (value !== "currentSession") return;
@@ -603,6 +632,10 @@ function saveCustomScheme() {
                 />
               </span>
               <span>{{ t("releases.aboutTitle") }}</span>
+              <span
+                v-if="appUpdate.hasUpdate"
+                class="settings-nav-item__update-badge"
+              >{{ t("releases.newBadge") }}</span>
             </button>
           </section>
 
@@ -1080,7 +1113,7 @@ function saveCustomScheme() {
             <div class="vault-controls">
               <NvxField
                 :label="t('sshSettings.vault.unlockPolicy')"
-                :hint="t('sshSettings.vault.policyHint')"
+                :hint="vaultPolicyHint"
               >
                 <NvxSelect
                   :model-value="vaultStatus?.unlockPolicy ?? 'currentSession'"
@@ -1119,7 +1152,7 @@ function saveCustomScheme() {
                 <NvxButton
                   size="sm"
                   variant="secondary"
-                  @click="setVaultPolicy('automatic')"
+                  @click="setVaultPolicy(autoUnlockRepairPolicy)"
                 >
                   {{ t("sshSettings.vault.reenable") }}
                 </NvxButton>
@@ -1131,6 +1164,9 @@ function saveCustomScheme() {
             >
               {{ vaultActionError }}
             </NvxInlineNotice>
+          </div>
+          <div class="settings-vault__backup">
+            <OfflineBackup />
           </div>
         </article>
       </main>
@@ -1321,7 +1357,7 @@ function saveCustomScheme() {
 
 .settings-nav-item {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   gap: var(--nvx-space-1);
   align-items: center;
   min-height: 40px;
@@ -1334,6 +1370,16 @@ function saveCustomScheme() {
 .settings-security-item--active {
   background: var(--nvx-color-accent-soft);
   color: var(--nvx-color-accent);
+}
+
+.settings-nav-item__update-badge {
+  padding: 2px 5px;
+  border-radius: var(--nvx-radius-sm);
+  background: var(--nvx-color-accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
 }
 
 .settings-nav-item--active:hover,
@@ -1782,6 +1828,12 @@ function saveCustomScheme() {
   display: grid;
   gap: var(--nvx-space-3);
   padding-top: var(--nvx-space-4);
+}
+
+.settings-vault__backup {
+  margin-top: var(--nvx-space-6);
+  padding-top: var(--nvx-space-6);
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .vault-controls {

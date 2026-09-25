@@ -34,10 +34,12 @@ import { computed, onMounted, type Component } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { usePluginExtensionsStore } from "../../stores/pluginExtensions";
+import { useAppUpdateStore } from "../../stores/appUpdate";
 import { NvxIcon } from "../ui";
 
 const { t } = useI18n();
 const extensions = usePluginExtensionsStore();
+const appUpdate = useAppUpdateStore();
 
 const fixedItems = [
   { to: "/overview", labelKey: "navigation.overview", icon: LayoutDashboard },
@@ -76,7 +78,7 @@ const items = computed(() => [
   ...fixedItems.map((item) => ({ ...item, label: t(item.labelKey) })),
   ...extensions.navigation.map((item) => ({
     to: `/plugin/${encodeURIComponent(item.pluginId)}/${encodeURIComponent(item.navigation.pageId)}`,
-    label: item.pluginName,
+    label: item.navigation.label,
     icon: iconMap[item.navigation.icon] ?? Plug,
   })),
   { to: "/settings", label: t("navigation.settings"), icon: Settings },
@@ -97,12 +99,18 @@ onMounted(() => {
       :key="item.to"
       :to="item.to"
       class="nvx-navigation-rail__item"
+      :aria-label="item.to === '/settings' && appUpdate.hasUpdate ? `${item.label}, ${t('releases.newBadgeAccessible')}` : item.label"
     >
       <NvxIcon
         :icon="item.icon"
         :size="22"
       />
       <span>{{ item.label }}</span>
+      <span
+        v-if="item.to === '/settings' && appUpdate.hasUpdate"
+        class="nvx-navigation-rail__new"
+        aria-hidden="true"
+      >{{ t("releases.newBadge") }}</span>
     </RouterLink>
   </nav>
 </template>
@@ -123,6 +131,7 @@ onMounted(() => {
 }
 
 .nvx-navigation-rail__item {
+  position: relative;
   display: flex;
   flex-shrink: 0;
   flex-direction: column;
@@ -139,6 +148,19 @@ onMounted(() => {
   transition:
     color var(--nvx-motion-fast),
     background-color var(--nvx-motion-fast);
+}
+
+.nvx-navigation-rail__new {
+  position: absolute;
+  top: 3px;
+  right: 1px;
+  padding: 1px 3px;
+  border-radius: var(--nvx-radius-sm);
+  background: var(--nvx-color-accent);
+  color: #fff;
+  font-size: 9px;
+  line-height: 1.2;
+  font-weight: 700;
 }
 
 .nvx-navigation-rail__item:hover {

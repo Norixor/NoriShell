@@ -374,6 +374,11 @@ impl SftpSession {
         self.session.hardlink(oldpath, newpath).await.map(|_| true)
     }
 
+    /// Reports whether the server advertised atomic POSIX replacement.
+    pub fn supports_posix_rename(&self) -> bool {
+        self.features.posix_rename
+    }
+
     /// Atomically replaces `newpath` with `oldpath` when the OpenSSH
     /// `posix-rename@openssh.com` extension is available.
     pub async fn posix_rename<O, N>(&self, oldpath: O, newpath: N) -> SftpResult<bool>

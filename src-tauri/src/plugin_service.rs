@@ -12,6 +12,7 @@ mod api_sftp;
 mod api_subscriptions;
 pub(crate) mod app_integration;
 mod approval_policy;
+mod auto_sync;
 mod broker_chain;
 mod input;
 pub(crate) mod isolated;
@@ -154,6 +155,8 @@ pub(crate) struct PluginService {
     package_limits: PackageLimits,
     local_import_root: Arc<PathBuf>,
     app_handle: Arc<Mutex<Option<AppHandle>>>,
+    auto_sync_task: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    auto_sync_stopped: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     test_lifecycle: Arc<Mutex<Option<LifecycleState>>>,
     safe_mode_next_marker: Arc<PathBuf>,
@@ -602,6 +605,22 @@ fn ssh_sync_request_profile_id(request: &norishell_core_api::PluginSshSyncReques
     }
 }
 
+fn trusted_ssh_sync_policy(
+    settings: Option<&serde_json::Value>,
+    key: &str,
+) -> norishell_core_api::PluginSshSyncConflictPolicy {
+    if settings
+        .and_then(|value| value.get("values"))
+        .and_then(|value| value.get(key))
+        .and_then(serde_json::Value::as_str)
+        == Some("newest")
+    {
+        norishell_core_api::PluginSshSyncConflictPolicy::Newest
+    } else {
+        norishell_core_api::PluginSshSyncConflictPolicy::Prompt
+    }
+}
+
 fn ssh_sync_result_payload(status: &norishell_core_api::PluginSshSyncStatus) -> serde_json::Value {
     serde_json::to_value(status).expect("SSH sync status is serializable")
 }
@@ -802,6 +821,8 @@ impl PluginService {
             package_limits,
             local_import_root: Arc::new(local_import_root),
             app_handle: Arc::new(Mutex::new(None)),
+            auto_sync_task: Arc::new(Mutex::new(None)),
+            auto_sync_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             test_lifecycle: Arc::new(Mutex::new(None)),
             safe_mode_next_marker: Arc::new(safe_mode_next_marker),
@@ -2769,6 +2790,7 @@ impl PluginService {
     }
 
     pub(crate) async fn shutdown_all(&self) -> CoreResult<()> {
+        self.stop_auto_sync().await;
         let mut plugin_ids = {
             let runtime = self
                 .runtime
@@ -5425,7 +5447,20 @@ impl PluginService {
                 }
             }
         }
-        let ssh_sync_status = if let Some(sync_request) = parsed.ssh_sync_request.clone() {
+        let ssh_sync_status = if let Some(mut sync_request) = parsed.ssh_sync_request.clone() {
+            if let norishell_core_api::PluginSshSyncRequest::Sync {
+                conflict_policy,
+                deletion_policy,
+                ..
+            } = &mut sync_request
+            {
+                // The guest cannot turn a user's review policy into unattended
+                // overwrite authority by changing its request payload.
+                *conflict_policy =
+                    trusted_ssh_sync_policy(settings_projection.as_ref(), "conflictPolicy");
+                *deletion_policy =
+                    trusted_ssh_sync_policy(settings_projection.as_ref(), "deletionPolicy");
+            }
             let ssh_sync_profile_id = ssh_sync_request_profile_id(&sync_request).to_owned();
             let capability = self.has_capability(
                 request.meta.request_id.clone(),
@@ -5470,8 +5505,16 @@ impl PluginService {
             )?;
             let service = self.clone();
             let fence_request = request.clone();
-            let fence: crate::ssh_sync_exchange::ActionFence =
-                Arc::new(move || service.ssh_sync_action_fence_current(&fence_request));
+            let fence: crate::ssh_sync_exchange::ActionFence = Arc::new(move || {
+                service.ssh_sync_action_fence_current(&fence_request)
+                    && service
+                        .runtime
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .active_instances
+                        .get(fence_request.plugin_id.as_str())
+                        .is_some_and(|instance| instance.settings_revision == settings_revision)
+            });
             if parsed.storage_write.is_some() {
                 self.clear_ui_action_in_flight(&request);
                 self.record_runtime_failure(&request.plugin_id, request.instance_generation);
@@ -5484,6 +5527,8 @@ impl PluginService {
                 &sync_request,
                 norishell_core_api::PluginSshSyncRequest::Status { .. }
             ) {
+                coordinator
+                    .invalidate_browser_profile(request.plugin_id.as_str(), &ssh_sync_profile_id);
                 self.emit_ssh_sync_browser_invalidated(
                     Some(request.plugin_id.clone()),
                     Some(ssh_sync_profile_id.clone()),
@@ -6215,23 +6260,25 @@ pub(crate) async fn plugin_host_approval_open(
     service.host_approval_snapshot(request.clone())?;
     let label = secure_host_approval_window_label(&request.approval_id);
     if let Some(window) = app.get_webview_window(&label) {
-        window
-            .show()
-            .and_then(|()| window.set_focus())
+        crate::window_first_show::show_if_revealed(&window)
             .map_err(|_| plugin_runtime_error(request.meta.request_id, None))?;
         return Ok(());
     }
-    crate::secure_window_frame::apply_secure_window_frame(WebviewWindowBuilder::new(
+    crate::secure_window_frame::apply_secure_window_frame(
         &app,
-        label,
-        WebviewUrl::App(
-            format!(
-                "secure-plugin-host-approval.html?approvalId={}",
-                request.approval_id.as_str()
-            )
-            .into(),
+        &label,
+        WebviewWindowBuilder::new(
+            &app,
+            label.clone(),
+            WebviewUrl::App(
+                format!(
+                    "secure-plugin-host-approval.html?approvalId={}",
+                    request.approval_id.as_str()
+                )
+                .into(),
+            ),
         ),
-    ))
+    )
     .title("NoriShell")
     .resizable(false)
     .center()
@@ -6346,7 +6393,9 @@ pub(crate) async fn plugin_ui_action(
     request: PluginUiActionRequest,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginUiActionResponse> {
-    service.invoke_ui_action(request).await
+    // Keep the full broker state machine out of Tauri's IPC dispatch future.
+    // Moving that future through the Windows UI thread exhausted its 1 MiB stack.
+    Box::pin(service.invoke_ui_action(request)).await
 }
 
 #[tauri::command]
@@ -6384,11 +6433,8 @@ pub(crate) async fn plugin_local_package_prepare(
     app: AppHandle,
     service: State<'_, PluginService>,
 ) -> CoreResult<Option<PluginLocalPackagePreview>> {
-    let selected = app
-        .dialog()
-        .file()
-        .add_filter("ZIP", &["zip"])
-        .blocking_pick_file();
+    // Let the Core importer validate the selected bytes and ZIP structure.
+    let selected = app.dialog().file().blocking_pick_file();
     let Some(selected) = selected else {
         return Ok(None);
     };
@@ -8210,9 +8256,9 @@ fn platform_request_error(request_id: RequestId, error: &PluginPlatformError) ->
 
 fn persistence_error_code(error: &AppPersistenceError) -> &'static str {
     match error {
-        AppPersistenceError::Conflict | AppPersistenceError::IdempotencyConflict => {
-            "install_conflict"
-        }
+        AppPersistenceError::Conflict
+        | AppPersistenceError::IdempotencyConflict
+        | AppPersistenceError::DatabaseNotFresh => "install_conflict",
         _ => "install_conflict",
     }
 }
@@ -8483,9 +8529,9 @@ fn map_persistence_error(request_id: RequestId, error: AppPersistenceError) -> B
             plugin_validation_error(request_id)
         }
         AppPersistenceError::NotFound => plugin_not_found_error(request_id),
-        AppPersistenceError::Conflict | AppPersistenceError::IdempotencyConflict => {
-            plugin_conflict_error(request_id, None)
-        }
+        AppPersistenceError::Conflict
+        | AppPersistenceError::IdempotencyConflict
+        | AppPersistenceError::DatabaseNotFresh => plugin_conflict_error(request_id, None),
         AppPersistenceError::UnsupportedSchema(_) => plugin_error(
             request_id,
             "plugin.schema_incompatible",
@@ -8526,6 +8572,29 @@ mod tests {
         webview::InvokeRequest,
     };
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+    #[test]
+    fn ssh_sync_policy_is_derived_from_host_settings() {
+        use norishell_core_api::PluginSshSyncConflictPolicy::{Newest, Prompt};
+
+        assert_eq!(trusted_ssh_sync_policy(None, "deletionPolicy"), Prompt);
+        let settings = serde_json::json!({"values": {
+            "conflictPolicy": "newest", "deletionPolicy": "prompt"
+        }});
+        assert_eq!(
+            trusted_ssh_sync_policy(Some(&settings), "conflictPolicy"),
+            Newest
+        );
+        assert_eq!(
+            trusted_ssh_sync_policy(Some(&settings), "deletionPolicy"),
+            Prompt
+        );
+        let forged = serde_json::json!({"values": {"deletionPolicy": "unexpected"}});
+        assert_eq!(
+            trusted_ssh_sync_policy(Some(&forged), "deletionPolicy"),
+            Prompt
+        );
+    }
 
     #[test]
     fn plugin_stop_reports_reconciliation_after_aggregating_cleanup_failures() {
@@ -8674,6 +8743,30 @@ mod tests {
         )
         .expect("parse callback output");
         assert!(!auto_refresh_callback_output_is_admissible(&callback));
+    }
+
+    #[test]
+    fn ssh_sync_action_keeps_page_open_until_core_returns_replacement_document() {
+        let parsed = parse_plugin_ui_outputs(
+            "request-1",
+            vec![norishell_core_api::PluginRuntimeOutput {
+                request_id: "request-1".to_owned(),
+                kind: "ssh.sync.request".to_owned(),
+                payload_json: serde_json::json!({
+                    "action": "status",
+                    "profileId": "primary"
+                })
+                .to_string(),
+            }],
+        )
+        .expect("parse sync request");
+        assert!(parsed.templates.is_empty());
+        assert!(ui_action_output_is_admissible(
+            &parsed,
+            PluginUiActionKind::Standard,
+            false
+        ));
+        assert!(!auto_refresh_initial_output_is_admissible(&parsed));
     }
 
     #[test]

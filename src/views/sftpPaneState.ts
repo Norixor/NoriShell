@@ -32,6 +32,7 @@ export interface SftpPaneEntry {
   nameBytes: number[];
   size: number | null;
   modifiedAtUnixMs: number | null;
+  permissionBits?: number | null;
   remotePathBytes: number[] | null;
   localRelativePath: string | null;
   precondition: SftpPaneObjectPrecondition;

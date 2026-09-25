@@ -163,10 +163,12 @@ pub async fn secure_credential_open(
         .and_then(|url| url.join(&prompt_path).ok());
     let expected_query = format!("prompt={id}");
     let window_height = match request.kind {
-        SecureCredentialKind::Password => 340.0,
-        SecureCredentialKind::PrivateKey => 420.0,
+        SecureCredentialKind::Password => 400.0,
+        SecureCredentialKind::PrivateKey => 480.0,
     };
     let child = crate::secure_window_frame::apply_secure_window_frame(
+        &app,
+        &window_label(&id),
         WebviewWindowBuilder::new(&app, window_label(&id), WebviewUrl::App(prompt_path.into()))
             .title("NoriShell"),
     )
@@ -196,7 +198,7 @@ pub async fn secure_credential_open(
             pending.remove(&cancelled_id);
         }
     });
-    let _ = child.set_focus();
+    let _ = crate::window_first_show::focus_if_revealed(&child);
 
     let mut receiver = receiver;
     let deadline = tokio::time::sleep(Duration::from_secs(180));

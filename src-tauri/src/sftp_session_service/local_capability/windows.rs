@@ -262,7 +262,15 @@ impl NativeLocalDirectoryCapability {
     ) -> io::Result<Self> {
         let file = self.open_entry(name, true)?;
         let observed = NativeFileIdentity::from_file(&file)?;
-        if expected.kind != LocalObjectKind::Directory || !expected.matches_native(&observed) {
+        // Directory enumeration reports EndOfFile as zero, while opening the
+        // same directory can report its allocated index size. Contents can
+        // also change between listing and navigation. The volume and file ID
+        // identify the selected directory without relying on that metadata.
+        if expected.kind != LocalObjectKind::Directory
+            || !observed.is_directory()
+            || expected.device != observed.device
+            || expected.object != observed.inode
+        {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
         }
         Self::from_file(file)
@@ -356,6 +364,17 @@ mod tests {
             cursor = remaining;
         }
         assert_eq!(entries.len(), 2);
+        let (directory_name, directory_identity) = entries
+            .iter()
+            .find(|(_, identity)| identity.is_directory())
+            .unwrap();
+        let child = capability
+            .open_child(
+                directory_name,
+                &LocalObjectIdentity::from_native(directory_identity),
+            )
+            .unwrap();
+        child.list_page(None, 1, &revoked).unwrap();
         let (name, identity) = entries
             .iter()
             .find(|(_, identity)| identity.is_regular())
@@ -374,6 +393,41 @@ mod tests {
         assert_eq!(contents, "payload");
         revoked.store(true, Ordering::Release);
         assert!(capability.list_page(None, 1, &revoked).is_err());
+    }
+
+    #[test]
+    fn program_files_can_be_opened_by_path_and_from_a_root_listing() {
+        let Some(path) = std::env::var_os("ProgramFiles").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let direct = NativeLocalDirectoryCapability::register(&path).unwrap();
+        direct
+            .list_page(None, 256, &AtomicBool::new(false))
+            .unwrap();
+
+        let root = NativeLocalDirectoryCapability::register(path.parent().unwrap()).unwrap();
+        let mut stream = None;
+        let expected_name = path.file_name().unwrap().to_str().unwrap().as_bytes();
+        let identity = loop {
+            let (entries, next) = root
+                .list_page(stream, 256, &AtomicBool::new(false))
+                .unwrap();
+            if let Some((_, identity)) = entries
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(expected_name))
+            {
+                break identity;
+            }
+            stream = next;
+            assert!(
+                stream.is_some(),
+                "Program Files was missing from the root listing"
+            );
+        };
+        let child = root
+            .open_child(expected_name, &LocalObjectIdentity::from_native(&identity))
+            .unwrap();
+        child.list_page(None, 256, &AtomicBool::new(false)).unwrap();
     }
 
     #[test]

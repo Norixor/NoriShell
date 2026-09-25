@@ -4,10 +4,10 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">A local-first terminal and remote connection workspace</p>
 <p align="center">SSH · Local terminal · SFTP · Port forwarding · RDP / VNC · Encrypted Vault · Plugins</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.1-beta</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.2</p>
 <p align="center"><a href="README.md">简体中文</a> · English</p>
 
-NoriShell brings terminal sessions, remote connections, file transfer, remote desktops, and credential management into one desktop application. Core connectivity requires no account. Host configuration stays local, while persisted passwords and private keys are stored in a separate encrypted Vault. End-to-end encrypted synchronization can be enabled selectively through the Norixor plugin when cross-device access is needed.
+NoriShell brings terminal sessions, remote connections, file transfer, remote desktops, and credential management into one desktop application. Core connectivity requires no account. Host configuration stays local, while persisted passwords and private keys are stored in a separate encrypted Vault. End-to-end encrypted synchronization can be enabled selectively through the Norixor plugin or the [self-hosted sync example](example/self-host-sync/readme.md) when cross-device access is needed.
 
 The application is built with **Tauri 2, Vue 3, TypeScript, xterm, and Rust**. Rust Core owns connections, secrets, persistence, and resource lifecycles. The frontend owns interaction and reconstructible state projections.
 
@@ -24,6 +24,7 @@ The application is built with **Tauri 2, Vue 3, TypeScript, xterm, and Rust**. R
 - [Troubleshooting](#troubleshooting)
 - [Architecture and project layout](#architecture-and-project-layout)
 - [License](#license)
+- [Star History](#star-history)
 
 ## Highlights
 
@@ -51,7 +52,7 @@ The application is built with **Tauri 2, Vue 3, TypeScript, xterm, and Rust**. R
 | Credential protection | Separate encrypted Vault, one-time credentials, protected windows, and strict host-key confirmation and mismatch blocking |
 | Daily workflow | Quick commands, custom shortcuts, keyword highlighting, notifications, tray panel, and settings import/export |
 | Plugins and themes | Isolated WebAssembly plugins, fine-grained permissions, local ZIP import/upgrade, and data-only declarative themes |
-| Optional synchronization | Synchronizes explicitly selected encrypted SSH and remote-desktop configuration through the Norixor plugin without uploading the local Vault file |
+| Optional synchronization | Synchronizes portable SSH, remote-desktop configuration, and non-secret preferences through the Norixor plugin or a self-hosted service without uploading the local Vault file |
 | Telnet | Independent Telnet sessions gated by acknowledgement of plaintext transport, missing server identity, and tampering risks |
 
 ## Installation and quick start
@@ -67,11 +68,11 @@ Visit [GitHub Releases](https://github.com/Norixor/NoriShell/releases) and choos
 
 For a macOS installer, drag NoriShell into Applications; on Windows, follow the installer. ZIP builds use the same local settings and data directories. Extract the full archive before running. The Windows ZIP requires WebView2 Runtime to be installed.
 
+For cross-device sync, follow the [self-hosted server and plugin installation guide](docs/guides/users/self-host-sync.en.md) to deploy the server and import the matching plugin ZIP.
+
 ### Check for updates
 
-Open **Settings → About** and click “Check for updates”. NoriShell reads public version information from [GitHub Releases](https://github.com/Norixor/NoriShell/releases). When an update is available, “Download on GitHub” opens the release page in your browser so you can choose the installer for your platform and architecture.
-
-Download and install updates manually. Beta builds can discover newer betas and stable releases; stable builds only offer stable releases.
+Open **Settings → About** and click “Check for updates”. When a new version is available, you can choose the installer for your platform from [GitHub Releases](https://github.com/Norixor/NoriShell/releases). For stable releases, the macOS app and installed Windows app can also download and install a signed update after you confirm. Windows portable ZIP builds and beta updates require a manual download. Beta builds can discover newer betas and stable releases; stable builds only offer stable releases.
 
 ### First connection
 
@@ -141,6 +142,7 @@ Plugin development entry points:
 - [Package, install, and upgrade](docs/guides/developers/development/packaging.en.md)
 - [API methods and types](docs/guides/plugin-api/README.en.md)
 - [Example walkthroughs and source](docs/guides/developers/examples/README.en.md)
+- [Self-hosted sync plugin and Go server](example/self-host-sync/readme.md)
 
 More topics: [Wasm ABI](docs/guides/developers/wasm-abi.en.md) · [Theme plugins](docs/guides/developers/themes.en.md) · [Security and release checks](docs/guides/developers/security.en.md) · [SDK tooling](examples/plugins/sdk-tooling/README.md)
 
@@ -150,6 +152,7 @@ More topics: [Wasm ABI](docs/guides/developers/wasm-abi.en.md) · [Theme plugins
 | --- | --- |
 | [Complete documentation index](docs/guides/README.md) | English and Chinese entry points |
 | [User guides](docs/guides/users/README.en.md) | Plugin import, permissions, recovery, and appearance |
+| [Self-hosted sync installation](docs/guides/users/self-host-sync.en.md) | Server setup, plugin import, and first sync |
 | [Developer guides](docs/guides/developers/README.en.md) | Package authoring, ABI, brokers, UI, themes, and security checks |
 | [Plugin API reference](docs/guides/plugin-api/README.en.md) | Guest-accessible protocols, types, capabilities, resources, and events |
 | [Core API catalog](docs/guides/core-api/README.en.md) | Renderer IPC, commands, events, handlers, and Plugin Host boundaries; not a plugin permission surface |
@@ -191,6 +194,7 @@ src-tauri/              Tauri desktop entry point, native windows, and host inte
 crates/                 Rust Core, protocols, Vault, persistence, and plugin capabilities
 docs/guides/            User, plugin development, Plugin API, and Core API documentation
 examples/plugins/       Wasm plugin and SDK examples
+example/self-host-sync/ Self-hosted sync plugin, Go server, and Release packager
 examples/theme-plugins/ Declarative theme examples
 vendor/                 Patched dependencies with retained upstream licenses and change notes
 ```
@@ -202,3 +206,13 @@ See [vendor/README.md](vendor/README.md) for the origin, licensing, and modifica
 Original NoriShell code is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)**. See [LICENSE](LICENSE) for the complete terms. Distribution of a GPL-covered version must satisfy the corresponding source-availability and other license obligations.
 
 Third-party source code, dependencies, and assets retain their respective licenses. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=norixor%2Fnorishell&type=date&legend=top-left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=norixor/norishell&type=date&theme=dark&legend=top-left" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=norixor/norishell&type=date&legend=top-left" />
+    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=norixor/norishell&type=date&legend=top-left" />
+  </picture>
+</a>

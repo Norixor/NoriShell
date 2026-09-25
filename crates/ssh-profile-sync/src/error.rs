@@ -20,7 +20,7 @@ pub enum SyncCodecError {
     BindingMismatch,
     #[error("sync object authentication failed")]
     AuthenticationFailed,
-    #[error("recovery password must contain between 12 and 65536 UTF-8 bytes")]
+    #[error("recovery password must contain between 8 and 65536 UTF-8 bytes")]
     InvalidRecoveryPassword,
     #[error("recovery key derivation failed")]
     KeyDerivation,

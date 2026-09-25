@@ -1,6 +1,6 @@
 # 应用 IPC command 目录
 
-这是应用 IPC 表面的维护索引。每个稳定 command 精确的 `RequestType → ResultType` 以 [`core-api.ts`](../../../src/core-api/generated/core-api.ts) 为准。完整稳定清单见[生成 command 目录](commands.generated.md)：它来自 `COMMAND_*` 声明，共 210 项。实际 production registry 另见[handler 与 ACL 目录](handlers.generated.md)：它来自 `production_invoke_handler!` 与受信任主窗口 allowlist，共 264 个 handler。
+这是应用 IPC 表面的维护索引。每个稳定 command 精确的 `RequestType → ResultType` 以 [`core-api.ts`](../../../src/core-api/generated/core-api.ts) 为准。完整稳定清单见[生成 command 目录](commands.generated.md)：它来自 `COMMAND_*` 声明，共 210 项。实际 production registry 另见[handler 与 ACL 目录](handlers.generated.md)：它来自 `production_invoke_handler!` 与受信任主窗口 allowlist，共 277 个 handler。
 
 | 分组 | Commands |
 |---|---|
@@ -17,6 +17,8 @@
 
 
 `desktop_preferences_get` / `desktop_preferences_replace` 只供可信主窗口读取与 CAS 替换非秘密桌面偏好；revision 使用十进制字符串。`tray_actions_ready` 在注册 `native-tray-action` listener 后调用，返回待消费 token；`tray_action_take` 消费绑定原资源代次的一次性 token，不接受 renderer 提交目标。新建动作仍经过原 Launcher/认证门禁；资源定位绝不重连。
+
+`ssh_sync_preferences_publish`、`ssh_sync_preferences_pending_get`、`ssh_sync_preferences_apply_ack`、`ssh_sync_preferences_retry_pending` 仅供可信主窗口提交经校验的非秘密偏好快照、读取恢复待办与按组确认结果。它们不属于稳定 `COMMAND_*` 接口，也不向插件开放；Core 持久化待办并核对恢复代次后才允许应用。
 
 `native_json_export` 是受信任主窗口专用的原生 JSON 保存命令（`preferences | shortcuts`、JSON 文本 → 是否保存），不属于插件 API。目标路径只能由本次系统保存对话框产生；取消不写入，失败不回显路径，不授予通用文件写权限。
 

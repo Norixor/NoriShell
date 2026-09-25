@@ -12,6 +12,16 @@ pub enum DesktopProtocol {
     Vnc,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum VncProtocolVersion {
+    #[default]
+    Auto,
+    Rfb33,
+    Rfb37,
+    Rfb38,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopAvailability {
@@ -39,6 +49,8 @@ pub struct DesktopProfile {
     pub clipboard_enabled: bool,
     #[serde(default)]
     pub audio_playback_enabled: bool,
+    #[serde(default)]
+    pub vnc_protocol_version: VncProtocolVersion,
     pub revision: WireSequence,
 }
 
@@ -212,6 +224,7 @@ pub enum DesktopPromptKind {
     Credentials {
         username: String,
         domain: String,
+        password_only: bool,
     },
     HostKey {
         address: String,

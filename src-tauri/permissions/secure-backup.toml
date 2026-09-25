@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "secure-backup-commands"
+description = "Read, answer or cancel the exact offline-backup prompt owned by this window."
+commands.allow = ["offline_backup_secure_get", "offline_backup_secure_submit", "offline_backup_secure_cancel"]

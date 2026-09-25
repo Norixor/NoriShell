@@ -221,6 +221,7 @@ impl SftpSessionService {
             factory.resolve_saved_host(&host_id, request.expected_target_host_state_version)?;
         let verifier = Arc::new(TrustedSftpHostKeyVerifier {
             hosts: self.hosts.clone(),
+            unknown_capture: None,
         });
         let mut interaction = NonInteractiveSftpConnectionInteraction;
         let connection = factory.connect(profile, verifier, &mut interaction).await?;

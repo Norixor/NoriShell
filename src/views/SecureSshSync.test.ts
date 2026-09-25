@@ -36,6 +36,7 @@ const authorizePrompt: SshSyncSecurePrompt = {
   conflictCount: 0,
   updateCount: 0,
   deleteCount: 0,
+  relatedForwardRuleLabels: [],
   remoteHostCount: 0,
   remoteCredentialCount: 0,
   localComparedAtUnixMs: null,
@@ -181,10 +182,83 @@ describe("SecureSshSync", () => {
     expect(wrapper.find('.nvx-secure-window__actions button:last-child').attributes("disabled")).toBeDefined();
     expect(wrapper.text()).toContain("本机覆盖云端");
     expect(wrapper.text()).toContain("云端覆盖本机");
+    expect(wrapper.find(".nvx-secure-window__scroll .secure-sync__difference-list").exists()).toBe(true);
+    expect(wrapper.find(".nvx-secure-window__scroll .secure-sync__direction").exists()).toBe(false);
+    expect(wrapper.find(".nvx-secure-window__decision .secure-sync__direction").exists()).toBe(true);
+    const content = wrapper.find(".nvx-secure-window__content").element;
+    expect([...content.children].map((child) => child.className)).toEqual([
+      "nvx-secure-window__intro",
+      "nvx-secure-window__scroll",
+      "nvx-secure-window__decision",
+      "nvx-secure-window__footer",
+    ]);
     await wrapper.find('input[type="radio"][value="keepLocal"]').setValue();
     await wrapper.find('.nvx-secure-window__actions button:last-child').trigger("click");
     await flushPromises();
     expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({ decision: "keepLocal" }));
+    wrapper.unmount();
+  });
+
+  it("requires an explicit protected approval for item deletions in a merge", async () => {
+    client.getSshSyncSecurePrompt.mockResolvedValue({
+      ...authorizePrompt,
+      kind: "approveMergedDeletion",
+      oauth: null,
+      hostCount: 2,
+      remoteHostCount: 1,
+      deleteCount: 1,
+      differences: [{
+        kind: "host",
+        change: "localOnly",
+        label: "retired-host",
+        localSummary: "deploy@old.example:22",
+        remoteSummary: null,
+      }],
+      differenceTotalCount: 1,
+    } satisfies SshSyncSecurePrompt);
+    client.decideSshSyncSecurePrompt.mockResolvedValue({ accepted: true });
+    const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("确认逐项合并中的删除");
+    expect(wrapper.text()).toContain("retired-host");
+    expect(wrapper.text()).toContain("将删除的项目数");
+    expect(wrapper.find('input[type="radio"]').exists()).toBe(false);
+    await wrapper.find(".nvx-secure-window__actions button:last-child").trigger("click");
+    await flushPromises();
+    expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({ decision: "applyMerged" }));
+    wrapper.unmount();
+  });
+
+  it("names saved forwarding rules affected by cloud and merged Host deletions", async () => {
+    const relatedForwardRuleLabels = ["Local API tunnel", "Database access"];
+    for (const kind of ["chooseSyncDirection", "approveMergedDeletion"] as const) {
+      client.getSshSyncSecurePrompt.mockResolvedValue({
+        ...authorizePrompt,
+        kind,
+        oauth: null,
+        relatedForwardRuleLabels,
+      } satisfies SshSyncSecurePrompt);
+      const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
+      await flushPromises();
+
+      const notice = wrapper.find(".secure-sync__forward-rules");
+      expect(notice.exists()).toBe(true);
+      expect(notice.findAll("li").map((item) => item.text())).toEqual(relatedForwardRuleLabels);
+      expect(wrapper.text()).toContain("被删除 Host");
+      expect(wrapper.text()).toContain(kind === "chooseSyncDirection" ? "本机覆盖云端" : "确认本次合并删除");
+      wrapper.unmount();
+    }
+
+    client.getSshSyncSecurePrompt.mockResolvedValue({
+      ...authorizePrompt,
+      kind: "resolveConflicts",
+      oauth: null,
+      relatedForwardRuleLabels,
+    } satisfies SshSyncSecurePrompt);
+    const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
+    await flushPromises();
+    expect(wrapper.find(".secure-sync__forward-rules").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -282,19 +356,19 @@ describe("SecureSshSync", () => {
     const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("本机 Vault 未创建；已有其他设备请使用相同 Vault 密码；仅创建本机 Vault，之后继续操作。");
+    expect(wrapper.text()).toContain("此处设置的密码只用于本机；远端数据恢复时会另行验证上传设备的 Vault 密码。");
     const fields = wrapper.findAll('input[type="password"]');
     expect(fields).toHaveLength(2);
-    await fields[0]!.setValue("密码密码");
+    await fields[0]!.setValue("密码密码密码密码");
     await fields[1]!.setValue("不匹配的密码");
     expect(wrapper.find("footer .nvx-button--primary").attributes("disabled")).toBeDefined();
-    await fields[1]!.setValue("密码密码");
+    await fields[1]!.setValue("密码密码密码密码");
     expect(wrapper.find("footer .nvx-button--primary").attributes("disabled")).toBeUndefined();
     await wrapper.find("footer .nvx-button--primary").trigger("click");
 
     expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({
-      vaultPassword: "密码密码",
-      vaultPasswordConfirmation: "密码密码",
+      vaultPassword: "密码密码密码密码",
+      vaultPasswordConfirmation: "密码密码密码密码",
     }));
     expect(fields.every((field) => (field.element as HTMLInputElement).value === "")).toBe(true);
     resolve({ accepted: true });

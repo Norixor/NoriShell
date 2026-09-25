@@ -12,7 +12,7 @@ use norishell_core_api::{
 };
 use norishell_ssh_profile_sync::{
     PortableBundleV1, PortableCredentialMaterial, PortableDesktopProtocol, PortableObjectId,
-    RouteIngress,
+    PortableObjectKind, RouteIngress,
 };
 use uuid::Uuid;
 
@@ -225,6 +225,11 @@ fn project_rows(
     Vec<PluginSshSyncBrowserCredential>,
     Vec<PluginSshSyncBrowserDesktopProfile>,
 ) {
+    let update_times = bundle
+        .update_times
+        .iter()
+        .map(|item| ((item.kind, item.id), item.update_time_unix_ms))
+        .collect::<BTreeMap<_, _>>();
     let host_row_ids = bundle
         .objects
         .hosts
@@ -247,6 +252,9 @@ fn project_rows(
             port: host.port,
             username: host.username.clone(),
             tags: host.tags.iter().cloned().collect(),
+            updated_at_unix_ms: update_times
+                .get(&(PortableObjectKind::Host, host.id))
+                .copied(),
         })
         .collect::<Vec<_>>();
 
@@ -276,6 +284,9 @@ fn project_rows(
             port: profile.port,
             username: profile.username.clone(),
             domain: profile.domain.clone(),
+            updated_at_unix_ms: update_times
+                .get(&(PortableObjectKind::DesktopProfile, profile.id))
+                .copied(),
         })
         .collect::<Vec<_>>();
 
@@ -375,6 +386,9 @@ fn project_rows(
                 .flatten()
                 .filter_map(|profile_id| desktop_profile_row_ids.get(profile_id).cloned())
                 .collect(),
+            updated_at_unix_ms: update_times
+                .get(&(PortableObjectKind::Credential, credential.id))
+                .copied(),
         })
         .collect();
     (hosts, credentials, desktop_profiles)
@@ -397,7 +411,8 @@ mod tests {
     use norishell_core_api::PluginSshSyncBrowserState;
     use norishell_ssh_profile_sync::{
         BundleSchema, PortableAuthenticationPlan, PortableCredential, PortableDesktopProfile,
-        PortableDesktopProtocol, PortableHost, PortableIdentity, PortableObjects, PortableRoute,
+        PortableDesktopProtocol, PortableHost, PortableIdentity, PortableItemUpdateTime,
+        PortableObjects, PortableRoute,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -479,6 +494,9 @@ mod tests {
             secrets: Vec::new(),
             skipped_machine_bound: Vec::new(),
             tombstones: Vec::new(),
+            preferences: None,
+            update_times: Vec::new(),
+            preference_update_times: Default::default(),
         }
     }
 
@@ -511,6 +529,7 @@ mod tests {
                 height: 800,
                 clipboard_enabled: true,
                 audio_playback_enabled: true,
+                vnc_protocol_version: norishell_ssh_profile_sync::PortableVncProtocolVersion::Auto,
             })
             .collect();
         bundle
@@ -538,6 +557,46 @@ mod tests {
         assert_eq!(snapshot.credential_rows_omitted, 1);
         assert_eq!(snapshot.desktop_profile_rows_omitted, 1);
         assert_eq!(snapshot.remote_updated_at_unix_ms, Some(42));
+    }
+
+    #[test]
+    fn projection_uses_only_authenticated_per_item_update_times() {
+        let mut source = bundle_with_desktops(1, 1, 1);
+        source.schema = BundleSchema::V5;
+        source.update_times = [
+            (PortableObjectKind::Host, source.objects.hosts[0].id, 11),
+            (
+                PortableObjectKind::DesktopProfile,
+                source.objects.desktop_profiles[0].id,
+                22,
+            ),
+            (
+                PortableObjectKind::Credential,
+                source.objects.credentials[0].id,
+                33,
+            ),
+        ]
+        .into_iter()
+        .map(|(kind, id, update_time_unix_ms)| PortableItemUpdateTime {
+            kind,
+            id,
+            update_time_unix_ms,
+        })
+        .collect();
+        let cache = SshSyncBrowserCache::default();
+        let binding = binding();
+        cache.publish(&binding, &source, Some(999), &|| true);
+        let snapshot = cache.read(&binding, &|| true);
+        assert_eq!(snapshot.hosts[0].updated_at_unix_ms, Some(11));
+        assert_eq!(snapshot.desktop_profiles[0].updated_at_unix_ms, Some(22));
+        assert_eq!(snapshot.credentials[0].updated_at_unix_ms, Some(33));
+
+        source.update_times.clear();
+        cache.publish(&binding, &source, Some(999), &|| true);
+        let snapshot = cache.read(&binding, &|| true);
+        assert_eq!(snapshot.hosts[0].updated_at_unix_ms, None);
+        assert_eq!(snapshot.desktop_profiles[0].updated_at_unix_ms, None);
+        assert_eq!(snapshot.credentials[0].updated_at_unix_ms, None);
     }
 
     #[test]

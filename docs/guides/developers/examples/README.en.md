@@ -10,6 +10,7 @@ Each example in this section corresponds to source code maintained with NoriShel
 | [App integration](./app-integration.en.md) | Commands, optional shortcut, notification, navigation, or a native file handle | Wasm build and SDK package check | Command/shortcut, native picker, scope review, notification, and handle cleanup |
 | [Isolated UI](./isolated-ui.en.md) | A packaged HTML/CSS/JS surface with a restricted bridge | Wasm build and isolated-surface ABI verification | Isolated WebView, MessagePort, approval prompts, and resource cleanup |
 | [Protocol Demo](./protocol.en.md) | A framed TCP terminal provider | Loopback fixture harness, ZIP check, and checksum | Desktop terminal lifecycle and protected approval flow |
+| [Self-hosted sync](./self-host-sync.en.md) | Deploy your own HTTPS backend, encrypted exchange, and in-app automatic sync | Six Go builds, Wasm Host verifier, ZIP check, and companion asset | Native macOS/Windows import, approval, two-device restore, and a real HTTPS proxy |
 
 Start with [Quick start](../start/quickstart.en.md) for prerequisites and the exact API Demo build command. For every example, the package is local until you select it through the NoriShell import flow; no example build command publishes or installs it.
 

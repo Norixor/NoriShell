@@ -47,7 +47,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { rootRef, triggerRef, open, closeMenu, toggleMenu, handleMenuKeyDown } = usePopoverMenu();
+const { rootRef, triggerRef, viewportPanelRef, viewportPanelStyle, open, closeMenu, toggleMenu, handleMenuKeyDown } = usePopoverMenu();
 
 function run(action: "search" | "copy" | "session" | "close") {
   if (action === "search") emit("search");
@@ -83,127 +83,131 @@ function runSplit(direction: "horizontal" | "vertical") {
       />
     </NvxIconButton>
 
-    <div
-      v-if="open"
-      class="terminal-pane-overflow-menu__popover"
-      role="menu"
-      :aria-label="t('terminalTools.moreActions')"
-      @keydown="handleMenuKeyDown"
-    >
-      <button
-        class="terminal-pane-overflow-menu__item"
-        type="button"
-        role="menuitem"
-        @click="run('search')"
+    <Teleport to="body">
+      <div
+        v-if="open"
+        :ref="viewportPanelRef"
+        class="terminal-pane-overflow-menu__popover"
+        :style="viewportPanelStyle"
+        role="menu"
+        :aria-label="t('terminalTools.moreActions')"
+        @keydown="handleMenuKeyDown"
       >
-        <NvxIcon
-          :icon="Search"
-          :size="16"
-        />
-        {{ t("terminalTools.search") }}
-      </button>
-      <button
-        class="terminal-pane-overflow-menu__item"
-        type="button"
-        role="menuitem"
-        :disabled="!hasSelection"
-        @click="run('copy')"
-      >
-        <NvxIcon
-          :icon="Copy"
-          :size="16"
-        />
-        {{ t("terminalTools.copySelection") }}
-      </button>
-
-      <template v-if="showLayoutActions">
-        <div
-          class="terminal-pane-overflow-menu__separator"
-          role="separator"
-        />
         <button
           class="terminal-pane-overflow-menu__item"
           type="button"
           role="menuitem"
-          :disabled="!canSplitHorizontal"
-          @click="runSplit('horizontal')"
+          @click="run('search')"
         >
           <NvxIcon
-            :icon="Columns2"
+            :icon="Search"
             :size="16"
           />
-          {{ canSplitHorizontal ? t("sshTerminal.splitHorizontal") : t("sshTerminal.splitLimitReached") }}
+          {{ t("terminalTools.search") }}
         </button>
         <button
           class="terminal-pane-overflow-menu__item"
           type="button"
           role="menuitem"
-          :disabled="!canSplitVertical"
-          @click="runSplit('vertical')"
+          :disabled="!hasSelection"
+          @click="run('copy')"
         >
           <NvxIcon
-            :icon="Rows2"
+            :icon="Copy"
             :size="16"
           />
-          {{ canSplitVertical ? t("sshTerminal.splitVertical") : t("sshTerminal.splitLimitReached") }}
+          {{ t("terminalTools.copySelection") }}
         </button>
-      </template>
 
-      <NvxPluginContributionSlot
-        class="terminal-pane-overflow-menu__plugins"
-        extension-slot="terminalToolbar"
-        menu
-        :menu-heading="t('plugins.toolbar.label')"
-        :instance-key="pluginContextKey"
-      />
+        <template v-if="showLayoutActions">
+          <div
+            class="terminal-pane-overflow-menu__separator"
+            role="separator"
+          />
+          <button
+            class="terminal-pane-overflow-menu__item"
+            type="button"
+            role="menuitem"
+            :disabled="!canSplitHorizontal"
+            @click="runSplit('horizontal')"
+          >
+            <NvxIcon
+              :icon="Columns2"
+              :size="16"
+            />
+            {{ canSplitHorizontal ? t("sshTerminal.splitHorizontal") : t("sshTerminal.splitLimitReached") }}
+          </button>
+          <button
+            class="terminal-pane-overflow-menu__item"
+            type="button"
+            role="menuitem"
+            :disabled="!canSplitVertical"
+            @click="runSplit('vertical')"
+          >
+            <NvxIcon
+              :icon="Rows2"
+              :size="16"
+            />
+            {{ canSplitVertical ? t("sshTerminal.splitVertical") : t("sshTerminal.splitLimitReached") }}
+          </button>
+        </template>
 
-      <NvxPluginExtensionTarget
-        target-id="terminal.contextMenu"
-        :instance-key="pluginContextKey"
-        :display-label="t('terminalTools.moreActions')"
-      />
-
-      <template v-if="showSessionAction">
-        <div
-          class="terminal-pane-overflow-menu__separator"
-          role="separator"
+        <NvxPluginContributionSlot
+          class="terminal-pane-overflow-menu__plugins"
+          extension-slot="terminalToolbar"
+          menu
+          :menu-heading="t('plugins.toolbar.label')"
+          :instance-key="pluginContextKey"
         />
-        <button
-          class="terminal-pane-overflow-menu__item"
-          :class="{ 'terminal-pane-overflow-menu__item--danger': sessionActionDanger }"
-          type="button"
-          role="menuitem"
-          :disabled="sessionActionDisabled"
-          @click="run('session')"
-        >
-          <NvxIcon
-            v-if="sessionActionIcon"
-            :icon="sessionActionIcon"
-            :size="16"
-          />
-          {{ sessionActionLabel }}
-        </button>
-      </template>
 
-      <template v-if="showLayoutActions">
-        <div
-          class="terminal-pane-overflow-menu__separator"
-          role="separator"
+        <NvxPluginExtensionTarget
+          target-id="terminal.contextMenu"
+          :instance-key="pluginContextKey"
+          :display-label="t('terminalTools.moreActions')"
         />
-        <button
-          class="terminal-pane-overflow-menu__item terminal-pane-overflow-menu__item--danger"
-          type="button"
-          role="menuitem"
-          @click="run('close')"
-        >
-          <NvxIcon
-            :icon="X"
-            :size="16"
+
+        <template v-if="showSessionAction">
+          <div
+            class="terminal-pane-overflow-menu__separator"
+            role="separator"
           />
-          {{ t("sshTerminal.closePane") }}
-        </button>
-      </template>
-    </div>
+          <button
+            class="terminal-pane-overflow-menu__item"
+            :class="{ 'terminal-pane-overflow-menu__item--danger': sessionActionDanger }"
+            type="button"
+            role="menuitem"
+            :disabled="sessionActionDisabled"
+            @click="run('session')"
+          >
+            <NvxIcon
+              v-if="sessionActionIcon"
+              :icon="sessionActionIcon"
+              :size="16"
+            />
+            {{ sessionActionLabel }}
+          </button>
+        </template>
+
+        <template v-if="showLayoutActions">
+          <div
+            class="terminal-pane-overflow-menu__separator"
+            role="separator"
+          />
+          <button
+            class="terminal-pane-overflow-menu__item terminal-pane-overflow-menu__item--danger"
+            type="button"
+            role="menuitem"
+            @click="run('close')"
+          >
+            <NvxIcon
+              :icon="X"
+              :size="16"
+            />
+            {{ t("sshTerminal.closePane") }}
+          </button>
+        </template>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -219,12 +223,13 @@ function runSplit(direction: "horizontal" | "vertical") {
 }
 
 .terminal-pane-overflow-menu__popover {
-  position: absolute;
+  position: fixed;
   z-index: var(--nvx-z-popover);
-  top: calc(100% + var(--nvx-space-1));
-  right: 0;
   display: grid;
+  box-sizing: border-box;
   width: min(208px, calc(100vw - 24px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
   padding: 2px;
   border: var(--nvx-border-width) solid var(--nvx-color-border-strong);
   border-radius: var(--nvx-radius-md);

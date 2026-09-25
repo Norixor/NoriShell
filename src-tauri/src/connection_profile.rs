@@ -859,6 +859,7 @@ fn map_persistence_error(error: AppPersistenceError) -> ConnectionProfileError {
             ConnectionProfileError::InvalidTarget
         }
         AppPersistenceError::IdempotencyConflict
+        | AppPersistenceError::DatabaseNotFresh
         | AppPersistenceError::InvalidStoredData
         | AppPersistenceError::KnownHostMismatch { .. }
         | AppPersistenceError::KnownHostAlgorithmChanged { .. }
@@ -1795,8 +1796,8 @@ mod tests {
                 monitoring.revision,
                 &MonitoringPolicy {
                     enabled: true,
-                    sample_interval_seconds: 30,
-                    sample_timeout_seconds: 10,
+                    sample_interval_millis: 30000,
+                    sample_timeout_millis: 10000,
                     disk_mount_ids: vec![DiskResourceId::Root],
                     network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
                 },
@@ -1919,8 +1920,8 @@ mod tests {
                 monitoring.revision,
                 &MonitoringPolicy {
                     enabled: true,
-                    sample_interval_seconds: 30,
-                    sample_timeout_seconds: 10,
+                    sample_interval_millis: 30000,
+                    sample_timeout_millis: 10000,
                     disk_mount_ids: vec![DiskResourceId::Root],
                     network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
                 },

@@ -8,6 +8,18 @@ vi.mock("../../core-api/desktop-client", () => ({ desktopClient: mocks }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ close: mocks.close }) }));
 beforeEach(() => { vi.clearAllMocks(); mocks.decide.mockReturnValue(new Promise(() => undefined)); });
 describe("isolated desktop credentials", () => {
+  it("asks only for a password on a classic VNC connection", async () => {
+    mocks.prompt.mockResolvedValue({ id: "prompt", sessionId: "session", label: "VNC", prompt: { kind: "credentials", username: "", domain: "", passwordOnly: true } });
+    const wrapper = mount(SecureDesktop, { global: { plugins: [createI18n({ legacy: false, locale: "en", messages: { en: { desktop: desktopEn, window: { protected: "Protected" } } } })] } });
+    await flushPromises();
+    expect(wrapper.find("#desktop-secure-user").exists()).toBe(false);
+    expect(wrapper.find("#desktop-secure-domain").exists()).toBe(false);
+    await wrapper.get("#desktop-secure-password").setValue("synthetic-fixture-value");
+    await wrapper.findAll("button").find((button) => button.text() === desktopEn.approve)!.trigger("click");
+    expect(mocks.decide).toHaveBeenCalledWith(expect.objectContaining({ username: null, domain: null, password: "synthetic-fixture-value" }));
+    wrapper.unmount();
+  });
+
   it("clears the Vault password before decision acknowledgement", async () => {
     mocks.prompt.mockResolvedValue({ id: "prompt", sessionId: "session", label: "Fixture", prompt: { kind: "vaultUnlock" } });
     const wrapper = mount(SecureDesktop, { global: { plugins: [createI18n({ legacy: false, locale: "en", messages: { en: { desktop: desktopEn, window: { protected: "Protected" } } } })] } });
@@ -27,18 +39,18 @@ describe("isolated desktop credentials", () => {
 
     const fields = wrapper.findAll('input[type="password"]');
     expect(fields).toHaveLength(2);
-    await fields[0]!.setValue("密码密码");
+    await fields[0]!.setValue("密码密码密码密码");
     await fields[1]!.setValue("different-password");
     const approve = wrapper.findAll("button").find((button) => button.text() === desktopEn.approve)!;
     expect(approve.attributes("disabled")).toBeDefined();
-    await fields[1]!.setValue("密码密码");
+    await fields[1]!.setValue("密码密码密码密码");
     expect(approve.attributes("disabled")).toBeUndefined();
     await approve.trigger("click");
 
     expect(mocks.decide).toHaveBeenCalledWith(expect.objectContaining({
       approved: true,
-      password: "密码密码",
-      passwordConfirmation: "密码密码",
+      password: "密码密码密码密码",
+      passwordConfirmation: "密码密码密码密码",
     }));
     expect(fields.every((field) => (field.element as HTMLInputElement).value === "")).toBe(true);
     wrapper.unmount();

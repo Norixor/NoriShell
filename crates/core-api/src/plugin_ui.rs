@@ -626,7 +626,7 @@ pub struct PluginSshSyncOAuthProfile {
     pub revoke_url: String,
     pub client_id: String,
     pub scopes: Vec<String>,
-    /// Canonical HTTPS origins that may receive this profile's bearer token.
+    /// Canonical HTTP or HTTPS origins that may receive this profile's bearer token.
     /// Paths are intentionally excluded so the Core can compare the final
     /// parsed request URL without trusting plugin-controlled string prefixes.
     pub resource_origins: Vec<String>,
@@ -634,7 +634,7 @@ pub struct PluginSshSyncOAuthProfile {
 
 /// Plugin-owned credential authentication endpoints. The plugin renders the
 /// host-managed login/register fields, while Core resolves only the field
-/// references from the current explicit action, performs the bounded HTTPS
+/// references from the current explicit action, performs the bounded HTTP(S)
 /// exchange and stores refresh tokens in the local Vault.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -657,7 +657,7 @@ pub enum PluginSshSyncHttpMethod {
     Put,
 }
 
-/// Plugin-chosen HTTPS upload target. Core sends only the opaque encrypted
+/// Plugin-chosen HTTP(S) upload target. Core sends only the opaque encrypted
 /// exchange body and attaches a plugin/profile-scoped OAuth token when asked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -668,7 +668,7 @@ pub struct PluginSshSyncUploadTarget {
     pub if_match: Option<String>,
 }
 
-/// Plugin-chosen HTTPS download target. Response bytes remain in Core until
+/// Plugin-chosen HTTP(S) download target. Response bytes remain in Core until
 /// they have been authenticated, decrypted and approved in a secure surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -677,7 +677,7 @@ pub struct PluginSshSyncDownloadSource {
     pub use_oauth: bool,
 }
 
-/// Plugin-chosen HTTPS deletion target. Core obtains and attaches the current
+/// Plugin-chosen HTTP(S) deletion target. Core obtains and attaches the current
 /// strong ETag only after the user confirms the destructive operation in a
 /// protected window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -687,7 +687,7 @@ pub struct PluginSshSyncDeleteTarget {
     pub use_oauth: bool,
 }
 
-/// A sync plugin owns provider login, HTTPS endpoints and its declarative UI.
+/// A sync plugin owns provider login, HTTP(S) endpoints and its declarative UI.
 /// Protocol minor 7 keeps revision, strong ETag/CAS, encryption, durable
 /// baselines and conflict detection in Core after the high-risk capability and
 /// action lease have been revalidated. Older variants remain for protocol 4-6
@@ -752,6 +752,10 @@ pub enum PluginSshSyncRequest {
         auth: PluginSshSyncCredentialProfile,
         source: PluginSshSyncDownloadSource,
         destination: PluginSshSyncUploadTarget,
+        #[serde(default)]
+        conflict_policy: PluginSshSyncConflictPolicy,
+        #[serde(default)]
+        deletion_policy: PluginSshSyncConflictPolicy,
     },
     /// Opens the protected scope editor. All eligible portable objects remain
     /// the default when no custom scope has been saved.
@@ -765,6 +769,14 @@ pub enum PluginSshSyncRequest {
         auth: PluginSshSyncCredentialProfile,
         target: PluginSshSyncDeleteTarget,
     },
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginSshSyncConflictPolicy {
+    #[default]
+    Prompt,
+    Newest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -822,6 +834,12 @@ pub enum PluginSshSyncStableErrorCode {
     StateConflict,
     RemoteDataInvalid,
     RemoteFormatUnsupported,
+    RecoveryRemoteKeyAuthenticationFailed,
+    RecoveryActionExpired,
+    LocalDataInvalid,
+    PreferencesUnavailable,
+    LocalKeyUnavailable,
+    OperationBusy,
     OperationRejected,
     Internal,
 }
@@ -838,6 +856,10 @@ pub struct PluginSshSyncStatus {
     pub credential_count: u32,
     pub conflict_count: u32,
     pub stable_error_code: Option<PluginSshSyncStableErrorCode>,
+    /// Fixed failure-site identifier. Contains no input, credentials, or remote body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diagnostic_code: Option<String>,
     pub http_status: Option<u16>,
     pub remote_revision: Option<u64>,
     pub etag: Option<String>,
@@ -879,6 +901,7 @@ pub enum SshSyncSecurePromptKind {
     ApproveRestore,
     ResolveConflicts,
     ChooseSyncDirection,
+    ApproveMergedDeletion,
     ResetRemote,
 }
 
@@ -896,6 +919,7 @@ pub enum SshSyncSecureDifferenceKind {
     Monitoring,
     LoginAutomation,
     EncryptedSecret,
+    Preferences,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1001,6 +1025,9 @@ pub struct SshSyncSecurePrompt {
     pub difference_total_count: u32,
     #[serde(default)]
     pub difference_omitted_count: u32,
+    /// Saved local rules removed with deleted hosts; visible only in the protected review.
+    #[serde(default)]
+    pub related_forward_rule_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1010,6 +1037,7 @@ pub enum SshSyncSecureDecision {
     Cancel,
     KeepLocal,
     UseRemote,
+    ApplyMerged,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1297,6 +1325,7 @@ mod tests {
             host_count: 3,
             credential_count: 4,
             conflict_count: 1,
+            diagnostic_code: None,
             stable_error_code: Some(PluginSshSyncStableErrorCode::StateConflict),
             http_status: Some(412),
             remote_revision: Some(4),

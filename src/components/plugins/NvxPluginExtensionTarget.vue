@@ -39,6 +39,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   availability: [count: number];
   catalog: [items: Array<Pick<PluginUiContribution, "pluginId" | "pluginName" | "icon">>];
+  openSettings: [pluginId: string, pluginName: string, fieldKey: string];
 }>();
 
 const extensions = usePluginExtensionsStore(getActivePinia() ?? createPinia());
@@ -76,11 +77,12 @@ function showFeedback(title: string, tone: NvxTipTone = "info", message?: string
   });
 }
 
-function syncFailureMessage(profile: string, code: string | null) {
+function syncFailureMessage(profile: string, code: string | null, diagnostic?: string | null) {
   const key = code ? `plugins.sshSync.errors.${code}` : "";
-  return key && te(key)
+  const message = key && te(key)
     ? t(key)
     : t("plugins.sshSync.operationFailed", { profile, code: code ?? "unknown" });
+  return diagnostic ? `${message} [${diagnostic}]` : message;
 }
 
 async function loadContributions(current: PluginTargetLease) {
@@ -184,6 +186,18 @@ async function invoke(
   automatic = false,
 ) {
   if (props.disabled) return null;
+  const settingsActionPrefix = "norishell.openSettings:";
+  if (actionId.startsWith(settingsActionPrefix)) {
+    const fieldKey = actionId.slice(settingsActionPrefix.length);
+    if (props.targetId === "app.page" && !automatic && fields.length === 0 && fieldKey
+      && lease.value?.context.contextHandle === contribution.target.contextHandle
+      && visibleContributions.value.includes(contribution)
+      && contribution.document.nodes.some((node) => node.kind === "button"
+        && node.actionId === actionId && !node.disabled)) {
+      emit("openSettings", contribution.pluginId, contribution.pluginName, fieldKey);
+    }
+    return null;
+  }
   terminalSuggestion.value = null;
   if (automatic) tips.dismissScope(feedbackScope.value);
   const hostDomEpoch = pluginHostDomEpoch(contribution.pluginId);
@@ -246,15 +260,32 @@ async function invoke(
       : status.operationState === "needsReview"
         ? t("plugins.sshSync.operationNeedsReview", { profile: status.profileId })
         : status.operationState === "failed"
-          ? syncFailureMessage(status.profileId, status.stableErrorCode)
+          ? syncFailureMessage(status.profileId, status.stableErrorCode, status.diagnosticCode)
           : t("plugins.sshSync.operationIdle", { profile: status.profileId });
     if (!automatic) {
       showFeedback(title, tone);
     }
   }
   terminalSuggestion.value = response.terminalInputSuggestion;
-  return response.contribution;
+  return {
+    contribution: response.contribution,
+    closeDialogOnSuccess: contribution.pluginId === "com.norishell.self-host-sync"
+      && actionId === "sync.login"
+      && response.sshSyncStatus?.accountState === "connected"
+      && response.sshSyncStatus.operationState === "idle"
+      && response.sshSyncStatus.stableErrorCode === null,
+  };
 }
+
+async function refreshAfterSettingsChange(pluginId: string) {
+  if (disposed || props.disabled || props.targetId !== "app.page") return;
+  const contribution = visibleContributions.value.find((item) => item.pluginId === pluginId);
+  if (contribution?.onOpenActionId) {
+    await invoke(contribution, contribution.onOpenActionId, [], true);
+  }
+}
+
+defineExpose({ refreshAfterSettingsChange });
 
 // A timer belongs to one visible target activation, not to a document revision.
 // Failed background refreshes pause until the next activation; interactive

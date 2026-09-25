@@ -36,6 +36,7 @@ export default defineConfig({
         main: resolve(projectRoot, "index.html"),
         toolWindow: resolve(projectRoot, "tool-window.html"),
         secureVault: resolve(projectRoot, "secure-vault.html"),
+        secureBackup: resolve(projectRoot, "secure-backup.html"),
         secureCredential: resolve(projectRoot, "secure-credential.html"),
         secureSshChallenge: resolve(projectRoot, "secure-ssh-challenge.html"),
         trayPanel: resolve(projectRoot, "tray-panel.html"),

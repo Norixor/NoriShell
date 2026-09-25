@@ -10,7 +10,7 @@ import NvxNavigationRail from "./NvxNavigationRail.vue";
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => false }));
 
 describe("NvxNavigationRail", () => {
-  it("uses the plugin name instead of a long plugin page title", async () => {
+  it("uses the plugin's localized navigation label", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
     const extensions = usePluginExtensionsStore();
@@ -24,7 +24,7 @@ describe("NvxNavigationRail", () => {
       contributionRevision: "1",
       navigation: {
         navigationId: "norixorSync",
-        label: "Norixor 同步",
+        label: "同步",
         icon: "shield",
         pageId: "account",
         order: 100,
@@ -41,7 +41,6 @@ describe("NvxNavigationRail", () => {
       global: { plugins: [pinia, router, i18n] },
     });
     const pluginLink = wrapper.get('a[href="/plugin/org.norixor/account"]');
-    expect(pluginLink.text()).toContain("Norixor");
-    expect(pluginLink.text()).not.toContain("同步");
+    expect(pluginLink.text()).toBe("同步");
   });
 });

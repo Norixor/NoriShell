@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
 
 import { NvxPluginExtensionTarget } from "../components/plugins";
+import NvxPluginSettingsDialog from "../components/plugins/NvxPluginSettingsDialog.vue";
 import { NvxInlineNotice } from "../components/ui";
 import { listInstalledPlugins } from "../core-api/client";
 import { usePluginExtensionsStore } from "../stores/pluginExtensions";
@@ -20,6 +21,19 @@ const navigationItem = computed(() => extensions.navigation.find((item) => (
 )) ?? null);
 const instanceKey = computed(() => `${pluginId.value}|${pageId.value}`);
 const sshSyncPermissionDenied = ref(false);
+const settingsTarget = ref<{ pluginId: string; pageId: string; pluginName: string; fieldKey: string } | null>(null);
+const pluginTarget = ref<InstanceType<typeof NvxPluginExtensionTarget> | null>(null);
+
+function openSettings(plugin: string, pluginName: string, fieldKey: string) {
+  if (!navigationItem.value || plugin !== pluginId.value) return;
+  settingsTarget.value = { pluginId: plugin, pageId: pageId.value, pluginName, fieldKey };
+}
+
+function refreshAfterSettingsSaved(plugin: string) {
+  if (plugin === pluginId.value) {
+    void pluginTarget.value?.refreshAfterSettingsChange(plugin).catch(() => undefined);
+  }
+}
 
 async function loadPermissionState() {
   const installed = (await listInstalledPlugins()).find((plugin) => plugin.pluginId === pluginId.value);
@@ -40,6 +54,10 @@ function handlePermissionChanged() {
 }
 
 watch([pluginId, pageId, navigationItem], () => {
+  if (settingsTarget.value && (!navigationItem.value || settingsTarget.value.pluginId !== pluginId.value
+    || settingsTarget.value.pageId !== pageId.value)) {
+    settingsTarget.value = null;
+  }
   if (navigationItem.value) workspaceTabs.ensurePluginPageTab(navigationItem.value);
 });
 onMounted(() => {
@@ -63,12 +81,22 @@ onBeforeUnmount(() => {
       </NvxInlineNotice>
       <section class="plugin-page__surface">
         <NvxPluginExtensionTarget
+          ref="pluginTarget"
           target-id="app.page"
           :instance-key="instanceKey"
           :display-label="navigationItem.navigation.label"
           :show-identity="false"
+          @open-settings="openSettings"
         />
       </section>
+      <NvxPluginSettingsDialog
+        v-if="settingsTarget"
+        :plugin-id="settingsTarget.pluginId"
+        :plugin-name="settingsTarget.pluginName"
+        :initial-field-key="settingsTarget.fieldKey"
+        @saved="refreshAfterSettingsSaved($event.pluginId)"
+        @close="settingsTarget = null"
+      />
     </template>
     <NvxInlineNotice
       v-else

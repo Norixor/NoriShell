@@ -1304,9 +1304,7 @@ fn emit_click(app: &AppHandle, state: &Arc<Mutex<NotificationState>>, click: Not
             return;
         }
         if let Some(window) = app_for_callback.get_webview_window("main") {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
+            let _ = crate::window_first_show::show_if_revealed(&window);
             match click {
                 NotificationClick::Terminal(click) => {
                     let _ = window.emit(CLICK_EVENT, click);

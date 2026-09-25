@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "fields": [
+    {
+      "type": "string",
+      "key": "serverUrl",
+      "label": {"en": "Server URL or IP:port", "zh-CN": "服务器地址或 IP:端口"},
+      "default": "",
+      "maxLength": 512
+    },
+    {
+      "type": "boolean",
+      "key": "autoSyncEnabled",
+      "label": {"en": "Sync automatically while the app is running", "zh-CN": "应用运行时自动同步"},
+      "default": false
+    },
+    {
+      "type": "select",
+      "key": "conflictPolicy",
+      "label": {"en": "When the same item changes on two devices", "zh-CN": "两台设备修改同一项目时"},
+      "default": "newest",
+      "options": [
+        {"value": "newest", "label": {"en": "Use the newer update automatically", "zh-CN": "自动采用较新修改"}},
+        {"value": "prompt", "label": {"en": "Ask me to choose", "zh-CN": "由我选择"}}
+      ]
+    },
+    {
+      "type": "select",
+      "key": "deletionPolicy",
+      "label": {"en": "When a newer update deletes an item", "zh-CN": "较新修改删除项目时"},
+      "default": "newest",
+      "options": [
+        {"value": "newest", "label": {"en": "Delete automatically", "zh-CN": "自动删除"}},
+        {"value": "prompt", "label": {"en": "Ask", "zh-CN": "询问"}}
+      ]
+    },
+    {
+      "type": "select",
+      "key": "autoSyncIntervalMinutes",
+      "label": {"en": "Automatic sync interval", "zh-CN": "自动同步间隔"},
+      "default": "15",
+      "options": [
+        {"value": "5", "label": {"en": "5 minutes", "zh-CN": "5 分钟"}},
+        {"value": "15", "label": {"en": "15 minutes", "zh-CN": "15 分钟"}},
+        {"value": "30", "label": {"en": "30 minutes", "zh-CN": "30 分钟"}},
+        {"value": "60", "label": {"en": "60 minutes", "zh-CN": "60 分钟"}}
+      ]
+    },
+    {
+      "type": "boolean",
+      "key": "checkOnStartup",
+      "label": {"en": "Check once after app starts", "zh-CN": "应用启动后检查一次"},
+      "default": false
+    }
+  ]
+}

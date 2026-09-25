@@ -36,25 +36,29 @@ mod forward_rules;
 pub use desktop_preferences::*;
 pub use desktop_profiles::validate_desktop_profile;
 mod migrations;
+mod offline_import;
+pub use offline_import::*;
 mod plugin_credentials;
 mod plugin_operation_permissions;
 mod plugin_permissions;
 mod plugin_private_storage;
 mod plugin_settings;
 mod plugin_tasks;
+mod sync_item_times;
 pub use plugin_credentials::*;
 pub use plugin_operation_permissions::*;
 pub use plugin_permissions::*;
 pub use plugin_private_storage::*;
 pub use plugin_settings::*;
 pub use plugin_tasks::*;
+pub use sync_item_times::*;
 
 #[cfg(test)]
 use migrations::{
     migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6, migrate_v6_to_v7,
 };
 
-const SCHEMA_VERSION: i64 = 42;
+const SCHEMA_VERSION: i64 = 45;
 const ROOT_DISK_RESOURCE_ID: &str = "root";
 const AGGREGATE_NON_LOOPBACK_NETWORK_RESOURCE_ID: &str = "aggregateNonLoopback";
 const MAX_TERMINAL_WORKSPACE_LAYOUT_BYTES: usize = 256 * 1024;
@@ -86,6 +90,57 @@ pub(crate) fn remove_schema_added_after_fixture_version(
     connection: &Connection,
     fixture_version: i64,
 ) -> rusqlite::Result<()> {
+    if fixture_version < 45 {
+        let mut statement = connection.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'
+             AND name LIKE 'ssh_sync_clock_%'",
+        )?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for name in names {
+            connection.execute_batch(&format!("DROP TRIGGER \"{name}\";"))?;
+        }
+        connection.execute_batch("DROP TABLE IF EXISTS ssh_sync_local_item_times;")?;
+    }
+    if fixture_version < 44 {
+        connection.execute_batch(
+            "PRAGMA defer_foreign_keys = ON;
+             BEGIN IMMEDIATE;
+             ALTER TABLE host_monitoring_policies RENAME TO host_monitoring_policies_v44;
+             CREATE TABLE host_monitoring_policies (
+               host_id TEXT PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE,
+               revision INTEGER NOT NULL CHECK(revision >= 1),
+               enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+               sample_interval_seconds INTEGER NOT NULL
+                 CHECK(sample_interval_seconds BETWEEN 5 AND 300),
+               sample_timeout_seconds INTEGER NOT NULL
+                 CHECK(sample_timeout_seconds BETWEEN 2 AND 30),
+               created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+               CHECK(sample_timeout_seconds < sample_interval_seconds)
+             ) STRICT;
+             WITH old_values AS (
+               SELECT host_id, revision, enabled,
+                 CASE WHEN sample_interval_millis = 1500 THEN 15
+                   ELSE MIN(300, MAX(5, (sample_interval_millis + 999) / 1000)) END AS interval_seconds,
+                 MIN(30, MAX(2, (sample_timeout_millis + 999) / 1000)) AS timeout_seconds,
+                 created_at_ms, updated_at_ms
+               FROM host_monitoring_policies_v44
+             )
+             INSERT INTO host_monitoring_policies
+               (host_id, revision, enabled, sample_interval_seconds,
+                sample_timeout_seconds, created_at_ms, updated_at_ms)
+             SELECT host_id, revision, enabled,
+               MAX(interval_seconds, timeout_seconds + 1), timeout_seconds,
+               created_at_ms, updated_at_ms
+             FROM old_values;
+             DROP TABLE host_monitoring_policies_v44;
+             COMMIT;",
+        )?;
+    }
+    if fixture_version < 43 {
+        connection.execute_batch("DROP TABLE IF EXISTS offline_import_sagas;")?;
+    }
     if fixture_version < 42 {
         connection.execute_batch(
             "PRAGMA defer_foreign_keys = ON;
@@ -280,6 +335,8 @@ pub enum AppPersistenceError {
     NotFound,
     #[error("the SSH metadata record changed; refresh and retry")]
     Conflict,
+    #[error("the application database is not empty; full Vault import requires a fresh database")]
+    DatabaseNotFresh,
     #[error(
         "the idempotency key or operation id was already used for a different credential import"
     )]
@@ -308,6 +365,47 @@ pub enum AppPersistenceError {
     Database(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+impl AppPersistenceError {
+    /// Returns fixed categories and numeric SQLite codes without SQL, paths or record values.
+    #[must_use]
+    pub fn safe_diagnostic(&self) -> (&'static str, Option<i32>) {
+        match self {
+            Self::InvalidInput(_) => ("invalid_input", None),
+            Self::Conflict | Self::IdempotencyConflict => ("state_conflict", None),
+            Self::Endpoint(_) => ("invalid_endpoint", None),
+            Self::InvalidStoredData => ("invalid_stored_data", None),
+            Self::NotFound => ("record_not_found", None),
+            Self::DatabaseNotFresh => ("database_not_empty", None),
+            Self::RequiresReload => ("reload_required", None),
+            Self::RestoreCommitUnknown => ("commit_outcome_unknown", None),
+            Self::KnownHostMismatch { .. } => ("host_key_mismatch", None),
+            Self::KnownHostAlgorithmChanged { .. } => ("host_key_algorithm_changed", None),
+            Self::UnsupportedSchema(_) => ("unsupported_schema", None),
+            Self::Io(_) => ("io_error", None),
+            Self::Database(error) => match error {
+                rusqlite::Error::SqliteFailure(code, message) => {
+                    let kind = match message.as_deref() {
+                        Some("FOREIGN KEY constraint failed") => "foreign_key_reference",
+                        Some("credential detail kind mismatch") => {
+                            "credential_detail_kind_mismatch"
+                        }
+                        Some("credential secret slot kind mismatch") => {
+                            "credential_secret_kind_mismatch"
+                        }
+                        _ => "sqlite",
+                    };
+                    (kind, Some(code.extended_code))
+                }
+                rusqlite::Error::QueryReturnedNoRows => ("query_returned_no_rows", None),
+                rusqlite::Error::InvalidColumnType(..) => ("invalid_column_type", None),
+                rusqlite::Error::FromSqlConversionFailure(..) => ("invalid_column_value", None),
+                rusqlite::Error::IntegralValueOutOfRange(..) => ("integer_out_of_range", None),
+                _ => ("database_error", None),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1369,6 +1467,15 @@ pub enum SshSyncHttpUploadCompletionProof {
     SupersededByNewerRemote {
         authenticated_remote_revision: u64,
     },
+    /// An authenticated GET found another encrypted body occupying the exact
+    /// target revision. The provider's revision is monotonic, so this body
+    /// cannot later become the attempted upload's successful result.
+    ConflictingBodyObservedAtTargetRevision {
+        authenticated_remote_revision: u64,
+        authenticated_remote_body_sha256: String,
+        authenticated_remote_etag: String,
+        attempted_body_sha256: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1460,7 +1567,7 @@ struct NormalizedRestoreSaga {
 
 struct NormalizedRestorePlan {
     attempt_id: OperationId,
-    plugin_id: PluginId,
+    plugin_id: Option<PluginId>,
     profile_id: String,
     bundle_sha256: String,
     plan_sha256: String,
@@ -1702,6 +1809,14 @@ impl AppRepository {
         &mut self,
         plan: &SshSyncRestorePlan,
     ) -> Result<SshSyncRestoreCommitResult> {
+        self.commit_ssh_sync_restore_plan_with_item_times(plan, &[])
+    }
+
+    pub fn commit_ssh_sync_restore_plan_with_item_times(
+        &mut self,
+        plan: &SshSyncRestorePlan,
+        item_times: &[SshSyncLocalItemTimeOverride],
+    ) -> Result<SshSyncRestoreCommitResult> {
         let normalized = normalized_restore_plan(plan)?;
         let transaction = self
             .connection
@@ -1721,6 +1836,7 @@ impl AppRepository {
 
         let now = unix_time_ms();
         publish_restore_plan(&transaction, &normalized, now)?;
+        sync_item_times::apply_local_item_time_overrides(&transaction, item_times)?;
         if saga.is_some() {
             let deleted = transaction.execute(
                 "DELETE FROM ssh_sync_restore_sagas WHERE attempt_id = ?1",
@@ -1840,6 +1956,133 @@ impl AppRepository {
     ) -> Result<Option<SshSyncProfileStateRecord>> {
         let key = normalized_ssh_sync_profile_state_key(key)?;
         get_ssh_sync_profile_state_connection(&self.connection, &key)
+    }
+
+    /// Moves a locally provisional profile to an authenticated data owner.
+    /// Locally allocated object IDs move with it; a key, baseline, upload,
+    /// restore or cleanup work makes the source non-provisional and aborts.
+    pub fn migrate_ssh_sync_provisional_scope_owner(
+        &mut self,
+        source: &SshSyncProfileStateKey,
+        target: &SshSyncProfileStateKey,
+        expected_state_version: WireSequence,
+    ) -> Result<SshSyncProfileStateRecord> {
+        let source = normalized_ssh_sync_profile_state_key(source)?;
+        let target = normalized_ssh_sync_profile_state_key(target)?;
+        if source.plugin_id != target.plugin_id
+            || source.profile_id != target.profile_id
+            || source.signer_fingerprint_sha256 == target.signer_fingerprint_sha256
+        {
+            return Err(AppPersistenceError::Conflict);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let state = get_ssh_sync_profile_state_connection(&transaction, &source)?
+            .ok_or(AppPersistenceError::Conflict)?;
+        if state.state_version != expected_state_version
+            || state.key_binding.is_some()
+            || state.remote_baseline.is_some()
+            || state.last_successful_sync_at_unix_ms.is_some()
+            || get_ssh_sync_profile_state_connection(&transaction, &target)?.is_some()
+        {
+            return Err(AppPersistenceError::Conflict);
+        }
+        let owner_params = params![
+            source.plugin_id.as_str(),
+            source.signer_fingerprint_sha256,
+            source.profile_id,
+        ];
+        for table in [
+            "ssh_sync_http_upload_attempts",
+            "ssh_sync_vault_gc_queue",
+            "ssh_sync_owned_delta_operations",
+            "ssh_sync_owned_delta_scope_replacements",
+            "ssh_sync_plugin_delete_profiles",
+            "ssh_sync_plugin_delete_refs",
+        ] {
+            let query = format!(
+                "SELECT EXISTS(SELECT 1 FROM {table} WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2 AND profile_id = ?3)"
+            );
+            let occupied: i64 = transaction.query_row(&query, owner_params, |row| row.get(0))?;
+            if occupied != 0 {
+                return Err(AppPersistenceError::Conflict);
+            }
+        }
+        let pending_restore: i64 = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ssh_sync_restore_sagas WHERE plugin_id = ?1 AND profile_id = ?2)",
+            params![source.plugin_id.as_str(), source.profile_id],
+            |row| row.get(0),
+        )?;
+        if pending_restore != 0 {
+            return Err(AppPersistenceError::Conflict);
+        }
+        let pending_plugin_delete: i64 = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ssh_sync_plugin_delete_operations
+             WHERE plugin_id = ?1 AND state = 'pending')",
+            [source.plugin_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if pending_plugin_delete != 0 {
+            return Err(AppPersistenceError::Conflict);
+        }
+        transaction.execute(
+            "INSERT INTO ssh_sync_profile_states
+             (plugin_id, signer_fingerprint_sha256, profile_id, scope_mode,
+              custom_host_ids_json, custom_credential_ref_ids_json, custom_desktop_profile_ids_json,
+              sync_key_secret_ref_id, password_wrapped_sync_key_envelope,
+              remote_revision, remote_etag, baseline_content_sha256, baseline_exchange_sha256,
+              state_version, updated_at_ms, last_successful_sync_at_ms)
+             SELECT plugin_id, ?4, profile_id, scope_mode,
+                    custom_host_ids_json, custom_credential_ref_ids_json, custom_desktop_profile_ids_json,
+                    NULL, NULL, NULL, NULL, NULL, NULL, state_version, ?5, NULL
+             FROM ssh_sync_profile_states
+             WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2 AND profile_id = ?3",
+            params![source.plugin_id.as_str(), source.signer_fingerprint_sha256, source.profile_id,
+                target.signer_fingerprint_sha256, unix_time_ms()],
+        )?;
+        transaction.execute(
+            "INSERT INTO ssh_sync_scope_memberships
+             (plugin_id, signer_fingerprint_sha256, profile_id, object_kind,
+              portable_object_id, membership, updated_at_ms)
+             SELECT plugin_id, ?4, profile_id, object_kind,
+                    portable_object_id, membership, updated_at_ms
+             FROM ssh_sync_scope_memberships
+             WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2 AND profile_id = ?3",
+            params![
+                source.plugin_id.as_str(),
+                source.signer_fingerprint_sha256,
+                source.profile_id,
+                target.signer_fingerprint_sha256
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO ssh_sync_object_mappings
+             (plugin_id, signer_fingerprint_sha256, profile_id, object_kind,
+              portable_object_id, local_object_id, created_at_ms, updated_at_ms)
+             SELECT plugin_id, ?4, profile_id, object_kind,
+                    portable_object_id, local_object_id, created_at_ms, updated_at_ms
+             FROM ssh_sync_object_mappings
+             WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2 AND profile_id = ?3",
+            params![
+                source.plugin_id.as_str(),
+                source.signer_fingerprint_sha256,
+                source.profile_id,
+                target.signer_fingerprint_sha256,
+            ],
+        )?;
+        let removed = transaction.execute(
+            "DELETE FROM ssh_sync_profile_states
+             WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2 AND profile_id = ?3",
+            owner_params,
+        )?;
+        if removed != 1 {
+            return Err(AppPersistenceError::Conflict);
+        }
+        let migrated = get_ssh_sync_profile_state_connection(&transaction, &target)?
+            .ok_or(AppPersistenceError::Conflict)?;
+        transaction.commit()?;
+        Ok(migrated)
     }
 
     pub fn list_ssh_sync_profile_states_for_plugin(
@@ -2441,6 +2684,22 @@ impl AppRepository {
             SshSyncHttpUploadCompletionProof::SupersededByNewerRemote { .. } => {
                 return Err(AppPersistenceError::Conflict);
             }
+            SshSyncHttpUploadCompletionProof::ConflictingBodyObservedAtTargetRevision {
+                authenticated_remote_revision,
+                authenticated_remote_body_sha256,
+                authenticated_remote_etag,
+                attempted_body_sha256,
+            } => {
+                if existing.state == SshSyncHttpUploadAttemptState::Prepared
+                    || *authenticated_remote_revision != existing.input.target_revision
+                    || attempted_body_sha256 != &existing.input.body_sha256
+                    || authenticated_remote_body_sha256 == attempted_body_sha256
+                    || existing.input.base_etag.as_deref()
+                        == Some(authenticated_remote_etag.as_str())
+                {
+                    return Err(AppPersistenceError::Conflict);
+                }
+            }
         }
         let deleted = transaction.execute(
             "DELETE FROM ssh_sync_http_upload_attempts
@@ -2494,6 +2753,7 @@ impl AppRepository {
             expected_state_version,
             memberships,
             None,
+            &[],
         )
     }
 
@@ -2511,7 +2771,44 @@ impl AppRepository {
             expected_state_version,
             memberships,
             Some(expected_fence),
+            &[],
         )
+    }
+
+    pub fn replace_ssh_sync_scope_memberships_with_item_times_and_fence(
+        &mut self,
+        owner: &SshSyncProfileStateKey,
+        expected_state_version: WireSequence,
+        memberships: &[SshSyncScopeMembershipInput],
+        expected_fence: &SshSyncChangeFence,
+        item_times: &[SshSyncLocalItemTimeOverride],
+    ) -> Result<SshSyncProfileStateRecord> {
+        self.replace_ssh_sync_scope_memberships_internal(
+            owner,
+            expected_state_version,
+            memberships,
+            Some(expected_fence),
+            item_times,
+        )
+    }
+
+    pub fn apply_ssh_sync_item_times_with_fence(
+        &mut self,
+        owner: &SshSyncProfileStateKey,
+        expected_fence: &SshSyncChangeFence,
+        item_times: &[SshSyncLocalItemTimeOverride],
+    ) -> Result<()> {
+        let owner = normalized_ssh_sync_profile_state_key(owner)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_ssh_sync_change_fence(&transaction, expected_fence)?;
+        if get_ssh_sync_profile_state_connection(&transaction, &owner)?.is_none() {
+            return Err(AppPersistenceError::NotFound);
+        }
+        sync_item_times::apply_local_item_time_overrides(&transaction, item_times)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     fn replace_ssh_sync_scope_memberships_internal(
@@ -2520,6 +2817,7 @@ impl AppRepository {
         expected_state_version: WireSequence,
         memberships: &[SshSyncScopeMembershipInput],
         expected_fence: Option<&SshSyncChangeFence>,
+        item_times: &[SshSyncLocalItemTimeOverride],
     ) -> Result<SshSyncProfileStateRecord> {
         let owner = normalized_ssh_sync_profile_state_key(owner)?;
         let memberships = normalized_ssh_sync_scope_memberships(memberships)?;
@@ -2540,11 +2838,13 @@ impl AppRepository {
             .map(|record| &record.membership)
             .eq(memberships.iter())
         {
+            sync_item_times::apply_local_item_time_overrides(&transaction, item_times)?;
             transaction.commit()?;
             return Ok(existing);
         }
         let now = unix_time_ms();
         replace_ssh_sync_scope_memberships_connection(&transaction, &owner, &memberships, now)?;
+        sync_item_times::apply_local_item_time_overrides(&transaction, item_times)?;
         let next = next_revision(expected_state_version)?;
         let changed = transaction.execute(
             "UPDATE ssh_sync_profile_states SET state_version = ?1, updated_at_ms = ?2
@@ -2719,7 +3019,7 @@ impl AppRepository {
         &mut self,
         delta: &SshSyncOwnedMetadataDelta,
     ) -> Result<SshSyncOwnedDeltaResult> {
-        self.apply_ssh_sync_owned_metadata_delta_internal(delta, None, None)
+        self.apply_ssh_sync_owned_metadata_delta_internal(delta, None, None, &[])
     }
 
     /// Applies an owned metadata delta and, when supplied, a full replacement
@@ -2730,7 +3030,7 @@ impl AppRepository {
         delta: &SshSyncOwnedMetadataDelta,
         memberships: Option<&[SshSyncScopeMembershipInput]>,
     ) -> Result<SshSyncOwnedDeltaResult> {
-        self.apply_ssh_sync_owned_metadata_delta_internal(delta, memberships, None)
+        self.apply_ssh_sync_owned_metadata_delta_internal(delta, memberships, None, &[])
     }
 
     /// Applies the approved owned delta and scope replacement only if no local
@@ -2742,7 +3042,29 @@ impl AppRepository {
         memberships: Option<&[SshSyncScopeMembershipInput]>,
         expected_fence: &SshSyncChangeFence,
     ) -> Result<SshSyncOwnedDeltaResult> {
-        self.apply_ssh_sync_owned_metadata_delta_internal(delta, memberships, Some(expected_fence))
+        self.apply_ssh_sync_owned_metadata_delta_internal(
+            delta,
+            memberships,
+            Some(expected_fence),
+            &[],
+        )
+    }
+
+    /// Restores authenticated source clocks atomically with the owned metadata
+    /// delta, so a remote apply cannot appear to be a new local edit.
+    pub fn apply_ssh_sync_owned_metadata_delta_with_item_times_and_fence(
+        &mut self,
+        delta: &SshSyncOwnedMetadataDelta,
+        memberships: Option<&[SshSyncScopeMembershipInput]>,
+        expected_fence: &SshSyncChangeFence,
+        item_times: &[SshSyncLocalItemTimeOverride],
+    ) -> Result<SshSyncOwnedDeltaResult> {
+        self.apply_ssh_sync_owned_metadata_delta_internal(
+            delta,
+            memberships,
+            Some(expected_fence),
+            item_times,
+        )
     }
 
     fn apply_ssh_sync_owned_metadata_delta_internal(
@@ -2750,6 +3072,7 @@ impl AppRepository {
         delta: &SshSyncOwnedMetadataDelta,
         memberships: Option<&[SshSyncScopeMembershipInput]>,
         expected_fence: Option<&SshSyncChangeFence>,
+        item_times: &[SshSyncLocalItemTimeOverride],
     ) -> Result<SshSyncOwnedDeltaResult> {
         validate_ssh_sync_owned_delta(delta)?;
         let owner = normalized_ssh_sync_profile_state_key(&delta.owner)?;
@@ -2792,7 +3115,7 @@ impl AppRepository {
         let mut created_count = 0_u32;
         let mut create_saga_present = false;
         if let Some((plan, mappings)) = &normalized_creates {
-            if plan.plugin_id != owner.plugin_id
+            if plan.plugin_id.as_ref() != Some(&owner.plugin_id)
                 || plan.profile_id != owner.profile_id
                 || plan.attempt_id != delta.attempt_id
             {
@@ -2812,7 +3135,7 @@ impl AppRepository {
             let expected_new_refs = normalized_secret_ref_ids(&expected_new_refs)?;
             let saga = get_restore_saga(&transaction, &plan.attempt_id)?
                 .ok_or(AppPersistenceError::NotFound)?;
-            if saga.plugin_id != plan.plugin_id
+            if Some(&saga.plugin_id) != plan.plugin_id.as_ref()
                 || saga.profile_id != plan.profile_id
                 || saga.bundle_sha256 != plan.bundle_sha256
                 || saga.plan_sha256 != plan.plan_sha256
@@ -2878,6 +3201,8 @@ impl AppRepository {
             delete_owned_secret_mapping(&transaction, &owner, delete)?;
             gc_candidates.insert(delete.secret_ref_id.as_str().to_owned(), "secret_deleted");
         }
+
+        sync_item_times::apply_local_item_time_overrides(&transaction, item_times)?;
 
         if let Some(memberships) = &memberships {
             replace_ssh_sync_scope_memberships_connection(&transaction, &owner, memberships, now)?;
@@ -6832,7 +7157,7 @@ impl AppRepository {
         let (revision, enabled, interval, timeout) = self
             .connection
             .query_row(
-                "SELECT revision, enabled, sample_interval_seconds, sample_timeout_seconds
+                "SELECT revision, enabled, sample_interval_millis, sample_timeout_millis
                  FROM host_monitoring_policies WHERE host_id = ?1",
                 [host_id.as_str()],
                 |row| {
@@ -6858,9 +7183,9 @@ impl AppRepository {
             revision,
             policy: MonitoringPolicy {
                 enabled,
-                sample_interval_seconds: u32::try_from(interval)
+                sample_interval_millis: u32::try_from(interval)
                     .map_err(|_| AppPersistenceError::InvalidStoredData)?,
-                sample_timeout_seconds: u32::try_from(timeout)
+                sample_timeout_millis: u32::try_from(timeout)
                     .map_err(|_| AppPersistenceError::InvalidStoredData)?,
                 disk_mount_ids,
                 network_interface_ids,
@@ -6881,14 +7206,14 @@ impl AppRepository {
         let next_revision = next_revision(expected_revision)?;
         let changed = transaction.execute(
             "UPDATE host_monitoring_policies
-             SET revision = ?1, enabled = ?2, sample_interval_seconds = ?3,
-                 sample_timeout_seconds = ?4, updated_at_ms = ?5
+             SET revision = ?1, enabled = ?2, sample_interval_millis = ?3,
+                 sample_timeout_millis = ?4, updated_at_ms = ?5
              WHERE host_id = ?6 AND revision = ?7",
             params![
                 u64_to_i64(next_revision)?,
                 policy.enabled,
-                i64::from(policy.sample_interval_seconds),
-                i64::from(policy.sample_timeout_seconds),
+                i64::from(policy.sample_interval_millis),
+                i64::from(policy.sample_timeout_millis),
                 unix_time_ms(),
                 host_id.as_str(),
                 u64_to_i64(expected_revision.get())?,
@@ -8000,6 +8325,27 @@ fn validate_ssh_sync_http_upload_completion_proof(
             Err(AppPersistenceError::InvalidInput(
                 "authenticated SSH sync revision exceeds the supported bound",
             ))
+        }
+        SshSyncHttpUploadCompletionProof::ConflictingBodyObservedAtTargetRevision {
+            authenticated_remote_revision,
+            authenticated_remote_body_sha256,
+            authenticated_remote_etag,
+            attempted_body_sha256,
+        } => {
+            if *authenticated_remote_revision > i64::MAX as u64 {
+                return Err(AppPersistenceError::InvalidInput(
+                    "authenticated SSH sync revision exceeds the supported bound",
+                ));
+            }
+            validate_lower_sha256(
+                authenticated_remote_body_sha256,
+                "invalid observed SSH sync upload body digest",
+            )?;
+            validate_lower_sha256(
+                attempted_body_sha256,
+                "invalid attempted SSH sync upload body digest",
+            )?;
+            validate_strong_etag(authenticated_remote_etag)
         }
     }
 }
@@ -9392,6 +9738,13 @@ fn delete_owned_hosts(
             return Err(AppPersistenceError::Conflict);
         };
         let delete = remaining.remove(position);
+        // Saved rules cannot exist without their host. Sync approval covers this dependent
+        // metadata; the repository fence binds the reviewed rules and the transaction rolls
+        // them back with the host if any later operation fails. Active sessions are separate.
+        transaction.execute(
+            "DELETE FROM forward_rules WHERE host_id = ?1",
+            [delete.host_id.as_str()],
+        )?;
         let changed = transaction.execute(
             "DELETE FROM hosts WHERE id = ?1 AND state_version = ?2",
             params![
@@ -10133,24 +10486,32 @@ fn normalized_ssh_sync_http_upload_completion_fence(
 }
 
 fn normalized_ssh_sync_canonical_url(value: &str) -> Result<String> {
+    let (remainder, default_port) = if let Some(remainder) = value.strip_prefix("https://") {
+        (remainder, ":443")
+    } else if let Some(remainder) = value.strip_prefix("http://") {
+        (remainder, ":80")
+    } else {
+        return Err(AppPersistenceError::InvalidInput(
+            "SSH sync upload URL must use HTTP or HTTPS",
+        ));
+    };
     if value.trim() != value
-        || !(9..=2_048).contains(&value.len())
+        || !(8..=2_048).contains(&value.len())
         || !value.is_ascii()
         || value.chars().any(char::is_control)
-        || !value.starts_with("https://")
+        || value.contains('?')
         || value.contains('#')
     {
         return Err(AppPersistenceError::InvalidInput(
-            "SSH sync upload URL must be a bounded canonical HTTPS URL",
+            "SSH sync upload URL must be a bounded canonical HTTP(S) URL",
         ));
     }
-    let remainder = &value[8..];
     let authority_end = remainder.find(['/', '?']).unwrap_or(remainder.len());
     let authority = &remainder[..authority_end];
     if authority.is_empty()
         || authority.contains('@')
         || authority.ends_with('.')
-        || authority.ends_with(":443")
+        || authority.ends_with(default_port)
         || authority.bytes().any(|byte| byte.is_ascii_uppercase())
     {
         return Err(AppPersistenceError::InvalidInput(
@@ -10787,6 +11148,29 @@ fn normalized_restore_saga_input(input: &SshSyncRestoreSagaInput) -> Result<Norm
 }
 
 fn normalized_restore_plan(plan: &SshSyncRestorePlan) -> Result<NormalizedRestorePlan> {
+    let profile_id = normalized_required(
+        &plan.profile_id,
+        160,
+        "SSH sync profile id is empty or too long",
+    )?;
+    normalized_offline_restore_plan(
+        &OfflineImportPlan {
+            attempt_id: plan.attempt_id.clone(),
+            archive_sha256: plan.bundle_sha256.clone(),
+            plan_sha256: plan.plan_sha256.clone(),
+            identities: plan.identities.clone(),
+            credentials: plan.credentials.clone(),
+            hosts: plan.hosts.clone(),
+            desktop_profiles: plan.desktop_profiles.clone(),
+        },
+        Some((plan.plugin_id.clone(), profile_id)),
+    )
+}
+
+fn normalized_offline_restore_plan(
+    plan: &OfflineImportPlan,
+    owner: Option<(PluginId, String)>,
+) -> Result<NormalizedRestorePlan> {
     if plan.identities.len() > 1_024
         || plan.credentials.len() > 4_096
         || plan.hosts.len() > 1_024
@@ -10796,14 +11180,8 @@ fn normalized_restore_plan(plan: &SshSyncRestorePlan) -> Result<NormalizedRestor
             "SSH sync restore plan exceeds the supported bound",
         ));
     }
-    let profile_id = normalized_required(
-        &plan.profile_id,
-        160,
-        "SSH sync profile id is empty or too long",
-    )?;
-    validate_restore_digest(&plan.bundle_sha256)?;
+    validate_restore_digest(&plan.archive_sha256)?;
     validate_restore_digest(&plan.plan_sha256)?;
-
     let mut identity_ids = BTreeSet::new();
     let mut identities = Vec::with_capacity(plan.identities.len());
     for input in &plan.identities {
@@ -10969,9 +11347,9 @@ fn normalized_restore_plan(plan: &SshSyncRestorePlan) -> Result<NormalizedRestor
 
     Ok(NormalizedRestorePlan {
         attempt_id: plan.attempt_id.clone(),
-        plugin_id: plan.plugin_id.clone(),
-        profile_id,
-        bundle_sha256: plan.bundle_sha256.clone(),
+        plugin_id: owner.as_ref().map(|(plugin, _)| plugin.clone()),
+        profile_id: owner.map(|(_, profile)| profile).unwrap_or_default(),
+        bundle_sha256: plan.archive_sha256.clone(),
         plan_sha256: plan.plan_sha256.clone(),
         identities,
         credentials,
@@ -11185,7 +11563,7 @@ fn same_restore_plan_saga(
     new_secret_ref_ids: &[SecretRefId],
 ) -> bool {
     existing.attempt_id == plan.attempt_id
-        && existing.plugin_id == plan.plugin_id
+        && Some(&existing.plugin_id) == plan.plugin_id.as_ref()
         && existing.profile_id == plan.profile_id
         && existing.bundle_sha256 == plan.bundle_sha256
         && existing.plan_sha256 == plan.plan_sha256
@@ -12531,13 +12909,13 @@ fn initialize_configured_monitoring_policy(
 ) -> Result<()> {
     let changed = transaction.execute(
         "UPDATE host_monitoring_policies
-         SET enabled = ?1, sample_interval_seconds = ?2, sample_timeout_seconds = ?3,
+         SET enabled = ?1, sample_interval_millis = ?2, sample_timeout_millis = ?3,
              updated_at_ms = ?4
          WHERE host_id = ?5 AND revision = 1",
         params![
             policy.enabled,
-            i64::from(policy.sample_interval_seconds),
-            i64::from(policy.sample_timeout_seconds),
+            i64::from(policy.sample_interval_millis),
+            i64::from(policy.sample_timeout_millis),
             now,
             host_id.as_str(),
         ],
@@ -12712,9 +13090,9 @@ fn insert_host_config_defaults(
     )?;
     transaction.execute(
         "INSERT INTO host_monitoring_policies
-         (host_id, revision, enabled, sample_interval_seconds, sample_timeout_seconds,
+         (host_id, revision, enabled, sample_interval_millis, sample_timeout_millis,
           created_at_ms, updated_at_ms)
-         VALUES (?1, 1, 0, 15, 5, ?2, ?2)",
+         VALUES (?1, 1, 0, 1500, 5000, ?2, ?2)",
         params![host_id.as_str(), now],
     )?;
     transaction.execute(
@@ -13095,9 +13473,8 @@ fn line_ending_from_db(value: &str) -> Result<ShellHeartbeatLineEnding> {
 }
 
 fn validated_monitoring_policy(policy: &MonitoringPolicy) -> Result<MonitoringPolicy> {
-    if !(5..=300).contains(&policy.sample_interval_seconds)
-        || !(2..=30).contains(&policy.sample_timeout_seconds)
-        || policy.sample_timeout_seconds >= policy.sample_interval_seconds
+    if !(1_500..=300_000).contains(&policy.sample_interval_millis)
+        || !(500..=30_000).contains(&policy.sample_timeout_millis)
     {
         return Err(AppPersistenceError::InvalidInput(
             "monitoring policy is outside its safe bounds",
@@ -14022,7 +14399,11 @@ fn read_identity(row: &rusqlite::Row<'_>) -> rusqlite::Result<IdentitySummary> {
     Ok(IdentitySummary {
         identity_id: parse_id(row.get::<_, String>(0)?, IdentityId::parse)?,
         label: row.get(1)?,
-        username: row.get(2)?,
+        // Legacy desktop password identities stored an absent username as "".
+        // Expose the same optional representation as normal identity creation.
+        username: row
+            .get::<_, Option<String>>(2)?
+            .filter(|value| !value.is_empty()),
         state_version: read_wire_sequence(row, 3)?,
     })
 }
@@ -15231,8 +15612,8 @@ mod tests {
             },
             monitoring_policy: MonitoringPolicy {
                 enabled: true,
-                sample_interval_seconds: 15,
-                sample_timeout_seconds: 5,
+                sample_interval_millis: 1500,
+                sample_timeout_millis: 5000,
                 disk_mount_ids: vec![DiskResourceId::Root],
                 network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
             },
@@ -15350,6 +15731,7 @@ mod tests {
             height: 900,
             clipboard_enabled: true,
             audio_playback_enabled: true,
+            vnc_protocol_version: norishell_core_api::VncProtocolVersion::Auto,
             revision: WireSequence::new(0),
         }
     }
@@ -15698,11 +16080,11 @@ mod tests {
         let host_id;
         {
             let mut repository = AppRepository::open(&database_path).expect("current repository");
-            super::remove_schema_added_after_fixture_version(&repository.connection, 26).unwrap();
             host_id = repository
                 .create_host("Current", "current.example", 22, None, None, false)
                 .expect("host")
                 .host_id;
+            super::remove_schema_added_after_fixture_version(&repository.connection, 26).unwrap();
             let plugin = PluginInstalledRecord {
                 plugin_id: plugin_id.clone(),
                 name: "Norixor".to_owned(),
@@ -16347,8 +16729,8 @@ mod tests {
         let policy = repository
             .get_monitoring_policy(&host.host_id)
             .expect("monitoring policy");
-        assert_eq!(policy.policy.sample_interval_seconds, 300);
-        assert_eq!(policy.policy.sample_timeout_seconds, 30);
+        assert_eq!(policy.policy.sample_interval_millis, 300_000);
+        assert_eq!(policy.policy.sample_timeout_millis, 30_000);
         assert_eq!(policy.policy.disk_mount_ids, [DiskResourceId::Root]);
         assert_eq!(
             policy.policy.network_interface_ids,
@@ -16382,8 +16764,8 @@ mod tests {
                 initial.revision,
                 &MonitoringPolicy {
                     enabled: true,
-                    sample_interval_seconds: 15,
-                    sample_timeout_seconds: 5,
+                    sample_interval_millis: 1500,
+                    sample_timeout_millis: 5000,
                     disk_mount_ids: Vec::new(),
                     network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
                 },
@@ -17443,8 +17825,11 @@ mod tests {
             HeartbeatPolicy::Disabled
         ));
         assert!(!config.monitoring_policy.policy.enabled);
-        assert_eq!(config.monitoring_policy.policy.sample_interval_seconds, 15);
-        assert_eq!(config.monitoring_policy.policy.sample_timeout_seconds, 5);
+        assert_eq!(
+            config.monitoring_policy.policy.sample_interval_millis,
+            1_500
+        );
+        assert_eq!(config.monitoring_policy.policy.sample_timeout_millis, 5_000);
         let violations: i64 = repository
             .connection
             .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
@@ -17780,8 +18165,8 @@ mod tests {
                 initial.monitoring_policy.revision,
                 &MonitoringPolicy {
                     enabled: true,
-                    sample_interval_seconds: 30,
-                    sample_timeout_seconds: 10,
+                    sample_interval_millis: 30000,
+                    sample_timeout_millis: 10000,
                     disk_mount_ids: vec![DiskResourceId::Root],
                     network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
                 },
@@ -17795,8 +18180,8 @@ mod tests {
                 monitoring.revision,
                 &MonitoringPolicy {
                     enabled: true,
-                    sample_interval_seconds: 30,
-                    sample_timeout_seconds: 10,
+                    sample_interval_millis: 30000,
+                    sample_timeout_millis: 10000,
                     disk_mount_ids: vec![DiskResourceId::Root, DiskResourceId::Root],
                     network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
                 },
@@ -17806,29 +18191,29 @@ mod tests {
         for invalid_policy in [
             MonitoringPolicy {
                 enabled: true,
-                sample_interval_seconds: 4,
-                sample_timeout_seconds: 2,
+                sample_interval_millis: 1000,
+                sample_timeout_millis: 2000,
                 disk_mount_ids: vec![DiskResourceId::Root],
                 network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
             },
             MonitoringPolicy {
                 enabled: true,
-                sample_interval_seconds: 301,
-                sample_timeout_seconds: 2,
+                sample_interval_millis: 301000,
+                sample_timeout_millis: 2000,
                 disk_mount_ids: vec![DiskResourceId::Root],
                 network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
             },
             MonitoringPolicy {
                 enabled: true,
-                sample_interval_seconds: 15,
-                sample_timeout_seconds: 1,
+                sample_interval_millis: 1500,
+                sample_timeout_millis: 499,
                 disk_mount_ids: vec![DiskResourceId::Root],
                 network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
             },
             MonitoringPolicy {
                 enabled: true,
-                sample_interval_seconds: 15,
-                sample_timeout_seconds: 31,
+                sample_interval_millis: 1500,
+                sample_timeout_millis: 31000,
                 disk_mount_ids: vec![DiskResourceId::Root],
                 network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
             },
@@ -20354,6 +20739,163 @@ mod tests {
     }
 
     #[test]
+    fn ssh_sync_provisional_scope_owner_moves_atomically_with_memberships() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut repository = repository(&directory);
+        let source = ssh_sync_profile_fixture("provisional-scope");
+        let mut target = source.key.clone();
+        target.signer_fingerprint_sha256 = "2".repeat(64);
+        let created = repository.ensure_ssh_sync_profile_state(&source).unwrap();
+        let membership = SshSyncScopeMembershipInput {
+            object_kind: SshSyncObjectKind::Host,
+            portable_object_id: uuid::Uuid::new_v4().to_string(),
+            state: SshSyncScopeMembershipState::Excluded,
+        };
+        let scoped = repository
+            .replace_ssh_sync_scope_memberships(
+                &source.key,
+                created.state_version,
+                std::slice::from_ref(&membership),
+            )
+            .unwrap();
+        assert!(matches!(
+            repository.migrate_ssh_sync_provisional_scope_owner(
+                &source.key,
+                &target,
+                created.state_version,
+            ),
+            Err(AppPersistenceError::Conflict)
+        ));
+        let migrated = repository
+            .migrate_ssh_sync_provisional_scope_owner(&source.key, &target, scoped.state_version)
+            .unwrap();
+        assert_eq!(migrated.key, target);
+        assert_eq!(migrated.scope, scoped.scope);
+        assert_eq!(migrated.state_version, scoped.state_version);
+        assert!(
+            repository
+                .get_ssh_sync_profile_state(&source.key)
+                .unwrap()
+                .is_none()
+        );
+        let memberships = repository.list_ssh_sync_scope_memberships(&target).unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].membership, membership);
+        assert_eq!(memberships[0].owner, target);
+    }
+
+    #[test]
+    fn ssh_sync_provisional_owner_moves_locally_allocated_object_mappings() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut repository = repository(&directory);
+        let source = ssh_sync_profile_fixture("provisional-mappings");
+        let mut target = source.key.clone();
+        target.signer_fingerprint_sha256 = "2".repeat(64);
+        let created = repository.ensure_ssh_sync_profile_state(&source).unwrap();
+        let portable_id = uuid::Uuid::new_v4().to_string();
+        let local_id = uuid::Uuid::new_v4().to_string();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO ssh_sync_object_mappings
+                 (plugin_id, signer_fingerprint_sha256, profile_id, object_kind,
+                  portable_object_id, local_object_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, 'host', ?4, ?5, 1, 1)",
+                params![
+                    source.key.plugin_id.as_str(),
+                    source.key.signer_fingerprint_sha256,
+                    source.key.profile_id,
+                    portable_id,
+                    local_id,
+                ],
+            )
+            .unwrap();
+        repository
+            .migrate_ssh_sync_provisional_scope_owner(&source.key, &target, created.state_version)
+            .unwrap();
+        let mappings: Vec<(String, String, String)> = repository
+            .connection
+            .prepare(
+                "SELECT signer_fingerprint_sha256, portable_object_id, local_object_id
+                 FROM ssh_sync_object_mappings WHERE plugin_id = ?1 AND profile_id = ?2",
+            )
+            .unwrap()
+            .query_map(
+                params![source.key.plugin_id.as_str(), source.key.profile_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            mappings,
+            vec![(target.signer_fingerprint_sha256, portable_id, local_id)]
+        );
+        assert!(
+            repository
+                .get_ssh_sync_profile_state(&source.key)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ssh_sync_provisional_scope_owner_rejects_bound_or_pending_state() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut repository = repository(&directory);
+        let source = ssh_sync_profile_fixture("non-provisional-scope");
+        let mut target = source.key.clone();
+        target.signer_fingerprint_sha256 = "2".repeat(64);
+        let created = repository.ensure_ssh_sync_profile_state(&source).unwrap();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO ssh_sync_plugin_delete_operations
+                 (plugin_id, operation_id, state, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'pending', 1, 1)",
+                params![source.key.plugin_id.as_str(), OperationId::new().as_str()],
+            )
+            .unwrap();
+        assert!(matches!(
+            repository.migrate_ssh_sync_provisional_scope_owner(
+                &source.key,
+                &target,
+                created.state_version,
+            ),
+            Err(AppPersistenceError::Conflict)
+        ));
+        repository
+            .connection
+            .execute("DELETE FROM ssh_sync_plugin_delete_operations", [])
+            .unwrap();
+        let binding = SshSyncProfileKeyBinding {
+            sync_key_secret_ref_id: SecretRefId::new(),
+            password_wrapped_sync_key_envelope: Some(vec![0xa5; 64]),
+        };
+        let bound = repository
+            .bind_ssh_sync_profile_key(&source.key, created.state_version, &binding)
+            .unwrap();
+        assert!(matches!(
+            repository.migrate_ssh_sync_provisional_scope_owner(
+                &source.key,
+                &target,
+                bound.state_version,
+            ),
+            Err(AppPersistenceError::Conflict)
+        ));
+        assert_eq!(
+            repository.get_ssh_sync_profile_state(&source.key).unwrap(),
+            Some(bound)
+        );
+        assert!(
+            repository
+                .get_ssh_sync_profile_state(&target)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn ssh_sync_profile_key_binding_is_exactly_idempotent_and_recovers_after_reopen() {
         let directory = tempfile::tempdir().expect("tempdir");
         let database_path = directory.path().join("data/norishell.sqlite3");
@@ -21024,9 +21566,46 @@ mod tests {
         ));
         assert!(repository.get_host(&plan.hosts[0].host_id).is_ok());
 
+        // Dependent rules must roll back with the host if a later delete fails.
+        let forwarding = repository
+            .create_forward_rule(
+                &ForwardRuleId::new(),
+                "Retained local forwarding",
+                &PortForwardRule::Dynamic {
+                    host_id: plan.hosts[0].host_id.clone(),
+                    local_bind_address: "127.0.0.1".into(),
+                    local_listen_port: 1080,
+                },
+            )
+            .unwrap();
+        repository
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_sync_identity_delete BEFORE DELETE ON identities
+             BEGIN SELECT RAISE(ABORT, 'test rollback after host delete'); END;",
+            )
+            .unwrap();
+        assert!(
+            repository
+                .apply_ssh_sync_owned_metadata_delta(&delta)
+                .is_err()
+        );
+        assert!(repository.get_host(&plan.hosts[0].host_id).is_ok());
+        assert_eq!(repository.list_forward_rules().unwrap(), vec![forwarding]);
+        assert!(
+            repository
+                .get_ready_credential_record(&plan.credentials[0].credential_ref_id)
+                .is_ok()
+        );
+        repository
+            .connection
+            .execute_batch("DROP TRIGGER fail_sync_identity_delete;")
+            .unwrap();
+
         let applied = repository
             .apply_ssh_sync_owned_metadata_delta(&delta)
             .unwrap();
+        assert!(repository.list_forward_rules().unwrap().is_empty());
         assert_eq!(applied.deleted_count, 4);
         assert_eq!(
             applied.pending_vault_gc_secret_ref_ids.as_slice(),
@@ -22727,6 +23306,167 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_target_body_releases_only_the_exact_sent_upload() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("norishell.sqlite3");
+        let mut repository = AppRepository::open(&database_path).unwrap();
+        let profile = ssh_sync_profile_fixture("conflicting-target");
+        repository.ensure_ssh_sync_profile_state(&profile).unwrap();
+        let input = SshSyncHttpUploadAttemptInput {
+            owner: profile.key.clone(),
+            canonical_url: "https://sync.example/exchange".to_owned(),
+            http_method: SshSyncHttpMethod::Put,
+            use_oauth: false,
+            authorization_revision: WireSequence::new(3),
+            configuration_revision: WireSequence::new(7),
+            base_revision: 4,
+            base_etag: Some("\"revision-4\"".to_owned()),
+            target_revision: 5,
+            keyed_content_sha256: "a".repeat(64),
+            body_sha256: "b".repeat(64),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        let created = repository
+            .ensure_ssh_sync_http_upload_attempt(&input)
+            .unwrap();
+        let fence = SshSyncHttpUploadCompletionFence {
+            canonical_url: input.canonical_url.clone(),
+            http_method: input.http_method,
+            use_oauth: input.use_oauth,
+            authorization_revision: input.authorization_revision,
+            configuration_revision: input.configuration_revision,
+        };
+        let proof = SshSyncHttpUploadCompletionProof::ConflictingBodyObservedAtTargetRevision {
+            authenticated_remote_revision: 5,
+            authenticated_remote_body_sha256: "c".repeat(64),
+            authenticated_remote_etag: "\"revision-5\"".to_owned(),
+            attempted_body_sha256: input.body_sha256.clone(),
+        };
+        assert!(matches!(
+            repository.complete_ssh_sync_http_upload_attempt(
+                &input.owner,
+                &input.idempotency_key,
+                &fence,
+                &proof
+            ),
+            Err(AppPersistenceError::Conflict)
+        ));
+        repository
+            .advance_ssh_sync_http_upload_attempt(
+                &input.owner,
+                created.state_version,
+                SshSyncHttpUploadAttemptState::Sent,
+            )
+            .unwrap();
+        drop(repository);
+        let mut repository = AppRepository::open(&database_path).unwrap();
+        let conflicting_proof =
+            |revision, remote_body: String, etag: &str, attempted_body: String| {
+                SshSyncHttpUploadCompletionProof::ConflictingBodyObservedAtTargetRevision {
+                    authenticated_remote_revision: revision,
+                    authenticated_remote_body_sha256: remote_body,
+                    authenticated_remote_etag: etag.to_owned(),
+                    attempted_body_sha256: attempted_body,
+                }
+            };
+        for invalid in [
+            conflicting_proof(
+                4,
+                "c".repeat(64),
+                "\"revision-5\"",
+                input.body_sha256.clone(),
+            ),
+            conflicting_proof(
+                5,
+                input.body_sha256.clone(),
+                "\"revision-5\"",
+                input.body_sha256.clone(),
+            ),
+            conflicting_proof(5, "c".repeat(64), "\"revision-5\"", "d".repeat(64)),
+            conflicting_proof(
+                5,
+                "c".repeat(64),
+                "\"revision-4\"",
+                input.body_sha256.clone(),
+            ),
+        ] {
+            assert!(matches!(
+                repository.complete_ssh_sync_http_upload_attempt(
+                    &input.owner,
+                    &input.idempotency_key,
+                    &fence,
+                    &invalid
+                ),
+                Err(AppPersistenceError::Conflict)
+            ));
+        }
+        assert!(matches!(
+            repository.complete_ssh_sync_http_upload_attempt(
+                &input.owner,
+                &input.idempotency_key,
+                &SshSyncHttpUploadCompletionFence {
+                    configuration_revision: WireSequence::new(8),
+                    ..fence.clone()
+                },
+                &proof,
+            ),
+            Err(AppPersistenceError::Conflict)
+        ));
+        assert_eq!(
+            repository
+                .complete_ssh_sync_http_upload_attempt(
+                    &input.owner,
+                    &input.idempotency_key,
+                    &fence,
+                    &proof
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            repository
+                .get_ssh_sync_http_upload_attempt(&input.owner)
+                .unwrap()
+                .is_none()
+        );
+        let replacement = SshSyncHttpUploadAttemptInput {
+            base_revision: 5,
+            base_etag: Some("\"revision-5\"".to_owned()),
+            target_revision: 6,
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            ..input
+        };
+        assert_eq!(
+            repository
+                .ensure_ssh_sync_http_upload_attempt(&replacement)
+                .unwrap()
+                .input,
+            replacement
+        );
+    }
+
+    #[test]
+    fn ssh_sync_http_upload_url_keeps_canonical_origin_and_path_rules() {
+        assert_eq!(
+            super::normalized_ssh_sync_canonical_url("http://127.0.0.1:8080/v1/exchange").unwrap(),
+            "http://127.0.0.1:8080/v1/exchange"
+        );
+        for invalid in [
+            "http://user@127.0.0.1:8080/v1/exchange",
+            "http://127.0.0.1:80/v1/exchange",
+            "http://127.0.0.1:8080/../exchange",
+            "http://127.0.0.1:8080/exchange?token=secret",
+            "http://127.0.0.1:8080/exchange#fragment",
+            "ftp://127.0.0.1:8080/v1/exchange",
+        ] {
+            assert!(
+                super::normalized_ssh_sync_canonical_url(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn v26_migration_discards_unbound_upload_attempt_and_preserves_secret_slots() {
         let directory = tempfile::tempdir().expect("tempdir");
         let database_path = directory.path().join("data/norishell.sqlite3");
@@ -23354,5 +24094,92 @@ mod tests {
                 state: SshSyncScopeMembershipState::Included,
             }
         );
+    }
+    #[test]
+    fn offline_import_journal_fences_publication_and_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("offline.sqlite");
+        let mut repository = AppRepository::open(&path).unwrap();
+        let (_, source) = ssh_sync_restore_fixture();
+        let plan = crate::OfflineImportPlan {
+            attempt_id: source.attempt_id,
+            archive_sha256: source.bundle_sha256,
+            plan_sha256: source.plan_sha256,
+            identities: source.identities,
+            credentials: source.credentials,
+            hosts: source.hosts,
+            desktop_profiles: source.desktop_profiles,
+        };
+        let before = repository.ssh_sync_change_fence().unwrap();
+        let (saga, fence) = repository.begin_offline_import(&plan, &before).unwrap();
+        assert!(!saga.secret_ref_ids.is_empty());
+        assert!(
+            repository
+                .list_pending_ssh_sync_restore_sagas()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(repository.commit_offline_import(&plan, &before).is_err());
+        assert_eq!(repository.pending_offline_imports().unwrap().len(), 1);
+        assert_eq!(
+            repository
+                .preview_offline_import(&plan)
+                .unwrap()
+                .already_applied_count,
+            0
+        );
+        repository.commit_offline_import(&plan, &fence).unwrap();
+        assert!(repository.pending_offline_imports().unwrap().is_empty());
+        let preview = repository.preview_offline_import(&plan).unwrap();
+        assert_eq!(preview.create_count, 0);
+        assert_eq!(preview.conflict_count, 0);
+        drop(repository);
+        let repository = AppRepository::open(&path).unwrap();
+        assert!(repository.pending_offline_imports().unwrap().is_empty());
+        let schema: i64 = repository
+            .connection
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(schema, super::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v43_migration_preserves_existing_data_and_offline_abort_keeps_metadata_unpublished() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("migration.sqlite");
+        let mut repository = AppRepository::open(&path).unwrap();
+        let identity = repository.create_identity("Existing", None).unwrap();
+        super::remove_schema_added_after_fixture_version(&repository.connection, 42).unwrap();
+        repository
+            .connection
+            .pragma_update(None, "user_version", 42)
+            .unwrap();
+        drop(repository);
+        let mut repository = AppRepository::open(&path).unwrap();
+        assert_eq!(
+            repository.list_identities().unwrap()[0].identity_id,
+            identity.identity_id
+        );
+        let (_, source) = ssh_sync_restore_fixture();
+        let plan = crate::OfflineImportPlan {
+            attempt_id: source.attempt_id,
+            archive_sha256: source.bundle_sha256,
+            plan_sha256: source.plan_sha256,
+            identities: source.identities,
+            credentials: source.credentials,
+            hosts: source.hosts,
+            desktop_profiles: source.desktop_profiles,
+        };
+        let before = repository.ssh_sync_change_fence().unwrap();
+        let (saga, _) = repository.begin_offline_import(&plan, &before).unwrap();
+        drop(repository);
+        let mut repository = AppRepository::open(&path).unwrap();
+        assert_eq!(
+            repository.pending_offline_imports().unwrap()[0].secret_ref_ids,
+            saga.secret_ref_ids
+        );
+        repository.finish_offline_import_cleanup(&saga).unwrap();
+        assert!(repository.pending_offline_imports().unwrap().is_empty());
+        assert_eq!(repository.list_identities().unwrap().len(), 1);
     }
 }

@@ -10,6 +10,7 @@ import NvxPluginApprovalPolicy from "../components/plugins/NvxPluginApprovalPoli
 import { NvxButton, NvxField, NvxIcon, NvxInlineNotice, NvxInput } from "../components/ui";
 import { decidePluginRemoteApproval, getPluginRemoteApproval, submitPluginCredentialInput } from "../core-api/client";
 import type { PluginApprovalDecision, PluginRemoteApprovalPrompt } from "../core-api/generated/core-api";
+import { MIN_NEW_SECRET_PASSWORD_CHARACTERS, passwordCharacterCount } from "../password-policy";
 
 const { t, locale } = useI18n();
 const prompt = ref<PluginRemoteApprovalPrompt | null>(null);
@@ -20,10 +21,18 @@ const policy = ref<"once" | "always">("once");
 const expiry = ref<"fifteenMinutes" | "oneHour" | "twentyFourHours" | "unlimited">("unlimited");
 const credentialSecret = ref("");
 const credentialConfirmation = ref("");
+const credentialByteLimit = computed(() => content.value?.kind === "vaultAccess" ? 65_536 : 4_096);
+const credentialTooLong = computed(() => new TextEncoder().encode(credentialSecret.value).byteLength > credentialByteLimit.value);
+const confirmationTooLong = computed(() => new TextEncoder().encode(credentialConfirmation.value).byteLength > 65_536);
+const vaultPasswordTooShort = computed(() => createsVault.value && !!credentialSecret.value
+  && passwordCharacterCount(credentialSecret.value) < MIN_NEW_SECRET_PASSWORD_CHARACTERS);
+const vaultConfirmationMismatch = computed(() => createsVault.value && !!credentialConfirmation.value
+  && credentialSecret.value !== credentialConfirmation.value);
 const credentialValid = computed(() => {
   const bytes = new TextEncoder().encode(credentialSecret.value).length;
-  return bytes > 0 && bytes <= 4096 && (content.value?.kind !== "vaultAccess"
-    || !content.value.create || (bytes >= 12 && credentialSecret.value === credentialConfirmation.value));
+  return bytes > 0 && bytes <= credentialByteLimit.value && (content.value?.kind !== "vaultAccess"
+    || !content.value.create || (passwordCharacterCount(credentialSecret.value) >= MIN_NEW_SECRET_PASSWORD_CHARACTERS
+      && !confirmationTooLong.value && credentialSecret.value === credentialConfirmation.value));
 });
 const approvalId = new URLSearchParams(window.location.search).get("approvalId") ?? "";
 const content = computed(() => prompt.value?.content);
@@ -194,6 +203,8 @@ onMounted(async () => {
           <NvxField
             for-id="plugin-credential-secret"
             :label="t(content.kind === 'credential' ? 'plugins.remoteApproval.credentialValue' : 'plugins.remoteApproval.vaultPassword')"
+            :hint="createsVault ? t('plugins.remoteApproval.vaultCreateHint') : undefined"
+            :error="credentialTooLong ? t('plugins.remoteApproval.passwordTooLong') : vaultPasswordTooShort ? t('sshTerminal.vaultPasswordTooShort') : undefined"
           >
             <NvxInput
               id="plugin-credential-secret"
@@ -201,6 +212,7 @@ onMounted(async () => {
               type="password"
               autocomplete="new-password"
               :disabled="pending"
+              :invalid="vaultPasswordTooShort || credentialTooLong"
               @keydown.enter.prevent="decide('approve')"
             />
           </NvxField>
@@ -208,6 +220,8 @@ onMounted(async () => {
             v-if="createsVault"
             for-id="plugin-vault-confirmation"
             :label="t('plugins.remoteApproval.vaultConfirmation')"
+            :hint="t('plugins.sshSync.confirmPasswordHint')"
+            :error="confirmationTooLong ? t('plugins.remoteApproval.passwordTooLong') : vaultConfirmationMismatch ? t('sshTerminal.vaultPasswordMismatch') : undefined"
           >
             <NvxInput
               id="plugin-vault-confirmation"
@@ -215,6 +229,7 @@ onMounted(async () => {
               type="password"
               autocomplete="new-password"
               :disabled="pending"
+              :invalid="vaultConfirmationMismatch || confirmationTooLong"
               @keydown.enter.prevent="decide('approve')"
             />
           </NvxField>

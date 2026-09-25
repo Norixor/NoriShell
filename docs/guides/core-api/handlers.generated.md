@@ -1,6 +1,6 @@
 # Generated Tauri handler and main-window ACL directory
 
-Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the trusted-main allowlist in `src-tauri/permissions/app.toml`. It lists **264 registered command handlers**. Registration does not grant plugin access.
+Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the trusted-main allowlist in `src-tauri/permissions/app.toml`. It lists **276 registered command handlers**. Registration does not grant plugin access.
 
 | Handler | Stable Core symbol | Main-window ACL |
 | --- | --- | --- |
@@ -242,8 +242,20 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `plugin_isolated_bridge` | `COMMAND_PLUGIN_ISOLATED_BRIDGE` | not allowed |
 | `ssh_sync_secure_prompt_get` | internal | not allowed |
 | `ssh_sync_secure_prompt_decide` | internal | not allowed |
+| `ssh_sync_preferences_publish` | internal | allowed |
+| `ssh_sync_preferences_pending_get` | internal | allowed |
+| `ssh_sync_preferences_apply_ack` | internal | allowed |
+| `ssh_sync_preferences_retry_pending` | internal | allowed |
 | `private_key_file_import` | `COMMAND_PRIVATE_KEY_FILE_IMPORT` | not allowed |
 | `native_json_export` | internal | allowed |
+| `offline_backup_export` | internal | allowed |
+| `offline_backup_open` | internal | allowed |
+| `offline_backup_preview` | internal | allowed |
+| `offline_backup_apply` | internal | allowed |
+| `offline_backup_discard` | internal | allowed |
+| `offline_backup_secure_get` | internal | not allowed |
+| `offline_backup_secure_submit` | internal | not allowed |
+| `offline_backup_secure_cancel` | internal | not allowed |
 | `secure_credential_open` | internal | allowed |
 | `secure_credential_get` | internal | not allowed |
 | `secure_credential_submit` | internal | not allowed |
@@ -256,6 +268,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `secure_vault_ensure_for_host` | internal | allowed |
 | `secure_vault_get` | internal | not allowed |
 | `secure_vault_submit` | internal | not allowed |
+| `secure_vault_reset` | internal | not allowed |
 | `secure_vault_cancel` | internal | not allowed |
 | `tool_window_exit_reply` | internal | not allowed |
 | `tool_window_open` | internal | allowed |

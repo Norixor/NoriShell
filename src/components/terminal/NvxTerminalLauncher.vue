@@ -552,13 +552,66 @@ function submitQuickConnect() {
   }
 
   .terminal-launcher__start {
-    padding-right: 0;
+    padding: 0;
     border-right: 0;
   }
 
+  .terminal-launcher__heading p {
+    max-width: none;
+    margin-top: var(--nvx-space-1);
+  }
+
+  .terminal-launcher__quick {
+    margin-top: var(--nvx-space-6);
+  }
+
+  .terminal-launcher__quick-row {
+    gap: var(--nvx-space-2);
+    margin-top: var(--nvx-space-2);
+  }
+
+  .terminal-launcher__methods {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: var(--nvx-space-5);
+    border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+  }
+
+  .terminal-launcher__method {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: var(--nvx-space-2);
+    min-height: 64px;
+    padding: var(--nvx-space-2) var(--nvx-space-3);
+  }
+
+  .terminal-launcher__method:nth-child(odd) {
+    border-right: var(--nvx-border-width) solid var(--nvx-color-border);
+  }
+
+  .terminal-launcher__method:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .terminal-launcher__method-icon {
+    width: 28px;
+    height: 28px;
+  }
+
   .terminal-launcher__recent {
-    padding: var(--nvx-space-6) 0 0;
-    border-top: var(--nvx-border-width) solid var(--nvx-color-border);
+    padding: var(--nvx-space-5) 0 0;
+    border-top: 0;
+  }
+
+  .terminal-launcher__recent-heading button {
+    padding: var(--nvx-space-1) 0;
+  }
+
+  .terminal-launcher__host-list {
+    margin-top: var(--nvx-space-3);
+  }
+
+  .ssh-terminal-recent__item {
+    min-height: 60px;
+    padding: var(--nvx-space-2) var(--nvx-space-3);
   }
 }
 
@@ -569,21 +622,30 @@ function submitQuickConnect() {
   }
 
   .terminal-launcher__quick {
-    margin-top: var(--nvx-space-6);
+    margin-top: var(--nvx-space-5);
   }
 
-  .terminal-launcher__quick-row {
-    grid-template-columns: 1fr;
+  .terminal-launcher__method {
+    min-height: 60px;
+    padding-inline: var(--nvx-space-2);
   }
 
-  .terminal-launcher__quick-row :deep(.nvx-button) {
-    width: 100%;
+  .terminal-launcher__method-copy strong,
+  .terminal-launcher__method-copy small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .ssh-terminal-recent__item {
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    gap: var(--nvx-space-2);
+  }
+}
+
+@container (max-width: 440px) {
+  .ssh-terminal-recent__item {
     grid-template-columns: auto minmax(0, 1fr) auto;
-    min-height: 72px;
-    padding: var(--nvx-space-3);
   }
 
   .terminal-launcher__host-time,

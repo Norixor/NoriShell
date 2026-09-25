@@ -26,6 +26,19 @@ export interface PreferenceTransferFile {
   groups: Partial<Record<PreferenceGroupId, unknown>>;
 }
 
+export function validateFullSyncPreferences(value: unknown, adapters: readonly PreferenceGroupAdapter[]): PreferenceTransferFile {
+  if (!object(value)) throw new Error("invalidFile");
+  const parsed = parsePreferenceTransfer(JSON.stringify(value), adapters);
+  if (adapters.length !== PREFERENCE_GROUP_IDS.length
+    || PREFERENCE_GROUP_IDS.some((id) => !adapters.some((adapter) => adapter.id === id) || !(id in parsed.groups))
+    || Object.keys(parsed.groups).length !== PREFERENCE_GROUP_IDS.length) throw new Error("incompletePreferences");
+  return parsed;
+}
+
+export async function exportFullSyncPreferences(adapters: readonly PreferenceGroupAdapter[]): Promise<PreferenceTransferFile> {
+  return validateFullSyncPreferences(JSON.parse(await exportPreferenceTransfer(adapters)), adapters);
+}
+
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

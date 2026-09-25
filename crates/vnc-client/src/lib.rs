@@ -20,6 +20,8 @@ use vnc::{
 };
 use zeroize::Zeroizing;
 
+pub use vnc::VncVersion;
+
 const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_WHEEL_STEPS: usize = 120;
 const MAX_JPEG_BYTES: usize = 32 * 1024 * 1024;
@@ -30,6 +32,7 @@ pub struct VncOptions {
     pub password: Zeroizing<String>,
     pub allow_unauthenticated: bool,
     pub clipboard_enabled: bool,
+    pub version: Option<VncVersion>,
 }
 
 /// Runs one already-connected VNC RFB session.
@@ -49,6 +52,7 @@ pub async fn run(
         password,
         allow_unauthenticated,
         clipboard_enabled,
+        version,
     } = options;
     let mut client = HardenedVncClient::connect(
         stream,
@@ -56,6 +60,7 @@ pub async fn run(
             password,
             allow_unauthenticated,
             clipboard_enabled,
+            version,
         },
         control.stop.clone(),
     )
@@ -659,6 +664,7 @@ mod tests {
                 password: Zeroizing::new(String::new()),
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
+                version: None,
             },
             command_rx,
             EngineControl {
@@ -735,6 +741,7 @@ mod tests {
                 password: Zeroizing::new(String::new()),
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
+                version: None,
             },
             command_rx,
             EngineControl {
@@ -787,6 +794,7 @@ mod tests {
                 password: Zeroizing::new("test-password".into()),
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
+                version: None,
             },
             command_rx,
             EngineControl {
@@ -796,6 +804,61 @@ mod tests {
             sink,
         ));
 
+        timeout(TEST_TIMEOUT, ready_rx).await.unwrap().unwrap();
+        stop_tx.send(true).unwrap();
+        assert_eq!(
+            timeout(TEST_TIMEOUT, task).await.unwrap().unwrap(),
+            Err(EngineError::Cancelled)
+        );
+        timeout(TEST_TIMEOUT, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_rfb33_uses_password_auth_with_custom_server_banner() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"RFB 003.889\n").await.unwrap();
+            let mut client_version = [0_u8; 12];
+            stream.read_exact(&mut client_version).await.unwrap();
+            assert_eq!(client_version, *b"RFB 003.003\n");
+            stream.write_all(&2_u32.to_be_bytes()).await.unwrap();
+            stream.write_all(&[0x5a; 16]).await.unwrap();
+            let mut response = [0_u8; 16];
+            stream.read_exact(&mut response).await.unwrap();
+            assert_ne!(response, [0x5a; 16]);
+            stream.write_all(&0_u32.to_be_bytes()).await.unwrap();
+            server_init(&mut stream, 1, 1).await;
+            sleep(Duration::from_millis(200)).await;
+        });
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (_epoch_tx, epoch_rx) = watch::channel(0_u64);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+        let sink: EventSink = Arc::new(move |event| {
+            if matches!(event, EngineEvent::Ready)
+                && let Some(sender) = ready_tx.lock().unwrap().take()
+            {
+                let _ = sender.send(());
+            }
+        });
+        let task = tokio::spawn(run(
+            Box::new(TcpStream::connect(address).await.unwrap()),
+            VncOptions {
+                password: Zeroizing::new("example-password".into()),
+                allow_unauthenticated: false,
+                clipboard_enabled: false,
+                version: Some(VncVersion::RFB33),
+            },
+            command_rx,
+            EngineControl {
+                stop: stop_rx,
+                focus_epoch: epoch_rx,
+            },
+            sink,
+        ));
         timeout(TEST_TIMEOUT, ready_rx).await.unwrap().unwrap();
         stop_tx.send(true).unwrap();
         assert_eq!(
@@ -844,6 +907,7 @@ mod tests {
                 password: Zeroizing::new(String::new()),
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
+                version: None,
             },
             command_rx,
             EngineControl {
@@ -901,6 +965,7 @@ mod tests {
                 password: Zeroizing::new(String::new()),
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
+                version: None,
             },
             command_rx,
             EngineControl {
@@ -956,6 +1021,7 @@ mod tests {
                 password: Zeroizing::new(String::new()),
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
+                version: None,
             },
             command_rx,
             EngineControl {
@@ -1000,6 +1066,7 @@ mod tests {
                 password: Zeroizing::new(String::new()),
                 allow_unauthenticated: false,
                 clipboard_enabled: false,
+                version: None,
             },
             command_rx,
             EngineControl {

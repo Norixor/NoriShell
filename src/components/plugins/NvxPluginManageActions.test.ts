@@ -4,6 +4,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { i18n } from "../../locales";
 import NvxPluginManageActions from "./NvxPluginManageActions.vue";
 
+function menu() {
+  return document.querySelector<HTMLElement>('.plugin-manage-actions__popover');
+}
+
+function menuItems() {
+  return Array.from(menu()?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+}
+
 afterEach(() => {
   document.body.innerHTML = "";
 });
@@ -21,15 +29,16 @@ describe("NvxPluginManageActions", () => {
     expect(wrapper.emitted("disable")).toHaveLength(1);
 
     await wrapper.get('button[aria-label="More plugin actions"]').trigger("click");
-    expect(wrapper.get('[role="menu"]').text()).toContain("View package and capability details");
-    expect(wrapper.get('[role="menu"]').text()).toContain("Manage Permissions");
-    expect(wrapper.get('[role="menu"]').text()).toContain("Operation approvals");
-    expect(wrapper.get('[role="menu"]').text()).toContain("Uninstall");
+    expect(menu()?.parentElement).toBe(document.body);
+    expect(menu()?.textContent).toContain("View package and capability details");
+    expect(menu()?.textContent).toContain("Manage Permissions");
+    expect(menu()?.textContent).toContain("Operation approvals");
+    expect(menu()?.textContent).toContain("Uninstall");
 
-    const permissions = wrapper.findAll('[role="menuitem"]')[1];
-    await permissions?.trigger("click");
+    menuItems()[1]?.click();
+    await wrapper.vm.$nextTick();
     expect(wrapper.emitted("permissions")).toHaveLength(1);
-    expect(wrapper.find('[role="menu"]').exists()).toBe(false);
+    expect(menu()).toBeNull();
     wrapper.unmount();
   });
 
@@ -40,9 +49,10 @@ describe("NvxPluginManageActions", () => {
       global: { plugins: [i18n] },
     });
     await wrapper.get('button[aria-haspopup="menu"]').trigger("click");
-    const action = wrapper.findAll('[role="menuitem"]').find((item) => item.text() === "Operation approvals");
+    const action = menuItems().find((item) => item.textContent?.trim() === "Operation approvals");
     expect(action).toBeDefined();
-    await action!.trigger("click");
+    action?.click();
+    await wrapper.vm.$nextTick();
     expect(wrapper.emitted("operationPermissions")).toHaveLength(1);
     wrapper.unmount();
   });
@@ -77,14 +87,14 @@ describe("NvxPluginManageActions", () => {
       props: { state: "disabled", hasSettings: true },
       global: { plugins: [i18n] },
     });
-    await wrapper.get('button[aria-haspopup="menu"]').trigger("click");
-    const settings = wrapper.findAll('[role="menuitem"]').find((item) => item.text() === "Settings");
+    const settings = wrapper.findAll("button").find((item) => item.text().trim() === "Settings");
     expect(settings).toBeDefined();
-    await settings!.trigger("click");
+    await settings?.trigger("click");
     expect(wrapper.emitted("settings")).toHaveLength(1);
-    await wrapper.setProps({ hasSettings: false });
     await wrapper.get('button[aria-haspopup="menu"]').trigger("click");
-    expect(wrapper.findAll('[role="menuitem"]').some((item) => item.text() === "Settings")).toBe(false);
+    expect(menuItems().some((item) => item.textContent?.trim() === "Settings")).toBe(false);
+    await wrapper.setProps({ hasSettings: false });
+    expect(wrapper.findAll("button").some((item) => item.text().trim() === "Settings")).toBe(false);
     wrapper.unmount();
   });
 

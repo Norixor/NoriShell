@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tauri::WebviewWindow;
+use tauri::{Manager, WebviewWindow};
 
 const GITHUB_RELEASES_API: &str =
     "https://api.github.com/repos/Norixor/NoriShell/releases?per_page=100";
@@ -34,6 +34,23 @@ pub(crate) struct ReleaseCheckResponse {
     status: ReleaseCheckStatus,
     latest_version: Option<String>,
     release_url: &'static str,
+    supports_auto_install: bool,
+}
+
+fn supports_auto_install() -> bool {
+    #[cfg(windows)]
+    {
+        // The direct-run ZIP contains only norishell.exe. NSIS creates its
+        // uninstaller beside the installed executable.
+        return std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join("uninstall.exe")))
+            .is_some_and(|path| path.is_file());
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -81,13 +98,14 @@ fn evaluate_releases(current: Version, releases: Vec<GithubRelease>) -> ReleaseC
         .filter_map(|release| is_eligible_release(&current, release))
         .max_by(|left, right| left.cmp_precedence(right));
 
-    let (status, latest_version) = match latest {
-        None => (ReleaseCheckStatus::NoRelease, None),
+    let (status, latest_version, stable_release) = match latest {
+        None => (ReleaseCheckStatus::NoRelease, None, false),
         Some(version) if version.cmp_precedence(&current).is_gt() => (
             ReleaseCheckStatus::UpdateAvailable,
             Some(version.to_string()),
+            version.pre.is_empty(),
         ),
-        Some(_) => (ReleaseCheckStatus::UpToDate, None),
+        Some(_) => (ReleaseCheckStatus::UpToDate, None, false),
     };
 
     ReleaseCheckResponse {
@@ -95,6 +113,8 @@ fn evaluate_releases(current: Version, releases: Vec<GithubRelease>) -> ReleaseC
         status,
         latest_version,
         release_url: GITHUB_RELEASES_PAGE,
+        // GitHub's Latest endpoint never points at a prerelease.
+        supports_auto_install: stable_release && supports_auto_install(),
     }
 }
 
@@ -157,6 +177,20 @@ pub(crate) async fn release_check<R: tauri::Runtime>(
     Ok(evaluate_releases(current, releases))
 }
 
+#[tauri::command]
+pub(crate) fn release_update_readiness<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+) -> Result<norishell_core_api::ExitReadiness, ReleaseCheckFailure> {
+    if window.label() != MAIN_WINDOW_LABEL {
+        return Err(ReleaseCheckFailure {
+            code: ReleaseCheckFailureCode::WindowNotAllowed,
+        });
+    }
+    Ok(crate::lifecycle::current_exit_readiness(
+        window.app_handle(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +217,8 @@ mod tests {
         assert_eq!(result.status, ReleaseCheckStatus::UpdateAvailable);
         assert_eq!(result.latest_version.as_deref(), Some("0.1.1"));
         assert_eq!(result.release_url, GITHUB_RELEASES_PAGE);
+        #[cfg(not(windows))]
+        assert!(result.supports_auto_install);
     }
 
     #[test]
@@ -211,6 +247,7 @@ mod tests {
 
         assert_eq!(result.status, ReleaseCheckStatus::UpdateAvailable);
         assert_eq!(result.latest_version.as_deref(), Some("0.1.0-beta.10"));
+        assert!(!result.supports_auto_install);
     }
 
     #[test]

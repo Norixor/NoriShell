@@ -83,11 +83,12 @@ impl ParsedPluginUiOutputs {
             || self.api_call.is_some()
     }
 
-    /// A broker result supplies the replacement document later. The existing page stays
-    /// visible while a document-free request runs.
+    /// Broker and SSH sync results supply the replacement document later. The existing
+    /// page stays visible while a document-free request runs.
     pub(crate) fn valid_initial_document_count(&self) -> bool {
         self.templates.len() == 1
-            || (self.has_operation_broker_request() && self.templates.is_empty())
+            || ((self.has_operation_broker_request() || self.ssh_sync_request.is_some())
+                && self.templates.is_empty())
     }
 }
 

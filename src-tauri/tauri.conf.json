@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "NoriShell",
-  "version": "0.1.1-beta",
+  "version": "0.1.2",
   "identifier": "app.norishell.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -31,6 +31,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "macOS": {
       "minimumSystemVersion": "13.0"
@@ -42,5 +43,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMyNkY1NjlCOTI1NjMxRkEKUldUNk1WYVNtMVp2d3R2bTJMZ3Z4cG0xd1huNmFIUkJRZk83YnV2ODhlTG9ZWi9QQWdDWE51UTMK",
+      "requireSignedVersion": true,
+      "endpoints": ["https://github.com/Norixor/NoriShell/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
   }
 }

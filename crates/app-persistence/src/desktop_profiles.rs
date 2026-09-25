@@ -25,6 +25,8 @@ pub fn validate_desktop_profile(profile: &DesktopProfile) -> Result<()> {
             .any(|value| value.chars().any(char::is_control))
         || (profile.protocol == norishell_core_api::DesktopProtocol::Vnc
             && profile.audio_playback_enabled)
+        || (profile.protocol == norishell_core_api::DesktopProtocol::Rdp
+            && profile.vnc_protocol_version != norishell_core_api::VncProtocolVersion::Auto)
         || profile.width == 0
         || profile.height == 0
         || profile.width > 8192
@@ -154,7 +156,7 @@ impl AppRepository {
             params![
                 identity_id.as_str(),
                 staged.identity_label,
-                normalized_profile.username,
+                (!normalized_profile.username.is_empty()).then_some(&normalized_profile.username),
                 now,
             ],
         )?;
@@ -474,6 +476,7 @@ mod tests {
             height: 720,
             clipboard_enabled: false,
             audio_playback_enabled: false,
+            vnc_protocol_version: norishell_core_api::VncProtocolVersion::Auto,
             revision: WireSequence::new(0),
         }
     }
@@ -516,8 +519,13 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("audioPlaybackEnabled");
+        value.as_object_mut().unwrap().remove("vncProtocolVersion");
         let restored: DesktopProfile = serde_json::from_value(value).unwrap();
         assert!(!restored.audio_playback_enabled);
+        assert_eq!(
+            restored.vnc_protocol_version,
+            norishell_core_api::VncProtocolVersion::Auto
+        );
         let mut audio = restored;
         audio.audio_playback_enabled = true;
         assert!(validate_desktop_profile(&audio).is_ok());
@@ -544,6 +552,9 @@ mod tests {
             let mut request = profile();
             request.protocol = protocol;
             request.port = port;
+            if protocol == DesktopProtocol::Vnc {
+                request.username.clear();
+            }
             let saved = repository
                 .save_desktop_profile_with_password_stage(
                     &request,
@@ -563,13 +574,46 @@ mod tests {
                 CredentialRecordDetails::Password { ref secret_ref_id }
                     if *secret_ref_id == staged.secret_ref_id
             ));
+            let identity = repository.get_identity(&credential.identity_id).unwrap();
+            assert_eq!(identity.label, "Desktop password identity");
             assert_eq!(
-                repository
-                    .get_identity(&credential.identity_id)
-                    .unwrap()
-                    .label,
-                "Desktop password identity"
+                identity.username.as_deref(),
+                (protocol == DesktopProtocol::Rdp).then_some("user")
             );
+            if protocol == DesktopProtocol::Vnc {
+                let stored: Option<String> = repository
+                    .connection
+                    .query_row(
+                        "SELECT username FROM identities WHERE id = ?1",
+                        [credential.identity_id.as_str()],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(stored, None);
+                // Older desktop saves used an empty string for an absent username.
+                repository
+                    .connection
+                    .execute(
+                        "UPDATE identities SET username = '' WHERE id = ?1",
+                        [credential.identity_id.as_str()],
+                    )
+                    .unwrap();
+                assert_eq!(
+                    repository
+                        .get_identity(&credential.identity_id)
+                        .unwrap()
+                        .username,
+                    None
+                );
+                assert!(
+                    repository
+                        .list_identities()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item.identity_id == credential.identity_id
+                            && item.username.is_none())
+                );
+            }
             let receipt_count: i64 = repository
                 .connection
                 .query_row(

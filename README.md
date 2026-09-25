@@ -4,10 +4,10 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">本地优先的终端与远程连接工作台</p>
 <p align="center">SSH · 本地终端 · SFTP · 端口转发 · RDP / VNC · 加密 Vault · 插件</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.1-beta</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.2</p>
 <p align="center">简体中文 · <a href="README.en.md">English</a></p>
 
-NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据管理放进一个桌面应用。基础连接无需账号，主机配置保存在本机，持久化密码和私钥进入独立加密 Vault；需要跨设备使用时，可通过 Norixor 插件选择性启用端到端加密同步。
+NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据管理放进一个桌面应用。基础连接无需账号，主机配置保存在本机，持久化密码和私钥进入独立加密 Vault；需要跨设备使用时，可通过 Norixor 插件或[自建同步示例](example/self-host-sync/readme.md)选择性启用端到端加密同步。
 
 项目基于 **Tauri 2、Vue 3、TypeScript、xterm 和 Rust**。Rust Core 管理连接、秘密、持久化和资源生命周期，前端负责交互与可重建的状态投影。
 
@@ -24,6 +24,7 @@ NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据�
 - [故障排查](#故障排查)
 - [架构与项目结构](#架构与项目结构)
 - [许可证](#许可证)
+- [Star History](#star-history)
 
 ## 亮点
 
@@ -51,7 +52,7 @@ NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据�
 | 凭据保护 | 独立加密 Vault、一次性凭据、受保护窗口、严格的 host-key 确认与变化阻断 |
 | 日常操作 | 快捷命令、自定义快捷键、关键词高亮、通知、托盘面板和设置导入导出 |
 | 插件与主题 | 隔离的 WebAssembly 插件、细粒度权限、本地 ZIP 导入/升级和纯数据声明式主题 |
-| 可选同步 | 通过 Norixor 插件同步用户明确选择的加密 SSH 与远程桌面配置，不上传本机 Vault 文件 |
+| 可选同步 | 通过 Norixor 插件或自建服务同步可移植 SSH、远程桌面配置与非秘密偏好，不上传本机 Vault 文件 |
 | Telnet | 独立 Telnet 会话；连接前明确提示明文传输、无服务器身份验证和链路篡改风险 |
 
 ## 安装与快速开始
@@ -67,11 +68,11 @@ NoriShell 将终端会话、远程连接、文件传输、远程桌面和凭据�
 
 使用 macOS 安装包时，将 NoriShell 拖入“应用程序”；Windows 安装包按向导安装。ZIP 版使用同样的本机配置与数据目录，运行前请完整解压。Windows ZIP 版需要系统已安装 WebView2 Runtime。
 
+需要跨设备同步时，参照[自建同步服务端与插件安装指南](docs/guides/users/self-host-sync.zh-CN.md)部署服务端，并在应用中导入对应插件 ZIP。
+
 ### 检查新版本
 
-在 **设置 → 关于** 中点击“检查更新”。应用读取 [NoriShell GitHub Releases](https://github.com/Norixor/NoriShell/releases) 的公开版本信息；发现新版本后，点击“前往 GitHub 下载”在浏览器中打开发布页，自行选择对应平台和架构的安装包。
-
-更新由你手动下载和安装。Beta 版本可检测后续 Beta 和正式版本；正式版本只提示正式发布。
+在 **设置 → 关于** 中点击“检查更新”。发现新版本后，可打开 [GitHub Releases](https://github.com/Norixor/NoriShell/releases) 选择对应平台的安装包。正式版本的 macOS 应用和 Windows 安装版也可在确认后由应用下载并安装签名更新；Windows 免安装 ZIP 版以及 Beta 更新需手动下载。Beta 版本可检测后续 Beta 和正式版本；正式版本只提示正式发布。
 
 ### 首次连接
 
@@ -141,6 +142,7 @@ NoriShell 不提供在线插件市场。安装或升级插件时，用户明确�
 - [打包、安装与升级](docs/guides/developers/development/packaging.zh-CN.md)
 - [API 方法与类型参考](docs/guides/plugin-api/README.zh-CN.md)
 - [示例讲解与源码](docs/guides/developers/examples/README.zh-CN.md)
+- [自建同步插件与 Go 服务端](example/self-host-sync/readme.md)
 
 更多专题：[Wasm ABI](docs/guides/developers/wasm-abi.zh-CN.md) · [主题插件](docs/guides/developers/themes.zh-CN.md) · [安全与发布检查](docs/guides/developers/security.zh-CN.md) · [SDK 开发工具](examples/plugins/sdk-tooling/README.md)
 
@@ -150,6 +152,7 @@ NoriShell 不提供在线插件市场。安装或升级插件时，用户明确�
 | --- | --- |
 | [完整文档目录](docs/guides/README.md) | 中英文总入口 |
 | [用户指南](docs/guides/users/README.zh-CN.md) | 插件导入、权限、恢复与外观 |
+| [自建同步安装指南](docs/guides/users/self-host-sync.zh-CN.md) | 服务端配置、插件导入与首次同步 |
 | [开发指南](docs/guides/developers/README.zh-CN.md) | 包开发、ABI、Broker、UI、主题和安全检查 |
 | [Plugin API 参考](docs/guides/plugin-api/README.zh-CN.md) | guest 可调用的协议、类型、能力、资源与事件 |
 | [Core API 目录](docs/guides/core-api/README.zh-CN.md) | 应用 renderer IPC、commands、events、handlers 与 Plugin Host；不是插件权限面 |
@@ -191,6 +194,7 @@ src-tauri/              Tauri 桌面入口、原生窗口与宿主集成
 crates/                 Rust Core、协议、Vault、持久化和插件能力
 docs/guides/            用户、插件开发、Plugin API 与 Core API 文档
 examples/plugins/       Wasm 插件与 SDK 示例
+example/self-host-sync/ 自建同步插件、Go 服务端与 Release 打包脚本
 examples/theme-plugins/ 声明式主题示例
 vendor/                 保留上游许可和修改说明的依赖补丁
 ```
@@ -202,3 +206,13 @@ vendor/                 保留上游许可和修改说明的依赖补丁
 NoriShell 原创代码采用 **GNU General Public License v3.0 only（GPL-3.0-only）**。完整条款见 [LICENSE](LICENSE)。使用、修改或分发受 GPL 覆盖的版本时，须履行相应的源码提供及其他许可义务。
 
 第三方源码、依赖和素材保留各自许可，见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=norixor%2Fnorishell&type=date&legend=top-left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=norixor/norishell&type=date&theme=dark&legend=top-left" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=norixor/norishell&type=date&legend=top-left" />
+    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=norixor/norishell&type=date&legend=top-left" />
+  </picture>
+</a>

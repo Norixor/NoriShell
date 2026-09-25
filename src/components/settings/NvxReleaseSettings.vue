@@ -1,30 +1,23 @@
 <script setup lang="ts">
 import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import appIconUrl from "../../assets/branding/norishell-app-icon.png";
-import { NvxButton, NvxInlineNotice, NvxStatusLabel } from "../ui";
+import { useAppUpdateStore } from "../../stores/appUpdate";
+import { NvxButton, NvxDialog, NvxInlineNotice, NvxStatusLabel } from "../ui";
 
 const PROJECT_PAGE = "https://github.com/Norixor/NoriShell";
 const RELEASES_PAGE = "https://github.com/Norixor/NoriShell/releases";
 
-type ReleaseStatus = "upToDate" | "updateAvailable" | "noRelease";
-type DisplayStatus = "idle" | "checking" | ReleaseStatus | "failed";
-
-interface ReleaseCheckResponse {
-  currentVersion: string;
-  status: ReleaseStatus;
-  latestVersion: string | null;
-  releaseUrl: string;
-}
-
 const { t } = useI18n();
-const currentVersion = ref<string | null>(null);
-const status = ref<DisplayStatus>("idle");
-const latestVersion = ref<string | null>(null);
+const updates = useAppUpdateStore();
+const packagedVersion = ref<string | null>(null);
+const currentVersion = computed(() => updates.currentVersion ?? packagedVersion.value);
+const status = computed(() => updates.status);
+const latestVersion = computed(() => updates.latestVersion);
+const confirmOpen = ref(false);
 const openFailed = ref(false);
 let mounted = false;
 
@@ -46,26 +39,20 @@ const statusText = computed(() => {
 async function loadVersion() {
   try {
     const version = await getVersion();
-    if (mounted) currentVersion.value = version;
+    if (mounted) packagedVersion.value = version;
   } catch {
     // The update action still reads the authoritative packaged version in Core.
   }
 }
 
 async function checkForUpdates() {
-  if (status.value === "checking") return;
-  status.value = "checking";
-  latestVersion.value = null;
   openFailed.value = false;
-  try {
-    const result = await invoke<ReleaseCheckResponse>("release_check");
-    if (!mounted) return;
-    currentVersion.value = result.currentVersion;
-    status.value = result.status;
-    latestVersion.value = result.latestVersion;
-  } catch {
-    if (mounted) status.value = "failed";
-  }
+  await updates.checkForUpdates();
+}
+
+async function installUpdate() {
+  confirmOpen.value = false;
+  await updates.installUpdate();
 }
 
 async function openReleases() {
@@ -142,8 +129,63 @@ onBeforeUnmount(() => {
           <NvxStatusLabel :tone="tone">
             {{ statusText }}
           </NvxStatusLabel>
+          <span v-if="status === 'updateAvailable' && !updates.supportsAutoInstall">
+            {{ t(latestVersion?.includes('-') ? 'releases.install.prereleaseManual' : 'releases.install.portableManual') }}
+          </span>
+          <span v-if="updates.installStatus === 'checking'">{{ t('releases.install.checking') }}</span>
+          <span v-if="updates.installStatus === 'downloading'">
+            {{ t('releases.install.downloading', { progress: updates.progressPercent === null ? '…' : `${updates.progressPercent}%` }) }}
+          </span>
+          <span v-if="updates.installStatus === 'installing'">{{ t('releases.install.installing') }}</span>
+          <NvxInlineNotice
+            v-if="updates.installStatus === 'resourcesActive'"
+            tone="warning"
+          >
+            {{ t('releases.install.resourcesActive') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice
+            v-if="updates.installStatus === 'failed'"
+            tone="error"
+          >
+            {{ t('releases.install.failed') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice
+            v-if="updates.installStatus === 'cancelled'"
+            tone="info"
+          >
+            {{ t('releases.install.cancelled') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice
+            v-if="updates.installStatus === 'restartRequired'"
+            tone="warning"
+          >
+            {{ t('releases.install.restartRequired') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice
+            v-if="updates.installStatus === 'restartNeeded'"
+            tone="warning"
+          >
+            {{ t('releases.install.restartNeeded') }}
+          </NvxInlineNotice>
         </div>
         <div class="about-settings__actions">
+          <NvxButton
+            v-if="updates.installStatus === 'restartNeeded' || updates.installStatus === 'restartRequired'"
+            variant="primary"
+            size="sm"
+            @click="updates.restartApp()"
+          >
+            {{ t('releases.install.restartAction') }}
+          </NvxButton>
+          <NvxButton
+            v-if="status === 'updateAvailable' && updates.supportsAutoInstall"
+            variant="primary"
+            size="sm"
+            :disabled="updates.installStatus === 'checking' || updates.installStatus === 'downloading' || updates.installStatus === 'installing' || updates.installStatus === 'restartNeeded' || updates.installStatus === 'restartRequired'"
+            @click="confirmOpen = true"
+          >
+            {{ t('releases.install.action') }}
+          </NvxButton>
           <NvxButton
             v-if="status === 'updateAvailable'"
             variant="secondary"
@@ -156,7 +198,7 @@ onBeforeUnmount(() => {
             variant="secondary"
             size="sm"
             :loading="status === 'checking'"
-            :disabled="status === 'checking'"
+            :disabled="status === 'checking' || updates.installStatus === 'downloading' || updates.installStatus === 'installing'"
             @click="checkForUpdates"
           >
             {{ t('releases.check') }}
@@ -170,6 +212,29 @@ onBeforeUnmount(() => {
     >
       {{ t('releases.openLinkFailed') }}
     </NvxInlineNotice>
+    <NvxDialog
+      v-model="confirmOpen"
+      :title="t('releases.install.confirmTitle')"
+      :description="t('releases.install.confirmDescription')"
+      :close-label="t('releases.install.cancel')"
+      size="md"
+    >
+      <p>{{ t('releases.install.confirmBody') }}</p>
+      <template #actions>
+        <NvxButton
+          variant="secondary"
+          @click="confirmOpen = false"
+        >
+          {{ t('releases.install.cancel') }}
+        </NvxButton>
+        <NvxButton
+          variant="primary"
+          @click="installUpdate"
+        >
+          {{ t('releases.install.action') }}
+        </NvxButton>
+      </template>
+    </NvxDialog>
   </section>
 </template>
 

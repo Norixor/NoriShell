@@ -107,7 +107,9 @@ pub(crate) fn map_preferences_error(
             RetryStrategy::Never,
             "errors.desktopPreferences.invalidInput",
         ),
-        AppPersistenceError::Conflict | AppPersistenceError::IdempotencyConflict => (
+        AppPersistenceError::Conflict
+        | AppPersistenceError::IdempotencyConflict
+        | AppPersistenceError::DatabaseNotFresh => (
             "desktop_preferences.conflict",
             ErrorCategory::Conflict,
             RetryStrategy::RefreshSnapshot,

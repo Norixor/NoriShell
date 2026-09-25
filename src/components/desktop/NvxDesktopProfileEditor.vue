@@ -6,7 +6,7 @@ import { NvxButton, NvxCheckbox, NvxDialog, NvxField, NvxInlineNotice, NvxInput,
 import NvxDesktopPasswordFields from "./NvxDesktopPasswordFields.vue";
 import { desktopClient } from "../../core-api/desktop-client";
 import { listCredentialRefs, listHosts, listIdentities } from "../../core-api/client";
-import type { CredentialRefSummary, DesktopProfile, HostSummary } from "../../core-api/generated/core-api";
+import type { CredentialRefSummary, DesktopProfile, HostSummary, VncProtocolVersion } from "../../core-api/generated/core-api";
 
 const props = defineProps<{ profileId?: string }>();
 const emit = defineEmits<{ saved: [profile: DesktopProfile]; cancel: []; closeCancelled: [] }>();
@@ -30,7 +30,7 @@ function fresh(): DesktopProfile {
   return {
     id: crypto.randomUUID(), label: "", protocol: "rdp", address: "", port: 3389,
     username: "", domain: "", hostId: null, gatewayHostId: null, credentialRefId: null,
-    width: 1280, height: 800, clipboardEnabled: false, audioPlaybackEnabled: false, revision: "0",
+    width: 1280, height: 800, clipboardEnabled: false, audioPlaybackEnabled: false, vncProtocolVersion: "auto", revision: "0",
   };
 }
 
@@ -70,8 +70,20 @@ async function load() {
 function changeProtocol(protocol: string) {
   if (protocol !== "rdp" && protocol !== "vnc") return;
   draft.value.protocol = protocol;
-  if (protocol === "vnc") draft.value.audioPlaybackEnabled = false;
+  if (protocol === "vnc") {
+    draft.value.audioPlaybackEnabled = false;
+    draft.value.username = "";
+    draft.value.domain = "";
+  } else {
+    draft.value.vncProtocolVersion = "auto";
+  }
   draft.value.port = protocol === "rdp" ? 3389 : 5900;
+}
+
+function changeVncProtocolVersion(version: string) {
+  if (["auto", "rfb33", "rfb37", "rfb38"].includes(version)) {
+    draft.value.vncProtocolVersion = version as VncProtocolVersion;
+  }
 }
 
 function valid(profile: DesktopProfile) {
@@ -85,6 +97,10 @@ function valid(profile: DesktopProfile) {
 async function save() {
   if (busy.value || loading.value) return;
   const value = { ...draft.value };
+  if (value.protocol === "vnc") {
+    value.username = "";
+    value.domain = "";
+  }
   if (!valid(value)) {
     invalid.value = true;
     return;
@@ -211,6 +227,22 @@ defineExpose({ requestClose, dirty, busy: closeBusy });
         />
       </NvxField>
       <NvxField
+        v-if="draft.protocol === 'vnc'"
+        :label="t('desktop.vncProtocolVersion')"
+      >
+        <NvxSelect
+          :model-value="draft.vncProtocolVersion"
+          :aria-label="t('desktop.vncProtocolVersion')"
+          :options="[
+            { value: 'auto', label: t('desktop.vncVersions.auto') },
+            { value: 'rfb33', label: 'RFB 3.3' },
+            { value: 'rfb37', label: 'RFB 3.7' },
+            { value: 'rfb38', label: 'RFB 3.8' },
+          ]"
+          @update:model-value="changeVncProtocolVersion"
+        />
+      </NvxField>
+      <NvxField
         for-id="desktop-address"
         :label="t('desktop.address')"
       >
@@ -220,6 +252,12 @@ defineExpose({ requestClose, dirty, busy: closeBusy });
           :maxlength="253"
         />
       </NvxField>
+      <p
+        v-if="draft.protocol === 'vnc'"
+        class="desktop-profile-editor__wide desktop-profile-editor__hint"
+      >
+        {{ t('desktop.vncProtocolVersionHint') }}
+      </p>
       <NvxField
         for-id="desktop-port"
         :label="t('desktop.port')"
@@ -234,6 +272,7 @@ defineExpose({ requestClose, dirty, busy: closeBusy });
         />
       </NvxField>
       <NvxField
+        v-if="draft.protocol === 'rdp'"
         for-id="desktop-user"
         :label="t('desktop.username')"
       >
@@ -355,6 +394,7 @@ defineExpose({ requestClose, dirty, busy: closeBusy });
 .desktop-profile-editor { height: 100%; min-height: 0; overflow: auto; padding: var(--nvx-space-4); }
 .desktop-profile-editor__form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--nvx-space-3); }
 .desktop-profile-editor__wide { grid-column: 1 / -1; }
+.desktop-profile-editor__hint { margin: calc(-1 * var(--nvx-space-2)) 0 0; color: var(--nvx-color-text-tertiary); font-size: var(--nvx-font-size-xs); line-height: var(--nvx-line-height-xs); }
 .desktop-profile-editor__actions { display: flex; justify-content: flex-end; gap: var(--nvx-space-2); padding-top: var(--nvx-space-2); }
 @media (max-width: 560px) { .desktop-profile-editor__form { grid-template-columns: 1fr; } }
 </style>

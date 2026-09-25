@@ -4,6 +4,7 @@ import {
   resolveThemePreference,
   UI_PREFERENCES_KEY,
 } from "./ui-preferences";
+import { disableDefaultWebviewContextMenu } from "./webview-context-menu";
 
 let removeSystemThemeListener: (() => void) | undefined;
 
@@ -35,6 +36,7 @@ export function applySecureWindowAppearance() {
 }
 
 export function initializeSecureWindowAppearance() {
+  disableDefaultWebviewContextMenu();
   applySecureWindowAppearance();
   const onStorage = (event: StorageEvent) => {
     if (event.key === UI_PREFERENCES_KEY || event.key === null) applySecureWindowAppearance();

@@ -4,9 +4,15 @@
 identifier = "main-window-commands"
 description = "Allows the trusted main NoriShell WebView to call the application command surface."
 commands.allow = [
+  "window_renderer_ready",
   "tool_window_open",
   "secure_vault_open",
   "secure_vault_ensure_for_host",
+  "offline_backup_export",
+  "offline_backup_open",
+  "offline_backup_preview",
+  "offline_backup_apply",
+  "offline_backup_discard",
   "secure_credential_open",
   "secure_ssh_challenge_open",
   "tray_action_take",
@@ -26,7 +32,14 @@ commands.allow = [
   "native_notification_test",
   "native_notification_context_set",
   "native_json_export",
+  "ssh_sync_preferences_publish",
+  "ssh_sync_preferences_pending_get",
+  "ssh_sync_preferences_apply_ack",
+  "ssh_sync_preferences_retry_pending",
   "release_check",
+  "release_update_readiness",
+  "release_update_prepare_install",
+  "release_update_allow_relaunch",
 
   "desktop_profile_list",
   "desktop_availability",
@@ -276,4 +289,4 @@ commands.allow = ["desktop_prompt_get", "desktop_prompt_decide"]
 [[permission]]
 identifier = "tray-panel-commands"
 description = "Only the restricted tray panel projection and one-shot actions."
-commands.allow = ["tray_panel_snapshot", "tray_panel_execute", "tray_panel_hide"]
+commands.allow = ["tray_panel_snapshot", "tray_panel_execute", "tray_panel_hide", "window_renderer_ready"]

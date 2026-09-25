@@ -119,7 +119,7 @@ pub(super) async fn run_metrics_probe(
                 recoverable: true,
             })?;
             let deadline = tokio::time::Instant::now()
-                + Duration::from_secs(u64::from(policy.sample_timeout_seconds));
+                + Duration::from_millis(u64::from(policy.sample_timeout_millis));
             collect_linux_sample(&mut transport, policy, provider, started, deadline).await
         } => Some(result),
     };

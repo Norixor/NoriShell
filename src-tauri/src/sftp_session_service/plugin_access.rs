@@ -74,6 +74,7 @@ impl SftpSessionService {
             request,
             Some(expected_connection_revision),
             Some(admission_fence),
+            None,
         )
         .await
     }
@@ -1092,6 +1093,7 @@ mod tests {
             ConnectRequest::new("127.0.0.1", port).expect("fixture endpoint"),
             Arc::new(TrustedSftpHostKeyVerifier {
                 hosts: hosts.clone(),
+                unknown_capture: None,
             }),
         )
         .await

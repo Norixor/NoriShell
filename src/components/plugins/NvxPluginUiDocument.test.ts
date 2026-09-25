@@ -5,6 +5,8 @@ import type { PluginUiContribution } from "../../core-api/generated/core-api";
 import { i18n } from "../../locales";
 import NvxPluginUiDocument from "./NvxPluginUiDocument.vue";
 
+type ActionReply = { contribution: PluginUiContribution; closeDialogOnSuccess?: boolean } | null;
+
 function contribution(): PluginUiContribution {
   return {
     pluginId: "com.norishell.fixture",
@@ -682,8 +684,8 @@ describe("NvxPluginUiDocument", () => {
         rows: [{ rowId: "qa", cells: ["Native QA"], actionId: `${plugin}:load:qa` }], emptyText: null },
       { kind: "textField", nodeId: "field", fieldId, fieldKind: kind, label: "Value", value: saved, placeholder: null, required: false, disabled: false },
     ];
-    let finish!: (result: PluginUiContribution | null) => void;
-    const requestAction = vi.fn(() => new Promise<PluginUiContribution | null>((resolve) => { finish = resolve; }));
+    let finish!: (result: ActionReply) => void;
+    const requestAction = vi.fn(() => new Promise<ActionReply>((resolve) => { finish = resolve; }));
     const wrapper = mount(NvxPluginUiDocument, { props: { contribution: page, busy: false, requestAction }, global: { plugins: [i18n] } });
     const field = wrapper.get("input,textarea");
     await field.setValue(draft);
@@ -693,7 +695,7 @@ describe("NvxPluginUiDocument", () => {
     const restored = { ...page, contributionRevision: "2" };
     await wrapper.setProps({ contribution: restored });
     expect(field.element).toHaveProperty("value", draft);
-    finish(restored);
+    finish({ contribution: restored });
     await flushPromises();
     expect(field.element).toHaveProperty("value", saved);
     await field.setValue(draft);
@@ -704,8 +706,8 @@ describe("NvxPluginUiDocument", () => {
 
   it("keeps edits made after submission and ignores failed or expired action replies", async () => {
     const page = contribution();
-    const pending: Array<(result: PluginUiContribution | null) => void> = [];
-    const requestAction = vi.fn(() => new Promise<PluginUiContribution | null>((resolve) => pending.push(resolve)));
+    const pending: Array<(result: ActionReply) => void> = [];
+    const requestAction = vi.fn(() => new Promise<ActionReply>((resolve) => pending.push(resolve)));
     const wrapper = mount(NvxPluginUiDocument, { props: { contribution: page, busy: false, requestAction }, global: { plugins: [i18n] } });
     const field = wrapper.get("input");
     await field.setValue("submitted");
@@ -719,7 +721,7 @@ describe("NvxPluginUiDocument", () => {
     node.value = "authoritative result";
     await wrapper.setProps({ contribution: response });
     expect(field.element).toHaveProperty("value", "edited while awaiting response");
-    pending.shift()!(response);
+    pending.shift()!({ contribution: response });
     await flushPromises();
     expect(field.element).toHaveProperty("value", "edited while awaiting response");
 
@@ -737,7 +739,7 @@ describe("NvxPluginUiDocument", () => {
     if (replacementField?.kind !== "textField") throw new Error("fixture replacement field");
     replacementField.value = "new context value";
     await wrapper.setProps({ contribution: replacement });
-    pending.shift()!({ ...response, contributionRevision: "3" });
+    pending.shift()!({ contribution: { ...response, contributionRevision: "3" } });
     await flushPromises();
     expect(field.element).toHaveProperty("value", "new context value");
     wrapper.unmount();
@@ -752,8 +754,8 @@ describe("NvxPluginUiDocument", () => {
       { kind: "textField", nodeId: "inside", fieldId: "inside", fieldKind: "text", label: "Inside", value: "inside default", placeholder: null, required: false, disabled: false },
       { kind: "button", nodeId: "save", actionId: "save-dialog", label: "Save", variant: "primary", icon: null, disabled: false },
     ];
-    let finish!: (result: PluginUiContribution | null) => void;
-    const requestAction = vi.fn(() => new Promise<PluginUiContribution | null>((resolve) => { finish = resolve; }));
+    let finish!: (result: ActionReply) => void;
+    const requestAction = vi.fn(() => new Promise<ActionReply>((resolve) => { finish = resolve; }));
     const wrapper = mount(NvxPluginUiDocument, { props: { contribution: page, busy: false, requestAction },
       global: { plugins: [i18n], stubs: { Teleport: true } } });
     await wrapper.get("input").setValue("outside draft");
@@ -768,10 +770,25 @@ describe("NvxPluginUiDocument", () => {
     if (outside?.kind !== "textField") throw new Error("fixture outside field");
     outside.value = "unrelated server default";
     await wrapper.setProps({ contribution: result });
-    finish(result);
+    finish({ contribution: result });
     await flushPromises();
     expect(wrapper.get("input").element).toHaveProperty("value", "outside draft");
     expect(wrapper.get('[role="dialog"] input').element).toHaveProperty("value", "inside default");
+
+    await wrapper.findAll('[role="dialog"] button').find((button) => button.text() === "Save")!.trigger("click");
+    await flushPromises();
+    finish(null);
+    await flushPromises();
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
+
+    await wrapper.findAll('[role="dialog"] button').find((button) => button.text() === "Save")!.trigger("click");
+    await flushPromises();
+    const success = { ...result, contributionRevision: "3" };
+    await wrapper.setProps({ contribution: success });
+    finish({ contribution: success, closeDialogOnSuccess: true });
+    await flushPromises();
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+    expect(wrapper.get("input").element).toHaveProperty("value", "outside draft");
     wrapper.unmount();
   });
 

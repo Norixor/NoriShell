@@ -4,7 +4,7 @@ impl NoriShellSshSyncLocalAdapter {
     pub(super) fn desktop_profiles(&self) -> Result<Vec<DesktopProfile>, PortableStoreError> {
         self.hosts
             .with_ssh_sync_repository(|r| r.list_desktop_profiles())
-            .map_err(map_store_error)
+            .map_err(|error| map_store_error_at("local.desktop_profiles", error))
     }
 
     pub(super) fn desktop_password(
@@ -14,9 +14,9 @@ impl NoriShellSshSyncLocalAdapter {
         let record = self
             .hosts
             .with_ssh_sync_repository(|r| r.get_ready_credential_record(id))
-            .map_err(map_store_error)?;
+            .map_err(|error| map_store_error_at("local.desktop_password", error))?;
         if !matches!(record.details, CredentialRecordDetails::Password { .. }) {
-            return Err(PortableStoreError::Rejected);
+            return Err(PortableStoreError::Rejected("desktop.desktop_password.01"));
         }
         Ok(record)
     }

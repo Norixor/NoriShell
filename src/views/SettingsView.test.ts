@@ -162,9 +162,91 @@ describe("Settings", () => {
     await vault!.trigger("click");
 
     expect(wrapper.text()).toContain("Until this app exits");
+    await wrapper.get('[role="combobox"]').trigger("click");
+    await flushPromises();
+    expect(document.body.textContent).toContain("Save the Vault password locally and auto-unlock");
     expect(wrapper.text()).toContain("Lock now");
     expect(wrapper.text()).not.toContain("30 minutes");
     expect(wrapper.text()).not.toContain("30 days");
+    wrapper.unmount();
+  });
+
+  it("opens the protected local-password flow when the local auto-unlock policy is selected", async () => {
+    const wrapper = await mountSettings();
+    await wrapper.vm.$router.push("/settings?section=vault");
+    await flushPromises();
+
+    const policy = wrapper.get('[role="combobox"]');
+    await policy.trigger("click");
+    const local = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find((option) => option.textContent?.includes("Save the Vault password locally"));
+    expect(local).toBeDefined();
+    local!.click();
+    await flushPromises();
+
+    expect(client.secureVault).toHaveBeenCalledWith("enableLocalAutoUnlock");
+    expect(client.enableVaultAutoUnlock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("reopens the failed local-password auto-unlock flow", async () => {
+    const locked = {
+      state: "locked",
+      vaultId: "01991c54-9122-7000-8000-000000000001",
+      revision: 1,
+      entryCount: 0,
+      unlockPolicy: "automaticLocal",
+      autoUnlockFailure: "deviceKeyMissing",
+    };
+    client.fetchVaultStatus.mockResolvedValue(locked);
+    const wrapper = await mountSettings();
+    await wrapper.vm.$router.push("/settings?section=vault");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("private local file");
+    await wrapper.findAll("button").find((button) => button.text() === "Enable again")!.trigger("click");
+    await flushPromises();
+
+    expect(client.secureVault.mock.calls.map(([mode]) => mode)).toEqual(["enableLocalAutoUnlock"]);
+    wrapper.unmount();
+  });
+
+  it("enables the local-password mode with one protected password prompt while locked", async () => {
+    client.fetchVaultStatus.mockResolvedValue({
+      state: "locked",
+      unlockPolicy: "currentSession",
+      autoUnlockFailure: null,
+    });
+    const wrapper = await mountSettings();
+    await wrapper.vm.$router.push("/settings?section=vault");
+    await flushPromises();
+
+    await wrapper.get('[role="combobox"]').trigger("click");
+    const local = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find((option) => option.textContent?.includes("Save the Vault password locally"));
+    local!.click();
+    await flushPromises();
+
+    expect(client.secureVault.mock.calls.map(([mode]) => mode)).toEqual(["enableLocalAutoUnlock"]);
+    expect(wrapper.get('[role="combobox"]').text()).toContain("Until this app exits");
+    wrapper.unmount();
+  });
+
+  it("uses the saved local password for an explicit unlock click", async () => {
+    client.fetchVaultStatus.mockResolvedValue({
+      state: "locked",
+      unlockPolicy: "automaticLocal",
+      autoUnlockFailure: null,
+    });
+    const wrapper = await mountSettings();
+    await wrapper.vm.$router.push("/settings?section=vault");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Lock ends this session only");
+    await wrapper.findAll("button").find((button) => button.text() === "Unlock Vault")!.trigger("click");
+    await flushPromises();
+
+    expect(client.secureVault.mock.calls.map(([mode]) => mode)).toEqual(["unlockSavedLocal"]);
     wrapper.unmount();
   });
 

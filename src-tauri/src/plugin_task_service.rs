@@ -1546,9 +1546,9 @@ fn task_call_allowed(operation: &PluginApiOperation) -> bool {
 fn map_persistence_error(error: AppPersistenceError) -> PluginApiErrorCode {
     match error {
         AppPersistenceError::NotFound => PluginApiErrorCode::NotFound,
-        AppPersistenceError::Conflict | AppPersistenceError::IdempotencyConflict => {
-            PluginApiErrorCode::Conflict
-        }
+        AppPersistenceError::Conflict
+        | AppPersistenceError::IdempotencyConflict
+        | AppPersistenceError::DatabaseNotFresh => PluginApiErrorCode::Conflict,
         AppPersistenceError::InvalidInput(_) | AppPersistenceError::InvalidStoredData => {
             PluginApiErrorCode::InvalidRequest
         }

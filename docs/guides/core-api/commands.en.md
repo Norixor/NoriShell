@@ -1,6 +1,6 @@
 # Application IPC command directory
 
-This is the maintained index for application IPC. Each stable command's exact `RequestType → ResultType` comes from [`core-api.ts`](../../../src/core-api/generated/core-api.ts). The complete stable list is [the generated command directory](commands.generated.md): 210 symbols from `COMMAND_*` declarations. The actual production registry is separately enumerated in [the handler and ACL directory](handlers.generated.md): 264 handlers from `production_invoke_handler!` and the trusted main-window allowlist.
+This is the maintained index for application IPC. Each stable command's exact `RequestType → ResultType` comes from [`core-api.ts`](../../../src/core-api/generated/core-api.ts). The complete stable list is [the generated command directory](commands.generated.md): 210 symbols from `COMMAND_*` declarations. The actual production registry is separately enumerated in [the handler and ACL directory](handlers.generated.md): 277 handlers from `production_invoke_handler!` and the trusted main-window allowlist.
 
 | Group | Commands |
 |---|---|
@@ -17,6 +17,8 @@ Registration is not permission: the main WebView and each secure surface have se
 
 
 `desktop_preferences_get` / `desktop_preferences_replace` read and CAS-replace non-secret preferences from the trusted main window; revisions are decimal strings. Call `tray_actions_ready` after registering the `native-tray-action` listener, then consume each immutable token with `tray_action_take`. The renderer cannot submit a replacement target. Explicit creation follows the existing launcher/authentication gates; focusing never reconnects.
+
+`ssh_sync_preferences_publish`, `ssh_sync_preferences_pending_get`, `ssh_sync_preferences_apply_ack`, and `ssh_sync_preferences_retry_pending` let only the trusted main window publish a validated non-secret preference snapshot, inspect pending restoration, and acknowledge per-group outcomes. They are not stable `COMMAND_*` entries or plugin APIs. Core persists and fences pending work before applying it.
 
 `native_json_export` is a trusted-main-only native JSON save command (`preferences | shortcuts`, JSON text → saved boolean), not a plugin API. Only its system save dialog selects the destination. Cancellation does not write; errors do not expose paths; no general filesystem write permission is granted.
 

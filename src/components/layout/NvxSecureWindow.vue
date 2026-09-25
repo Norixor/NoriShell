@@ -63,6 +63,12 @@ const platform = detectDesktopPlatform();
           <slot name="support" />
         </aside>
       </div>
+      <div
+        v-if="$slots.decision"
+        class="nvx-secure-window__decision"
+      >
+        <slot name="decision" />
+      </div>
       <footer
         v-if="$slots.actions"
         class="nvx-secure-window__footer"
@@ -115,6 +121,10 @@ const platform = detectDesktopPlatform();
   padding-bottom: var(--nvx-space-3);
   overflow: auto;
   scrollbar-gutter: stable;
+}
+.nvx-secure-window__decision {
+  flex: none; min-width: 0; padding-block: var(--nvx-space-2);
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 .nvx-secure-window__body { display: grid; align-content: start; gap: var(--nvx-space-3); min-width: 0; }
 .nvx-secure-window__body :deep(h2) { margin: 0; font-size: var(--nvx-font-size-sm); line-height: var(--nvx-line-height-sm); }

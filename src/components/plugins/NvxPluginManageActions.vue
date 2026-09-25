@@ -23,11 +23,10 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { rootRef, triggerRef, open, closeMenu, toggleMenu, handleMenuKeyDown } = usePopoverMenu();
+const { rootRef, triggerRef, viewportPanelRef, viewportPanelStyle, open, closeMenu, toggleMenu, handleMenuKeyDown } = usePopoverMenu();
 
-function run(action: "details" | "settings" | "permissions" | "operationPermissions" | "uninstall") {
+function run(action: "details" | "permissions" | "operationPermissions" | "uninstall") {
   if (action === "details") emit("details");
-  else if (action === "settings") emit("settings");
   else if (action === "permissions") emit("permissions");
   else if (action === "operationPermissions") emit("operationPermissions");
   else emit("uninstall");
@@ -49,6 +48,19 @@ function run(action: "details" | "settings" | "permissions" | "operationPermissi
         aria-hidden="true"
       />{{ t(state === "enabled" ? "plugins.disable" : "plugins.enable") }}
     </NvxButton>
+    <NvxButton
+      v-if="hasSettings"
+      size="sm"
+      variant="ghost"
+      :disabled="disabled"
+      @click="$emit('settings')"
+    >
+      <NvxIcon
+        :icon="Settings"
+        :size="16"
+        aria-hidden="true"
+      />{{ t("plugins.settings.open") }}
+    </NvxButton>
     <div
       :ref="rootRef"
       class="plugin-manage-actions__menu"
@@ -68,79 +80,70 @@ function run(action: "details" | "settings" | "permissions" | "operationPermissi
           aria-hidden="true"
         />
       </NvxIconButton>
-      <div
-        v-if="open"
-        class="plugin-manage-actions__popover"
-        role="menu"
-        :aria-label="t('plugins.moreActions')"
-        @keydown="handleMenuKeyDown"
-      >
-        <button
-          v-if="hasSettings"
-          class="plugin-manage-actions__item"
-          type="button"
-          role="menuitem"
-          @click="run('settings')"
-        >
-          <NvxIcon
-            :icon="Settings"
-            :size="16"
-            aria-hidden="true"
-          />{{ t("plugins.settings.open") }}
-        </button>
-        <button
-          class="plugin-manage-actions__item"
-          type="button"
-          role="menuitem"
-          @click="run('details')"
-        >
-          <NvxIcon
-            :icon="Info"
-            :size="16"
-            aria-hidden="true"
-          />{{ t("plugins.details") }}
-        </button>
-        <button
-          class="plugin-manage-actions__item"
-          type="button"
-          role="menuitem"
-          @click="run('permissions')"
-        >
-          <NvxIcon
-            :icon="ShieldQuestion"
-            :size="16"
-            aria-hidden="true"
-          />{{ t("plugins.managePermissions") }}
-        </button>
-        <button
-          class="plugin-manage-actions__item"
-          type="button"
-          role="menuitem"
-          @click="run('operationPermissions')"
-        >
-          <NvxIcon
-            :icon="History"
-            :size="16"
-            aria-hidden="true"
-          />{{ t("plugins.approvalPolicy.management.title") }}
-        </button>
+      <Teleport to="body">
         <div
-          class="plugin-manage-actions__separator"
-          role="separator"
-        />
-        <button
-          class="plugin-manage-actions__item plugin-manage-actions__item--danger"
-          type="button"
-          role="menuitem"
-          @click="run('uninstall')"
+          v-if="open"
+          :ref="viewportPanelRef"
+          class="plugin-manage-actions__popover"
+          :style="viewportPanelStyle"
+          role="menu"
+          :aria-label="t('plugins.moreActions')"
+          @keydown="handleMenuKeyDown"
         >
-          <NvxIcon
-            :icon="Trash2"
-            :size="16"
-            aria-hidden="true"
-          />{{ t("plugins.uninstall") }}
-        </button>
-      </div>
+          <button
+            class="plugin-manage-actions__item"
+            type="button"
+            role="menuitem"
+            @click="run('details')"
+          >
+            <NvxIcon
+              :icon="Info"
+              :size="16"
+              aria-hidden="true"
+            />{{ t("plugins.details") }}
+          </button>
+          <button
+            class="plugin-manage-actions__item"
+            type="button"
+            role="menuitem"
+            @click="run('permissions')"
+          >
+            <NvxIcon
+              :icon="ShieldQuestion"
+              :size="16"
+              aria-hidden="true"
+            />{{ t("plugins.managePermissions") }}
+          </button>
+          <button
+            class="plugin-manage-actions__item"
+            type="button"
+            role="menuitem"
+            @click="run('operationPermissions')"
+          >
+            <NvxIcon
+              :icon="History"
+              :size="16"
+              aria-hidden="true"
+            />{{ t("plugins.approvalPolicy.management.title") }}
+          </button>
+          <div
+            class="plugin-manage-actions__separator"
+            role="separator"
+          />
+          <button
+            class="plugin-manage-actions__item plugin-manage-actions__item--danger"
+            type="button"
+            role="menuitem"
+            @click="run('uninstall')"
+          >
+            <NvxIcon
+              :icon="Trash2"
+              :size="16"
+              aria-hidden="true"
+            />{{ t("plugins.uninstall") }}
+          </button>
+        </div>
+      </Teleport>
     </div>
   </div>
 </template>
@@ -159,12 +162,13 @@ function run(action: "details" | "settings" | "permissions" | "operationPermissi
 }
 
 .plugin-manage-actions__popover {
-  position: absolute;
+  position: fixed;
   z-index: var(--nvx-z-popover);
-  top: calc(100% + var(--nvx-space-1));
-  right: 0;
   display: grid;
+  box-sizing: border-box;
   width: min(220px, calc(100vw - 24px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
   padding: 2px;
   border: var(--nvx-border-width) solid var(--nvx-color-border-strong);
   border-radius: var(--nvx-radius-md);
