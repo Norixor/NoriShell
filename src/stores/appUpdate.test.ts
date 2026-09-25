@@ -60,10 +60,32 @@ describe("app update", () => {
     expect(api.check).toHaveBeenCalledWith({ timeout: 15_000 });
     expect(api.download).toHaveBeenCalledOnce();
     expect(api.invoke).toHaveBeenCalledWith("release_update_readiness");
-    expect(api.invoke).toHaveBeenCalledWith("release_update_prepare_install");
+    expect(api.invoke).toHaveBeenCalledWith("release_update_prepare_install", { disconnectActiveResources: false });
     expect(api.flush).toHaveBeenCalledOnce();
     expect(api.install).toHaveBeenCalledOnce();
     expect(api.invoke).not.toHaveBeenCalledWith("release_update_allow_relaunch");
+  });
+
+  it("requires an explicit force action before closing active resources for an update", async () => {
+    api.invoke.mockImplementation(async (command: string) => {
+      if (command === "release_check") {
+        return { currentVersion: "0.1.2", status: "updateAvailable", latestVersion: "0.1.3", supportsAutoInstall: true };
+      }
+      if (command === "release_update_readiness") {
+        return { canExit: false, blockers: [{ kind: "sshSession", sessionId: "test" }] };
+      }
+      return { canExit: true, blockers: [] };
+    });
+    const updates = useAppUpdateStore();
+    await updates.checkForUpdates();
+    await updates.installUpdate();
+    expect(updates.installStatus).toBe("resourcesActive");
+    expect(api.invoke).not.toHaveBeenCalledWith("release_update_prepare_install", expect.anything());
+    expect(api.install).not.toHaveBeenCalled();
+
+    await updates.installUpdate(true);
+    expect(api.invoke).toHaveBeenCalledWith("release_update_prepare_install", { disconnectActiveResources: true });
+    expect(api.install).toHaveBeenCalledOnce();
   });
 
   it("keeps the app running when a tool window cancels its draft approval", async () => {
@@ -87,7 +109,7 @@ describe("app update", () => {
     const updates = useAppUpdateStore();
     await updates.checkForUpdates();
     await updates.installUpdate();
-    expect(api.invoke).toHaveBeenCalledWith("release_update_prepare_install");
+    expect(api.invoke).toHaveBeenCalledWith("release_update_prepare_install", { disconnectActiveResources: false });
     expect(updates.installStatus).toBe("restartNeeded");
     await updates.restartApp();
     expect(api.invoke).toHaveBeenCalledWith("release_update_allow_relaunch");

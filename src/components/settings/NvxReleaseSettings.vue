@@ -18,6 +18,7 @@ const currentVersion = computed(() => updates.currentVersion ?? packagedVersion.
 const status = computed(() => updates.status);
 const latestVersion = computed(() => updates.latestVersion);
 const confirmOpen = ref(false);
+const forceConfirmOpen = ref(false);
 const openFailed = ref(false);
 let mounted = false;
 
@@ -53,6 +54,11 @@ async function checkForUpdates() {
 async function installUpdate() {
   confirmOpen.value = false;
   await updates.installUpdate();
+}
+
+async function forceInstallUpdate() {
+  forceConfirmOpen.value = false;
+  await updates.installUpdate(true);
 }
 
 async function openReleases() {
@@ -170,6 +176,14 @@ onBeforeUnmount(() => {
         </div>
         <div class="about-settings__actions">
           <NvxButton
+            v-if="status === 'updateAvailable' && updates.supportsAutoInstall && updates.installStatus === 'resourcesActive'"
+            variant="danger"
+            size="sm"
+            @click="forceConfirmOpen = true"
+          >
+            {{ t('releases.install.forceAction') }}
+          </NvxButton>
+          <NvxButton
             v-if="updates.installStatus === 'restartNeeded' || updates.installStatus === 'restartRequired'"
             variant="primary"
             size="sm"
@@ -232,6 +246,29 @@ onBeforeUnmount(() => {
           @click="installUpdate"
         >
           {{ t('releases.install.action') }}
+        </NvxButton>
+      </template>
+    </NvxDialog>
+    <NvxDialog
+      v-model="forceConfirmOpen"
+      :title="t('releases.install.forceConfirmTitle')"
+      :description="t('releases.install.forceConfirmDescription')"
+      :close-label="t('releases.install.cancel')"
+      size="md"
+    >
+      <p>{{ t('releases.install.forceConfirmBody') }}</p>
+      <template #actions>
+        <NvxButton
+          variant="secondary"
+          @click="forceConfirmOpen = false"
+        >
+          {{ t('releases.install.cancel') }}
+        </NvxButton>
+        <NvxButton
+          variant="danger"
+          @click="forceInstallUpdate"
+        >
+          {{ t('releases.install.forceAction') }}
         </NvxButton>
       </template>
     </NvxDialog>

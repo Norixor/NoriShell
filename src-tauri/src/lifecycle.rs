@@ -550,6 +550,7 @@ pub async fn application_request_exit(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn release_update_prepare_install<R: Runtime>(
     window: WebviewWindow<R>,
+    disconnect_active_resources: bool,
     app: AppHandle<R>,
     lifecycle: State<'_, LifecycleState>,
     update_exit: State<'_, UpdateExitState>,
@@ -568,8 +569,8 @@ pub(crate) async fn release_update_prepare_install<R: Runtime>(
             Uuid::new_v4().to_string(),
         )));
     }
-    let readiness = current_exit_readiness(&app);
-    if !readiness.can_exit {
+    let readiness = current_update_readiness(&app);
+    if !readiness.can_exit && !disconnect_active_resources {
         return Ok(readiness);
     }
     let tool_exit = app.state::<crate::tool_window_exit::ToolWindowExit>();
@@ -592,8 +593,8 @@ pub(crate) async fn release_update_prepare_install<R: Runtime>(
             Uuid::new_v4().to_string(),
         )));
     }
-    let current = current_exit_readiness(&app);
-    if !current.can_exit {
+    let current = current_update_readiness(&app);
+    if !current.can_exit && !disconnect_active_resources {
         lifecycle.cancel_cleanup();
         return Ok(current);
     }
@@ -716,6 +717,20 @@ pub(crate) fn current_exit_readiness<R: Runtime>(app: &AppHandle<R>) -> ExitRead
     }
 }
 
+pub(crate) fn current_update_readiness<R: Runtime>(app: &AppHandle<R>) -> ExitReadiness {
+    update_readiness_from_exit(current_exit_readiness(app))
+}
+
+fn update_readiness_from_exit(mut readiness: ExitReadiness) -> ExitReadiness {
+    // An idle plugin host is owned by the app and will be stopped by the
+    // update cleanup. Plugin resources and user sessions remain blockers.
+    readiness
+        .blockers
+        .retain(|blocker| !matches!(blocker, ExitBlocker::PluginHost { .. }));
+    readiness.can_exit = readiness.blockers.is_empty();
+    readiness
+}
+
 pub fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     crate::tray_service::install(app)
 }
@@ -724,12 +739,14 @@ pub fn install_tray(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::{
         LifecycleState, MainWindowCloseAction, cleanup_plugins_before_global_owners,
-        main_window_close_action,
+        main_window_close_action, update_readiness_from_exit,
     };
     use crate::telnet_session_service::{
         TelnetOpenRequest, TelnetSessionService, TelnetSessionState,
     };
-    use norishell_core_api::{DesktopWindowCloseBehavior, RequestId};
+    use norishell_core_api::{
+        DesktopWindowCloseBehavior, ExitBlocker, ExitReadiness, PluginId, RequestId, SshSessionId,
+    };
     use std::{
         sync::{Arc, Mutex},
         time::Duration,
@@ -778,6 +795,35 @@ mod tests {
         assert!(!state.is_exit_authorized());
         state.authorize_exit();
         assert!(state.is_exit_authorized());
+    }
+
+    #[test]
+    fn update_allows_idle_plugin_hosts_but_not_live_resources() {
+        let host = ExitBlocker::PluginHost {
+            plugin_id: PluginId::parse("com.norishell.self-host-sync").unwrap(),
+            process_id: 42,
+        };
+        let ready = update_readiness_from_exit(ExitReadiness {
+            can_exit: false,
+            blockers: vec![host.clone()],
+        });
+        assert!(ready.can_exit);
+        assert!(ready.blockers.is_empty());
+
+        let ssh = ExitBlocker::SshSession {
+            session_id: SshSessionId::new(),
+        };
+        let plugin_resource = ExitBlocker::PluginResource {
+            plugin_id: PluginId::parse("com.norishell.self-host-sync").unwrap(),
+            resource_kind: "plugin-workflow-task".to_owned(),
+            resource_id: "task-1".to_owned(),
+        };
+        let blocked = update_readiness_from_exit(ExitReadiness {
+            can_exit: false,
+            blockers: vec![host, ssh.clone(), plugin_resource.clone()],
+        });
+        assert!(!blocked.can_exit);
+        assert_eq!(blocked.blockers, vec![ssh, plugin_resource]);
     }
 
     #[tokio::test]

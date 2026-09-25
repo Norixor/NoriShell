@@ -186,7 +186,7 @@ pub(crate) fn release_update_readiness<R: tauri::Runtime>(
             code: ReleaseCheckFailureCode::WindowNotAllowed,
         });
     }
-    Ok(crate::lifecycle::current_exit_readiness(
+    Ok(crate::lifecycle::current_update_readiness(
         window.app_handle(),
     ))
 }
