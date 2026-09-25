@@ -207,6 +207,8 @@ const monitoringRevision = ref("1");
 
 const monitoringEnabled = ref(false);
 
+const monitoringSelectionTouched = ref(false);
+
 const monitoringIntervalSeconds = ref("1.5");
 
 const monitoringTimeoutSeconds = ref("5");
@@ -390,6 +392,19 @@ watch(authenticationMode, (mode, previousMode) => {
   }
 });
 
+watch([authenticationMode, hostPassword, stagedHostPasswordId, identityId, routeCredentials], () => {
+  if (editingHost.value || monitoringSelectionTouched.value) return;
+  const hasSavedPassword = authenticationMode.value === "savedIdentity"
+    && routeCredentials.value.some((credential) => credential.identityId === identityId.value);
+  monitoringEnabled.value = (authenticationMode.value === "password"
+    && Boolean(hostPassword.value || stagedHostPasswordId.value)) || hasSavedPassword;
+});
+
+function setMonitoringEnabled(enabled: boolean) {
+  monitoringSelectionTouched.value = true;
+  monitoringEnabled.value = enabled;
+}
+
 async function cancelStagedHostPassword() {
   if (!stagedHostPasswordId.value) return true;
   try {
@@ -532,6 +547,7 @@ async function refresh() {
 }
 
 async function openCreate() {
+  monitoringSelectionTouched.value = false;
   configuredCreateOperationId.value = createUuidV7();
   configuredCreateIdempotencyKey.value = `host-configured-create-${configuredCreateOperationId.value}`;
   stagedHostPasswordId.value = null;
@@ -1710,6 +1726,7 @@ onMounted(async () => {
             :label="t('sshHosts.identity')"
           >
             <NvxSelect
+              id="host-identity"
               v-model="identityId"
               :options="identityOptions"
               :aria-label="t('sshHosts.identity')"
@@ -2420,7 +2437,8 @@ onMounted(async () => {
               <h4>{{ t("sshHosts.editorSections.serverMonitoring") }}</h4>
               <NvxCheckbox
                 id="monitoring-enabled"
-                v-model="monitoringEnabled"
+                :model-value="monitoringEnabled"
+                @update:model-value="setMonitoringEnabled"
               >
                 {{ t("sshHosts.editorSections.enableMonitoring") }}
               </NvxCheckbox>

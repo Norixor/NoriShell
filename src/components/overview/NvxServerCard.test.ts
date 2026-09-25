@@ -282,10 +282,21 @@ describe("NvxServerCard", () => {
     const staleNetwork = staleWrapper.get(".nvx-server-card__network");
 
     expect(staleNetwork.attributes("data-status")).toBe("stale");
-    expect(staleWrapper.text()).toContain("数据已过期");
+    expect(staleWrapper.text()).toContain("重试中");
+    expect(staleWrapper.text()).not.toContain("数据已过期");
+    expect(staleWrapper.get('.nvx-server-card__metric[data-status="stale"]').attributes("aria-label"))
+      .toContain("暂未更新");
     expect(staleNetwork.findAll(".nvx-server-card__network-values > span")).toHaveLength(2);
     expect(staleNetwork.text().match(/0B/g)).toHaveLength(2);
     expect(staleNetwork.attributes("aria-label")?.match(/0\.0 B\/s/g)).toHaveLength(2);
+
+    const paused = monitoredCard(metricSnapshot("available", true), "sampleTimedOut");
+    paused.metricsSession!.state = "failed";
+    const pausedWrapper = mount(NvxServerCard, {
+      props: { card: paused },
+      global: { plugins: [i18n] },
+    });
+    expect(pausedWrapper.text()).toContain("上次采样");
 
     const freshWrapper = mount(NvxServerCard, {
       props: { card: monitoredCard(metricSnapshot("available")) },
@@ -294,7 +305,7 @@ describe("NvxServerCard", () => {
     const freshNetwork = freshWrapper.get(".nvx-server-card__network");
 
     expect(freshNetwork.attributes("data-status")).toBe("available");
-    expect(freshNetwork.text()).not.toContain("数据已过期");
+    expect(freshNetwork.text()).not.toContain("重试中");
     expect(freshNetwork.findAll(".nvx-server-card__network-values > span")).toHaveLength(2);
     expect(freshNetwork.text().match(/0B/g)).toHaveLength(2);
     expect(freshNetwork.attributes("aria-label")?.match(/0\.0 B\/s/g)).toHaveLength(2);

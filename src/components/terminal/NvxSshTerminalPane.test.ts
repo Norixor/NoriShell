@@ -28,6 +28,8 @@ const client = vi.hoisted(() => ({
   decideSshHostKey: vi.fn(),
   detachSshSession: vi.fn(),
   disconnectSshSession: vi.fn(),
+  confirmLoginAutomation: vi.fn(),
+  getHostConnectionConfig: vi.fn(),
   getSshSession: vi.fn(),
   fetchTerminalInputFocusSnapshot: vi.fn(),
   heartbeatSshAttachment: vi.fn(),
@@ -1059,6 +1061,109 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
 
     expect(wrapper.emitted("requestAuthenticationRecovery")?.[0]).toEqual([paneId, target]);
     expect(wrapper.text()).toContain(i18n.global.t("sshSession.states.failed"));
+    wrapper.unmount();
+  });
+
+  it("reviews an unconfirmed synced automation and resumes the same Host connection after confirmation", async () => {
+    const running = summary("running");
+    client.openSshSession.mockRejectedValueOnce({
+      code: "ssh_terminal.login_automation_confirmation_required",
+      messageKey: "errors.sshSession.loginAutomationConfirmationRequired",
+    }).mockResolvedValueOnce({
+      operationId: "019d0000-0000-7000-8000-000000000461",
+      idempotencyKey: "confirmed-open",
+      openAttemptId: running.openAttemptId,
+      stateRevision: running.stateRevision,
+      session: running,
+      attachment: attachment(),
+    });
+    client.getHostConnectionConfig.mockResolvedValue({
+      loginAutomation: {
+        hostId: target.hostId,
+        revision: "2",
+        confirmedRevision: null,
+        enabled: true,
+        steps: [{ kind: "sendText", text: "echo ready", appendEnter: true, timeoutSeconds: 10 }],
+      },
+    });
+    client.confirmLoginAutomation.mockResolvedValue({});
+    const wrapper = mountPane();
+    await flushPromises();
+
+    expect(document.body.textContent).toContain("echo ready");
+    expect(client.confirmLoginAutomation).not.toHaveBeenCalled();
+    bodyButton("Confirm and connect")?.click();
+    await flushPromises();
+
+    expect(client.confirmLoginAutomation).toHaveBeenCalledWith({ hostId: target.hostId, expectedRevision: "2" });
+    expect(client.openSshSession).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain(i18n.global.t("sshSession.states.running"));
+    wrapper.unmount();
+  });
+
+  it("keeps an unconfirmed automation blocked when the confirmation is cancelled", async () => {
+    client.openSshSession.mockRejectedValueOnce({
+      code: "ssh_terminal.login_automation_confirmation_required",
+      messageKey: "errors.sshSession.loginAutomationConfirmationRequired",
+    });
+    client.getHostConnectionConfig.mockResolvedValue({
+      loginAutomation: {
+        hostId: target.hostId,
+        revision: "2",
+        confirmedRevision: null,
+        enabled: true,
+        steps: [{ kind: "sendSecret", secretLabel: "Deployment key", appendEnter: true, timeoutSeconds: 10 }],
+      },
+    });
+    const wrapper = mountPane();
+    await flushPromises();
+
+    expect(document.body.textContent).toContain("Deployment key");
+    bodyButton("Cancel connection")?.click();
+    await flushPromises();
+
+    expect(client.confirmLoginAutomation).not.toHaveBeenCalled();
+    expect(client.openSshSession).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("continues an explicit reconnect after confirming the current automation revision", async () => {
+    const failed = summary("failed");
+    const running = summary("running", { generation: "3", stateRevision: "8" });
+    client.getSshSession.mockResolvedValue(details(failed));
+    client.attachSshSession.mockResolvedValue({
+      stateRevision: failed.stateRevision,
+      attachmentRevision: failed.attachmentRevision,
+      attachment: attachment({ channelId: null }),
+      replay: [],
+    });
+    client.reconnectSshSession.mockRejectedValueOnce({
+      code: "ssh_terminal.login_automation_confirmation_required",
+      messageKey: "errors.sshSession.loginAutomationConfirmationRequired",
+    }).mockResolvedValueOnce(details(running, {
+      attachments: [attachment({ generation: "3" })],
+    }));
+    client.getHostConnectionConfig.mockResolvedValue({
+      loginAutomation: {
+        hostId: target.hostId,
+        revision: "2",
+        confirmedRevision: null,
+        enabled: true,
+        steps: [{ kind: "expect", literalText: "Ready", timeoutSeconds: 10 }],
+      },
+    });
+    client.confirmLoginAutomation.mockResolvedValue({});
+    const wrapper = mountPane(failed);
+    await flushPromises();
+
+    await wrapper.get(".ssh-terminal-pane__reconnect").trigger("click");
+    await flushPromises();
+    expect(document.body.textContent).toContain("Ready");
+    bodyButton("Confirm and connect")?.click();
+    await flushPromises();
+
+    expect(client.reconnectSshSession).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain(i18n.global.t("sshSession.states.running"));
     wrapper.unmount();
   });
 

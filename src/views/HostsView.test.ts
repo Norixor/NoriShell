@@ -625,6 +625,7 @@ describe("HostsView single-Host management contract", () => {
       algorithmPolicyId: "secure-default",
       compatibilityExceptions: [],
       heartbeatPolicy: { mode: "disabled" },
+      monitoringPolicy: expect.objectContaining({ enabled: false }),
       loginAutomationEnabled: false,
       loginAutomationConfirmed: false,
       loginAutomationSteps: [],
@@ -721,10 +722,46 @@ describe("HostsView single-Host management contract", () => {
       authenticationMode: "identity",
       credentialRefIds: [],
       stagedPasswordId: stagedRequest.operationId,
+      monitoringPolicy: expect.objectContaining({ enabled: true }),
     }));
     expect(client.createConfiguredHost.mock.calls[0]?.[0]).not.toHaveProperty("password");
     expect(client.cancelHostCreatePassword).not.toHaveBeenCalled();
     expect(document.querySelector("#host-password")).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("lets a new password Host opt out of the monitoring default", async () => {
+    client.listHostCatalog.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const { wrapper } = await mountView("/hosts?create=1");
+
+    await body().get("#host-address").setValue("quiet.example.test");
+    await chooseSelectOption("host-authentication-mode", "Save password");
+    await body().get("#host-password").setValue("saved-password");
+    await selectHostEditorSection("Connection Health");
+    expect((body().get("#monitoring-enabled").element as HTMLInputElement).checked).toBe(true);
+    await body().get("#monitoring-enabled").setValue(false);
+    await button("Save Host")?.click();
+    await flushPromises();
+
+    expect(client.createConfiguredHost).toHaveBeenCalledWith(expect.objectContaining({
+      monitoringPolicy: expect.objectContaining({ enabled: false }),
+    }));
+    wrapper.unmount();
+  });
+
+  it("enables monitoring for a new Host using an existing password Identity", async () => {
+    client.listHostCatalog.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const { wrapper } = await mountView("/hosts?create=1");
+
+    await body().get("#host-address").setValue("existing-password.example.test");
+    await chooseSelectOption("host-authentication-mode", "Use saved Identity");
+    await chooseSelectOption("host-identity", "Production deploy · deploy");
+    await button("Save Host")?.click();
+    await flushPromises();
+
+    expect(client.createConfiguredHost).toHaveBeenCalledWith(expect.objectContaining({
+      monitoringPolicy: expect.objectContaining({ enabled: true }),
+    }));
     wrapper.unmount();
   });
 

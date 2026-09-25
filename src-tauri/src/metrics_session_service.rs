@@ -1690,7 +1690,8 @@ fn map_profile_failure(error: ConnectionProfileError) -> MetricsSessionFailureCo
             MetricsSessionFailureCode::AuthenticationRejected
         }
         ConnectionProfileError::InvalidTarget
-        | ConnectionProfileError::UnsupportedConfiguration => {
+        | ConnectionProfileError::UnsupportedConfiguration
+        | ConnectionProfileError::LoginAutomationConfirmationRequired => {
             MetricsSessionFailureCode::ProviderUnsupported
         }
         ConnectionProfileError::StaleHost | ConnectionProfileError::PersistenceUnavailable => {
