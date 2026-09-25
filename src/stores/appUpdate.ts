@@ -44,11 +44,11 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     return checkInFlight;
   }
 
-  function installUpdate(): Promise<void> {
+  function installUpdate(disconnectActiveResources = false): Promise<void> {
     if (installInFlight) return installInFlight;
     if (!hasUpdate.value || !supportsAutoInstall.value) return Promise.resolve();
     if (installStatus.value === "restartNeeded" || installStatus.value === "restartRequired") return Promise.resolve();
-    installInFlight = performInstall().finally(() => { installInFlight = null; });
+    installInFlight = performInstall(disconnectActiveResources).finally(() => { installInFlight = null; });
     return installInFlight;
   }
 
@@ -62,7 +62,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     }
   }
 
-  async function performInstall() {
+  async function performInstall(disconnectActiveResources: boolean) {
     let update: Update | null = null;
     let prepared = false;
     installStatus.value = "checking";
@@ -85,12 +85,12 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
       // Both checks happen after the signed package is downloaded, so failed
       // downloads never interrupt a live terminal or transfer.
       const ready = await invoke<ExitReadiness>("release_update_readiness");
-      if (!ready.canExit) {
+      if (!ready.canExit && !disconnectActiveResources) {
         installStatus.value = "resourcesActive";
         return;
       }
       await flushTerminalWorkspaceBeforeExit();
-      const stillReady = await invoke<ExitReadiness>("release_update_prepare_install");
+      const stillReady = await invoke<ExitReadiness>("release_update_prepare_install", { disconnectActiveResources });
       if (!stillReady.canExit) {
         installStatus.value = "resourcesActive";
         return;
