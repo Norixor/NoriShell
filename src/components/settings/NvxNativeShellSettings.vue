@@ -20,7 +20,6 @@ import {
 } from "../ui";
 
 const emit = defineEmits<{ saved: [] }>();
-defineSlots<{ "notification-permission"(): unknown }>();
 
 const { t } = useI18n();
 const tips = useTipsStore();
@@ -34,15 +33,14 @@ const snapshot = ref<NativeShellSettingsSnapshot | null>(null);
 const settingsRevision = ref<string | null>(null);
 const baseline = ref("");
 const draft = ref<NativeShellSettings>({
-  historyEnabled: false,
-  persistEncrypted: false,
+  historyEnabled: true,
+  persistEncrypted: true,
   historyMaxEntries: 500,
   historyRetentionDays: 30,
   historyPaused: false,
   notificationsEnabled: false,
   notificationThresholdSeconds: 60,
 });
-const thresholdDraft = ref("60");
 const maxEntriesDraft = ref("500");
 const retentionDaysDraft = ref("30");
 
@@ -55,21 +53,18 @@ function parseBounded(value: string, minimum: number, maximum: number) {
   return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
 }
 
-const thresholdValid = computed(() => parseBounded(thresholdDraft.value, 1, 3_600) !== null);
 const maxEntriesValid = computed(() => parseBounded(maxEntriesDraft.value, 100, 2_000) !== null);
 const retentionDaysValid = computed(() => parseBounded(retentionDaysDraft.value, 1, 90) !== null);
-const numericValid = computed(() => thresholdValid.value && maxEntriesValid.value && retentionDaysValid.value);
+const numericValid = computed(() => maxEntriesValid.value && retentionDaysValid.value);
 
 function settingsFromDraft(): NativeShellSettings | null {
-  const notificationThresholdSeconds = parseBounded(thresholdDraft.value, 1, 3_600);
   const historyMaxEntries = parseBounded(maxEntriesDraft.value, 100, 2_000);
   const historyRetentionDays = parseBounded(retentionDaysDraft.value, 1, 90);
-  if (notificationThresholdSeconds === null || historyMaxEntries === null || historyRetentionDays === null) {
+  if (historyMaxEntries === null || historyRetentionDays === null) {
     return null;
   }
   return {
     ...draft.value,
-    notificationThresholdSeconds,
     historyMaxEntries,
     historyRetentionDays,
   };
@@ -78,7 +73,6 @@ function settingsFromDraft(): NativeShellSettings | null {
 function draftSignature() {
   return JSON.stringify(settingsFromDraft() ?? {
     ...draft.value,
-    notificationThresholdSeconds: thresholdDraft.value,
     historyMaxEntries: maxEntriesDraft.value,
     historyRetentionDays: retentionDaysDraft.value,
   });
@@ -96,7 +90,6 @@ const historyStatus = computed<"available" | "disabled" | "vaultLocked" | "persi
 
 function applyDraft(settings: NativeShellSettings) {
   draft.value = cloneSettings(settings);
-  thresholdDraft.value = String(settings.notificationThresholdSeconds);
   maxEntriesDraft.value = String(settings.historyMaxEntries);
   retentionDaysDraft.value = String(settings.historyRetentionDays);
 }
@@ -223,41 +216,6 @@ onMounted(() => void load());
     </NvxInlineNotice>
 
     <template v-else-if="snapshot">
-      <NvxInlineNotice
-        tone="info"
-        :title="t('nativeShellSettings.shellNoticeTitle')"
-      >
-        {{ t("nativeShellSettings.shellNotice") }}
-      </NvxInlineNotice>
-
-      <section class="nvx-native-shell-settings__section">
-        <h3>{{ t("nativeShellSettings.notifications.title") }}</h3>
-        <div class="nvx-native-shell-settings__rows">
-          <NvxCheckbox v-model="draft.notificationsEnabled">
-            {{ t("nativeShellSettings.notifications.enabled") }}
-          </NvxCheckbox>
-          <NvxField
-            class="nvx-native-shell-settings__field"
-            :label="t('nativeShellSettings.notifications.threshold')"
-            :hint="t('nativeShellSettings.notifications.thresholdHint')"
-            :error="thresholdValid ? undefined : t('nativeShellSettings.invalid')"
-          >
-            <NvxInput
-              :model-value="thresholdDraft"
-              type="number"
-              :min="1"
-              :max="3600"
-              :invalid="!thresholdValid"
-              @update:model-value="thresholdDraft = $event"
-            />
-          </NvxField>
-          <div class="nvx-native-shell-settings__permission">
-            <strong>{{ t("nativeShellSettings.notifications.permission") }}</strong>
-            <slot name="notification-permission" />
-          </div>
-        </div>
-      </section>
-
       <section class="nvx-native-shell-settings__section">
         <div class="nvx-native-shell-settings__section-heading">
           <h3>{{ t("nativeShellSettings.history.title") }}</h3>
@@ -409,8 +367,6 @@ onMounted(() => void load());
 .nvx-native-shell-settings__history-status { color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-xs); text-align: end; }
 .nvx-native-shell-settings__rows { display: grid; gap: var(--nvx-space-2); }
 .nvx-native-shell-settings__field { max-width: 330px; }
-.nvx-native-shell-settings__permission { display: grid; gap: var(--nvx-space-2); padding: var(--nvx-space-3); border: var(--nvx-border-width) solid var(--nvx-color-border-subtle); border-radius: var(--nvx-radius-md); color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-sm); }
-.nvx-native-shell-settings__permission strong { color: var(--nvx-color-text-primary); font-weight: var(--nvx-font-weight-medium); }
 .nvx-native-shell-settings__number-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--nvx-space-3); max-width: 680px; }
 .nvx-native-shell-settings__actions, .nvx-native-shell-settings__footer { display: flex; flex-wrap: wrap; gap: var(--nvx-space-2); align-items: center; }
 .nvx-native-shell-settings__actions { justify-content: flex-end; }

@@ -15,7 +15,8 @@ import { NvxButton, NvxCheckbox, NvxInlineNotice, NvxStatusLabel } from "../ui";
 const { t } = useI18n();
 const adapters = createPreferenceAdapters();
 const fileInput = useTemplateRef<HTMLInputElement>("fileInput");
-const selected = ref<PreferenceGroupId[]>(PREFERENCE_GROUP_IDS.filter((id) => isTauri() || !["desktop", "commandNotifications"].includes(id)));
+const visibleGroups = PREFERENCE_GROUP_IDS.filter((id) => id !== "commandNotifications");
+const selected = ref<PreferenceGroupId[]>(visibleGroups.filter((id) => isTauri() || id !== "desktop"));
 const loadedFile = ref<PreferenceTransferFile | null>(null);
 const preview = ref<PreferencePreviewGroup[]>([]);
 const busy = ref(false);
@@ -58,7 +59,7 @@ async function readFile(event: Event) {
     const parsed = parsePreferenceTransfer(await file.text(), adapters);
     if (!alive) return;
     loadedFile.value = parsed;
-    selected.value = PREFERENCE_GROUP_IDS.filter((id) => Object.hasOwn(parsed.groups, id));
+    selected.value = visibleGroups.filter((id) => Object.hasOwn(parsed.groups, id));
     preview.value = [];
     mode.value = "import";
     message.value = "loaded";
@@ -108,7 +109,7 @@ onBeforeUnmount(() => {
     >
       <legend>{{ t('preferenceTransfer.groupsTitle') }}</legend>
       <NvxCheckbox
-        v-for="id in PREFERENCE_GROUP_IDS"
+        v-for="id in visibleGroups"
         :key="id"
         :model-value="selected.includes(id)"
         :disabled="busy"

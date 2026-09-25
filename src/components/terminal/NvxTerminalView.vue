@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
-import { Terminal, type IBufferLine, type IDisposable, type ILink, type ILinkProvider } from "@xterm/xterm";
+import { Terminal, type IBufferLine, type IDecoration, type IDisposable, type ILink, type ILinkProvider, type IMarker } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
@@ -13,6 +13,7 @@ import { detectDesktopPlatform } from "../../platform";
 import { terminalFontCssFamily } from "../../terminal-theme";
 import { createTerminalHighlighter } from "../../terminal/xtermHighlighting";
 import { TerminalDraftTracker } from "../../terminal/draft";
+import { captureTerminalInput } from "../../terminal-input-target";
 import { wordSeparatorForDoubleClickSelection } from "../../terminal/interaction-preferences";
 import { MacOptionKeyTracker, isPlainBackspace } from "../../terminal/keyboard-compatibility";
 import { TerminalBellAudio, type TerminalBellAudioAvailability } from "../../terminal/terminal-bell";
@@ -27,17 +28,18 @@ const props = defineProps<{
   gapLabel: string;
   paneId?: string;
   hostId?: string | null;
-  shellPromptKey?: string | null;
+  ghostSuggestion?: { draft: string; suffix: string } | null;
 }>();
 
 const emit = defineEmits<{
-  input: [value: string];
+  input: [value: string, observedCommand?: string];
   reconnectRequest: [];
   resize: [rows: number, cols: number];
   selectionChange: [hasSelection: boolean];
   searchRequest: [];
   draftChange: [draft: string | null];
   bellAttention: [active: boolean];
+  acceptSuggestion: [];
 }>();
 
 const host = ref<HTMLElement | null>(null);
@@ -54,6 +56,13 @@ const contextLinkUrl = ref<string | null>(null);
 const { rootRef, open: contextMenuOpen, closeMenu: closeContextMenuPopover, toggleMenu: toggleContextMenu, handleMenuKeyDown } = usePopoverMenu();
 let highlighter: ReturnType<typeof createTerminalHighlighter> | null = null;
 const draftTracker = new TerminalDraftTracker();
+let simplePrompt: { line: number; prefix: string } | null = null;
+let shellTabCandidate: { prefix: string; typedAfterTab: string } | null = null;
+let opaqueInteractive = false;
+let alternateActive = false;
+let alternateEntryLine: number | null = null;
+let awaitingShellAfterAlternate = false;
+let blockedLine: number | null = null;
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let searchAddon: SearchAddon | null = null;
@@ -66,6 +75,12 @@ let removeReducedMotionListener: (() => void) | null = null;
 let selectionMouseGestureActive = false;
 let selectionAtMouseDown: string | null = null;
 let bellDisposable: IDisposable | null = null;
+let ghostDecoration: IDecoration | null = null;
+let ghostMarker: IMarker | null = null;
+let ghostWriteListener: IDisposable | null = null;
+let ghostResizeListener: IDisposable | null = null;
+let ghostFrame = 0;
+let ghostKey = "";
 let linkProviderDisposable: IDisposable | null = null;
 let bellFlashTimer: number | null = null;
 let lastBellVisualAt = 0;
@@ -137,6 +152,64 @@ function fit() {
     lastCols = terminal.cols;
     emit("resize", terminal.rows, terminal.cols);
   }
+  scheduleGhost();
+}
+
+function clearGhost() {
+  ghostDecoration?.dispose();
+  ghostMarker?.dispose();
+  ghostDecoration = null;
+  ghostMarker = null;
+  ghostKey = "";
+}
+
+function visibleGhost() {
+  const candidate = props.ghostSuggestion;
+  if (!terminal || props.readOnly || opaqueInteractive || !simplePrompt || !candidate?.draft || !candidate.suffix
+    || draftTracker.value() !== candidate.draft
+    || terminal.buffer.active.type !== "normal"
+    || !/^[\x20-\x7e]+$/.test(candidate.suffix)) return null;
+  const buffer = terminal.buffer.active;
+  const cursorX = buffer.cursorX;
+  const line = activeLogicalLine();
+  const available = terminal.cols - cursorX;
+  if (!line || line.start !== simplePrompt.line || available <= 0) return null;
+  if (line.beforeCursor !== simplePrompt.prefix + candidate.draft || line.afterCursor.trim().length) return null;
+  const preview = candidate.suffix.length <= available
+    ? candidate.suffix
+    : `${candidate.suffix.slice(0, available - 1)}…`;
+  return { candidate, cursorX, line: buffer.baseY + buffer.cursorY, preview };
+}
+
+function renderGhost() {
+  ghostFrame = 0;
+  const position = visibleGhost();
+  if (!position || !terminal) { clearGhost(); return; }
+  const key = `${position.line}:${position.cursorX}:${position.candidate.draft}:${position.preview}:${ui.resolvedTerminalPalette.foreground}`;
+  if (key === ghostKey && ghostDecoration && !ghostDecoration.isDisposed) return;
+  clearGhost();
+  const marker = terminal.registerMarker(0);
+  const decoration = terminal.registerDecoration({ marker, x: position.cursorX, width: position.preview.length });
+  if (!decoration) { marker.dispose(); return; }
+  ghostMarker = marker;
+  ghostDecoration = decoration;
+  ghostKey = key;
+  const paint = (element: HTMLElement) => {
+    element.textContent = position.preview;
+    element.style.color = ui.resolvedTerminalPalette.foreground;
+    element.style.opacity = "0.55";
+    element.style.whiteSpace = "pre";
+    element.style.pointerEvents = "none";
+    element.setAttribute("aria-hidden", "true");
+    element.setAttribute("data-plugin-protected", "");
+  };
+  decoration.onRender(paint);
+  if (decoration.element) paint(decoration.element);
+}
+
+function scheduleGhost() {
+  cancelAnimationFrame(ghostFrame);
+  ghostFrame = requestAnimationFrame(renderGhost);
 }
 
 function scheduleFit() {
@@ -145,6 +218,13 @@ function scheduleFit() {
 }
 
 function writeBytes(bytes: readonly number[]) {
+  const text = bytes.includes(0x1b) ? String.fromCharCode(...bytes.slice(0, 4096)) : "";
+  const csi = `${String.fromCharCode(0x1b)}[`;
+  if (["H", "2J"].some((code) => text.includes(csi + code))) {
+    // A Shell clear redraws the screen too; it does not make later prompts opaque.
+    blockedLine = null;
+    invalidateDraft();
+  }
   terminal?.write(new Uint8Array(bytes));
 }
 
@@ -285,6 +365,18 @@ function closeContextMenu(restoreTerminalFocus = false) {
   if (restoreTerminalFocus) focus();
 }
 
+function dismissContextMenuOnTerminalPointerDown(event: PointerEvent) {
+  if (!contextMenuOpen.value) return;
+  const target = event.target;
+  if (target instanceof Node && viewRoot.value?.querySelector(".nvx-terminal-view__context-menu")?.contains(target)) return;
+  closeContextMenu();
+}
+
+function handleTerminalPointerDown(event: PointerEvent) {
+  handleBellPointerDown();
+  dismissContextMenuOnTerminalPointerDown(event);
+}
+
 function showContextMenuAt(root: HTMLElement, left: number, top: number) {
   const bounds = root.getBoundingClientRect();
   const menuHeight = contextLinkUrl.value ? 136 : 104;
@@ -419,6 +511,17 @@ function handleTerminalKeyDownCapture(event: KeyboardEvent) {
   clearBellAttention();
   enableBellAudioFromUserGesture();
   handleContextMenuShortcut(event);
+  const position = visibleGhost();
+  if (event.type === "keydown" && event.key === "Tab" && !event.repeat && !event.isComposing
+    && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+    && props.paneId && terminalHasForegroundFocus() && !document.querySelector('[role="dialog"][aria-modal="true"]')
+    && position && ghostDecoration?.element && !ghostDecoration.isDisposed
+    && ghostKey === `${position.line}:${position.cursorX}:${position.candidate.draft}:${position.preview}:${ui.resolvedTerminalPalette.foreground}`
+    && captureTerminalInput(props.paneId)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    emit("acceptSuggestion");
+  }
 }
 
 function handleTerminalFocusIn() { clearBellAttention(); }
@@ -529,7 +632,7 @@ function handleTerminalCustomKeyEvent(event: KeyboardEvent) {
   if (keyboard.backspaceMode === "bs" && isPlainBackspace(event)) {
     event.preventDefault();
     event.stopImmediatePropagation();
-    appendDraftText("\b");
+    invalidateDraft();
     emit("input", "\b");
     return false;
   }
@@ -543,9 +646,164 @@ function canRequestReconnect() {
     && !document.querySelector('[role="dialog"][aria-modal="true"]');
 }
 
-function invalidateDraft() { emit("draftChange", draftTracker.invalidate()); }
-function appendDraftText(text: string) { emit("draftChange", draftTracker.input(text)); }
+function invalidateDraft() { simplePrompt = null; shellTabCandidate = null; clearGhost(); emit("draftChange", draftTracker.invalidate()); }
+function blockDraftLine() {
+  blockedLine = activeLogicalLine()?.start ?? null;
+  invalidateDraft();
+}
+function appendDraftText(text: string) { clearGhost(); emit("draftChange", draftTracker.input(text)); }
 function currentDraft() { return draftTracker.value(); }
+
+const emptyPromptPatterns = [
+  /^\[[A-Za-z0-9_.-]+@[A-Za-z0-9_.:-]+ [^\r\n]{1,80}\][#$] ?$/,
+  /^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:[^\r\n#$]{1,80}[#$] ?$/,
+  /^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+ [^\r\n]{1,80}% ?$/,
+  /^PS (?:[A-Za-z]:\\|\\\\|\/)[^\r\n]{0,160}>\s*$/,
+];
+
+function activeLogicalLine() {
+  if (!terminal || terminal.buffer.active.type !== "normal") return null;
+  const buffer = terminal.buffer.active;
+  const current = buffer.baseY + buffer.cursorY;
+  const line = buffer.getLine(current);
+  if (!line) return null;
+  let start = current;
+  let beforeCursor = line.translateToString(false, 0, buffer.cursorX);
+  while (start > 0 && buffer.getLine(start)?.isWrapped) {
+    const previous = buffer.getLine(--start);
+    if (!previous) return null;
+    beforeCursor = previous.translateToString(false, 0, terminal.cols) + beforeCursor;
+    // Only bounded prompt and command text belongs to a simple Shell line.
+    if (beforeCursor.length > 4096) return null;
+  }
+  return { start, beforeCursor, afterCursor: line.translateToString(false, buffer.cursorX, terminal.cols) };
+}
+
+function visibleShellCommand() {
+  const line = activeLogicalLine();
+  if (!line || line.afterCursor.trim()) return null;
+  const maximumPromptLength = Math.min(line.beforeCursor.length - 1, 180);
+  for (let length = 1; length <= maximumPromptLength; length++) {
+    let prefix = line.beforeCursor.slice(0, length);
+    if (!emptyPromptPatterns.some((pattern) => pattern.test(prefix))) continue;
+    // A Shell prompt's optional trailing space belongs to the prompt, not
+    // to the command; do not absorb later '#' characters from the command.
+    if (line.beforeCursor[length] === " " && emptyPromptPatterns.some((pattern) => pattern.test(prefix + " "))) prefix += " ";
+    const command = line.beforeCursor.slice(prefix.length);
+    if (/^[\x20-\x7e]{1,4096}$/.test(command)) return { line: line.start, prefix, command };
+  }
+  return null;
+}
+
+function isEmptyShellPrompt() {
+  if (!terminal || opaqueInteractive || terminal.buffer.active.type !== "normal") return false;
+  return hasEmptyShellPrompt();
+}
+
+function hasEmptyShellPrompt() {
+  const line = activeLogicalLine();
+  if (!line || blockedLine === line.start || line.afterCursor.trim()) return false;
+  // Recognize only strong Shell prompt forms. Ambiguous TUI input is never sampled.
+  return emptyPromptPatterns.some((pattern) => pattern.test(line.beforeCursor));
+}
+
+function observeBufferState() {
+  if (!terminal) return;
+  if (terminal.buffer.active.type === "alternate") {
+    if (!alternateActive) {
+      alternateActive = true;
+      alternateEntryLine = terminal.buffer.normal.baseY + terminal.buffer.normal.cursorY;
+    }
+    awaitingShellAfterAlternate = false;
+    opaqueInteractive = true;
+    invalidateDraft();
+    return;
+  }
+  if (alternateActive) {
+    alternateActive = false;
+    awaitingShellAfterAlternate = true;
+    blockedLine = null;
+    invalidateDraft();
+  }
+  // Leaving the alternate buffer restores old screen contents. A later,
+  // newly drawn Shell prompt is needed before input can be observed again.
+  const line = activeLogicalLine();
+  if (awaitingShellAfterAlternate && line && alternateEntryLine !== null
+    && line.start > alternateEntryLine && hasEmptyShellPrompt()) {
+    opaqueInteractive = false;
+    awaitingShellAfterAlternate = false;
+    alternateEntryLine = null;
+    blockedLine = null;
+  }
+}
+
+function simpleCommandAtCursor() {
+  const draft = draftTracker.value();
+  if (!terminal || !simplePrompt || !draft || terminal.buffer.active.type !== "normal") return null;
+  const line = activeLogicalLine();
+  if (!line || line.start !== simplePrompt.line) return null;
+  const visible = line.beforeCursor;
+  if (!visible.startsWith(simplePrompt.prefix)
+    || !draft.startsWith(visible.slice(simplePrompt.prefix.length))) return null;
+  if (line.afterCursor.trim()) return null;
+  return draft;
+}
+
+function shellTabCommandAtCursor() {
+  if (!simplePrompt || !shellTabCandidate) return null;
+  const line = activeLogicalLine();
+  if (!line || line.afterCursor.trim() || !line.beforeCursor.startsWith(simplePrompt.prefix)) return null;
+  const command = line.beforeCursor.slice(simplePrompt.prefix.length);
+  // Tab completion comes from the Shell. Only capture its echoed result when
+  // it still contains the typed prefix and all printable input after Tab.
+  if (!command.startsWith(shellTabCandidate.prefix)
+    || !command.endsWith(shellTabCandidate.typedAfterTab)
+    || !/^[\x20-\x7e]{1,4096}$/.test(command)) return null;
+  return command;
+}
+
+function observeSimpleInput(value: string) {
+  if (!terminal || props.readOnly) return null;
+  if (value === "\r" || value === "\n") {
+    const command = shellTabCandidate ? shellTabCommandAtCursor() : simpleCommandAtCursor();
+    const launchCandidate = command ?? draftTracker.value();
+    invalidateDraft();
+    if (launchCandidate && /(?:^|[;&|\s/])(?:codex|claude)(?:[-\w]*)(?:[;&|\s]|$)/i.test(launchCandidate)) opaqueInteractive = true;
+    return command;
+  }
+  if (value === "\t" && !opaqueInteractive) {
+    const visible = visibleShellCommand();
+    if (visible && blockedLine !== visible.line && (!simplePrompt || visible.prefix === simplePrompt.prefix)) {
+      const draft = shellTabCandidate ? null : draftTracker.value();
+      const typedPrefix = draft && draft.startsWith(visible.command) ? draft : visible.command;
+      simplePrompt = { line: visible.line, prefix: visible.prefix };
+      shellTabCandidate = { prefix: typedPrefix, typedAfterTab: "" };
+      clearGhost();
+      emit("draftChange", null);
+      return null;
+    }
+  }
+  if (opaqueInteractive || !/^[\x20-\x7e]$/.test(value)) {
+    blockedLine = activeLogicalLine()?.start ?? terminal.buffer.active.baseY + terminal.buffer.active.cursorY;
+    invalidateDraft();
+    return null;
+  }
+  if (shellTabCandidate) {
+    shellTabCandidate.typedAfterTab += value;
+    return null;
+  }
+  if (!simplePrompt) {
+    if (!isEmptyShellPrompt()) { invalidateDraft(); return null; }
+    const line = activeLogicalLine()!;
+    simplePrompt = { line: line.start, prefix: line.beforeCursor };
+    draftTracker.prompt();
+  } else if (activeLogicalLine()?.start !== simplePrompt.line) {
+    invalidateDraft();
+    return null;
+  }
+  appendDraftText(value);
+  return null;
+}
 
 defineExpose({
   writeBytes,
@@ -600,8 +858,9 @@ onMounted(async () => {
   applyInteractionOptions();
   terminal.onData((value) => {
     if (!props.readOnly) {
-      appendDraftText(value);
-      emit("input", value);
+      const observedCommand = observeSimpleInput(value);
+      if (observedCommand) emit("input", value, observedCommand);
+      else emit("input", value);
     }
   });
   terminal.onSelectionChange(() => {
@@ -614,17 +873,19 @@ onMounted(async () => {
   linkProviderDisposable = terminal.registerLinkProvider(terminalHttpLinkProvider());
   highlighter = createTerminalHighlighter(terminal, (failed) => { highlightFailed.value = failed; });
   highlighter.update(preferences.resolvedHighlights(props.hostId));
+  ghostWriteListener = terminal.onWriteParsed(() => {
+    observeBufferState();
+    scheduleGhost();
+  });
+  ghostResizeListener = terminal.onResize(scheduleGhost);
   observer = new ResizeObserver(scheduleFit);
   if (host.value) observer.observe(host.value);
   await nextTick();
   fit();
+  scheduleGhost();
 });
 
-watch(
-  () => props.shellPromptKey,
-  (key) => emit("draftChange", key ? draftTracker.prompt() : draftTracker.invalidate()),
-  { immediate: true },
-);
+watch(() => [props.ghostSuggestion, props.readOnly], scheduleGhost, { deep: true, flush: "post" });
 
 watch(
   () => preferences.resolvedHighlights(props.hostId),
@@ -694,11 +955,16 @@ watch(
   async () => {
     await nextTick();
     if (terminal) terminal.options.theme = terminalTheme();
+    scheduleGhost();
   },
   { deep: true },
 );
 
 onBeforeUnmount(() => {
+  cancelAnimationFrame(ghostFrame);
+  clearGhost();
+  ghostWriteListener?.dispose();
+  ghostResizeListener?.dispose();
   window.removeEventListener("blur", handleWindowBlur);
   resetSelectionMouseGesture();
   cancelAnimationFrame(animationFrame);
@@ -733,7 +999,7 @@ onBeforeUnmount(() => {
     role="application"
     :aria-label="terminalLabel"
     @paste.capture="handlePaste"
-    @pointerdown.capture="handleBellPointerDown"
+    @pointerdown.capture="handleTerminalPointerDown"
     @mousedown.capture="handleSelectionMouseDown"
     @pointercancel="handleSelectionPointerCancel"
     @contextmenu.capture="handleContextMenu"
@@ -799,7 +1065,7 @@ onBeforeUnmount(() => {
       :pane-id="paneId"
       :bracketed="bracketedPaste"
       @focus="focus"
-      @pasted="invalidateDraft"
+      @pasted="blockDraftLine"
     />
   </div>
 </template>

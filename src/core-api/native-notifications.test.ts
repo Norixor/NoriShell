@@ -8,11 +8,10 @@ import { setNativeNotificationContext, testNativeNotification } from "./native-n
 describe("native notification IPC", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("sends an exact scope and locale without a renderer focus claim", async () => {
-    const scope = { kind: "local" as const, sessionId: "session", generation: "3", ptyId: "pty", paneId: "pane" };
-    await setNativeNotificationContext("en", scope);
+  it("sends locale without a renderer focus claim", async () => {
+    await setNativeNotificationContext("en");
     expect(invoke).toHaveBeenCalledWith("native_notification_context_set", {
-      request: { meta: { requestId: expect.any(String) }, locale: "en", visibleScope: scope },
+      request: { meta: { requestId: expect.any(String) }, locale: "en" },
     });
   });
 

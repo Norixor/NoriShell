@@ -32,7 +32,9 @@ import {
   setTerminalForPane,
   setTerminalSplitRatio,
   splitTerminalPane,
+  splitTerminalWorkspaceToRight,
   terminalLayoutMinimumSpanAfterSplit,
+  terminalLayoutMinimumSpanAfterWorkspaceRightSplit,
   type TerminalLayoutNode,
   type TerminalSplitDirection,
 } from "../components/terminal/terminalLayout";
@@ -102,14 +104,15 @@ import { createUuidV7 } from "../core-api/ids";
 import { clearTerminalInputFocus } from "../terminal-input-target";
 import { registerTerminalWorkspaceFlush } from "../terminal-workspace-persistence";
 import { useUiStore } from "../stores/ui";
-import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
-import { useNativeTerminalStore } from "../stores/nativeTerminal";
 import type { NativeTerminalSessionScope } from "../core-api/generated/core-api";
+import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { useTipsStore } from "../stores/tips";
 import type { ShortcutCommandId } from "../shortcuts";
 import NvxPluginToolPanel from "../components/plugins/NvxPluginToolPanel.vue";
 import NvxPluginFloatingControls from "../components/plugins/NvxPluginFloatingControls.vue";
 import NvxTerminalPluginRegion from "../components/terminal/NvxTerminalPluginRegion.vue";
 import { terminalPluginToolsKey } from "../components/terminal/terminalPluginTools";
+import { takeSftpTerminalLaunch } from "./sftpTerminalLaunch";
 
 interface TerminalLauncherPane {
   kind: "launcher";
@@ -128,6 +131,7 @@ interface SshSessionPane {
   summary: SshSessionSummary | null;
   deferredStart: boolean;
   deferredRecovery: "reconnect" | "credential" | "vaultUnlock";
+  initialDirectory?: string | null;
 }
 
 interface LocalSessionPane {
@@ -196,7 +200,7 @@ const route = useRoute();
 const router = useRouter();
 const ui = useUiStore();
 const workspaceTabs = useWorkspaceTabsStore();
-const nativeTerminal = useNativeTerminalStore();
+const tips = useTipsStore();
 const launcherOpen = ref(false);
 const telnetLauncherOpen = ref(false);
 const telnetAddress = ref("");
@@ -229,6 +233,7 @@ const activeTabId = ref("");
 // BEL attention is renderer-only projection state: it never changes the session or workspace layout.
 const bellAttentionPaneIds = ref<Set<string>>(new Set());
 const requestedHost = ref<HostSummary | null>(null);
+const requestedInitialDirectory = ref<{ hostId: string; paneId: string; directory: string } | null>(null);
 const requestedPluginAuthorizationToken = ref<string | null>(null);
 const savedHosts = ref<HostSummary[]>([]);
 const recentHostEntries = ref<HostCatalogEntry[]>([]);
@@ -241,6 +246,7 @@ const workspacePersistenceErrorVisible = ref(false);
 const pluginLaunchErrorVisible = ref(false);
 const consumingHostOperationId = ref<string | null>(null);
 const consumedHostOperationIds = new Set<string>();
+const consumingRouteOperationIds = new Set<string>();
 const reauthenticationPaneId = ref<string | null>(null);
 const pendingVaultReconnectPaneIds = new Set<string>();
 const launcherTargetPaneId = ref<string | null>(null);
@@ -268,6 +274,7 @@ const activePane = computed(() => activeTab.value?.panes.find(
   (pane) => pane.paneId === activeTab.value?.activePaneId,
 ) ?? null);
 const pluginToolsOpen = ref(false);
+const terminalToolCatalogCount = ref(0);
 const embeddedSidebarCount = ref(0);
 const activePluginContextKey = computed(() => {
   const pane = activePane.value;
@@ -281,13 +288,17 @@ const activePluginContextLabel = computed(() => activePane.value?.label ?? t("pl
 const activePluginSessionAvailable = computed(() => route.path === "/terminal"
   && activePane.value?.kind === "session" && activePane.value.state === "running"
   && Boolean(activePane.value.summary));
-provide(terminalPluginToolsKey, (contextKey) => {
-  const paneId = contextKey.includes("|") ? contextKey.split("|")[1] : contextKey;
-  const tab = tabs.value.find((candidate) => candidate.panes.some((pane) => pane.paneId === paneId));
-  if (tab && paneId) { activateTab(tab.tabId); activatePane(tab.tabId, paneId); }
-  quickCommandsOpen.value = false;
-  pluginToolsOpen.value = true;
+provide(terminalPluginToolsKey, {
+  open: (contextKey) => {
+    const paneId = contextKey.includes("|") ? contextKey.split("|")[1] : contextKey;
+    const tab = tabs.value.find((candidate) => candidate.panes.some((pane) => pane.paneId === paneId));
+    if (tab && paneId) { activateTab(tab.tabId); activatePane(tab.tabId, paneId); }
+    quickCommandsOpen.value = false;
+    pluginToolsOpen.value = true;
+  },
+  available: computed(() => activePluginSessionAvailable.value && terminalToolCatalogCount.value > 0),
 });
+watch(activePluginContextKey, () => { terminalToolCatalogCount.value = 0; });
 watch(quickCommandsOpen, (open) => { if (open) pluginToolsOpen.value = false; });
 const workspaceProjection = computed(() => JSON.stringify(
   projectTerminalWorkspaceLayout(tabs.value, activeTabId.value),
@@ -346,6 +357,7 @@ function showConnectionError(error: unknown) {
 }
 
 function openInlineQuickConnect(target: string, paneId: string | null = null) {
+  requestedInitialDirectory.value = null;
   let endpoint = target.trim();
   let parsedUsername = "";
   let parsedAddress = endpoint;
@@ -535,6 +547,15 @@ function closeLauncher() {
   launcherOpen.value = false;
   reauthenticationPaneId.value = null;
   launcherTargetPaneId.value = null;
+  requestedInitialDirectory.value = null;
+}
+
+function takeRequestedInitialDirectory(hostId: string, paneId: string): string | null {
+  const request = requestedInitialDirectory.value;
+  requestedInitialDirectory.value = null;
+  return request?.hostId === hostId && request.paneId === paneId
+    ? request.directory
+    : null;
 }
 
 function setPaneRef(paneId: string, value: unknown) {
@@ -1024,6 +1045,10 @@ async function connectWithCredentialRef(credentialRefId: string) {
     && host.address === address.value.trim()
     && host.port === parsedConnectionPort()
     && host.username === username.value.trim();
+  if (requestedInitialDirectory.value && !matchesRequestedHost) {
+    tips.show({ scope: "ssh-sftp-directory-launch", tone: "error", title: t("sshTerminal.sftpDirectoryConnectFailed") });
+    return;
+  }
   const paneId = launcherTargetPaneId.value ?? ensureLauncherTarget();
   const connectedPane: SshSessionPane = {
     kind: "session",
@@ -1046,7 +1071,9 @@ async function connectWithCredentialRef(credentialRefId: string) {
     summary: null,
     deferredStart: false,
     deferredRecovery: "reconnect",
+    initialDirectory: matchesRequestedHost ? takeRequestedInitialDirectory(host.hostId, paneId) : null,
   };
+  if (!matchesRequestedHost) requestedInitialDirectory.value = null;
   replaceWorkspacePane(paneId, connectedPane);
   launcherOpen.value = false;
   vaultDialogOpen.value = false;
@@ -1055,6 +1082,7 @@ async function connectWithCredentialRef(credentialRefId: string) {
 }
 
 function createLocalTerminal(targetPaneId: string | null = null) {
+  requestedInitialDirectory.value = null;
   const paneId = targetPaneId ?? activeLauncherPane()?.paneId ?? ensureLauncherTarget();
   const localPane: LocalSessionPane = {
     kind: "local",
@@ -1068,6 +1096,7 @@ function createLocalTerminal(targetPaneId: string | null = null) {
 }
 
 function openTelnetLauncher(targetPaneId: string | null = null) {
+  requestedInitialDirectory.value = null;
   launcherTargetPaneId.value = targetPaneId
     ?? activeLauncherPane()?.paneId
     ?? ensureLauncherTarget();
@@ -1278,6 +1307,7 @@ async function connectSavedHost(
     summary: null,
     deferredStart: false,
     deferredRecovery: "reconnect",
+    initialDirectory: takeRequestedInitialDirectory(host.hostId, paneId),
   };
   replaceWorkspacePane(paneId, connectedPane);
   requestedPluginAuthorizationToken.value = null;
@@ -1343,6 +1373,15 @@ async function attemptConnect() {
   if (preparing.value) return;
   validationVisible.value = !connectionFormIsValid();
   if (validationVisible.value) return;
+  const requestedDirectory = requestedInitialDirectory.value;
+  const host = requestedHost.value;
+  if (requestedDirectory && (!host || host.hostId !== requestedDirectory.hostId
+    || host.address !== address.value.trim()
+    || host.port !== parsedConnectionPort()
+    || host.username !== username.value.trim())) {
+    tips.show({ scope: "ssh-sftp-directory-launch", tone: "error", title: t("sshTerminal.sftpDirectoryConnectFailed") });
+    return;
+  }
   preparing.value = true;
   credentialSavedDuringAttempt.value = false;
   connectionErrorVisible.value = false;
@@ -1898,19 +1937,16 @@ const tabItems = computed(() => tabs.value.map((tab) => {
         : pane.kind === "telnet"
         ? t(`telnetSession.states.${pane.state}`)
         : t(`sshSession.states.${pane.state}`);
-  const completionCount = tab.panes.reduce((count, item) => count + (nativeTerminal.unread[item.paneId]?.length ?? 0), 0);
   const bellAttention = tab.panes.some((item) => bellAttentionPaneIds.value.has(item.paneId));
   return {
     groupId: tab.tabId,
     label: pane.label,
-    stateLabel: `${state} · ${t("sshTerminal.paneCount", { count: countTerminalPanes(tab.layout) })}${completionCount ? ` · ${t('nativeTerminal.completion')}` : ''}`,
+    stateLabel: `${state} · ${t("sshTerminal.paneCount", { count: countTerminalPanes(tab.layout) })}`,
     hostId: pane.kind === "session" && pane.target.kind === "host" ? pane.target.hostId : null,
-    completionCount,
     bellAttention,
   };
 }));
 
-watch(() => route.path === "/terminal" ? activeTab.value?.activePaneId ?? null : null, (paneId) => nativeTerminal.setVisiblePane(paneId), { immediate: true });
 
 function focusExistingPane(matches: (pane: TerminalWorkspacePane) => boolean) {
   if (terminalFocusIsBlocked() || document.querySelector('[role="dialog"][aria-modal="true"]')) return false;
@@ -1919,6 +1955,7 @@ function focusExistingPane(matches: (pane: TerminalWorkspacePane) => boolean) {
   activatePane(match.tab.tabId, match.pane.paneId);
   return true;
 }
+
 
 function focusNativeSession(scope: NativeTerminalSessionScope) {
   return focusExistingPane((pane) => {
@@ -1986,6 +2023,29 @@ function splitActivePane(direction: TerminalSplitDirection) {
   activatePane(tab.tabId, paneId);
 }
 
+function splitWorkspaceRight() {
+  const tab = activeTab.value;
+  if (!tab || !workspaceRightSplitAllowed()) return;
+  const paneId = createUuidV7();
+  tab.layout = splitTerminalWorkspaceToRight(tab.layout, paneId, createUuidV7());
+  tab.panes.push({ kind: "launcher", paneId, label: t("sshTerminal.newPaneLabel") });
+  void refreshSavedHosts();
+  activatePane(tab.tabId, paneId);
+}
+
+function workspaceRightSplitAllowed() {
+  const tab = activeTab.value;
+  if (!tab) return false;
+  const activePaneElement = Array.from(
+    document.querySelectorAll<HTMLElement>(".nvx-terminal-split-tree__pane--active"),
+  ).find((element) => element.dataset.paneId === tab.activePaneId);
+  const tree = activePaneElement?.closest<HTMLElement>(".nvx-terminal-split-tree");
+  const available = tree?.getBoundingClientRect().width ?? 0;
+  if (available <= 0) return true;
+  const minimum = terminalLayoutMinimumSpanAfterWorkspaceRightSplit(tab.layout);
+  return available >= minimum.widthUnits * 400;
+}
+
 function canSplitActivePane(direction: TerminalSplitDirection) {
   const tab = activeTab.value;
   if (!tab) return false;
@@ -2051,6 +2111,7 @@ async function openRequestedHost(
     forceNewTab?: boolean;
     operationId?: string;
     pluginAuthorizationToken?: string;
+    initialDirectory?: string | null;
   } = {},
 ) {
   const operationId = options.operationId;
@@ -2072,11 +2133,23 @@ async function openRequestedHost(
       ?? (options.forceNewTab
         ? createLauncherTab()
         : activeLauncherPane()?.paneId ?? createLauncherTab());
+    const launchPaneId = launcherTargetPaneId.value;
+    requestedInitialDirectory.value = options.initialDirectory
+      ? { hostId, paneId: launchPaneId, directory: options.initialDirectory }
+      : null;
     const host = (await listHosts()).find((candidate) => candidate.hostId === hostId);
+    if (launcherTargetPaneId.value !== launchPaneId) {
+      if (requestedInitialDirectory.value?.paneId === launchPaneId) requestedInitialDirectory.value = null;
+      return;
+    }
     if (!host) throw new Error("Requested Host no longer exists");
     requestedHost.value = host;
     requestedPluginAuthorizationToken.value = options.pluginAuthorizationToken ?? null;
     const state = await refreshVaultState();
+    if (launcherTargetPaneId.value !== launchPaneId) {
+      if (requestedInitialDirectory.value?.paneId === launchPaneId) requestedInitialDirectory.value = null;
+      return;
+    }
     if (host.hasReadyCredential) {
       if (state === "unlocked") {
         await connectSavedHost(host, options.pluginAuthorizationToken ?? null);
@@ -2104,9 +2177,13 @@ async function openRequestedHost(
     openLauncher();
     await router.replace({ path: "/terminal" });
   } catch {
+    if (requestedInitialDirectory.value?.hostId === hostId) requestedInitialDirectory.value = null;
+    if (options.initialDirectory) {
+      tips.show({ scope: "ssh-sftp-directory-launch", tone: "error", title: t("sshTerminal.sftpDirectoryConnectFailed") });
+    }
     connectionErrorVisible.value = true;
   } finally {
-    consumingHostOperationId.value = null;
+    if (consumingHostOperationId.value === inFlightKey) consumingHostOperationId.value = null;
   }
 }
 
@@ -2116,7 +2193,8 @@ async function consumeRequestedHostRoute() {
   const operationId = typeof route.query.connectOperationId === "string"
     ? route.query.connectOperationId
     : undefined;
-  const forceNewTab = route.query.source === "overview" || route.query.source === "plugin";
+  const sftpDirectoryLaunch = route.query.source === "sftpDirectory";
+  const forceNewTab = route.query.source === "overview" || route.query.source === "plugin" || sftpDirectoryLaunch;
   const pluginAuthorizationToken = route.query.source === "plugin"
     && typeof route.query.pluginAuthorizationToken === "string"
     ? route.query.pluginAuthorizationToken
@@ -2125,12 +2203,35 @@ async function consumeRequestedHostRoute() {
     await router.replace({ path: "/terminal" });
     return;
   }
-  await ensureTerminalWorkspaceInitialized();
-  await openRequestedHost(hostId, null, {
-    forceNewTab,
-    operationId,
-    pluginAuthorizationToken,
-  });
+  const routeKey = operationId ?? `host:${hostId}`;
+  if (consumingRouteOperationIds.has(routeKey)) return;
+  consumingRouteOperationIds.add(routeKey);
+  try {
+    await ensureTerminalWorkspaceInitialized();
+    const initialDirectory = sftpDirectoryLaunch && operationId
+      ? takeSftpTerminalLaunch(operationId, hostId)
+      : null;
+    if (sftpDirectoryLaunch && (initialDirectory === null || !canUseDesktopCore())) {
+      tips.show({ scope: "ssh-sftp-directory-launch", tone: "error", title: t("sshTerminal.sftpDirectoryLaunchExpired") });
+      await router.replace({ path: "/terminal" });
+      return;
+    }
+    await openRequestedHost(hostId, null, {
+      forceNewTab,
+      operationId,
+      pluginAuthorizationToken,
+      initialDirectory,
+    });
+  } catch {
+    if (sftpDirectoryLaunch) {
+      tips.show({ scope: "ssh-sftp-directory-launch", tone: "error", title: t("sshTerminal.sftpDirectoryConnectFailed") });
+    } else {
+      connectionErrorVisible.value = true;
+    }
+    await router.replace({ path: "/terminal" });
+  } finally {
+    consumingRouteOperationIds.delete(routeKey);
+  }
 }
 
 async function consumeRequestedSessionFocus() {
@@ -2308,7 +2409,7 @@ onMounted(async () => {
             @activate="activatePane(tab.tabId, $event)"
             @resize="(splitId, ratio) => resizeSplit(tab.tabId, splitId, ratio)"
           >
-            <template #pane="{ pane: layoutPane, canSplitHorizontal, canSplitVertical }">
+            <template #pane="{ pane: layoutPane, canSplitHorizontal, canSplitVertical, canSplitWorkspaceRight }">
               <template
                 v-for="pane in tab.panes"
                 :key="pane.paneId"
@@ -2324,8 +2425,10 @@ onMounted(async () => {
                       :plugin-context-key="pane.paneId"
                       :can-split-horizontal="canSplitHorizontal"
                       :can-split-vertical="canSplitVertical"
+                      :can-split-workspace-right="canSplitWorkspaceRight"
                       :show-layout-actions="true"
                       @split="splitActivePane"
+                      @split-workspace-right="splitWorkspaceRight"
                       @close="requestClosePane(tab.tabId, pane.paneId)"
                     />
                   </header>
@@ -2353,16 +2456,21 @@ onMounted(async () => {
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
                   :deferred-recovery="pane.deferredRecovery"
-                  :active="tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :initial-directory="pane.initialDirectory ?? null"
+                  :active="route.path === '/terminal' && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :visible="route.path === '/terminal' && tab.tabId === activeTabId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
+                  :can-split-workspace-right="canSplitWorkspaceRight"
                   @activate="activatePane(tab.tabId, pane.paneId)"
                   @state="(state, summary) => updateTabState(pane.paneId, state, summary)"
                   @bell-attention="setPaneBellAttention(pane.paneId, $event)"
                   @request-authentication-recovery="(_, target) => requestSessionAuthenticationRecovery(pane.paneId, target)"
                   @request-credential="(_, target) => requestSessionRecovery(pane.paneId, target, 'credential')"
                   @request-vault-unlock="(_, target) => requestSessionRecovery(pane.paneId, target, 'vault')"
+                  @initial-directory-handled="(directory) => { if (pane.initialDirectory === directory) pane.initialDirectory = null; }"
                   @split="splitActivePane"
+                  @split-workspace-right="splitWorkspaceRight"
                   @close="requestClosePane(tab.tabId, pane.paneId)"
                 />
                 <NvxLocalTerminalPane
@@ -2372,13 +2480,16 @@ onMounted(async () => {
                   :label="pane.label"
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
-                  :active="tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :active="route.path === '/terminal' && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :visible="route.path === '/terminal' && tab.tabId === activeTabId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
+                  :can-split-workspace-right="canSplitWorkspaceRight"
                   @activate="activatePane(tab.tabId, pane.paneId)"
                   @state="(state, summary) => updateLocalTabState(pane.paneId, state, summary)"
                   @bell-attention="setPaneBellAttention(pane.paneId, $event)"
                   @split="splitActivePane"
+                  @split-workspace-right="splitWorkspaceRight"
                   @close="requestClosePane(tab.tabId, pane.paneId)"
                 />
                 <NvxPluginTerminalPane
@@ -2394,10 +2505,12 @@ onMounted(async () => {
                   :active="route.path === '/terminal' && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
+                  :can-split-workspace-right="canSplitWorkspaceRight"
                   @activate="activatePane(tab.tabId, pane.paneId)"
                   @state="(state, summary) => updatePluginTabState(pane.paneId, state, summary)"
                   @bell-attention="setPaneBellAttention(pane.paneId, $event)"
                   @split="splitActivePane"
+                  @split-workspace-right="splitWorkspaceRight"
                   @close="requestClosePane(tab.tabId, pane.paneId)"
                 />
                 <NvxTelnetTerminalPane
@@ -2411,10 +2524,12 @@ onMounted(async () => {
                   :active="tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
+                  :can-split-workspace-right="canSplitWorkspaceRight"
                   @activate="activatePane(tab.tabId, pane.paneId)"
                   @state="(state, summary) => updateTelnetTabState(pane.paneId, state, summary)"
                   @bell-attention="setPaneBellAttention(pane.paneId, $event)"
                   @split="splitActivePane"
+                  @split-workspace-right="splitWorkspaceRight"
                   @close="requestClosePane(tab.tabId, pane.paneId)"
                 />
               </template>
@@ -2437,6 +2552,7 @@ onMounted(async () => {
         :instance-key="activePluginContextKey"
         :context-label="activePluginContextLabel"
         :available="activePluginSessionAvailable"
+        @catalog="terminalToolCatalogCount = $event.length"
       />
       <NvxTerminalPluginRegion
         region="sidebar"

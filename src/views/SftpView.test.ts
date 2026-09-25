@@ -11,6 +11,7 @@ import { i18n } from "../locales";
 import { SFTP_PREFERENCES_KEY } from "../stores/sftpPreferences";
 import { useTipsStore } from "../stores/tips";
 import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./sftpPluginNavigation";
+import { takeSftpTerminalLaunch } from "./sftpTerminalLaunch";
 
 const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
 const pathApi = vi.hoisted(() => ({ homeDir: vi.fn(), sep: vi.fn(() => "/") }));
@@ -249,6 +250,40 @@ async function dragEntryToPane(source: DOMWrapper<Element>, target: DOMWrapper<E
 }
 
 describe("SftpView production boundaries", () => {
+  it("opens a new terminal at the right-clicked directory instead of the previous selection", async () => {
+    const entries = [
+      { entryRef: "file", path: { bytes: Array.from(new TextEncoder().encode("/old.txt")) }, displayName: "old.txt", kind: "file" as const, size: 1, modifiedAtUnixMs: 1, permissionBits: null },
+      { entryRef: "directory", path: { bytes: Array.from(new TextEncoder().encode("/new folder")) }, displayName: "new folder", kind: "directory" as const, size: null, modifiedAtUnixMs: 1, permissionBits: null },
+    ];
+    const { wrapper, router } = await mountView(readySnapshot(), undefined, entries);
+    const rows = wrapper.findAll('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button');
+    await rows.find((row) => row.text().includes("old.txt"))!.trigger("click");
+    await rows.find((row) => row.text().includes("new folder"))!.trigger("contextmenu");
+    await wrapper.findAll('[role="menuitem"]').find((button) => button.text().includes("Open terminal here"))!.trigger("click");
+    await flushPromises();
+    const { hostId, connectOperationId, source } = router.currentRoute.value.query;
+    expect(source).toBe("sftpDirectory");
+    expect(takeSftpTerminalLaunch(connectOperationId as string, hostId as string)).toBe("/new folder");
+    wrapper.unmount();
+  });
+
+  it("uses the current directory for a file or list background right-click", async () => {
+    const { wrapper, router } = await mountView(readySnapshot(), undefined, "old.txt");
+    const row = wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button');
+    await row.trigger("contextmenu");
+    await wrapper.findAll('[role="menuitem"]').find((button) => button.text().includes("Open terminal here"))!.trigger("click");
+    await flushPromises();
+    expect(takeSftpTerminalLaunch(router.currentRoute.value.query.connectOperationId as string, host.hostId)).toBe("/");
+    wrapper.unmount();
+
+    const blank = await mountView(readySnapshot(), undefined, "old.txt");
+    await blank.wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button').trigger("click");
+    await blank.wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries').trigger("contextmenu");
+    await blank.wrapper.findAll('[role="menuitem"]').find((button) => button.text().includes("Open terminal here"))!.trigger("click");
+    await flushPromises();
+    expect(takeSftpTerminalLaunch(blank.router.currentRoute.value.query.connectOperationId as string, host.hostId)).toBe("/");
+    blank.wrapper.unmount();
+  });
   it("positions the measured menu inside the viewport and recomputes after resize", async () => {
     const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: 216, height: 520 } as DOMRect);
     const width = vi.spyOn(window, "innerWidth", "get").mockReturnValue(800);

@@ -1974,6 +1974,7 @@ fn not_found_error(request_id: RequestId) -> Box<CoreApiError> {
 mod tests {
     use std::time::Duration;
 
+    use norishell_app_persistence::AppRepository;
     use norishell_core_api::{
         CpuMetric, DiskResourceId, HostId, MetricByteCount, MetricFieldState, MetricSnapshot,
         MetricsKeyboardInteractiveAnswerPrepareRequest, MetricsKeyboardInteractiveAnswerRefId,
@@ -2077,6 +2078,40 @@ mod tests {
                 let _ = sender.send(());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn background_reconcile_starts_only_enabled_saved_hosts() {
+        let (directory, mut actor) = actor();
+        let mut repository = AppRepository::open(directory.path().join("ssh/norishell.sqlite3"))
+            .expect("fixture repository");
+        let enabled = repository
+            .create_host("Enabled", "enabled.example", 22, Some("ops"), None, false)
+            .expect("enabled host");
+        let disabled = repository
+            .create_host("Disabled", "disabled.example", 22, Some("ops"), None, false)
+            .expect("disabled host");
+        let current = repository
+            .get_monitoring_policy(&enabled.host_id)
+            .expect("monitoring policy");
+        repository
+            .replace_monitoring_policy(&enabled.host_id, current.revision, &policy(true))
+            .expect("enable monitoring");
+        drop(repository);
+
+        let sources = actor
+            .hosts
+            .list_overview_sources(RequestId::new())
+            .expect("saved hosts");
+        let sessions = actor
+            .reconcile(RequestId::new(), sources)
+            .await
+            .expect("background reconcile");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].host_id, enabled.host_id);
+        assert_eq!(sessions[0].state, MetricsSessionState::NeedsAuthentication);
+        assert!(!actor.sessions.contains_key(disabled.host_id.as_str()));
     }
 
     #[tokio::test]

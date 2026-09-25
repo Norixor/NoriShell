@@ -42,14 +42,14 @@
 
 ## 安装与快速开始
 
-当前版本：**[v0.1.3](https://github.com/Norixor/NoriShell/releases/tag/v0.1.3)**。按设备选择安装包或免安装 ZIP。
+当前版本：**[v0.1.4](https://github.com/Norixor/NoriShell/releases/tag/v0.1.4)**。按设备选择安装包或免安装 ZIP。
 
 | 平台 | 架构 | 安装包 | 免安装 ZIP |
 | --- | --- | --- | --- |
-| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.3/NoriShell_0.1.3_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.3/NoriShell_0.1.3_macos_arm64.zip) |
-| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.3/NoriShell_0.1.3_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.3/NoriShell_0.1.3_macos_x64.zip) |
-| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.3/NoriShell_0.1.3_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.3/NoriShell_0.1.3_windows_x64.zip) |
-| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.3/NoriShell_0.1.3_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.3/NoriShell_0.1.3_windows_arm64.zip) |
+| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_arm64.zip) |
+| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_x64.zip) |
+| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_x64.zip) |
+| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_arm64.zip) |
 
 使用 macOS 安装包时，将 NoriShell 拖入“应用程序”；Windows 安装包按向导安装。ZIP 版使用同样的本机配置与数据目录，运行前请完整解压。Windows ZIP 版需要系统已安装 WebView2 Runtime。
 

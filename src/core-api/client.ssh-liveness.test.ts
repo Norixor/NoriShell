@@ -182,9 +182,6 @@ describe("SSH renderer binding client", () => {
       channelId: "019d0000-0000-7000-8000-000000000346",
       attachmentId: "019d0000-0000-7000-8000-000000000343",
       viewId: "019d0000-0000-7000-8000-000000000344",
-      focusEpoch: "22",
-      leaseId: "019d0000-0000-7000-8000-000000000345",
-      inputEpoch: "3",
       resizeSeq: "9",
       rows: 42,
       cols: 132,
@@ -221,10 +218,10 @@ describe("SSH renderer binding client", () => {
     });
     expect(tauri.invoke.mock.calls[5]?.[1].request).toMatchObject({
       resizeSeq: "9",
-      focusEpoch: "22",
       rows: 42,
       cols: 132,
     });
+    expect(tauri.invoke.mock.calls[5]?.[1].request).not.toHaveProperty("focusEpoch");
     expect(tauri.invoke.mock.calls[6]?.[1].request.idempotencyKey)
       .toBe(`ssh-reconnect-${tauri.invoke.mock.calls[6]?.[1].request.operationId}`);
     expect(tauri.invoke.mock.calls[7]?.[1].request.idempotencyKey)

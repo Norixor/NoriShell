@@ -36,7 +36,8 @@ const TerminalStub = defineComponent({
 function render(props = {}) {
   return mount(NvxPluginTerminalPane, {
     props: { paneId: "pane", tabId: "tab", label: "Device", profile, existingSession: null,
-      active: true, canSplitHorizontal: true, canSplitVertical: true, ...props },
+      active: true, canSplitHorizontal: true, canSplitVertical: true,
+      canSplitWorkspaceRight: true, ...props },
     global: { plugins: [createPinia(), i18n], stubs: { NvxTerminalView: TerminalStub, NvxTerminalTools: true, NvxTerminalPaneControls: true } },
   });
 }

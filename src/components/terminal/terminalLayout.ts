@@ -52,6 +52,13 @@ export function terminalLayoutMinimumSpanAfterSplit(
   return terminalLayoutMinimumSpanWithPendingSplit(node, paneId, direction);
 }
 
+export function terminalLayoutMinimumSpanAfterWorkspaceRightSplit(
+  node: TerminalLayoutNode,
+): TerminalLayoutMinimumSpan {
+  const span = terminalLayoutMinimumSpan(node);
+  return { widthUnits: span.widthUnits + 1, heightUnits: span.heightUnits };
+}
+
 export function findTerminalPane(
   node: TerminalLayoutNode,
   paneId: string,
@@ -81,6 +88,22 @@ export function splitTerminalPane(
 ): TerminalLayoutNode {
   const result = splitNode(node, paneId, direction, newPaneId, splitId);
   return result.changed ? result.node : node;
+}
+
+export function splitTerminalWorkspaceToRight(
+  node: TerminalLayoutNode,
+  newPaneId: string,
+  splitId: string,
+): TerminalLayoutNode {
+  const span = terminalLayoutMinimumSpan(node);
+  return {
+    kind: "split",
+    splitId,
+    direction: "horizontal",
+    ratio: span.widthUnits / (span.widthUnits + 1),
+    first: node,
+    second: createTerminalPane(newPaneId),
+  };
 }
 
 function splitNode(

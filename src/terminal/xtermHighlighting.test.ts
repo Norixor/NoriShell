@@ -15,14 +15,15 @@ function fixture() {
   const callbacks: (() => void)[] = [];
   const disposals: ReturnType<typeof vi.fn>[] = [];
   const on = (callback: () => void) => { callbacks.push(callback); const dispose = vi.fn(); disposals.push(dispose); return { dispose }; };
+  let text = "ERROR";
   const terminal = {
     rows: 1, cols: 5,
-    buffer: { active: { type: "normal", viewportY: 0, length: 1, baseY: 0, cursorY: 0, getLine: () => ({ isWrapped: false, getCell: (index: number) => ({ getChars: () => "ERROR"[index], getWidth: () => 1 }) }) }, onBufferChange: on },
+    buffer: { active: { type: "normal", viewportY: 0, length: 1, baseY: 0, cursorY: 0, getLine: () => ({ isWrapped: false, getCell: (index: number) => ({ getChars: () => text[index], getWidth: () => 1 }) }) }, onBufferChange: on },
     onWriteParsed: on, onScroll: on, onResize: on,
-    registerMarker: vi.fn(() => ({ dispose: vi.fn() })),
+    registerMarker: vi.fn(() => ({ line: 0, isDisposed: false, dispose: vi.fn() })),
     registerDecoration: vi.fn(() => ({ dispose: vi.fn() })),
   };
-  return { terminal, callbacks, disposals };
+  return { terminal, callbacks, disposals, setText(value: string) { text = value; } };
 }
 const config = { enabled: true, rules: [{ id: "error", label: "Error", pattern: "ERROR", mode: "literal" as const, caseSensitive: true, foreground: "#ff0000", background: "#ffffff", enabled: true }] };
 beforeEach(() => { vi.useFakeTimers(); FakeWorker.instances = []; vi.stubGlobal("Worker", FakeWorker); });
@@ -31,19 +32,47 @@ describe("xterm highlighting worker lifecycle", () => {
   it("terminates a timed-out regex worker once and resumes only after a configuration change", () => {
     const { terminal, callbacks, disposals } = fixture(); const report = vi.fn(); const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, report);
     highlighter.update(config); vi.advanceTimersByTime(80); const first = FakeWorker.instances[0]!;
-    vi.advanceTimersByTime(500); expect(first.terminate).toHaveBeenCalledOnce(); expect(report).toHaveBeenLastCalledWith(true);
+    vi.advanceTimersByTime(500); expect(first.terminate).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1_500); expect(first.terminate).toHaveBeenCalledOnce(); expect(report).toHaveBeenLastCalledWith(true);
     callbacks[0]!(); vi.advanceTimersByTime(2_000); expect(FakeWorker.instances).toHaveLength(1);
     highlighter.update(config); vi.advanceTimersByTime(80); expect(FakeWorker.instances).toHaveLength(2);
     // A queued failure from the terminated worker cannot stop its replacement.
     first.reply([], true); expect(FakeWorker.instances[1]!.terminate).not.toHaveBeenCalled();
     highlighter.dispose(); expect(disposals.every((dispose) => dispose.mock.calls.length === 1)).toBe(true);
   });
-  it("discards stale output matches and disposes decorations on invalidation", () => {
-    const { terminal, callbacks } = fixture(); const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, vi.fn());
+  it("keeps a short timeout after the first Worker reply", () => {
+    const { terminal, callbacks } = fixture(); const report = vi.fn();
+    const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, report);
+    highlighter.update(config); vi.advanceTimersByTime(80);
+    const worker = FakeWorker.instances[0]!;
+    vi.advanceTimersByTime(600); worker.reply();
+    expect(worker.terminate).not.toHaveBeenCalled();
+    callbacks[0]!(); vi.advanceTimersByTime(80);
+    vi.advanceTimersByTime(500);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(report).toHaveBeenLastCalledWith(true);
+    highlighter.dispose();
+  });
+  it("keeps unchanged highlights across frequent redraws and reconciles changed text", () => {
+    const { terminal, callbacks, setText } = fixture(); const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, vi.fn());
     highlighter.update(config); vi.advanceTimersByTime(80); const worker = FakeWorker.instances[0]!;
-    callbacks[0]!(); worker.reply([{ line: 0, ruleId: "error", start: 0, end: 5 }]); expect(terminal.registerDecoration).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(80); worker.reply([{ line: 0, ruleId: "error", start: 0, end: 5 }]); expect(terminal.registerDecoration).toHaveBeenCalledOnce();
+    worker.reply([{ line: 0, ruleId: "error", start: 0, end: 5 }]); expect(terminal.registerDecoration).toHaveBeenCalledOnce();
     const decoration = terminal.registerDecoration.mock.results[0]!.value;
-    callbacks[0]!(); expect(decoration.dispose).toHaveBeenCalledOnce(); highlighter.dispose();
+    for (let index = 0; index < 5; index++) callbacks[0]!();
+    expect(decoration.dispose).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(80);
+    callbacks[0]!(); worker.reply([{ line: 0, ruleId: "error", start: 0, end: 5 }]);
+    expect(terminal.registerDecoration).toHaveBeenCalledOnce();
+    expect(decoration.dispose).not.toHaveBeenCalled();
+    setText("OTHER"); callbacks[0]!(); vi.advanceTimersByTime(80);
+    worker.reply([]); expect(decoration.dispose).toHaveBeenCalledOnce();
+    highlighter.dispose();
+  });
+  it("ignores a stale worker match when the underlying line changes", () => {
+    const { terminal, callbacks, setText } = fixture(); const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, vi.fn());
+    highlighter.update(config); vi.advanceTimersByTime(80); const worker = FakeWorker.instances[0]!;
+    setText("OTHER"); callbacks[0]!(); worker.reply([{ line: 0, ruleId: "error", start: 0, end: 5 }]);
+    expect(terminal.registerDecoration).not.toHaveBeenCalled();
+    highlighter.dispose();
   });
 });

@@ -324,13 +324,22 @@ onBeforeUnmount(() => {
   <section class="plugins-page">
     <NvxPluginAppIntegrations />
     <header class="plugins-page__topbar">
+      <h1 class="plugins-page__title">
+        {{ t("plugins.title") }}
+      </h1>
       <div class="plugins-page__actions">
         <NvxButton
           size="sm"
-          variant="secondary"
+          variant="ghost"
           :disabled="actionPending || plugins.loading"
+          :aria-pressed="plugins.readiness?.safeModeNextStart ?? false"
           @click="toggleSafeModeNextStart"
         >
+          <NvxIcon
+            :icon="ShieldCheck"
+            :size="16"
+            aria-hidden="true"
+          />
           {{ t(plugins.readiness?.safeModeNextStart
             ? "plugins.safeMode.cancelNextStart"
             : "plugins.safeMode.enableNextStart") }}
@@ -946,16 +955,25 @@ onBeforeUnmount(() => {
 .plugins-page__topbar {
   display: flex;
   flex: none;
-  gap: var(--nvx-space-4);
+  gap: var(--nvx-space-3);
   align-items: center;
   justify-content: space-between;
   min-height: 56px;
-  padding: 0 var(--nvx-space-6);
+  padding: 0 var(--nvx-space-4);
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
   background: var(--nvx-color-bg-surface);
+}
+
+.plugins-page__title {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--nvx-font-size-md);
+  white-space: nowrap;
 }
 
 .plugins-page__actions {
   display: flex;
+  flex: none;
   gap: var(--nvx-space-2);
   align-items: center;
 }

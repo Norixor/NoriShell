@@ -13,6 +13,7 @@ import type {
 import NvxWorkspaceTabBar from "../components/layout/NvxWorkspaceTabBar.vue";
 import { i18n } from "../locales";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { useTipsStore } from "../stores/tips";
 import {
   focusedTerminalLabel,
   focusTerminalInputTarget,
@@ -21,6 +22,7 @@ import {
   runInFocusedTerminal,
 } from "../terminal-input-target";
 import { flushTerminalWorkspaceBeforeExit } from "../terminal-workspace-persistence";
+import { createSftpTerminalLaunch } from "./sftpTerminalLaunch";
 
 const defaultNavigatorPlatform = navigator.platform;
 const nativeEvents = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -220,6 +222,7 @@ const SshPaneContractStub = defineComponent({
     existingSession: { type: Object, default: null },
     deferredStart: Boolean,
     deferredRecovery: { type: String, default: "reconnect" },
+    initialDirectory: { type: String, default: null },
     active: Boolean,
     canSplitHorizontal: Boolean,
     canSplitVertical: Boolean,
@@ -279,6 +282,7 @@ const SshPaneContractStub = defineComponent({
       "data-target-kind": (props.target as SshSessionSummary["target"]).kind,
       "data-deferred-start": String(props.deferredStart),
       "data-deferred-recovery": props.deferredRecovery,
+      "data-initial-directory": props.initialDirectory ?? "",
     }, [
       props.label,
       props.active
@@ -430,6 +434,56 @@ function deferred<T>() {
 }
 
 describe("SshTerminalView route and Header behavior", () => {
+  it("opens each SFTP directory request in a new Host tab and consumes its path only once", async () => {
+    const readyHost = { ...host, hasReadyCredential: true };
+    client.listHosts.mockResolvedValue([readyHost]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked", vaultId: "vault", revision: "2", entryCount: 1 });
+    const { wrapper, router } = await mountShell();
+    const first = createSftpTerminalLaunch(host.hostId, Array.from(new TextEncoder().encode("/srv/first")))!;
+    await router.push({ path: "/terminal", query: { hostId: host.hostId, source: "sftpDirectory", connectOperationId: first } });
+    await flushPromises();
+    expect(wrapper.findAll(".ssh-pane-contract-stub")).toHaveLength(1);
+    expect(wrapper.find(".ssh-pane-contract-stub").attributes("data-initial-directory")).toBe("/srv/first");
+    expect(router.currentRoute.value.query.connectOperationId).toBeUndefined();
+
+    const second = createSftpTerminalLaunch(host.hostId, Array.from(new TextEncoder().encode("/srv/second")))!;
+    await router.push({ path: "/terminal", query: { hostId: host.hostId, source: "sftpDirectory", connectOperationId: second } });
+    await flushPromises();
+    expect(wrapper.findAll(".ssh-pane-contract-stub")).toHaveLength(2);
+    expect(wrapper.findAll(".ssh-pane-contract-stub").map((pane) => pane.attributes("data-initial-directory")))
+      .toEqual(["/srv/first", "/srv/second"]);
+    wrapper.unmount();
+  });
+
+  it("does not carry a pending SFTP directory into a later ordinary Host launch", async () => {
+    const noCredentialHost = { ...host, hasReadyCredential: false };
+    const readyHost = { ...host, hasReadyCredential: true };
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked", vaultId: "vault", revision: "2", entryCount: 1 });
+    const { wrapper, router } = await mountShell();
+    client.listHosts.mockResolvedValue([noCredentialHost]);
+    const operationId = createSftpTerminalLaunch(host.hostId, Array.from(new TextEncoder().encode("/srv/old")))!;
+    await router.push({ path: "/terminal", query: { hostId: host.hostId, source: "sftpDirectory", connectOperationId: operationId } });
+    await flushPromises();
+    expect(wrapper.findAll(".ssh-pane-contract-stub")).toHaveLength(0);
+
+    client.listHosts.mockResolvedValue([readyHost]);
+    await router.push({ path: "/terminal", query: { hostId: host.hostId, source: "overview", connectOperationId: crypto.randomUUID() } });
+    await flushPromises();
+    expect(wrapper.findAll(".ssh-pane-contract-stub")).toHaveLength(1);
+    expect(wrapper.find(".ssh-pane-contract-stub").attributes("data-initial-directory")).toBe("");
+    wrapper.unmount();
+  });
+
+  it("shows an error and opens no Host tab for an expired SFTP directory request", async () => {
+    const { wrapper, router, pinia } = await mountShell();
+    await router.push({ path: "/terminal", query: { hostId: host.hostId, source: "sftpDirectory", connectOperationId: crypto.randomUUID() } });
+    await flushPromises();
+    expect(wrapper.findAll(".ssh-pane-contract-stub")).toHaveLength(0);
+    expect(useTipsStore(pinia).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ scope: "ssh-sftp-directory-launch", title: i18n.global.t("sshTerminal.sftpDirectoryLaunchExpired") }),
+    ]));
+    wrapper.unmount();
+  });
   it("recovers a pending plugin launch even when its navigation event was lost and deduplicates later events", async () => {
     const launch = { launchId: "launch", pluginId: "provider.test", providerId: "serial", label: "Serial device",
       tabId: "provider-tab", paneId: "provider-pane", revision: "1", claimed: false, expiresAtUnixMs: Date.now() + 60_000 };
@@ -487,6 +541,25 @@ describe("SshTerminalView route and Header behavior", () => {
     await flushPromises();
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(2);
     expect(document.querySelectorAll(".local-pane-contract-stub")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("places a new full-height Pane to the right of a vertical stack", async () => {
+    client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "1", sessions: [runningSession] });
+    const { wrapper } = await mountShell();
+
+    await wrapper.get('button[aria-label="向下拆分 Pane"]').trigger("click");
+    await flushPromises();
+    expect(document.querySelectorAll(".nvx-terminal-split-tree__pane")).toHaveLength(2);
+
+    await wrapper.get('button[aria-label="在右侧新建完整高度 Pane"]').trigger("click");
+    await flushPromises();
+    const panes = Array.from(document.querySelectorAll<HTMLElement>(".nvx-terminal-split-tree__pane"));
+    expect(panes).toHaveLength(3);
+    expect(panes[0]?.style.height).toBe("50%");
+    expect(panes[1]?.style.top).toBe("50%");
+    expect(panes[2]?.style.height).toBe("100%");
+    expect(panes[2]?.style.left).toBe("50%");
     wrapper.unmount();
   });
 

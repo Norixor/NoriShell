@@ -117,4 +117,39 @@ describe("NvxTerminalSplitTree", () => {
     )).toEqual(["true", "true"]);
     bounds.mockRestore();
   });
+
+  it("offers a full-height right split only when the workspace has room", async () => {
+    const narrowBounds = {
+      width: 790, height: 600, top: 0, right: 790, bottom: 600,
+      left: 0, x: 0, y: 0, toJSON: () => ({}),
+    };
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(narrowBounds);
+    const node = splitTerminalPane(
+      createTerminalPane("pane-a"), "pane-a", "vertical", "pane-b", "split-a",
+    );
+    const wrapper = mount(NvxTerminalSplitTree, {
+      props: { node, activePaneId: "pane-b", separatorLabel: "调整 Pane 大小" },
+      slots: {
+        pane: ({ canSplitWorkspaceRight }) => h("div", {
+          class: "workspace-split-availability",
+          "data-available": String(canSplitWorkspaceRight),
+        }),
+      },
+    });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll(".workspace-split-availability").map((pane) => pane.attributes("data-available")))
+      .toEqual(["false", "false"]);
+    bounds.mockReturnValue({ ...narrowBounds, width: 800, right: 800 });
+    // ResizeObserver owns live geometry updates; remount to exercise the new measured width.
+    wrapper.unmount();
+    const wide = mount(NvxTerminalSplitTree, {
+      props: { node, activePaneId: "pane-b", separatorLabel: "调整 Pane 大小" },
+      slots: { pane: ({ canSplitWorkspaceRight }) => h("div", { "data-available": String(canSplitWorkspaceRight) }) },
+    });
+    await wide.vm.$nextTick();
+    expect(wide.findAll("[data-available]").map((pane) => pane.attributes("data-available")))
+      .toEqual(["true", "true"]);
+    wide.unmount();
+    bounds.mockRestore();
+  });
 });

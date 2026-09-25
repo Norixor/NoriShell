@@ -5,7 +5,7 @@ import { takeNativeTransferNavigation, matchesNativeTransferNavigation } from ".
 import { homeDir, sep } from "@tauri-apps/api/path";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Activity, Archive, ArrowUp, Download, Eye, FileArchive, FilePlus2, FolderOpen, FolderPlus, HardDrive, Link2, ListFilter, Pause, Pencil, PlugZap, Radio, RefreshCw, RotateCcw, Save, Search, Server, ShieldCheck, Square, Trash2, X } from "lucide-vue-next";
+import { Activity, Archive, ArrowUp, Download, Eye, FileArchive, FilePlus2, FolderOpen, FolderPlus, HardDrive, Link2, ListFilter, Pause, Pencil, PlugZap, Radio, RefreshCw, RotateCcw, Save, Search, Server, ShieldCheck, Square, Terminal, Trash2, X } from "lucide-vue-next";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
@@ -42,6 +42,7 @@ import {
   visibleSftpPaneEntries, type SftpPaneDragIntent, type SftpPaneEntry, type SftpPaneState,
 } from "./sftpPaneState";
 import { pendingSftpPluginNavigations, resolveSftpPluginNavigation, takeSftpPluginNavigation } from "./sftpPluginNavigation";
+import { createSftpTerminalLaunch } from "./sftpTerminalLaunch";
 
 interface LocalTrailItem {
   capability: SftpLocalDirectoryCapability;
@@ -102,6 +103,10 @@ interface SftpContextMenuState {
   paneId: string;
   left: number;
   top: number;
+  endpointRevision: number;
+  directoryRevision: number;
+  hostId: string;
+  directoryPathBytes: number[];
 }
 interface TextPreviewTarget {
   paneId: string;
@@ -1817,6 +1822,12 @@ function openSftpContextMenu(event: MouseEvent, pane: SftpPaneState, entry?: Sft
     anchorY: event.clientY,
     left: event.clientX,
     top: event.clientY,
+    endpointRevision: pane.endpointRevision,
+    directoryRevision: pane.directoryRevision,
+    hostId: pane.endpoint.hostId ?? "",
+    directoryPathBytes: [...(entry?.kind === "directory" && entry.remotePathBytes
+      ? entry.remotePathBytes
+      : pane.remoteDirectoryPathBytes ?? [])],
   };
 }
 
@@ -1846,12 +1857,28 @@ watch(contextMenuRoot, (element, _previous, onCleanup) => {
 }, { flush: "post" });
 watch(() => [contextMenu.value?.anchorX, contextMenu.value?.anchorY], positionContextMenu, { flush: "post" });
 
-function runSftpContextAction(action: "refresh" | "mkdir" | "touch" | "preview" | "tail" | "download" | "rename" | "delete" | "permissions" | "compress" | "extract" | "downloadUrl") {
-  const pane = contextMenu.value ? paneStates[contextMenu.value.paneId] : null;
+function runSftpContextAction(action: "refresh" | "mkdir" | "touch" | "preview" | "tail" | "download" | "rename" | "delete" | "permissions" | "compress" | "extract" | "downloadUrl" | "openTerminal") {
+  const menu = contextMenu.value;
+  const pane = menu ? paneStates[menu.paneId] : null;
   contextMenu.value = null;
   if (!pane) return;
   activeSftpPaneId.value = pane.paneId;
-  if (action === "refresh") refreshPane(pane);
+  if (action === "openTerminal") {
+    if (!menu || pane.endpoint.kind !== "remote" || !paneReady(pane)
+      || pane.endpointRevision !== menu.endpointRevision
+      || pane.directoryRevision !== menu.directoryRevision
+      || pane.endpoint.hostId !== menu.hostId) {
+      showOperationFailed();
+      return;
+    }
+    const operationId = createSftpTerminalLaunch(menu.hostId, menu.directoryPathBytes);
+    if (!operationId) {
+      tips.show({ scope: operationFeedbackScope, tone: "error", title: t("sftp.openTerminalUnsupportedPath") });
+      return;
+    }
+    void router.push({ path: "/terminal", query: { hostId: menu.hostId, source: "sftpDirectory", connectOperationId: operationId } })
+      .catch(() => showOperationFailed());
+  } else if (action === "refresh") refreshPane(pane);
   else if (action === "preview") void previewSelectedFile(pane);
   else if (action === "tail") void previewSelectedFile(pane, "tail");
   else if (action === "download") void downloadSelectedFromPicker(pane);
@@ -3059,6 +3086,18 @@ onBeforeUnmount(() => {
       :aria-label="t('sftp.fileContextMenu')"
       :style="{ left: `${contextMenu.left}px`, top: `${contextMenu.top}px` }"
     >
+      <button
+        type="button"
+        role="menuitem"
+        @click="runSftpContextAction('openTerminal')"
+      >
+        <NvxIcon
+          :icon="Terminal"
+          :size="16"
+        />
+        {{ t("sftp.openTerminalHere") }}
+      </button>
+      <span role="separator" />
       <button
         type="button"
         role="menuitem"

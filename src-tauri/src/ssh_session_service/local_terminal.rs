@@ -28,7 +28,6 @@ use crate::{
         LocalPtyExit, LocalPtyMetadata, LocalPtyProcess, LocalPtySpawnError, LocalPtySpawnFailure,
         LocalPtyWriter,
     },
-    native_terminal::NativeTerminalService,
     ssh_operation_ledger::{SshOperationLedger, SshOperationLookup, StoredSshOperationResult},
 };
 
@@ -155,6 +154,7 @@ struct LocalAttachmentRecord {
     summary: LocalSessionAttachment,
     events: Channel<LocalSessionEvent>,
     last_seen_at_unix_ms: i64,
+    last_resize_seq: u64,
 }
 
 struct LocalSessionRecord {
@@ -163,7 +163,6 @@ struct LocalSessionRecord {
     input_lease: Option<LocalSessionInputLease>,
     next_input_epoch: u64,
     last_client_seq: u64,
-    last_resize_seq: u64,
     next_output_seq: u64,
     output_ring: VecDeque<LocalSessionOutputItem>,
     output_ring_bytes: usize,
@@ -199,14 +198,12 @@ pub(super) struct LocalSessions {
         StoredSshOperationResult<LocalSessionSummary>,
     >,
     live_sessions: Arc<Mutex<BTreeSet<String>>>,
-    native_terminal: NativeTerminalService,
     plugin_metadata_events: broadcast::Sender<PluginSessionMetadataEvent>,
 }
 
 impl LocalSessions {
     pub(super) fn new(
         live_sessions: Arc<Mutex<BTreeSet<String>>>,
-        native_terminal: NativeTerminalService,
         plugin_metadata_events: broadcast::Sender<PluginSessionMetadataEvent>,
     ) -> Self {
         Self {
@@ -217,7 +214,6 @@ impl LocalSessions {
             detach_operations: SshOperationLedger::new(CONTROL_OPERATION_LEDGER_CAPACITY),
             terminate_operations: SshOperationLedger::new(CONTROL_OPERATION_LEDGER_CAPACITY),
             live_sessions,
-            native_terminal,
             plugin_metadata_events,
         }
     }
@@ -284,12 +280,12 @@ impl LocalSessions {
                         summary: attachment,
                         events: Channel::new(|_| Ok(())),
                         last_seen_at_unix_ms: now,
+                        last_resize_seq: 0,
                     },
                 )]),
                 input_lease: Some(lease),
                 next_input_epoch: 1,
                 last_client_seq: 0,
-                last_resize_seq: 0,
                 next_output_seq: 1,
                 output_ring: VecDeque::new(),
                 output_ring_bytes: 0,
@@ -326,9 +322,6 @@ impl LocalSessions {
             pty_id,
             attachment_id,
             view_id,
-            lease_id,
-            focus_epoch: WireSequence::new(focus_epoch),
-            input_epoch: WireSequence::new(1),
             resize_seq: WireSequence::new(1),
             rows: 43,
             cols: 133,
@@ -337,10 +330,11 @@ impl LocalSessions {
     }
 
     #[cfg(test)]
-    pub(super) fn resize_seq_for_test(&self, session_id: &str) -> Option<u64> {
+    pub(super) fn resize_seq_for_test(&self, session_id: &str, attachment_id: &str) -> Option<u64> {
         self.sessions
             .get(session_id)
-            .map(|record| record.last_resize_seq)
+            .and_then(|record| record.attachments.get(attachment_id))
+            .map(|attachment| attachment.last_resize_seq)
     }
 
     pub(super) fn snapshot(&self) -> LocalSessionSnapshot {
@@ -519,12 +513,12 @@ impl LocalSessions {
                         summary: attachment.clone(),
                         events,
                         last_seen_at_unix_ms: now,
+                        last_resize_seq: 0,
                     },
                 )]),
                 input_lease: None,
                 next_input_epoch: 0,
                 last_client_seq: 0,
-                last_resize_seq: 0,
                 next_output_seq: 1,
                 output_ring: VecDeque::new(),
                 output_ring_bytes: 0,
@@ -679,6 +673,7 @@ impl LocalSessions {
                 summary: attachment.clone(),
                 events,
                 last_seen_at_unix_ms: now,
+                last_resize_seq: 0,
             },
         );
         record.summary.attachment_revision = WireSequence::new(next_revision);
@@ -1022,7 +1017,6 @@ impl LocalSessions {
         };
         record.input_lease = Some(lease.clone());
         record.last_client_seq = 0;
-        record.last_resize_seq = 0;
         emit_payload(
             record,
             LocalSessionEventPayload::InputLeaseChanged {
@@ -1150,6 +1144,36 @@ impl LocalSessions {
         Ok(completed)
     }
 
+    pub(super) fn validate_history_fence(
+        &self,
+        fence: &norishell_core_api::NativeTerminalLocalInputFence,
+        target: &LocalTerminalInputFocusTarget,
+        current_focus_epoch: u64,
+        request_id: &RequestId,
+    ) -> ActorResult<()> {
+        self.validate_focus_fence(
+            &fence.session_id,
+            fence.expected_generation,
+            fence.expected_state_revision,
+            &fence.pty_id,
+            &fence.attachment_id,
+            &fence.view_id,
+            fence.focus_epoch,
+            target,
+            current_focus_epoch,
+            request_id,
+        )?;
+        let record = self
+            .sessions
+            .get(fence.session_id.as_str())
+            .expect("validated local focus record");
+        validate_lease(record, &fence.lease_id, fence.input_epoch, request_id, true)?;
+        if record.last_client_seq != fence.client_seq.get() {
+            return Err(local_conflict(request_id.clone()));
+        }
+        Ok(())
+    }
+
     /// Marks an acknowledged write failure or delivery-uncertain timeout as a
     /// terminal generation failure immediately. The PTY owner remains tracked
     /// until cleanup is confirmed, so application exit cannot hide a process
@@ -1182,36 +1206,33 @@ impl LocalSessions {
     pub(super) fn resize(
         &mut self,
         request: LocalSessionResizeRequest,
-        target: &LocalTerminalInputFocusTarget,
-        current_focus_epoch: u64,
     ) -> ActorResult<oneshot::Receiver<bool>> {
         if request.rows == 0 || request.cols == 0 {
             return Err(local_validation(request.meta.request_id));
         }
-        self.validate_focus_fence(
-            &request.session_id,
-            request.expected_generation,
-            request.expected_state_revision,
-            &request.pty_id,
-            &request.attachment_id,
-            &request.view_id,
-            request.focus_epoch,
-            target,
-            current_focus_epoch,
-            &request.meta.request_id,
-        )?;
         let record = self
             .sessions
             .get_mut(request.session_id.as_str())
-            .expect("validated local resize record");
-        validate_lease(
+            .ok_or_else(|| local_not_found(request.meta.request_id.clone()))?;
+        validate_attachment(
             record,
-            &request.lease_id,
-            request.input_epoch,
+            request.expected_generation,
+            &request.attachment_id,
+            &request.view_id,
             &request.meta.request_id,
-            true,
         )?;
-        if request.resize_seq.get() <= record.last_resize_seq {
+        let attachment = record
+            .attachments
+            .get(request.attachment_id.as_str())
+            .expect("validated attachment exists");
+        if record.summary.state != LocalSessionState::Running
+            || record.summary.state_revision != request.expected_state_revision
+            || record.summary.pty_id.as_ref() != Some(&request.pty_id)
+            || attachment.summary.pty_id.as_ref() != Some(&request.pty_id)
+        {
+            return Err(local_conflict(request.meta.request_id));
+        }
+        if request.resize_seq.get() <= attachment.last_resize_seq {
             return Err(local_conflict(request.meta.request_id));
         }
         let (completion, completed) = oneshot::channel();
@@ -1232,6 +1253,7 @@ impl LocalSessions {
         &mut self,
         session_id: &str,
         generation: u64,
+        attachment_id: &str,
         resize_seq: u64,
     ) -> bool {
         let Some(record) = self.sessions.get_mut(session_id) else {
@@ -1239,11 +1261,16 @@ impl LocalSessions {
         };
         if record.summary.generation.get() != generation
             || record.summary.state != LocalSessionState::Running
-            || resize_seq <= record.last_resize_seq
         {
             return false;
         }
-        record.last_resize_seq = resize_seq;
+        let Some(attachment) = record.attachments.get_mut(attachment_id) else {
+            return false;
+        };
+        if resize_seq <= attachment.last_resize_seq {
+            return false;
+        }
+        attachment.last_resize_seq = resize_seq;
         true
     }
 
@@ -1494,29 +1521,6 @@ impl LocalSessions {
     }
 
     pub(super) fn process_output(&mut self, session_id: &str, generation: u64, bytes: Vec<u8>) {
-        let Some((wire_session_id, pty_id, prompt_input_sequence, prompt_input_epoch)) =
-            self.sessions.get(session_id).and_then(|record| {
-                Some((
-                    record.summary.session_id.clone(),
-                    record.summary.pty_id.clone()?,
-                    WireSequence::new(record.last_client_seq),
-                    record.input_lease.as_ref().map(|lease| lease.input_epoch),
-                ))
-            })
-        else {
-            return;
-        };
-        let bytes = self.native_terminal.filter_local_output(
-            &wire_session_id,
-            WireSequence::new(generation),
-            &pty_id,
-            prompt_input_sequence,
-            prompt_input_epoch,
-            bytes,
-        );
-        if bytes.is_empty() {
-            return;
-        }
         let Some(record) = self.sessions.get_mut(session_id) else {
             return;
         };
@@ -1532,7 +1536,7 @@ impl LocalSessions {
             let frame = LocalSessionOutputFrame {
                 session_id: record.summary.session_id.clone(),
                 generation: record.summary.generation,
-                pty_id: pty_id.clone(),
+                pty_id: record.summary.pty_id.clone().expect("running PTY"),
                 output_seq: WireSequence::new(record.next_output_seq),
                 bytes: chunk.to_vec(),
             };
@@ -2428,17 +2432,8 @@ mod tests {
     ) {
         let session_id = norishell_core_api::LocalSessionId::new();
         let live_sessions = Arc::new(Mutex::new(BTreeSet::from([session_id.as_str().to_owned()])));
-        let native_terminal =
-            NativeTerminalService::detached(crate::vault_service::VaultService::start(
-                std::env::temp_dir()
-                    .join(format!("norishell-local-fixture-{}", uuid::Uuid::now_v7())),
-            ));
         let (plugin_metadata_events, _) = broadcast::channel(64);
-        let mut sessions = LocalSessions::new(
-            Arc::clone(&live_sessions),
-            native_terminal,
-            plugin_metadata_events,
-        );
+        let mut sessions = LocalSessions::new(Arc::clone(&live_sessions), plugin_metadata_events);
         let record_metadata_events = sessions.plugin_metadata_events.clone();
         sessions.sessions.insert(
             session_id.as_str().to_owned(),
@@ -2463,7 +2458,6 @@ mod tests {
                 input_lease: None,
                 next_input_epoch: 0,
                 last_client_seq: 0,
-                last_resize_seq: 0,
                 next_output_seq: 1,
                 output_ring: VecDeque::new(),
                 output_ring_bytes: 0,
@@ -2478,6 +2472,50 @@ mod tests {
             },
         );
         (session_id, live_sessions, sessions)
+    }
+
+    #[test]
+    fn local_resize_sequence_is_scoped_to_attachment() {
+        let (process, _commands) = std_mpsc::sync_channel(4);
+        let mut sessions = LocalSessions::new(
+            Arc::new(Mutex::new(BTreeSet::new())),
+            broadcast::channel(64).0,
+        );
+        let (first_request, target) = sessions.insert_resize_test_session(process, 1);
+        let record = sessions
+            .sessions
+            .get_mut(first_request.session_id.as_str())
+            .expect("session");
+        let first = record
+            .attachments
+            .get_mut(first_request.attachment_id.as_str())
+            .expect("first view");
+        first.last_resize_seq = 7;
+        let mut second = first.summary.clone();
+        second.attachment_id = LocalAttachmentId::new();
+        second.view_id = norishell_core_api::LocalViewId::new();
+        record.attachments.insert(
+            second.attachment_id.as_str().to_owned(),
+            LocalAttachmentRecord {
+                summary: second.clone(),
+                events: Channel::new(|_| Ok(())),
+                last_seen_at_unix_ms: unix_time_ms(),
+                last_resize_seq: 0,
+            },
+        );
+        sessions.acquire_focus(&target, WireSequence::new(2));
+        assert_eq!(
+            sessions.resize_seq_for_test(
+                first_request.session_id.as_str(),
+                first_request.attachment_id.as_str()
+            ),
+            Some(7),
+        );
+        let mut request = first_request;
+        request.attachment_id = second.attachment_id;
+        request.view_id = second.view_id;
+        request.resize_seq = WireSequence::new(1);
+        assert!(sessions.resize(request).is_ok());
     }
 
     #[tokio::test]

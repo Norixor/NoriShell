@@ -11,6 +11,7 @@ describe("NvxTerminalPaneOverflowMenu", () => {
       props: {
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
         hasSelection: true,
         showLayoutActions: true,
         showSessionAction: true,
@@ -29,14 +30,14 @@ describe("NvxTerminalPaneOverflowMenu", () => {
     const menu = document.querySelector<HTMLElement>('.terminal-pane-overflow-menu__popover');
     expect(menu).not.toBeNull();
     expect(menu?.parentElement).toBe(document.body);
-    expect(menu?.querySelectorAll('[role="menuitem"]')).toHaveLength(6);
+    expect(menu?.querySelectorAll('[role="menuitem"]')).toHaveLength(7);
 
-    menu?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')[4]?.click();
+    menu?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')[5]?.click();
     await wrapper.vm.$nextTick();
     expect(wrapper.emitted("session")).toHaveLength(1);
     await trigger.trigger("click");
     document.querySelector<HTMLElement>('.terminal-pane-overflow-menu__popover')
-      ?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')[5]?.click();
+      ?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')[6]?.click();
     await wrapper.vm.$nextTick();
     expect(wrapper.emitted("close")).toHaveLength(1);
     expect(document.querySelector('.terminal-pane-overflow-menu__popover')).toBeNull();
@@ -48,6 +49,7 @@ describe("NvxTerminalPaneOverflowMenu", () => {
       props: {
         canSplitHorizontal: true,
         canSplitVertical: true,
+        canSplitWorkspaceRight: true,
         hasSelection: false,
         showLayoutActions: false,
       },

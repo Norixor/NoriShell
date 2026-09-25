@@ -3,6 +3,7 @@ import {
   Columns2,
   Copy,
   Ellipsis,
+  PanelRight,
   Rows2,
   Search,
   X,
@@ -19,6 +20,7 @@ withDefaults(
   defineProps<{
     canSplitHorizontal: boolean;
     canSplitVertical: boolean;
+    canSplitWorkspaceRight: boolean;
     hasSelection: boolean;
     showLayoutActions: boolean;
     showSessionAction?: boolean;
@@ -42,6 +44,7 @@ const emit = defineEmits<{
   search: [];
   copy: [];
   split: [direction: "horizontal" | "vertical"];
+  splitWorkspaceRight: [];
   session: [];
   close: [];
 }>();
@@ -59,6 +62,11 @@ function run(action: "search" | "copy" | "session" | "close") {
 
 function runSplit(direction: "horizontal" | "vertical") {
   emit("split", direction);
+  closeMenu(true);
+}
+
+function runWorkspaceSplit() {
+  emit("splitWorkspaceRight");
   closeMenu(true);
 }
 
@@ -149,6 +157,19 @@ function runSplit(direction: "horizontal" | "vertical") {
               :size="16"
             />
             {{ canSplitVertical ? t("sshTerminal.splitVertical") : t("sshTerminal.splitLimitReached") }}
+          </button>
+          <button
+            class="terminal-pane-overflow-menu__item"
+            type="button"
+            role="menuitem"
+            :disabled="!canSplitWorkspaceRight"
+            @click="runWorkspaceSplit"
+          >
+            <NvxIcon
+              :icon="PanelRight"
+              :size="16"
+            />
+            {{ canSplitWorkspaceRight ? t("sshTerminal.splitWorkspaceRight") : t("sshTerminal.splitLimitReached") }}
           </button>
         </template>
 

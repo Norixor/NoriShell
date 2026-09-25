@@ -671,10 +671,6 @@ fn declarations() -> String {
         SshSessionInputLeaseChange::decl(&config),
         SshSessionEventPayload::decl(&config),
         SshSessionEvent::decl(&config),
-        NativeTerminalShellKind::decl(&config),
-        NativeTerminalCaptureState::decl(&config),
-        NativeTerminalActivity::decl(&config),
-        NativeTerminalCaptureFailureCode::decl(&config),
         NativeTerminalSettings::decl(&config),
         NativeTerminalSettingsGetRequest::decl(&config),
         NativeTerminalSettingsReplaceRequest::decl(&config),
@@ -682,12 +678,8 @@ fn declarations() -> String {
         NativeTerminalSshInputFence::decl(&config),
         NativeTerminalLocalInputFence::decl(&config),
         NativeTerminalInputFence::decl(&config),
-        NativeTerminalEnableRequest::decl(&config),
+        NativeTerminalHistoryRecordRequest::decl(&config),
         NativeTerminalSessionScope::decl(&config),
-        NativeTerminalSessionStatus::decl(&config),
-        NativeTerminalCommandCompletion::decl(&config),
-        NativeTerminalSnapshotRequest::decl(&config),
-        NativeTerminalSnapshot::decl(&config),
         NativeTerminalHistoryScope::decl(&config),
         NativeTerminalHistoryListRequest::decl(&config),
         NativeTerminalHistoryEntry::decl(&config),
@@ -1030,7 +1022,7 @@ fn declarations() -> String {
         .replace(
             "  terminalWorkspaceLayoutGet:",
             &format!(
-                "  nativeTerminalSettingsGet: {COMMAND_NATIVE_TERMINAL_SETTINGS_GET:?},\n  nativeTerminalSettingsReplace: {COMMAND_NATIVE_TERMINAL_SETTINGS_REPLACE:?},\n  nativeTerminalEnable: {COMMAND_NATIVE_TERMINAL_ENABLE:?},\n  nativeTerminalSnapshot: {COMMAND_NATIVE_TERMINAL_SNAPSHOT:?},\n  nativeTerminalHistoryList: {COMMAND_NATIVE_TERMINAL_HISTORY_LIST:?},\n  nativeTerminalHistoryDelete: {COMMAND_NATIVE_TERMINAL_HISTORY_DELETE:?},\n  nativeTerminalHistoryClear: {COMMAND_NATIVE_TERMINAL_HISTORY_CLEAR:?},\n  nativeTerminalHistoryPause: {COMMAND_NATIVE_TERMINAL_HISTORY_PAUSE:?},\n  terminalWorkspaceLayoutGet:"
+                "  nativeTerminalSettingsGet: {COMMAND_NATIVE_TERMINAL_SETTINGS_GET:?},\n  nativeTerminalSettingsReplace: {COMMAND_NATIVE_TERMINAL_SETTINGS_REPLACE:?},\n  nativeTerminalHistoryRecord: {COMMAND_NATIVE_TERMINAL_HISTORY_RECORD:?},\n  nativeTerminalHistoryList: {COMMAND_NATIVE_TERMINAL_HISTORY_LIST:?},\n  nativeTerminalHistoryDelete: {COMMAND_NATIVE_TERMINAL_HISTORY_DELETE:?},\n  nativeTerminalHistoryClear: {COMMAND_NATIVE_TERMINAL_HISTORY_CLEAR:?},\n  nativeTerminalHistoryPause: {COMMAND_NATIVE_TERMINAL_HISTORY_PAUSE:?},\n  terminalWorkspaceLayoutGet:"
             ),
         );
     generated

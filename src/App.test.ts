@@ -6,8 +6,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App.vue";
 import { usePluginsStore } from "./stores/plugins";
-import { useWorkspaceTabsStore } from "./stores/workspaceTabs";
-import type { NativeTerminalNotificationClick } from "./core-api/native-notifications";
 import type { InstalledPluginSummary } from "./core-api/generated/core-api";
 
 enableAutoUnmount(afterEach);
@@ -17,7 +15,6 @@ const hooks = vi.hoisted(() => ({
   flushAndExit: vi.fn(),
   listInstalledPlugins: vi.fn(),
   listPluginNavigation: vi.fn().mockResolvedValue([]),
-  notification: undefined as undefined | ((event: { payload: NativeTerminalNotificationClick }) => void),
   runtimeInvalidated: undefined as undefined | ((event: { payload: { pluginId: string } }) => void),
   runtimeReady: undefined as undefined | ((event: { payload: InstalledPluginSummary }) => void),
   preferencesPending: vi.fn().mockResolvedValue(null),
@@ -27,7 +24,6 @@ const hooks = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, callback: never) => {
-    if (event === "native-terminal-notification-click") hooks.notification = callback;
     if (event === "application-exit-requested") hooks.applicationExit = callback;
     if (event === "plugin-runtime-invalidated") hooks.runtimeInvalidated = callback;
     if (event === "plugin-runtime-ready") hooks.runtimeReady = callback;
@@ -274,19 +270,5 @@ describe("plugin runtime status projection", () => {
     expect(plugins.installed).toEqual([enabledPlugin]);
     expect(plugins.errorCode).toBe("requestFailed");
     expect(plugins.success).toBeNull();
-  });
-});
-
-
-describe("native completion navigation", () => {
-  it("passes the exact clicked scope to the existing terminal controller", async () => {
-    await mountApplication();
-    const focusNativeSession = vi.fn();
-    const create = vi.fn();
-    useWorkspaceTabsStore().registerTerminalController({ focusNativeSession, create, createLocal: vi.fn(() => true), quickConnect: vi.fn(() => true), focusTelnetSession: vi.fn(() => true), focusSshSession: vi.fn(() => true), focusLocalSession: vi.fn(() => true), activate: vi.fn(), close: vi.fn(), closeMany: vi.fn(), deactivate: vi.fn(), toggleQuickCommands: vi.fn() });
-    const scope = { kind: "local" as const, sessionId: "session", generation: "7", ptyId: "pty", paneId: "pane" };
-    hooks.notification?.({ payload: { eventId: "event", scope } });
-    expect(focusNativeSession).toHaveBeenCalledWith(scope);
-    expect(create).not.toHaveBeenCalled();
   });
 });

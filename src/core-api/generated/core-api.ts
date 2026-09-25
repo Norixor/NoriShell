@@ -47,7 +47,11 @@ export type DesktopPromptDecision = { id: string, approved: boolean, username: s
 
 export type DesktopWindowCloseBehavior = "hide" | "quit";
 
-export type DesktopPreferences = { windowCloseBehavior: DesktopWindowCloseBehavior, trayShowStatus: boolean, trayRecentLimit: number, trayShowHostNames: boolean, notificationBackgroundOnly: boolean, notificationFailureOnly: boolean, notifyTransferCompleted: boolean, notifyTransferFailed: boolean, notifyDisconnected: boolean, };
+export type DesktopPreferences = { windowCloseBehavior: DesktopWindowCloseBehavior, trayShowStatus: boolean, trayRecentLimit: number, trayShowHostNames: boolean, notificationBackgroundOnly: boolean,
+/**
+ * Retained for existing SQLite and sync profiles; command notifications are removed.
+ */
+notificationFailureOnly: boolean, notifyTransferCompleted: boolean, notifyTransferFailed: boolean, notifyDisconnected: boolean, };
 
 export type DesktopPreferencesGetRequest = { meta: RequestMeta, };
 
@@ -1532,7 +1536,12 @@ export type SshTransportHeartbeatStatus = { routeStage: SshSessionRouteStage, ne
 
 export type SshShellHeartbeatStatus = { nextDueAtUnixMs: number | null, lastSentAtUnixMs: number | null, skipReason: SshShellHeartbeatSkipReason | null, };
 
-export type SshSessionHeartbeatStatus = { policyRevision: WireSequence | null, mode: SshHeartbeatMode, transports: Array<SshTransportHeartbeatStatus>, shell: SshShellHeartbeatStatus | null, };
+export type SshSessionHeartbeatStatus = { policyRevision: WireSequence | null, mode: SshHeartbeatMode,
+/**
+ * Route-stage RTT samples may contain a single connection-time probe even
+ * when the configured periodic keepalive mode is disabled.
+ */
+transports: Array<SshTransportHeartbeatStatus>, shell: SshShellHeartbeatStatus | null, };
 
 export type SshSessionGetRequest = { meta: RequestMeta, sessionId: SshSessionId, };
 
@@ -1584,7 +1593,7 @@ export type SshSessionInputLeaseRenewRequest = { meta: RequestMeta, sessionId: S
 
 export type SshSessionInputRequest = { meta: RequestMeta, sessionId: SshSessionId, expectedGeneration: WireSequence, channelId: SshChannelId, attachmentId: SshAttachmentId, viewId: SshViewId, focusEpoch: WireSequence, leaseId: SshInputLeaseId, inputEpoch: WireSequence, clientSeq: WireSequence, bytes: Array<number>, };
 
-export type SshSessionResizeRequest = { meta: RequestMeta, sessionId: SshSessionId, expectedGeneration: WireSequence, channelId: SshChannelId, attachmentId: SshAttachmentId, viewId: SshViewId, focusEpoch: WireSequence, leaseId: SshInputLeaseId, inputEpoch: WireSequence, resizeSeq: WireSequence, rows: number, cols: number, };
+export type SshSessionResizeRequest = { meta: RequestMeta, sessionId: SshSessionId, expectedGeneration: WireSequence, channelId: SshChannelId, attachmentId: SshAttachmentId, viewId: SshViewId, resizeSeq: WireSequence, rows: number, cols: number, };
 
 export type SshSessionDisconnectRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, sessionId: SshSessionId, expectedGeneration: WireSequence, expectedStateRevision: WireSequence, };
 
@@ -1610,15 +1619,15 @@ export type SshSessionEventPayload = { "kind": "stateChanged", previousState: Ss
 
 export type SshSessionEvent = { schemaVersion: number, sessionId: SshSessionId, generation: WireSequence, stateRevision: WireSequence, eventSeq: WireSequence, occurredAtUnixMs: number, payload: SshSessionEventPayload, };
 
-export type NativeTerminalShellKind = "bash" | "zsh" | "fish" | "powerShell";
-
-export type NativeTerminalCaptureState = "disabled" | "pending" | "ready" | "unsupported" | "failed";
-
-export type NativeTerminalActivity = "prompt" | "executing";
-
-export type NativeTerminalCaptureFailureCode = "promptNotConfirmed" | "shellUnsupported" | "writerRejected" | "enableTimedOut" | "protocolViolation";
-
-export type NativeTerminalSettings = { historyEnabled: boolean, persistEncrypted: boolean, historyMaxEntries: number, historyRetentionDays: number, historyPaused: boolean, notificationsEnabled: boolean, notificationThresholdSeconds: number, };
+export type NativeTerminalSettings = { historyEnabled: boolean, persistEncrypted: boolean, historyMaxEntries: number, historyRetentionDays: number, historyPaused: boolean,
+/**
+ * Retained for existing preference export and sync data; completion notifications are removed.
+ */
+notificationsEnabled: boolean,
+/**
+ * Retained for existing preference export and sync data; completion notifications are removed.
+ */
+notificationThresholdSeconds: number, };
 
 export type NativeTerminalSettingsGetRequest = { meta: RequestMeta, };
 
@@ -1644,49 +1653,9 @@ export type NativeTerminalLocalInputFence = { sessionId: LocalSessionId, expecte
 
 export type NativeTerminalInputFence = { "kind": "ssh", "payload": NativeTerminalSshInputFence } | { "kind": "local", "payload": NativeTerminalLocalInputFence };
 
-export type NativeTerminalEnableRequest = { meta: RequestMeta, inputFence: NativeTerminalInputFence, shellKind: NativeTerminalShellKind,
-/**
- * Shell hooks can only be safely installed after the user explicitly
- * confirms that the current terminal is at an empty interactive prompt.
- */
-confirmedEmptyPrompt: boolean, };
+export type NativeTerminalHistoryRecordRequest = { meta: RequestMeta, inputFence: NativeTerminalInputFence, command: string, };
 
 export type NativeTerminalSessionScope = { "kind": "ssh", sessionId: SshSessionId, generation: WireSequence, channelId: SshChannelId, paneId: SshViewId, } | { "kind": "local", sessionId: LocalSessionId, generation: WireSequence, ptyId: LocalPtyId, paneId: LocalViewId, };
-
-export type NativeTerminalSessionStatus = { session: NativeTerminalSessionScope, shellKind: NativeTerminalShellKind, captureState: NativeTerminalCaptureState, failureCode: NativeTerminalCaptureFailureCode | null, activity: NativeTerminalActivity,
-/**
- * True when the Core-owned script installed for this session sends
- * command text in its private OSC start frame. This mode is snapshotted
- * at enable time so notification-only sessions never emit command text.
- */
-capturesCommand: boolean, historyPaused: boolean, promptObserved: boolean,
-/**
- * Advances for every valid shell prompt hook, including a prompt reached
- * after an empty line or cancelled edit. It is independent of completion
- * delivery so the renderer can safely reset append-only suggestions.
- */
-promptSequence: WireSequence,
-/**
- * The session's writer sequence at the exact prompt hook. A delayed
- * snapshot must not be mistaken for an empty current input line.
- */
-promptInputSequence: WireSequence,
-/**
- * The focused lease input epoch at that prompt, if the exact pane still
- * held a lease. The renderer compares it before offering an auto-append.
- */
-promptInputEpoch: WireSequence | null, completionCursor: WireSequence, };
-
-export type NativeTerminalCommandCompletion = { cursor: WireSequence, eventId: NativeTerminalEventId, session: NativeTerminalSessionScope, elapsedMillis: number, exitCode: number | null, completedAtUnixMs: number, };
-
-export type NativeTerminalSnapshotRequest = { meta: RequestMeta, afterCompletionCursor: WireSequence | null, };
-
-export type NativeTerminalSnapshot = { schemaVersion: number, snapshotRevision: WireSequence, historyPaused: boolean, historyPersistenceFailed: boolean, completionCursor: WireSequence, sessions: Array<NativeTerminalSessionStatus>,
-/**
- * Only completions strictly after `afterCompletionCursor` are included.
- * The command text never appears in this projection.
- */
-completions: Array<NativeTerminalCommandCompletion>, };
 
 export type NativeTerminalHistoryScope = { "kind": "host", hostId: HostId, } | { "kind": "local" };
 
@@ -1744,7 +1713,7 @@ export type LocalSessionInputLeaseRenewRequest = { meta: RequestMeta, sessionId:
 
 export type LocalSessionInputRequest = { meta: RequestMeta, sessionId: LocalSessionId, expectedGeneration: WireSequence, expectedStateRevision: WireSequence, ptyId: LocalPtyId, attachmentId: LocalAttachmentId, viewId: LocalViewId, leaseId: LocalInputLeaseId, focusEpoch: WireSequence, inputEpoch: WireSequence, clientSeq: WireSequence, bytes: Array<number>, };
 
-export type LocalSessionResizeRequest = { meta: RequestMeta, sessionId: LocalSessionId, expectedGeneration: WireSequence, expectedStateRevision: WireSequence, ptyId: LocalPtyId, attachmentId: LocalAttachmentId, viewId: LocalViewId, leaseId: LocalInputLeaseId, focusEpoch: WireSequence, inputEpoch: WireSequence, resizeSeq: WireSequence, rows: number, cols: number, };
+export type LocalSessionResizeRequest = { meta: RequestMeta, sessionId: LocalSessionId, expectedGeneration: WireSequence, expectedStateRevision: WireSequence, ptyId: LocalPtyId, attachmentId: LocalAttachmentId, viewId: LocalViewId, resizeSeq: WireSequence, rows: number, cols: number, };
 
 export type LocalSessionTerminateRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, sessionId: LocalSessionId, expectedGeneration: WireSequence, expectedStateRevision: WireSequence, };
 
@@ -2256,8 +2225,7 @@ export const coreApiCommands = {
   sftpRemoteCleanupRetain: "sftp_remote_cleanup_retain",
   nativeTerminalSettingsGet: "native_terminal_settings_get",
   nativeTerminalSettingsReplace: "native_terminal_settings_replace",
-  nativeTerminalEnable: "native_terminal_enable",
-  nativeTerminalSnapshot: "native_terminal_snapshot",
+  nativeTerminalHistoryRecord: "native_terminal_history_record",
   nativeTerminalHistoryList: "native_terminal_history_list",
   nativeTerminalHistoryDelete: "native_terminal_history_delete",
   nativeTerminalHistoryClear: "native_terminal_history_clear",

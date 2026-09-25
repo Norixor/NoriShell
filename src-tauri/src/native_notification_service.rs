@@ -1,4 +1,4 @@
-//! Background orchestration for long-running task notifications; reads completion metadata, never commands or terminal output.
+//! Background orchestration for resource notifications.
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
@@ -6,11 +6,9 @@ use std::{
 };
 
 use norishell_core_api::{
-    DesktopPreferences, DesktopSessionState, ForwardSessionState,
-    NATIVE_TERMINAL_EVENT_SCHEMA_VERSION, NativeTerminalCommandCompletion,
-    NativeTerminalSessionScope, NativeTerminalSettings, NativeTerminalSnapshotRequest, RequestId,
-    RequestMeta, SshSessionCloseReason, SshSessionFailureCode, SshSessionFailureStage,
-    SshSessionState, WireSequence,
+    DesktopPreferences, DesktopSessionState, ForwardSessionState, RequestId, RequestMeta,
+    SshSessionCloseReason, SshSessionFailureCode, SshSessionFailureStage, SshSessionState,
+    WireSequence,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -22,13 +20,11 @@ use crate::{
     native_notifications::{
         DispatchResult, NativeNotifications, NotificationError, NotificationPermission,
     },
-    native_terminal::NativeTerminalService,
     sftp_session_service::{
         NotificationTransferKind, NotificationTransferState, NotificationTransferSummary,
     },
 };
 
-const CLICK_EVENT: &str = "native-terminal-notification-click";
 const RESOURCE_CLICK_EVENT: &str = "native-resource-notification-click";
 const CLICK_LIMIT: usize = 128;
 const SEEN_LIMIT: usize = 256;
@@ -108,7 +104,6 @@ pub struct NotificationTestRequest {
 pub struct NotificationContextRequest {
     pub meta: RequestMeta,
     pub locale: NotificationLocale,
-    pub visible_scope: Option<NativeTerminalSessionScope>,
 }
 
 #[derive(Serialize)]
@@ -116,13 +111,6 @@ pub struct NotificationContextRequest {
 pub struct NotificationPermissionSnapshot {
     pub permission: NotificationPermission,
     pub last_delivery: NotificationDeliveryState,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeTerminalNotificationClick {
-    pub event_id: String,
-    pub scope: NativeTerminalSessionScope,
 }
 
 /// An opaque resource fence consumed by the desktop renderer after a native
@@ -169,14 +157,11 @@ pub enum NativeResourceNotificationClick {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NotificationClick {
-    Terminal(NativeTerminalNotificationClick),
     Resource(NativeResourceNotificationClick),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NotificationKind {
-    CommandFinished,
-    CommandFailed,
     TransferCompleted,
     TransferFailed,
     SshDisconnected,
@@ -188,8 +173,6 @@ enum NotificationKind {
 impl NotificationKind {
     fn key(self) -> &'static str {
         match self {
-            Self::CommandFinished => "commandFinished",
-            Self::CommandFailed => "commandFailed",
             Self::TransferCompleted => "transferCompleted",
             Self::TransferFailed => "transferFailed",
             Self::SshDisconnected => "sshDisconnected",
@@ -201,7 +184,6 @@ impl NotificationKind {
 
     fn preference_enabled(self, preferences: &DesktopPreferences) -> bool {
         match self {
-            Self::CommandFinished | Self::CommandFailed => true,
             Self::TransferCompleted => preferences.notify_transfer_completed,
             Self::TransferFailed => preferences.notify_transfer_failed,
             Self::SshDisconnected
@@ -725,7 +707,6 @@ fn resource_event_key(
 
 struct Inner {
     app: AppHandle,
-    terminal: NativeTerminalService,
     adapter: NativeNotifications,
     state: Arc<Mutex<NotificationState>>,
     explicit_gate: tokio::sync::Mutex<()>,
@@ -738,7 +719,7 @@ pub struct NativeNotificationService(Arc<Inner>);
 
 impl NativeNotificationService {
     /// Call only on the setup main thread; starting the service neither requests permission nor sends a test notification.
-    pub fn start(app: AppHandle, terminal: NativeTerminalService) -> Self {
+    pub fn start(app: AppHandle) -> Self {
         let state = Arc::new(Mutex::new(NotificationState::default()));
         let click_state = Arc::downgrade(&state);
         let click_app = app.clone();
@@ -754,10 +735,8 @@ impl NativeNotificationService {
         });
         let (stop_tx, mut stop_rx) = watch::channel(false);
         // Start an independent cursor at the current facts; service startup or reconstruction must not resend old events.
-        let mut cursor = completion_snapshot(&terminal, None).completion_cursor;
         let inner = Arc::new(Inner {
             app,
-            terminal,
             adapter,
             state,
             explicit_gate: tokio::sync::Mutex::new(()),
@@ -781,7 +760,7 @@ impl NativeNotificationService {
                 tokio::select! {
                     biased;
                     _ = stop_rx.changed() => break,
-                    _ = inner.poll(&mut cursor, &mut resources) => {}
+                    _ = inner.poll(&mut resources) => {}
                 }
             }
         });
@@ -829,7 +808,7 @@ impl NativeNotificationService {
         Ok(state.pause_status(Instant::now()))
     }
 
-    /// Pausing never queues pending events: resource and completion cursors
+    /// Pausing never queues pending events: resource baselines
     /// continue to advance, and the final platform-dispatch guard checks this
     /// deadline again immediately before delivery.
     pub(crate) fn pause_for(
@@ -999,102 +978,8 @@ impl NativeNotificationService {
 }
 
 impl Inner {
-    async fn poll(&self, cursor: &mut WireSequence, resources: &mut ResourceBaselines) {
-        self.poll_terminal(cursor).await;
+    async fn poll(&self, resources: &mut ResourceBaselines) {
         self.poll_resources(resources).await;
-    }
-
-    async fn poll_terminal(&self, cursor: &mut WireSequence) {
-        let snapshot = completion_snapshot(&self.terminal, Some(*cursor));
-        *cursor = snapshot.completion_cursor;
-        if snapshot.schema_version != NATIVE_TERMINAL_EVENT_SCHEMA_VERSION {
-            return;
-        }
-        for completion in snapshot.completions {
-            let kind = if completion.exit_code.is_some_and(|code| code != 0) {
-                NotificationKind::CommandFailed
-            } else {
-                NotificationKind::CommandFinished
-            };
-            let event_key = resource_event_key(
-                kind,
-                completion.event_id.as_str(),
-                Some(scope_generation(&completion.session)),
-                completion.cursor,
-            );
-            {
-                let Ok(mut state) = self.state.lock() else {
-                    return;
-                };
-                if state.stopped {
-                    return;
-                }
-                // Completion facts advance regardless of the current settings,
-                // rate limit, or pause. Re-enabling later never backfills them.
-                if !state.observe(&event_key) {
-                    continue;
-                }
-            }
-            let Some(preferences) = desktop_preferences(&self.app) else {
-                continue;
-            };
-            let settings = self.terminal.settings_snapshot().settings;
-            let focused = read_application_focus(&self.app).await;
-            let (id, locale) = {
-                let Ok(mut state) = self.state.lock() else {
-                    return;
-                };
-                if state.stopped {
-                    return;
-                }
-                if state.is_paused(Instant::now()) {
-                    state.last_delivery = NotificationDeliveryState::Suppressed;
-                    continue;
-                }
-                if !command_eligible(&completion, &settings, &preferences, focused) {
-                    continue;
-                }
-                let id = notification_event_id();
-                let target = NotificationClick::Terminal(NativeTerminalNotificationClick {
-                    event_id: completion.event_id.to_string(),
-                    scope: completion.session.clone(),
-                });
-                if state
-                    .reserve(id.clone(), Some(target), Instant::now())
-                    .is_err()
-                {
-                    continue;
-                }
-                (id, state.locale)
-            };
-            let (title, body) = notification_text(locale, kind);
-            let terminal = self.terminal.clone();
-            let app = self.app.clone();
-            let state = self.state.clone();
-            let guarded_completion = completion.clone();
-            let result =
-                self.adapter
-                    .send_if(&id, title, body, move || {
-                        if !state.lock().is_ok_and(|mut state| {
-                            !state.stopped && !state.is_paused(Instant::now())
-                        }) {
-                            return false;
-                        }
-                        let settings = terminal.settings_snapshot().settings;
-                        desktop_preferences(&app).is_some_and(|preferences| {
-                            command_eligible(
-                                &guarded_completion,
-                                &settings,
-                                &preferences,
-                                application_is_focused(&app),
-                            )
-                        })
-                    })
-                    .await;
-            if let Some(click) = self.finish_dispatch(&id, result) {
-                emit_click(&self.app, &self.state, click);
-            }
-        }
     }
 
     async fn poll_resources(&self, baselines: &mut ResourceBaselines) {
@@ -1230,32 +1115,6 @@ impl Inner {
     }
 }
 
-fn completion_snapshot(
-    terminal: &NativeTerminalService,
-    cursor: Option<WireSequence>,
-) -> norishell_core_api::NativeTerminalSnapshot {
-    terminal.snapshot(NativeTerminalSnapshotRequest {
-        meta: RequestMeta {
-            request_id: RequestId::new(),
-        },
-        after_completion_cursor: cursor,
-    })
-}
-
-fn command_eligible(
-    completion: &NativeTerminalCommandCompletion,
-    settings: &NativeTerminalSettings,
-    preferences: &DesktopPreferences,
-    focused: bool,
-) -> bool {
-    settings.notifications_enabled
-        && completion.elapsed_millis
-            >= u64::from(settings.notification_threshold_seconds).saturating_mul(1_000)
-        && (!preferences.notification_failure_only
-            || completion.exit_code.is_some_and(|code| code != 0))
-        && background_eligible(preferences, focused)
-}
-
 fn resource_eligible(
     kind: NotificationKind,
     preferences: &DesktopPreferences,
@@ -1306,9 +1165,6 @@ fn emit_click(app: &AppHandle, state: &Arc<Mutex<NotificationState>>, click: Not
         if let Some(window) = app_for_callback.get_webview_window("main") {
             let _ = crate::window_first_show::show_if_revealed(&window);
             match click {
-                NotificationClick::Terminal(click) => {
-                    let _ = window.emit(CLICK_EVENT, click);
-                }
                 NotificationClick::Resource(click) => {
                     let _ = window.emit(RESOURCE_CLICK_EVENT, click);
                 }
@@ -1322,22 +1178,6 @@ fn notification_text(
     kind: NotificationKind,
 ) -> (&'static str, &'static str) {
     match (locale, kind) {
-        (NotificationLocale::ZhCn, NotificationKind::CommandFinished) => (
-            "NoriShell · 任务已结束",
-            "一个长时间运行的终端任务已结束。点击返回对应终端查看结果。",
-        ),
-        (NotificationLocale::En, NotificationKind::CommandFinished) => (
-            "NoriShell · Task finished",
-            "A long-running terminal task has finished. Click to return to its terminal and inspect the result.",
-        ),
-        (NotificationLocale::ZhCn, NotificationKind::CommandFailed) => (
-            "NoriShell · 任务失败",
-            "一个长时间运行的终端任务失败。点击返回对应终端查看结果。",
-        ),
-        (NotificationLocale::En, NotificationKind::CommandFailed) => (
-            "NoriShell · Task failed",
-            "A long-running terminal task failed. Click to return to its terminal and inspect the result.",
-        ),
         (NotificationLocale::ZhCn, NotificationKind::TransferCompleted) => (
             "NoriShell · 文件传输已完成",
             "一项文件传输已完成。点击返回对应资源查看状态。",
@@ -1405,13 +1245,6 @@ fn notification_test_text(locale: NotificationLocale) -> (&'static str, &'static
 fn desktop_preferences(app: &AppHandle) -> Option<DesktopPreferences> {
     app.try_state::<DesktopPreferencesService>()
         .and_then(|service| service.preferences().ok())
-}
-
-fn scope_generation(scope: &NativeTerminalSessionScope) -> WireSequence {
-    match scope {
-        NativeTerminalSessionScope::Ssh { generation, .. }
-        | NativeTerminalSessionScope::Local { generation, .. } => *generation,
-    }
 }
 
 fn failure_code(error: NotificationError) -> NotificationFailureCode {
@@ -1519,88 +1352,13 @@ pub fn native_notification_context_set<R: tauri::Runtime>(
     // The renderer still sends its visible scope for protocol compatibility,
     // but foreground suppression is intentionally based on every application
     // window, including protected windows, rather than on one terminal pane.
-    let _ = request.visible_scope;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use norishell_core_api::{
-        LocalPtyId, LocalSessionId, LocalViewId, NativeTerminalEventId, TransferId,
-    };
-
-    fn scope() -> NativeTerminalSessionScope {
-        NativeTerminalSessionScope::Local {
-            session_id: LocalSessionId::new(),
-            generation: WireSequence::new(1),
-            pty_id: LocalPtyId::new(),
-            pane_id: LocalViewId::new(),
-        }
-    }
-
-    fn completion(
-        scope: NativeTerminalSessionScope,
-        elapsed_millis: u64,
-    ) -> NativeTerminalCommandCompletion {
-        NativeTerminalCommandCompletion {
-            cursor: WireSequence::new(1),
-            event_id: NativeTerminalEventId::new(),
-            session: scope,
-            elapsed_millis,
-            exit_code: Some(0),
-            completed_at_unix_ms: 1,
-        }
-    }
-
-    #[test]
-    fn command_eligibility_uses_whole_application_focus_and_known_failures_only() {
-        let mut settings = NativeTerminalSettings {
-            notifications_enabled: true,
-            ..Default::default()
-        };
-        let scope = scope();
-        let elapsed = u64::from(settings.notification_threshold_seconds) * 1_000;
-        let mut event = completion(scope.clone(), elapsed);
-        let mut preferences = DesktopPreferences::default();
-        assert!(command_eligible(&event, &settings, &preferences, false));
-        assert!(!command_eligible(&event, &settings, &preferences, true));
-        preferences.notification_background_only = false;
-        assert!(command_eligible(&event, &settings, &preferences, true));
-        preferences.notification_failure_only = true;
-        event.exit_code = None;
-        assert!(!command_eligible(&event, &settings, &preferences, false));
-        event.exit_code = Some(0);
-        assert!(!command_eligible(&event, &settings, &preferences, false));
-        event.exit_code = Some(-1);
-        assert!(command_eligible(&event, &settings, &preferences, false));
-        event.elapsed_millis = elapsed.saturating_sub(1);
-        assert!(!command_eligible(&event, &settings, &preferences, false));
-        settings.notifications_enabled = false;
-        assert!(!command_eligible(&event, &settings, &preferences, false));
-    }
-
-    #[test]
-    fn clicks_require_successful_dispatch_and_are_consumed_once() {
-        let mut state = NotificationState::default();
-        let target = scope();
-        let target = NativeTerminalNotificationClick {
-            event_id: "completion".to_owned(),
-            scope: target,
-        };
-        state
-            .reserve(
-                "event".into(),
-                Some(NotificationClick::Terminal(target.clone())),
-                Instant::now(),
-            )
-            .unwrap();
-        assert!(state.clicked("foreign").is_none());
-        assert!(state.clicked("event").is_none());
-        let click = state.dispatched("event").unwrap();
-        assert_eq!(click, NotificationClick::Terminal(target));
-        assert!(state.clicked("event").is_none());
-    }
+    use norishell_core_api::TransferId;
 
     #[test]
     fn pause_uses_a_monotonic_deadline_and_suppression_is_not_service_stopped() {
@@ -1782,7 +1540,7 @@ mod tests {
         assert!(serde_json::from_value::<NotificationContextRequest>(serde_json::json!({ "meta": meta, "locale": "en", "visibleScope": null, "focused": true })).is_err());
         for locale in [NotificationLocale::En, NotificationLocale::ZhCn] {
             assert_ne!(
-                notification_text(locale, NotificationKind::CommandFinished),
+                notification_text(locale, NotificationKind::TransferCompleted),
                 notification_test_text(locale)
             );
         }

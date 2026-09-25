@@ -1,3 +1,6 @@
-import type { InjectionKey } from "vue";
+import type { InjectionKey, Ref } from "vue";
 
-export const terminalPluginToolsKey: InjectionKey<(contextKey: string) => void> = Symbol("terminalPluginTools");
+export const terminalPluginToolsKey: InjectionKey<{
+  open: (contextKey: string) => void;
+  available: Ref<boolean>;
+}> = Symbol("terminalPluginTools");

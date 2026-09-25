@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { KeyRound, RotateCcw, Server, ShieldCheck, Unplug } from "lucide-vue-next";
+import { KeyRound, RotateCcw, Server, Unplug } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -47,15 +47,18 @@ import NvxHostMarker from "../hosts/NvxHostMarker.vue";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
 import { useTipsStore } from "../../stores/tips";
-import { NvxButton, NvxDialog, NvxIcon, NvxIconButton, NvxInlineNotice, NvxStatusLabel } from "../ui";
+import { NvxButton, NvxDialog, NvxIcon, NvxInlineNotice, NvxStatusLabel } from "../ui";
+import { usePopoverMenu } from "../ui/usePopoverMenu";
 import NvxTerminalPaneControls from "./NvxTerminalPaneControls.vue";
 import NvxTerminalPaneOverflowMenu from "./NvxTerminalPaneOverflowMenu.vue";
 import NvxTerminalTools from "./NvxTerminalTools.vue";
 import NvxTerminalView from "./NvxTerminalView.vue";
 import { createFencedTerminalResize } from "./fencedTerminalResize";
 import NvxNativeTerminalTools from "./NvxNativeTerminalTools.vue";
-import { enableNativeTerminal } from "../../core-api/native-terminal";
-import type { NativeTerminalSessionScope, NativeTerminalSessionStatus, NativeTerminalShellKind } from "../../core-api/generated/core-api";
+import { recordNativeTerminalHistory } from "../../core-api/native-terminal";
+import { useNativeTerminalStore } from "../../stores/nativeTerminal";
+import { posixDirectoryCommand } from "../../views/sftpTerminalLaunch";
+import type { NativeTerminalSessionScope } from "../../core-api/generated/core-api";
 import type { ShortcutCommandId } from "../../shortcuts";
 
 interface TerminalViewExpose {
@@ -88,12 +91,16 @@ const props = withDefaults(defineProps<{
   deferredStart?: boolean;
   deferredRecovery?: "reconnect" | "credential" | "vaultUnlock";
   active: boolean;
+  visible: boolean;
+  initialDirectory?: string | null;
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
+  canSplitWorkspaceRight: boolean;
 }>(), {
   deferredStart: false,
   deferredRecovery: "reconnect",
   pluginAuthorizationToken: null,
+  initialDirectory: null,
 });
 
 const emit = defineEmits<{
@@ -103,7 +110,9 @@ const emit = defineEmits<{
   requestCredential: [paneId: string, target: SshSessionTarget];
   requestAuthenticationRecovery: [paneId: string, target: SshSessionTarget];
   requestVaultUnlock: [paneId: string, target: SshSessionTarget];
+  initialDirectoryHandled: [directory: string];
   split: [direction: "horizontal" | "vertical"];
+  splitWorkspaceRight: [];
   close: [];
 }>();
 
@@ -111,9 +120,10 @@ const { t, te } = useI18n();
 const hostMarkers = useHostMarkersStore();
 const terminalPreferences = useTerminalPreferencesStore();
 const tips = useTipsStore();
+const nativeHistory = useNativeTerminalStore();
 const nativeTools = ref<InstanceType<typeof NvxNativeTerminalTools> | null>(null);
 const inputDraft = ref<string | null>(null);
-const shellPromptKey = ref<string | null>(null);
+const ghostSuggestion = ref<{ draft: string; suffix: string } | null>(null);
 const pluginAuthorizationToken = ref(props.pluginAuthorizationToken);
 // paneId is already a UUIDv7 and is the stable renderer view identity. Keeping
 // it across component HMR lets a fresh attach attempt atomically replace only
@@ -143,6 +153,15 @@ const heartbeat = ref<SshSessionHeartbeatStatus>({
   transports: [],
   shell: null,
 });
+const {
+  rootRef: latencyRootRef,
+  triggerRef: latencyTriggerRef,
+  viewportPanelRef: latencyPanelRef,
+  viewportPanelStyle: latencyPanelStyle,
+  open: latencyOpen,
+  closeMenu: closeLatency,
+  toggleMenu: toggleLatency,
+} = usePopoverMenu();
 const failure = ref<SshSessionFailureReason | null>(null);
 const opening = ref(false);
 const openFailed = ref(false);
@@ -160,9 +179,7 @@ const automationConfirmationOpen = computed({
     if (!open && !automationConfirmationBusy.value) pendingAutomationConfirmation.value = null;
   },
 });
-const algorithmDetailsOpen = ref(false);
 let inputSequence = 0n;
-let promptBoundaryInputSequence: bigint | null = null;
 let leaseTimer: number | null = null;
 let attachmentHeartbeatTimer: number | null = null;
 let unregisterInputTarget: (() => void) | null = null;
@@ -180,8 +197,7 @@ let foregroundReconcilePromise: Promise<void> | null = null;
 const fencedResize = createFencedTerminalResize((dimensions) => {
   const current = session.value;
   const currentAttachment = attachment.value;
-  const currentLease = lease.value;
-  if (!current || !currentAttachment?.channelId || !currentLease || current.state !== "running") return null;
+  if (!props.visible || !current || !currentAttachment?.channelId || current.state !== "running") return null;
   const channelId = currentAttachment.channelId;
   return {
     key: [
@@ -197,9 +213,6 @@ const fencedResize = createFencedTerminalResize((dimensions) => {
       channelId,
       attachmentId: currentAttachment.attachmentId,
       viewId,
-      focusEpoch: currentLease.focusEpoch,
-      leaseId: currentLease.leaseId,
-      inputEpoch: currentLease.inputEpoch,
       resizeSeq,
       rows: dimensions.rows,
       cols: dimensions.cols,
@@ -208,6 +221,12 @@ const fencedResize = createFencedTerminalResize((dimensions) => {
 });
 const resize = fencedResize.resize;
 const flushPendingResize = fencedResize.flush;
+
+function reassertCurrentResize() {
+  if (!props.visible) return;
+  const size = terminalView.value?.dimensions();
+  if (size) fencedResize.reassert(size.rows, size.cols);
+}
 
 const state = computed<SshSessionState>(
   () => session.value?.state
@@ -226,39 +245,15 @@ const ownsLease = computed(() => {
     && currentLease.viewId === viewId
     && currentLease.expiresAtUnixMs > Date.now();
 });
-const writable = computed(() => props.active
+const inputReady = computed(() => props.active
   && state.value === "running"
   && ownsLease.value
   && isTerminalInputTargetFocused(props.paneId, lease.value?.focusEpoch ?? null));
+const writable = computed(() => inputReady.value && !props.initialDirectory);
 const nativeScope = computed<NativeTerminalSessionScope | null>(() => session.value && attachment.value?.channelId ? {
   kind: "ssh", sessionId: session.value.sessionId, generation: session.value.generation,
   channelId: attachment.value.channelId, paneId: viewId,
 } : null);
-
-function acceptNativePrompt(status: NativeTerminalSessionStatus | null) {
-  shellPromptKey.value = status && status.promptInputSequence === inputSequence.toString()
-    && promptBoundaryInputSequence === inputSequence
-    && status.promptInputEpoch === lease.value?.inputEpoch
-    ? `${status.session.sessionId}:${status.session.generation}:${status.promptSequence}` : null;
-}
-
-async function enableNativeShell(shellKind: NativeTerminalShellKind) {
-  const current = session.value;
-  const attached = attachment.value;
-  const inputLease = lease.value;
-  if (!current || !attached?.channelId || !inputLease || !writable.value) throw new Error("Terminal unavailable");
-  inputSequence++;
-  promptBoundaryInputSequence = inputSequence;
-  return enableNativeTerminal({
-    shellKind, confirmedEmptyPrompt: true,
-    inputFence: { kind: "ssh", payload: {
-      sessionId: current.sessionId, expectedGeneration: current.generation,
-      channelId: attached.channelId, attachmentId: attached.attachmentId, viewId,
-      focusEpoch: inputLease.focusEpoch, leaseId: inputLease.leaseId,
-      inputEpoch: inputLease.inputEpoch, clientSeq: inputSequence.toString(),
-    } },
-  });
-}
 
 function runShortcut(commandId: ShortcutCommandId) {
   if (!props.active) return;
@@ -349,6 +344,55 @@ const heartbeatTitle = computed(() => {
   return lastSent
     ? t("sshSession.heartbeat.lastSent", { time: new Date(lastSent).toLocaleTimeString() })
     : t("sshSession.heartbeat.awaitingSend");
+});
+function transportLatency(status: SshSessionHeartbeatStatus["transports"][number] | undefined) {
+  if (!status || status.consecutiveFailures > 0) return null;
+  const sent = status.lastSentAtUnixMs;
+  const ack = status.lastAckAtUnixMs;
+  return sent !== null && ack !== null && ack >= sent ? ack - sent : null;
+}
+const latencyRows = computed(() => {
+  const hops = new Map<number, { endpoint: string; latency: number | null }>();
+  for (const result of session.value?.negotiatedAlgorithms ?? []) {
+    if (result.routeStage.kind !== "jumpHost") continue;
+    const { hopIndex, endpoint } = result.routeStage;
+    hops.set(hopIndex, { endpoint: `${endpoint.address}:${endpoint.port}`, latency: null });
+  }
+  for (const status of heartbeat.value.transports) {
+    if (status.routeStage.kind !== "jumpHost") continue;
+    const { hopIndex, endpoint } = status.routeStage;
+    hops.set(hopIndex, { endpoint: `${endpoint.address}:${endpoint.port}`, latency: transportLatency(status) });
+  }
+  const rows = [...hops.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([hopIndex, value]) => ({ key: `jump-${hopIndex}`, label: t("sshSession.heartbeat.jumpHost", { hop: hopIndex + 1 }), ...value }));
+  rows.push({
+    key: "target",
+    label: t("sshSession.heartbeat.target"),
+    endpoint: session.value?.endpoint ? `${session.value.endpoint.address}:${session.value.endpoint.port}` : "",
+    latency: transportLatency(heartbeat.value.transports.find((status) => status.routeStage.kind === "target")),
+  });
+  return rows;
+});
+const latencyMs = computed(() => latencyRows.value.at(-1)?.latency ?? null);
+function latencyText(value: number | null) {
+  return value === null ? "—" : `${value} ms`;
+}
+function closeLatencyOnBlur(event: FocusEvent) {
+  if (!(event.relatedTarget instanceof Node) || !(event.currentTarget instanceof Node)
+    || !event.currentTarget.contains(event.relatedTarget)) closeLatency();
+}
+watch(() => [state.value, session.value?.generation], () => closeLatency());
+const stateDisplayLabel = computed(() => {
+  if (state.value !== "running") return stateLabel.value;
+  return latencyMs.value === null ? "— ms" : `${latencyMs.value}ms`;
+});
+const stateTitle = computed(() => {
+  if (state.value !== "running") return stateLabel.value;
+  const details = [stateLabel.value];
+  if (heartbeatLabel.value) details.push(heartbeatLabel.value, heartbeatTitle.value);
+  if (latencyMs.value === null) details.push(t("sshSession.heartbeat.latencyUnavailable"));
+  return details.join(" · ");
 });
 
 function openSearch() {
@@ -856,7 +900,7 @@ function applyFocusLease(inputLease: TerminalInputLease | null) {
     : null;
   if (lease.value) startLeaseHeartbeat();
   else stopLeaseHeartbeat();
-  if (lease.value) void flushPendingResize();
+  if (props.visible) void flushPendingResize();
 }
 
 function startLeaseHeartbeat() {
@@ -947,12 +991,11 @@ async function send(value: string) {
   const current = session.value;
   const currentAttachment = attachment.value;
   const currentLease = lease.value;
-  if (!current || !currentAttachment?.channelId || !currentLease || !writable.value) {
+  if (!current || !currentAttachment?.channelId || !currentLease || !inputReady.value) {
     throw new Error("SSH terminal input is unavailable");
   }
   inputSequence += 1n;
   // Network delay can deliver the prompt after typed-ahead input; do not mistake this line for empty input.
-  promptBoundaryInputSequence = ["\r", "\n", "\u0003"].includes(value) ? inputSequence : null;
   await sendSshInput({
     sessionId: current.sessionId,
     expectedGeneration: current.generation,
@@ -967,7 +1010,12 @@ async function send(value: string) {
   });
 }
 
-async function handleTerminalInput(value: string) {
+async function handleTerminalInput(value: string, observedCommand?: string) {
+  if (props.initialDirectory) return;
+  const current = session.value;
+  const attached = attachment.value;
+  const inputLease = lease.value;
+  const previousSequence = inputSequence;
   try {
     await send(value);
   } catch {
@@ -982,6 +1030,20 @@ async function handleTerminalInput(value: string) {
       tone: "error",
       title: t("quickCommands.runFailed"),
     });
+    return;
+  }
+  if (!observedCommand || value !== "\r" || props.target.kind !== "host"
+    || !current || !attached?.channelId || !inputLease || inputSequence !== previousSequence + 1n) return;
+  try {
+    const recorded = await recordNativeTerminalHistory({ command: observedCommand, inputFence: { kind: "ssh", payload: {
+      sessionId: current.sessionId, expectedGeneration: current.generation,
+      channelId: attached.channelId, attachmentId: attached.attachmentId, viewId,
+      focusEpoch: inputLease.focusEpoch, leaseId: inputLease.leaseId,
+      inputEpoch: inputLease.inputEpoch, clientSeq: inputSequence.toString(),
+    } } });
+    if (recorded) nativeHistory.historyChanged();
+  } catch {
+    /* Uncertain history capture must not change terminal input or retry its Enter. */
   }
 }
 
@@ -1146,7 +1208,6 @@ async function reconnect(
       lastAppliedOutputSeq = 0n;
     }
     inputSequence = 0n;
-    promptBoundaryInputSequence = null;
     fencedResize.reset();
     attachment.value = details.attachments.find(
       (candidate) => candidate.viewId === viewId,
@@ -1282,8 +1343,50 @@ function recoverActiveInputLease() {
 function activateFromTab() {
   if (!props.active) return;
   void recoverActiveInputLease();
+  if (session.value?.attachmentCount && session.value.attachmentCount > 1) reassertCurrentResize();
+  else if (props.visible) void flushPendingResize();
   terminalView.value?.focus();
 }
+
+let initialDirectoryAttempted = false;
+watch(
+  () => [props.initialDirectory, state.value, props.active, attachment.value?.channelId],
+  () => {
+    const directory = props.initialDirectory;
+    if (!directory || initialDirectoryAttempted || state.value !== "running"
+      || !props.active || !attachment.value?.channelId) return;
+    const originalSessionId = session.value?.sessionId;
+    const originalGeneration = session.value?.generation;
+    const originalAttachmentId = attachment.value.attachmentId;
+    const originalChannelId = attachment.value.channelId;
+    initialDirectoryAttempted = true;
+    void (async () => {
+      try {
+        const focused = await recoverActiveInputLease();
+        if (!focused || released || !inputReady.value
+          || session.value?.sessionId !== originalSessionId
+          || session.value?.generation !== originalGeneration
+          || attachment.value?.attachmentId !== originalAttachmentId
+          || attachment.value.channelId !== originalChannelId) {
+          throw new Error("SSH input target changed");
+        }
+        await send(posixDirectoryCommand(directory));
+      } catch {
+        lease.value = null;
+        stopLeaseHeartbeat();
+        tips.show({ scope: `ssh-initial-directory:${props.paneId}`, tone: "error", title: t("sshSession.initialDirectoryFailed") });
+      } finally {
+        emit("initialDirectoryHandled", directory);
+      }
+    })();
+  },
+  { flush: "post", immediate: true },
+);
+
+watch(
+  () => [props.visible, session.value?.sessionId, session.value?.generation, session.value?.state, attachment.value?.attachmentId],
+  reassertCurrentResize,
+);
 
 function deactivateFromTab() {
   unregisterInputTarget?.();
@@ -1330,11 +1433,63 @@ onBeforeUnmount(() => {
   >
     <header class="ssh-terminal-pane__status">
       <div class="ssh-terminal-pane__identity">
-        <NvxStatusLabel
-          class="ssh-terminal-pane__state"
-          :tone="state === 'running' ? 'success' : state === 'failed' ? 'danger' : 'neutral'"
+        <div
+          v-if="state === 'running'"
+          :ref="latencyRootRef"
+          class="ssh-terminal-pane__latency"
+          @focusout="closeLatencyOnBlur"
         >
-          {{ stateLabel }}
+          <button
+            :ref="latencyTriggerRef"
+            class="ssh-terminal-pane__latency-trigger"
+            type="button"
+            :title="stateTitle"
+            :aria-label="t('sshSession.heartbeat.showHopLatency', { latency: stateDisplayLabel })"
+            :aria-expanded="latencyOpen"
+            :aria-controls="`${paneId}-latency`"
+            @click="toggleLatency"
+          >
+            <NvxStatusLabel
+              class="ssh-terminal-pane__state"
+              tone="success"
+            >
+              {{ stateDisplayLabel }}
+            </NvxStatusLabel>
+          </button>
+          <Teleport to="body">
+            <div
+              v-if="latencyOpen"
+              :id="`${paneId}-latency`"
+              :ref="latencyPanelRef"
+              class="ssh-terminal-pane__latency-popover"
+              :style="latencyPanelStyle"
+              role="region"
+              :aria-label="t('sshSession.heartbeat.hopLatency')"
+            >
+              <div
+                v-for="row in latencyRows"
+                :key="row.key"
+                class="ssh-terminal-pane__latency-row"
+              >
+                <span
+                  class="ssh-terminal-pane__latency-host"
+                  :title="row.endpoint"
+                >
+                  <span>{{ row.label }}</span>
+                  <small v-if="row.endpoint">{{ row.endpoint }}</small>
+                </span>
+                <span class="ssh-terminal-pane__latency-value">{{ latencyText(row.latency) }}</span>
+              </div>
+            </div>
+          </Teleport>
+        </div>
+        <NvxStatusLabel
+          v-else
+          class="ssh-terminal-pane__state"
+          :tone="state === 'failed' ? 'danger' : 'neutral'"
+          :title="stateTitle"
+        >
+          {{ stateDisplayLabel }}
         </NvxStatusLabel>
         <span
           class="ssh-terminal-pane__endpoint"
@@ -1350,14 +1505,6 @@ onBeforeUnmount(() => {
           v-if="target.kind === 'host'"
           :marker="hostMarkers.visibleMarker(target.hostId)"
         />
-        <NvxStatusLabel
-          v-if="heartbeatLabel"
-          class="ssh-terminal-pane__heartbeat"
-          :tone="heartbeat.transports.some((status) => status.consecutiveFailures > 0) ? 'warning' : 'neutral'"
-          :title="heartbeatTitle"
-        >
-          {{ heartbeatLabel }}
-        </NvxStatusLabel>
       </div>
       <div class="ssh-terminal-pane__actions">
         <NvxNativeTerminalTools
@@ -1370,22 +1517,10 @@ onBeforeUnmount(() => {
           :writable="writable"
           :draft="inputDraft"
           :current-draft="() => terminalView?.currentDraft() ?? null"
-          :enable="enableNativeShell"
           @invalidate-draft="terminalView?.invalidateDraft()"
-          @prompt="acceptNativePrompt"
+          @suggestion-change="ghostSuggestion = $event"
           @focus="terminalView?.focus()"
         />
-        <NvxIconButton
-          v-if="session?.negotiatedAlgorithms.length"
-          size="sm"
-          :label="t('sshSession.algorithms.open')"
-          @click.stop="algorithmDetailsOpen = true"
-        >
-          <NvxIcon
-            :icon="ShieldCheck"
-            :size="16"
-          />
-        </NvxIconButton>
         <NvxTerminalTools
           ref="terminalTools"
           :terminal="terminalView"
@@ -1395,8 +1530,10 @@ onBeforeUnmount(() => {
           :plugin-context-key="pluginContextKey"
           :can-split-horizontal="canSplitHorizontal"
           :can-split-vertical="canSplitVertical"
+          :can-split-workspace-right="canSplitWorkspaceRight"
           :show-layout-actions="active"
           @split="emit('split', $event)"
+          @split-workspace-right="emit('splitWorkspaceRight')"
           @close="emit('close')"
         >
           <NvxButton
@@ -1433,6 +1570,7 @@ onBeforeUnmount(() => {
           class="ssh-terminal-pane__overflow"
           :can-split-horizontal="canSplitHorizontal"
           :can-split-vertical="canSplitVertical"
+          :can-split-workspace-right="canSplitWorkspaceRight"
           :has-selection="hasSelection"
           :show-layout-actions="active"
           show-session-action
@@ -1443,6 +1581,7 @@ onBeforeUnmount(() => {
           @search="openSearch"
           @copy="copySelection"
           @split="emit('split', $event)"
+          @split-workspace-right="emit('splitWorkspaceRight')"
           @session="runSessionAction"
           @close="emit('close')"
         />
@@ -1504,7 +1643,7 @@ onBeforeUnmount(() => {
       ref="terminalView"
       :pane-id="paneId"
       :host-id="target.kind === 'host' ? target.hostId : null"
-      :shell-prompt-key="shellPromptKey"
+      :ghost-suggestion="ghostSuggestion"
       :read-only="!writable"
       :reconnect-on-input="reconnectOnInput"
       :terminal-label="t('sshSession.terminalLabel', { label })"
@@ -1515,6 +1654,7 @@ onBeforeUnmount(() => {
       @selection-change="hasSelection = $event"
       @search-request="openSearch"
       @draft-change="inputDraft = $event"
+      @accept-suggestion="nativeTools?.acceptSuggestion()"
       @bell-attention="emit('bellAttention', $event)"
     />
 
@@ -1561,45 +1701,6 @@ onBeforeUnmount(() => {
         </NvxButton>
       </template>
     </NvxDialog>
-
-    <NvxDialog
-      v-model="algorithmDetailsOpen"
-      :title="t('sshSession.algorithms.title')"
-      :description="t('sshSession.algorithms.description')"
-      :close-label="t('sshSession.algorithms.close')"
-    >
-      <section class="ssh-negotiated-algorithms">
-        <article
-          v-for="result in session?.negotiatedAlgorithms ?? []"
-          :key="`${result.routeStage.kind}-${result.routeStage.kind === 'jumpHost' ? result.routeStage.hopIndex : 0}`"
-        >
-          <h3>
-            {{ result.routeStage.kind === "jumpHost"
-              ? t("sshSession.algorithms.jumpHost", { hop: result.routeStage.hopIndex + 1 })
-              : t("sshSession.algorithms.target") }}
-          </h3>
-          <dl>
-            <div><dt>{{ t("sshSession.algorithms.policy") }}</dt><dd>{{ result.policyId }}</dd></div>
-            <div><dt>{{ t("sshSession.algorithms.policyRevision") }}</dt><dd>{{ result.policyRevision ?? "—" }}</dd></div>
-            <div><dt>{{ t("sshSession.algorithms.catalogVersion") }}</dt><dd>{{ result.policyCatalogVersion }}</dd></div>
-            <div><dt>{{ t("sshSession.algorithms.keyExchange") }}</dt><dd><code>{{ result.keyExchange }}</code></dd></div>
-            <div><dt>{{ t("sshSession.algorithms.hostKey") }}</dt><dd><code>{{ result.hostKey }}</code></dd></div>
-            <div><dt>{{ t("sshSession.algorithms.cipherClientToServer") }}</dt><dd><code>{{ result.cipherClientToServer }}</code></dd></div>
-            <div><dt>{{ t("sshSession.algorithms.cipherServerToClient") }}</dt><dd><code>{{ result.cipherServerToClient }}</code></dd></div>
-            <div><dt>{{ t("sshSession.algorithms.macClientToServer") }}</dt><dd><code>{{ result.macClientToServer }}</code></dd></div>
-            <div><dt>{{ t("sshSession.algorithms.macServerToClient") }}</dt><dd><code>{{ result.macServerToClient }}</code></dd></div>
-          </dl>
-        </article>
-      </section>
-      <template #actions>
-        <NvxButton
-          variant="ghost"
-          @click="algorithmDetailsOpen = false"
-        >
-          {{ t("sshSession.algorithms.close") }}
-        </NvxButton>
-      </template>
-    </NvxDialog>
   </section>
 </template>
 
@@ -1637,10 +1738,75 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.ssh-terminal-pane__state,
-.ssh-terminal-pane__heartbeat {
+.ssh-terminal-pane__state {
   flex: none;
   white-space: nowrap;
+}
+
+.ssh-terminal-pane__latency {
+  flex: none;
+}
+
+.ssh-terminal-pane__latency-trigger {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--nvx-radius-sm);
+  background: transparent;
+  cursor: pointer;
+}
+
+.ssh-terminal-pane__latency-trigger:hover .ssh-terminal-pane__state {
+  text-decoration: underline;
+}
+
+.ssh-terminal-pane__latency-trigger:focus-visible {
+  outline: 2px solid var(--nvx-color-accent);
+  outline-offset: 2px;
+}
+
+.ssh-terminal-pane__latency-popover {
+  position: fixed;
+  z-index: var(--nvx-z-popover);
+  display: grid;
+  box-sizing: border-box;
+  width: min(264px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  padding: var(--nvx-space-1);
+  border: var(--nvx-border-width) solid var(--nvx-color-border-strong);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-surface);
+  color: var(--nvx-color-text-primary);
+  box-shadow: var(--nvx-shadow-overlay);
+}
+
+.ssh-terminal-pane__latency-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nvx-space-3);
+  padding: var(--nvx-space-1) var(--nvx-space-2);
+  font-size: var(--nvx-font-size-xs);
+}
+
+.ssh-terminal-pane__latency-host {
+  display: grid;
+  min-width: 0;
+}
+
+.ssh-terminal-pane__latency-host small {
+  overflow: hidden;
+  color: var(--nvx-color-text-secondary);
+  font-size: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-terminal-pane__latency-value {
+  flex: none;
+  font-family: var(--nvx-font-mono);
 }
 
 .ssh-terminal-pane__actions {
@@ -1670,11 +1836,11 @@ onBeforeUnmount(() => {
 
 .ssh-terminal-pane__disconnect {
   color: var(--nvx-color-terminal-muted);
+  padding-inline: var(--nvx-space-2);
 }
 
 .ssh-terminal-pane__disconnect:hover:not(:disabled) {
-  background: var(--nvx-color-danger);
-  color: var(--nvx-color-on-danger);
+  background: color-mix(in srgb, var(--nvx-color-danger) 9%, transparent);
 }
 
 @container ssh-terminal-pane-toolbar (max-width: 560px) {
@@ -1727,44 +1893,6 @@ onBeforeUnmount(() => {
 
 .ssh-login-automation__review code {
   white-space: pre-wrap;
-}
-
-.ssh-negotiated-algorithms {
-  display: grid;
-  gap: var(--nvx-space-4);
-}
-
-.ssh-negotiated-algorithms article {
-  display: grid;
-  gap: var(--nvx-space-3);
-  padding-bottom: var(--nvx-space-4);
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
-}
-
-.ssh-negotiated-algorithms h3,
-.ssh-negotiated-algorithms dl,
-.ssh-negotiated-algorithms dd {
-  margin: 0;
-}
-
-.ssh-negotiated-algorithms dl {
-  display: grid;
-  gap: var(--nvx-space-2);
-}
-
-.ssh-negotiated-algorithms dl > div {
-  display: grid;
-  grid-template-columns: minmax(140px, 0.45fr) minmax(0, 1fr);
-  gap: var(--nvx-space-3);
-}
-
-.ssh-negotiated-algorithms dt {
-  color: var(--nvx-color-text-secondary);
-  font-size: var(--nvx-font-size-xs);
-}
-
-.ssh-negotiated-algorithms dd {
-  overflow-wrap: anywhere;
 }
 
 .ssh-host-key {
