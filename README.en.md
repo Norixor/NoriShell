@@ -4,10 +4,15 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">A local-first terminal and remote connection workspace</p>
 <p align="center">SSH · Local terminal · SFTP · Port forwarding · RDP / VNC · Encrypted Vault · Plugins</p>
-<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows · v0.1.2</p>
+<p align="center"><a href="LICENSE">GPL-3.0-only</a> · macOS / Windows</p>
 <p align="center"><a href="README.md">简体中文</a> · English</p>
 
 NoriShell brings terminal sessions, remote connections, file transfer, remote desktops, and credential management into one desktop application. Core connectivity requires no account. Host configuration stays local, while persisted passwords and private keys are stored in a separate encrypted Vault. End-to-end encrypted synchronization can be enabled selectively through the Norixor plugin or the [self-hosted sync example](example/self-host-sync/readme.md) when cross-device access is needed.
+
+<p align="center">
+  <a href="https://github.com/Norixor/NoriShell/releases/latest"><strong>Download NoriShell</strong></a>
+  · <a href="#installation-and-quick-start">Installation guide</a>
+</p>
 
 The application is built with **Tauri 2, Vue 3, TypeScript, xterm, and Rust**. Rust Core owns connections, secrets, persistence, and resource lifecycles. The frontend owns interaction and reconstructible state projections.
 
@@ -34,6 +39,8 @@ The application is built with **Tauri 2, Vue 3, TypeScript, xterm, and Rust**. R
 - **Independent connections.** Terminals, file transfers, tunnels, and monitoring run independently; closing one does not disconnect the others.
 - **Constrained plugins.** Plugins use an isolated WebAssembly host, fine-grained capabilities, and protected approval. Installation and upgrades require an explicit local ZIP import.
 - **Built for macOS and Windows.** Installers are available for macOS Apple Silicon / Intel, Windows x64, and Windows ARM64.
+
+For cross-device sync, follow the [self-hosted sync guide](docs/guides/users/self-host-sync.en.md) to deploy the server and import the plugin. Confirm the upload on the first device, then select “Sync now” on each additional device to review the restore. Restoring existing encrypted data requires the Vault password from the device that first uploaded it. The guide also covers data scope and conflicts.
 
 ## Preview
 
@@ -67,8 +74,6 @@ Visit [GitHub Releases](https://github.com/Norixor/NoriShell/releases) and choos
 | Windows | ARM64 | `-setup.exe` | Extract the entire folder and run `norishell.exe` |
 
 For a macOS installer, drag NoriShell into Applications; on Windows, follow the installer. ZIP builds use the same local settings and data directories. Extract the full archive before running. The Windows ZIP requires WebView2 Runtime to be installed.
-
-For cross-device sync, follow the [self-hosted server and plugin installation guide](docs/guides/users/self-host-sync.en.md) to deploy the server and import the matching plugin ZIP.
 
 ### Check for updates
 
