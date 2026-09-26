@@ -43,6 +43,7 @@ fn main() {
             },
             request: PluginNetworkStartRequest {
                 timeout_ms: 1_000,
+                oauth_profile_id: None,
                 credential: Some(PluginNetworkCredentialRef {
                     handle: "credential".into(),
                     expected_revision: sequence,

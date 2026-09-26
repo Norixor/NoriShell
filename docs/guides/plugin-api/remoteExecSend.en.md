@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `remoteExecRequest`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `remoteExecRequest`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 Use the handle from remoteExecStart. closeStdin defaults to false; use empty dataBase64 when sending EOF. Read remoteExecOutput/remoteExecExited; remoteExecSent does not mean command completion.
 

@@ -11,7 +11,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use norishell_app_persistence::SshSyncChangeFence;
-use norishell_core_api::WireSequence;
+use norishell_core_api::{CoreApiError, ErrorCategory, RequestId, RetryStrategy, WireSequence};
 use norishell_secret_vault::{SecretRef, VaultError};
 use norishell_ssh_profile_sync::{
     MAX_OFFLINE_BACKUP_FILE_BYTES, PortableBundleV1, RecoveryPassword, decrypt_offline_backup,
@@ -41,6 +41,153 @@ const PENDING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const MAX_PENDING: usize = 4;
 const SECURE_PROMPT_LIFETIME: Duration = Duration::from_secs(180);
 const MAX_SECURE_PASSWORD_BYTES: usize = 65_536;
+
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub(crate) struct OfflineBackupCommandError(Box<CoreApiError>);
+
+impl From<&str> for OfflineBackupCommandError {
+    fn from(value: &str) -> Self {
+        let (category, retry, message_key) = match value {
+            "offline-backup-cancelled" => (
+                ErrorCategory::Unavailable,
+                RetryStrategy::Never,
+                "offlineBackupErrors.cancelled",
+            ),
+            "offline-backup-empty-selection" | "offline-backup-invalid-selection" => (
+                ErrorCategory::Validation,
+                RetryStrategy::Never,
+                "offlineBackup.invalidSelection",
+            ),
+            "offline-backup-invalid-password" => (
+                ErrorCategory::Validation,
+                RetryStrategy::Never,
+                "offlineBackup.openPasswordLength",
+            ),
+            "offline-backup-invalid-content" | "offline-backup-open-failed" => (
+                ErrorCategory::Validation,
+                RetryStrategy::Never,
+                "offlineBackup.openFailed",
+            ),
+            "offline-backup-too-many-open" => (
+                ErrorCategory::Unavailable,
+                RetryStrategy::AfterMilliseconds(1000),
+                "offlineBackupErrors.tooManyOpen",
+            ),
+            "offline-backup-handle-expired" | "offline-backup-preview-expired" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::RefreshSnapshot,
+                "offlineBackup.previewFailed",
+            ),
+            "offline-backup-vault-already-exists" | "offline-backup-target-not-fresh" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::Never,
+                "offlineBackup.targetNotFresh",
+            ),
+            "offline-backup-vault-locked" | "offline-backup-vault-unavailable" => (
+                ErrorCategory::Permission,
+                RetryStrategy::WaitForUser,
+                "offlineBackup.vaultUnavailable",
+            ),
+            "offline-backup-vault-merge-uncertain" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::Never,
+                "offlineBackup.vaultMergeUncertain",
+            ),
+            "offline-backup-vault-merge-failed" => (
+                ErrorCategory::Internal,
+                RetryStrategy::Never,
+                "offlineBackup.vaultMergeFailed",
+            ),
+            "offline-backup-vault-restored-configs-failed" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::Never,
+                "offlineBackup.vaultRestoredPartial",
+            ),
+            "offline-backup-vault-restore-failed" | "offline-backup-import-failed" => (
+                ErrorCategory::Internal,
+                RetryStrategy::Never,
+                "offlineBackup.importFailed",
+            ),
+            "offline-backup-secure-denied" => (
+                ErrorCategory::Permission,
+                RetryStrategy::Never,
+                "offlineBackup.secure.failed",
+            ),
+            "offline-backup-secure-expired" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::Never,
+                "offlineBackupErrors.secureExpired",
+            ),
+            "offline-backup-preview-failed" => (
+                ErrorCategory::Internal,
+                RetryStrategy::RefreshSnapshot,
+                "offlineBackup.previewFailed",
+            ),
+            "offline-backup-encryption-failed"
+            | "offline-backup-export-failed"
+            | "offline-backup-snapshot-failed"
+            | "offline-backup-write-failed" => (
+                ErrorCategory::Internal,
+                RetryStrategy::Never,
+                "offlineBackup.exportFailed",
+            ),
+            "offline-backup-snapshot-stale" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::RefreshSnapshot,
+                "offlineBackupErrors.snapshotChanged",
+            ),
+            "offline-backup-dialog-unavailable"
+            | "offline-backup-secure-unavailable"
+            | "offline-backup-unavailable" => (
+                ErrorCategory::Unavailable,
+                RetryStrategy::RefreshSnapshot,
+                "offlineBackup.exportFailed",
+            ),
+            _ => {
+                let diagnostic_id = Uuid::new_v4().to_string();
+                eprintln!(
+                    "offline backup command failed: diagnostic_id={diagnostic_id} reason={value}"
+                );
+                return Self(Box::new(CoreApiError::safe_internal(
+                    RequestId::new(),
+                    diagnostic_id,
+                )));
+            }
+        };
+        let mut error = crate::core_api_error::core_error(
+            RequestId::new(),
+            value,
+            category,
+            retry,
+            message_key,
+        );
+        if matches!(
+            value,
+            "offline-backup-vault-merge-failed"
+                | "offline-backup-vault-restore-failed"
+                | "offline-backup-import-failed"
+                | "offline-backup-preview-failed"
+                | "offline-backup-encryption-failed"
+                | "offline-backup-export-failed"
+                | "offline-backup-snapshot-failed"
+                | "offline-backup-write-failed"
+        ) {
+            let diagnostic_id = Uuid::new_v4().to_string();
+            eprintln!(
+                "offline backup operation failed: diagnostic_id={diagnostic_id} code={value}"
+            );
+            error.diagnostic_id = Some(diagnostic_id);
+        }
+        Self(error)
+    }
+}
+
+impl From<String> for OfflineBackupCommandError {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -284,7 +431,7 @@ impl OfflineBackupService {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         pending.retain(|_, entry| entry.expires_at > Instant::now());
         if pending.len() >= MAX_PENDING {
-            return Err("offline-backup-too-many-open".to_owned());
+            return Err("offline-backup-too-many-open".into());
         }
         let handle = Uuid::new_v4().to_string();
         let inventory = contents.inventory();
@@ -325,7 +472,7 @@ impl OfflineBackupService {
             .as_ref()
             .ok_or_else(|| "offline-backup-preview-expired".to_owned())?;
         if prepared.preview_handle != preview_handle {
-            return Err("offline-backup-preview-expired".to_owned());
+            return Err("offline-backup-preview-expired".into());
         }
         // Only consume the matching prepared preview. A secure prompt can
         // outlive a replacement preview, which must remain available to its
@@ -353,7 +500,7 @@ impl OfflineBackupService {
             .as_ref()
             .ok_or_else(|| "offline-backup-preview-expired".to_owned())?;
         if prepared.preview_handle != preview_handle {
-            return Err("offline-backup-preview-expired".to_owned());
+            return Err("offline-backup-preview-expired".into());
         }
         Ok(prepared.vault_mode)
     }
@@ -369,7 +516,7 @@ fn secure_window_label_matches(id: &str, label: &str) -> bool {
 
 fn require_secure_window(window: &WebviewWindow, id: &str) -> Result<(), String> {
     if !secure_window_label_matches(id, window.label()) {
-        return Err("offline-backup-secure-denied".to_owned());
+        return Err("offline-backup-secure-denied".into());
     }
     Ok(())
 }
@@ -403,7 +550,7 @@ fn validate_secure_answer(
         || answer.password.len() > MAX_SECURE_PASSWORD_BYTES
         || answer.password_confirmation.len() > MAX_SECURE_PASSWORD_BYTES
     {
-        return Err("offline-backup-secure-denied".to_owned());
+        return Err("offline-backup-secure-denied".into());
     }
     match kind {
         OfflineBackupSecureKind::Export => {
@@ -411,16 +558,16 @@ fn validate_secure_answer(
                 || answer.password.chars().count() < 8
                 || answer.password.as_bytes() != answer.password_confirmation.as_bytes()
             {
-                return Err("offline-backup-secure-denied".to_owned());
+                return Err("offline-backup-secure-denied".into());
             }
         }
         OfflineBackupSecureKind::Open if answer.password.len() < 8 => {
-            return Err("offline-backup-secure-denied".to_owned());
+            return Err("offline-backup-secure-denied".into());
         }
         OfflineBackupSecureKind::RestoreVault | OfflineBackupSecureKind::MergeVault
             if !answer.confirmed =>
         {
-            return Err("offline-backup-secure-denied".to_owned());
+            return Err("offline-backup-secure-denied".into());
         }
         OfflineBackupSecureKind::Open
         | OfflineBackupSecureKind::RestoreVault
@@ -436,7 +583,7 @@ async fn request_secure_password(
     service: &OfflineBackupService,
 ) -> Result<Option<SecureBackupAnswer>, String> {
     if owner.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".to_owned());
+        return Err("offline-backup-unavailable".into());
     }
     let id = Uuid::now_v7().to_string();
     let (sender, receiver) = oneshot::channel();
@@ -544,7 +691,7 @@ pub(crate) fn offline_backup_secure_get(
     id: String,
     window: WebviewWindow,
     service: State<'_, OfflineBackupService>,
-) -> Result<OfflineBackupSecurePrompt, String> {
+) -> Result<OfflineBackupSecurePrompt, OfflineBackupCommandError> {
     require_secure_window(&window, &id)?;
     service
         .secure_pending
@@ -552,7 +699,7 @@ pub(crate) fn offline_backup_secure_get(
         .map_err(|_| "offline-backup-secure-unavailable".to_owned())?
         .get(&id)
         .map(|entry| entry.prompt.clone())
-        .ok_or_else(|| "offline-backup-secure-expired".to_owned())
+        .ok_or_else(|| "offline-backup-secure-expired".into())
 }
 
 #[tauri::command]
@@ -563,7 +710,7 @@ pub(crate) fn offline_backup_secure_submit(
     confirmed: bool,
     window: WebviewWindow,
     service: State<'_, OfflineBackupService>,
-) -> Result<(), String> {
+) -> Result<(), OfflineBackupCommandError> {
     require_secure_window(&window, &id)?;
     let kind = service
         .secure_pending
@@ -587,7 +734,7 @@ pub(crate) fn offline_backup_secure_submit(
     pending
         .sender
         .send(answer)
-        .map_err(|_| "offline-backup-secure-expired".to_owned())
+        .map_err(|_| "offline-backup-secure-expired".into())
 }
 
 #[tauri::command]
@@ -595,7 +742,7 @@ pub(crate) fn offline_backup_secure_cancel(
     id: String,
     window: WebviewWindow,
     service: State<'_, OfflineBackupService>,
-) -> Result<(), String> {
+) -> Result<(), OfflineBackupCommandError> {
     require_secure_window(&window, &id)?;
     service
         .secure_pending
@@ -611,9 +758,9 @@ pub(crate) async fn offline_backup_discard(
     service: State<'_, OfflineBackupService>,
     adapter: State<'_, NoriShellSshSyncLocalAdapter>,
     handle: String,
-) -> Result<(), String> {
+) -> Result<(), OfflineBackupCommandError> {
     if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".to_owned());
+        return Err("offline-backup-unavailable".into());
     }
     let _operation = service.operation.lock().await;
     if let Ok(pending) = service.take(&handle)
@@ -657,7 +804,7 @@ fn import_selection_allowed(
         || (selection.credentials && !offered.credentials)
         || (selection.vault && !offered.vault)
     {
-        return Err("offline-backup-invalid-selection".to_owned());
+        return Err("offline-backup-invalid-selection".into());
     }
     Ok(())
 }
@@ -673,13 +820,13 @@ pub(crate) async fn offline_backup_preview(
     selection: OfflineBackupSelection,
     duplicate_policy: OfflineDuplicatePolicy,
     vault_mode: Option<OfflineVaultImportMode>,
-) -> Result<BackupImportPreview, String> {
+) -> Result<BackupImportPreview, OfflineBackupCommandError> {
     if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".to_owned());
+        return Err("offline-backup-unavailable".into());
     }
     let _operation = service.operation.lock().await;
     if selection.vault != vault_mode.is_some() {
-        return Err("offline-backup-invalid-selection".to_owned());
+        return Err("offline-backup-invalid-selection".into());
     }
     let vault_state = vault.status().state;
     let (bundle, digest, old_prepared) = {
@@ -696,12 +843,12 @@ pub(crate) async fn offline_backup_preview(
             Some(OfflineVaultImportMode::Fresh)
                 if vault_state != norishell_core_api::VaultState::Missing =>
             {
-                return Err("offline-backup-vault-already-exists".to_owned());
+                return Err("offline-backup-vault-already-exists".into());
             }
             Some(OfflineVaultImportMode::Merge)
                 if vault_state != norishell_core_api::VaultState::Unlocked =>
             {
-                return Err("offline-backup-vault-locked".to_owned());
+                return Err("offline-backup-vault-locked".into());
             }
             _ => {}
         }
@@ -758,7 +905,7 @@ pub(crate) async fn offline_backup_preview(
         if portable {
             adapter.discard_offline_import(&result.handle);
         }
-        return Err("offline-backup-handle-expired".to_owned());
+        return Err("offline-backup-handle-expired".into());
     };
     entry.prepared = Some(PreparedBackup {
         preview_handle: result.handle.clone(),
@@ -781,9 +928,9 @@ pub(crate) async fn offline_backup_apply(
     hosts: State<'_, HostService>,
     handle: String,
     preview_handle: String,
-) -> Result<BackupImportResult, String> {
+) -> Result<BackupImportResult, OfflineBackupCommandError> {
     if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".to_owned());
+        return Err("offline-backup-unavailable".into());
     }
     // Prompt before taking the prepared import. Cancellation must leave both
     // the archive handle and its portable restore plan available to retry.
@@ -814,7 +961,7 @@ pub(crate) async fn offline_backup_apply(
         if prepared.portable {
             adapter.discard_offline_import(&prepared.preview_handle);
         }
-        return Err("offline-backup-preview-expired".to_owned());
+        return Err("offline-backup-preview-expired".into());
     }
     let mut vault_restored = false;
     if let Some(vault_mode) = vault_mode {
@@ -874,7 +1021,7 @@ pub(crate) async fn offline_backup_apply(
             if prepared.portable {
                 adapter.discard_offline_import(&preview_handle);
             }
-            return Err(failure);
+            return Err(failure.into());
         }
         vault_restored = true;
     }
@@ -943,14 +1090,14 @@ fn read_backup_bounded(path: &Path) -> Result<Vec<u8>, String> {
         .metadata()
         .map_err(|_| "offline-backup-open-failed".to_owned())?;
     if !metadata.is_file() || metadata.len() > MAX_OFFLINE_BACKUP_FILE_BYTES as u64 {
-        return Err("offline-backup-open-failed".to_owned());
+        return Err("offline-backup-open-failed".into());
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_OFFLINE_BACKUP_FILE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "offline-backup-open-failed".to_owned())?;
     if bytes.len() > MAX_OFFLINE_BACKUP_FILE_BYTES {
-        return Err("offline-backup-open-failed".to_owned());
+        return Err("offline-backup-open-failed".into());
     }
     Ok(bytes)
 }
@@ -996,9 +1143,9 @@ pub(crate) async fn offline_backup_export(
     vault: State<'_, VaultService>,
     hosts: State<'_, HostService>,
     selection: OfflineBackupSelection,
-) -> Result<bool, String> {
+) -> Result<bool, OfflineBackupCommandError> {
     if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".to_owned());
+        return Err("offline-backup-unavailable".into());
     }
     selection.validate().map_err(str::to_owned)?;
     let Some(path) = choose_backup_path(&window, true).await? else {
@@ -1055,7 +1202,7 @@ pub(crate) async fn offline_backup_export(
         &before,
         &capture_export_snapshot_fence(hosts.inner(), &vault_after_snapshot)?,
     ) {
-        return Err("offline-backup-snapshot-stale".to_owned());
+        return Err("offline-backup-snapshot-stale".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
         write_backup_atomically(path, encrypted.as_slice())
@@ -1070,9 +1217,9 @@ pub(crate) async fn offline_backup_open(
     window: WebviewWindow,
     app: AppHandle,
     service: State<'_, OfflineBackupService>,
-) -> Result<Option<OpenedOfflineBackup>, String> {
+) -> Result<Option<OpenedOfflineBackup>, OfflineBackupCommandError> {
     if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".to_owned());
+        return Err("offline-backup-unavailable".into());
     }
     let Some(path) = choose_backup_path(&window, false).await? else {
         return Ok(None);
@@ -1096,7 +1243,10 @@ pub(crate) async fn offline_backup_open(
     })
     .await
     .map_err(|_| "offline-backup-open-failed".to_owned())??;
-    service.stage(contents, digest).map(Some)
+    service
+        .stage(contents, digest)
+        .map(Some)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -1105,6 +1255,19 @@ mod tests {
     use norishell_ssh_profile_sync::{
         BundleSchema, PortableHost, PortableObjectId, PortableObjects,
     };
+
+    #[test]
+    fn partial_vault_restore_is_not_a_generic_import_failure() {
+        let partial =
+            OfflineBackupCommandError::from("offline-backup-vault-restored-configs-failed");
+        let failed = OfflineBackupCommandError::from("offline-backup-import-failed");
+        assert_eq!(
+            partial.0.code,
+            "offline-backup-vault-restored-configs-failed"
+        );
+        assert_eq!(partial.0.message_key, "offlineBackup.vaultRestoredPartial");
+        assert_ne!(partial.0.message_key, failed.0.message_key);
+    }
 
     fn answer(password: &str, confirmation: &str, confirmed: bool) -> SecureBackupAnswer {
         SecureBackupAnswer {
@@ -1133,6 +1296,7 @@ mod tests {
         };
         PortableBundleV1 {
             schema: BundleSchema::V3,
+            selected_categories: None,
             revision: 1,
             objects: PortableObjects {
                 hosts: vec![dependency],

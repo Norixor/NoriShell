@@ -3,7 +3,11 @@
 //! it accepted unauthenticated sessions implicitly, allocated from untrusted
 //! lengths, and detached decoder tasks without a join path.
 
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -46,6 +50,7 @@ pub struct HardenedVncClient {
     stop_tx: watch::Sender<bool>,
     reader: Option<JoinHandle<()>>,
     writer: Option<JoinHandle<()>>,
+    resize: Arc<Mutex<ResizeState>>,
 }
 
 enum WriteRequest {
@@ -58,6 +63,37 @@ enum WriteRequest {
         height: u16,
         incremental: bool,
     },
+    Resize {
+        width: u16,
+        height: u16,
+        completion: oneshot::Sender<Result<(), VncError>>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScreenInfo {
+    id: u32,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    flags: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RequestedLayout {
+    width: u16,
+    height: u16,
+    screen_id: u32,
+    flags: u32,
+    forwarded: bool,
+}
+
+#[derive(Default)]
+struct ResizeState {
+    // None means the server has not confirmed ExtendedDesktopSize support.
+    layout: Option<(Dimensions, Vec<ScreenInfo>)>,
+    pending: Option<RequestedLayout>,
 }
 
 #[derive(Clone, Copy)]
@@ -98,10 +134,12 @@ impl HardenedVncClient {
             )))
             .map_err(|_| VncError::Closed)?;
         let (stop_tx, stop_rx) = watch::channel(false);
+        let resize = Arc::new(Mutex::new(ResizeState::default()));
 
         let reader_events = event_tx.clone();
         let reader_stop_tx = stop_tx.clone();
         let reader_stop = stop_rx.clone();
+        let reader_resize = Arc::clone(&resize);
         let reader_task = tokio::spawn(async move {
             let result = read_loop(
                 reader,
@@ -110,6 +148,7 @@ impl HardenedVncClient {
                 update_tx,
                 reader_events.clone(),
                 reader_stop,
+                reader_resize,
             )
             .await;
             if let Err(error) = result {
@@ -121,8 +160,17 @@ impl HardenedVncClient {
         let writer_events = event_tx;
         let writer_stop_tx = stop_tx.clone();
         let writer_stop = stop_rx;
+        let writer_resize = Arc::clone(&resize);
         let writer_task = tokio::spawn(async move {
-            let result = write_loop(writer, priority_rx, normal_rx, update_rx, writer_stop).await;
+            let result = write_loop(
+                writer,
+                priority_rx,
+                normal_rx,
+                update_rx,
+                writer_stop,
+                writer_resize,
+            )
+            .await;
             if let Err(error) = result {
                 let _ = writer_events.send(Err(error)).await;
                 let _ = writer_stop_tx.send(true);
@@ -136,6 +184,7 @@ impl HardenedVncClient {
             stop_tx,
             reader: Some(reader_task),
             writer: Some(writer_task),
+            resize,
         })
     }
 
@@ -148,6 +197,40 @@ impl HardenedVncClient {
     /// High-priority input is reserved for focus-loss key/button releases.
     pub async fn priority_input(&self, events: Vec<X11Event>) -> Result<(), VncError> {
         self.dispatch(&self.priority_tx, events).await
+    }
+
+    /// A resize is permitted only after the server has returned an extended
+    /// layout. This adapter changes a single full-frame screen and preserves
+    /// its server-assigned ID and opaque flags.
+    pub async fn resize(&self, width: u16, height: u16) -> Result<(), VncError> {
+        validate_dimensions(width, height)?;
+        {
+            let state = self.resize.lock().unwrap();
+            let Some((dimensions, screens)) = &state.layout else {
+                return Err(VncError::UnsupportedOperation);
+            };
+            if screens.len() != 1
+                || screens[0].x != 0
+                || screens[0].y != 0
+                || screens[0].width != dimensions.width
+                || screens[0].height != dimensions.height
+            {
+                return Err(VncError::UnsupportedOperation);
+            }
+            if state.pending.is_some() {
+                return Err(VncError::Timeout);
+            }
+        }
+        let (completion_tx, completion_rx) = oneshot::channel();
+        self.normal_tx
+            .send(WriteRequest::Resize {
+                width,
+                height,
+                completion: completion_tx,
+            })
+            .await
+            .map_err(|_| VncError::Closed)?;
+        completion_rx.await.map_err(|_| VncError::Closed)?
     }
 
     pub async fn next_event(&mut self) -> Result<VncEvent, VncError> {
@@ -248,6 +331,7 @@ where
                 VncEncoding::CopyRect,
                 VncEncoding::Raw,
                 VncEncoding::DesktopSizePseudo,
+                VncEncoding::ExtendedDesktopSizePseudo,
             ]),
             cancellation,
         )
@@ -402,6 +486,7 @@ async fn read_loop<R>(
     update_tx: mpsc::Sender<WriteRequest>,
     event_tx: mpsc::Sender<Result<VncEvent, VncError>>,
     mut stop: watch::Receiver<bool>,
+    resize: Arc<Mutex<ResizeState>>,
 ) -> Result<(), VncError>
 where
     R: AsyncRead + Unpin,
@@ -463,10 +548,56 @@ where
                                 return Err(VncError::Protocol);
                             }
                             dimensions = validate_dimensions(rect.width, rect.height)?;
+                            resize.lock().unwrap().layout = None;
                             emit(VncEvent::SetResolution(
                                 (dimensions.width, dimensions.height).into(),
                             ))
                             .await?;
+                        }
+                        VncEncoding::ExtendedDesktopSizePseudo => {
+                            let screens = read_extended_screens(&mut reader, &mut stop).await?;
+                            let mut result = None;
+                            if rect.x == 1 {
+                                let mut state = resize.lock().unwrap();
+                                if rect.y == 4 {
+                                    if let Some(pending) = state.pending.as_mut() {
+                                        pending.forwarded = true;
+                                    }
+                                } else if let Some(pending) = state.pending.take() {
+                                    let applied = rect.y == 0
+                                        && rect.width == pending.width
+                                        && rect.height == pending.height
+                                        && screens.as_slice()
+                                            == [ScreenInfo {
+                                                id: pending.screen_id,
+                                                x: 0,
+                                                y: 0,
+                                                width: pending.width,
+                                                height: pending.height,
+                                                flags: pending.flags,
+                                            }];
+                                    result = Some((applied, rect.y));
+                                }
+                            } else if let Some(pending) = resize.lock().unwrap().pending {
+                                if pending.forwarded
+                                    && rect.width == pending.width
+                                    && rect.height == pending.height
+                                {
+                                    resize.lock().unwrap().pending = None;
+                                    result = Some((true, 0));
+                                }
+                            }
+                            if rect.x != 1 || rect.y == 0 {
+                                dimensions = validate_dimensions(rect.width, rect.height)?;
+                                resize.lock().unwrap().layout = Some((dimensions, screens));
+                                emit(VncEvent::SetResolution(
+                                    (dimensions.width, dimensions.height).into(),
+                                ))
+                                .await?;
+                            }
+                            if let Some((applied, status)) = result {
+                                emit(VncEvent::ResizeResult { applied, status }).await?;
+                            }
                         }
                         // Cursor is intentionally not negotiated because the
                         // shared desktop contract has no cursor-shape event.
@@ -512,6 +643,7 @@ async fn write_loop<W>(
     mut normal_rx: mpsc::Receiver<WriteRequest>,
     mut update_rx: mpsc::Receiver<WriteRequest>,
     mut stop: watch::Receiver<bool>,
+    resize: Arc<Mutex<ResizeState>>,
 ) -> Result<(), VncError>
 where
     W: AsyncWrite + Unpin,
@@ -520,14 +652,18 @@ where
         tokio::select! {
             biased;
             () = cancelled(&mut stop) => return Ok(()),
-            Some(request) = priority_rx.recv() => write_request(&mut writer, request).await?,
-            Some(request) = normal_rx.recv() => write_request(&mut writer, request).await?,
-            Some(request) = update_rx.recv() => write_request(&mut writer, request).await?,
+            Some(request) = priority_rx.recv() => write_request(&mut writer, request, &resize).await?,
+            Some(request) = normal_rx.recv() => write_request(&mut writer, request, &resize).await?,
+            Some(request) = update_rx.recv() => write_request(&mut writer, request, &resize).await?,
         }
     }
 }
 
-async fn write_request<W>(writer: &mut W, request: WriteRequest) -> Result<(), VncError>
+async fn write_request<W>(
+    writer: &mut W,
+    request: WriteRequest,
+    resize: &Arc<Mutex<ResizeState>>,
+) -> Result<(), VncError>
 where
     W: AsyncWrite + Unpin,
 {
@@ -561,6 +697,59 @@ where
             )
             .write(writer)
             .await
+        }
+        WriteRequest::Resize {
+            width,
+            height,
+            completion,
+        } => {
+            if completion.is_closed() {
+                return Ok(());
+            }
+            let request = {
+                let mut state = resize.lock().unwrap();
+                let Some((dimensions, screens)) = &state.layout else {
+                    let _ = completion.send(Err(VncError::UnsupportedOperation));
+                    return Ok(());
+                };
+                if state.pending.is_some()
+                    || screens.len() != 1
+                    || screens[0].x != 0
+                    || screens[0].y != 0
+                    || screens[0].width != dimensions.width
+                    || screens[0].height != dimensions.height
+                {
+                    let _ = completion.send(Err(VncError::UnsupportedOperation));
+                    return Ok(());
+                }
+                let request = RequestedLayout {
+                    width,
+                    height,
+                    screen_id: screens[0].id,
+                    flags: screens[0].flags,
+                    forwarded: false,
+                };
+                state.pending = Some(request);
+                request
+            };
+            let result = ClientMsg::SetDesktopSize {
+                width,
+                height,
+                screen_id: request.screen_id,
+                flags: request.flags,
+            }
+            .write(writer)
+            .await;
+            if result.is_err() {
+                resize.lock().unwrap().pending = None;
+            }
+            let completed = result.is_ok();
+            let _ = completion.send(result);
+            if completed {
+                Ok(())
+            } else {
+                Err(VncError::ConnectionLost)
+            }
         }
     }
 }
@@ -694,6 +883,30 @@ where
         width: read_u16(reader, cancellation).await?,
         height: read_u16(reader, cancellation).await?,
     })
+}
+
+async fn read_extended_screens<R>(
+    reader: &mut R,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<Vec<ScreenInfo>, VncError>
+where
+    R: AsyncRead + Unpin,
+{
+    let count = read_u8(reader, cancellation).await?;
+    let mut padding = [0_u8; 3];
+    read_exact(reader, &mut padding, cancellation).await?;
+    let mut screens = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        screens.push(ScreenInfo {
+            id: read_u32(reader, cancellation).await?,
+            x: read_u16(reader, cancellation).await?,
+            y: read_u16(reader, cancellation).await?,
+            width: read_u16(reader, cancellation).await?,
+            height: read_u16(reader, cancellation).await?,
+            flags: read_u32(reader, cancellation).await?,
+        });
+    }
+    Ok(screens)
 }
 
 async fn read_latin1<R>(

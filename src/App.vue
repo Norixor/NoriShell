@@ -3,19 +3,13 @@ import { takeNativeTrayAction, readyNativeTrayActions } from "./core-api/native-
 import { navigateNativeResourceNotification } from "./native-resource-navigation";
 import { navigateNativeTrayAction } from "./native-tray-navigation";
 import { initializeStartupVaultTip } from "./startup-vault-tip";
-import {
-  getPendingSshSyncPreferences,
-  resolvePendingSshSyncPreferences,
-  startSshSyncPreferencesBridge,
-} from "./ssh-sync-preferences-bridge";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createPinia, getActivePinia } from "pinia";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { startPluginAppNavigation } from "./stores/pluginAppIntegrations";
-import { PREFERENCE_GROUP_IDS } from "./preferences-transfer";
 
 import {
   NvxAppHeader,
@@ -45,6 +39,7 @@ import { useNativeTerminalStore } from "./stores/nativeTerminal";
 import { setNativeNotificationContext, type NativeResourceNotificationClick } from "./core-api/native-notifications";
 import { requestExitAfterTerminalWorkspaceFlush } from "./terminal-workspace-persistence";
 import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./views/sftpPluginNavigation";
+import { routeRevealKey } from "./routeReveal";
 
 function isToolWindowExitCancelled(error: unknown) { return typeof error === "object" && error !== null && "code" in error && error.code === "app.tool_window_exit_cancelled"; }
 
@@ -85,6 +80,7 @@ const contentRouteLabel = computed(() => {
   return key ? t(key) : null;
 });
 const contentInstanceKey = ref(`route:${crypto.randomUUID()}`);
+const routeReady = ref(false);
 const contentAvailability = ref<Partial<Record<ContentRegion, number>>>({});
 const contentTargets = computed(() => contentRegions.map((region) => ({
   region,
@@ -92,9 +88,20 @@ const contentTargets = computed(() => contentRegions.map((region) => ({
 })));
 
 watch(routePath, () => {
+  routeReady.value = false;
   contentAvailability.value = {};
   contentInstanceKey.value = `route:${crypto.randomUUID()}`;
 }, { flush: "sync" });
+
+provide(routeRevealKey, (path) => {
+  const instanceKey = contentInstanceKey.value;
+  return () => {
+    if (routePath.value !== path || contentInstanceKey.value !== instanceKey) return;
+    void nextTick().then(() => {
+      if (routePath.value === path && contentInstanceKey.value === instanceKey) routeReady.value = true;
+    });
+  };
+});
 
 function updateContentAvailability(region: ContentRegion, instanceKey: string, count: number) {
   if (instanceKey !== contentInstanceKey.value) return;
@@ -187,52 +194,11 @@ async function confirmResourceCleanupAndExit() {
 }
 
 let disposeStartupVaultTip: (() => void) | undefined;
-let stopSshSyncPreferencesBridge: (() => void) | undefined;
-const pendingSshSyncPreferences = ref<Awaited<ReturnType<typeof getPendingSshSyncPreferences>>>(null);
-const sshSyncPreferencesReviewOpen = ref(false);
-const sshSyncPreferencesReviewBusy = ref(false);
-const sshSyncPreferencesReviewError = ref(false);
-let pendingSshSyncPreferencesRead = 0;
-async function refreshPendingSshSyncPreferences() {
-  const read = ++pendingSshSyncPreferencesRead;
-  try {
-    const pending = await getPendingSshSyncPreferences();
-    if (read !== pendingSshSyncPreferencesRead) return;
-    pendingSshSyncPreferences.value = pending;
-    if (!pendingSshSyncPreferences.value) sshSyncPreferencesReviewOpen.value = false;
-  } catch {
-    // A failed Core read must not clear a previously visible review request.
-    sshSyncPreferencesReviewError.value = true;
-  }
-}
-async function resolveSshSyncPreferences(resolution: "retry" | "useRemote" | "keepLocal") {
-  if (sshSyncPreferencesReviewBusy.value) return;
-  sshSyncPreferencesReviewBusy.value = true;
-  sshSyncPreferencesReviewError.value = false;
-  try {
-    await resolvePendingSshSyncPreferences(resolution);
-    await refreshPendingSshSyncPreferences();
-  } catch {
-    sshSyncPreferencesReviewError.value = true;
-    await refreshPendingSshSyncPreferences();
-  } finally {
-    sshSyncPreferencesReviewBusy.value = false;
-  }
-}
-function onSshSyncPreferencesChanged() { void refreshPendingSshSyncPreferences(); }
 onMounted(async () => {
   if (!isTauri()) return;
   void appUpdate.checkForUpdates();
   updateCheckTimer = setInterval(() => { void appUpdate.checkForUpdates(); }, 6 * 60 * 60 * 1000);
   disposeStartupVaultTip = initializeStartupVaultTip({ t, tips });
-  window.addEventListener("norishell:ssh-sync-preferences:changed", onSshSyncPreferencesChanged);
-  void startSshSyncPreferencesBridge().then((stop) => {
-    if (trayDisposed) stop();
-    else {
-      stopSshSyncPreferencesBridge = stop;
-      void refreshPendingSshSyncPreferences();
-    }
-  }).catch(() => { /* Core rejects collection when the trusted bridge is unavailable. */ });
   stopPluginAppNavigation = await startPluginAppNavigation(router);
   unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => { void router.push("/terminal"); });
   nativeTerminal.start();
@@ -336,10 +302,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (updateCheckTimer) clearInterval(updateCheckTimer);
   disposeStartupVaultTip?.();
-  stopSshSyncPreferencesBridge?.();
-  stopSshSyncPreferencesBridge = undefined;
-  pendingSshSyncPreferencesRead += 1;
-  window.removeEventListener("norishell:ssh-sync-preferences:changed", onSshSyncPreferencesChanged);
   trayDisposed = true;
   trayReady = false;
   trayUnlisteners.splice(0).forEach((unlisten) => unlisten());
@@ -382,22 +344,13 @@ onBeforeUnmount(() => {
           <NvxWorkspaceTabBar />
         </template>
       </NvxAppHeader>
-      <div
-        v-if="pendingSshSyncPreferences"
-        class="app-sync-preferences-banner"
-        role="status"
-      >
-        <span>{{ t("plugins.sshSyncPreferencesReview.title") }}</span>
-        <NvxButton
-          variant="secondary"
-          @click="sshSyncPreferencesReviewOpen = true"
-        >
-          {{ t("plugins.sshSyncPreferencesReview.title") }}
-        </NvxButton>
-      </div>
       <div class="app-workspace">
         <NvxNavigationRail />
-        <main class="app-main">
+        <main
+          class="app-main"
+          :class="{ 'app-main--route-pending': !routeReady }"
+          :aria-busy="!routeReady"
+        >
           <template
             v-for="target in contentTargets"
             :key="target.region"
@@ -444,72 +397,16 @@ onBeforeUnmount(() => {
             :preference-scope="`app:${routePath}`"
             :route-path="routePath"
           />
+          <div
+            v-if="!routeReady"
+            class="app-route-placeholder"
+            role="status"
+          >
+            {{ t("navigation.loading") }}
+          </div>
         </main>
       </div>
     </div>
-
-    <NvxDialog
-      plugin-protected
-      :model-value="sshSyncPreferencesReviewOpen && pendingSshSyncPreferences !== null"
-      :title="t('plugins.sshSyncPreferencesReview.title')"
-      :description="t(pendingSshSyncPreferences?.ready ? 'plugins.sshSyncPreferencesReview.description' : 'plugins.sshSyncPreferencesReview.preparedDescription')"
-      :close-label="t('plugins.sshSyncPreferencesReview.close')"
-      :dismissible="!sshSyncPreferencesReviewBusy"
-      size="lg"
-      @update:model-value="(open) => { if (!open) sshSyncPreferencesReviewOpen = false; }"
-    >
-      <ul class="app-sync-preferences-groups">
-        <li
-          v-for="groupId in PREFERENCE_GROUP_IDS"
-          :key="groupId"
-        >
-          <span>{{ t(`preferenceTransfer.groups.${groupId}`) }}</span>
-          <span>{{ pendingSshSyncPreferences?.results[groupId]
-            ? t(`plugins.sshSyncPreferencesReview.states.${pendingSshSyncPreferences.results[groupId]}`)
-            : t('plugins.sshSyncPreferencesReview.pending') }}</span>
-        </li>
-      </ul>
-      <p
-        v-if="sshSyncPreferencesReviewError"
-        role="alert"
-      >
-        {{ t("plugins.sshSyncPreferencesReview.error") }}
-      </p>
-      <template #actions>
-        <div class="app-sync-preferences-actions">
-          <NvxButton
-            data-nvx-dialog-initial-focus
-            variant="secondary"
-            :disabled="sshSyncPreferencesReviewBusy"
-            @click="sshSyncPreferencesReviewOpen = false"
-          >
-            {{ t("plugins.sshSyncPreferencesReview.close") }}
-          </NvxButton>
-          <NvxButton
-            variant="secondary"
-            :disabled="sshSyncPreferencesReviewBusy || !pendingSshSyncPreferences?.ready"
-            :loading="sshSyncPreferencesReviewBusy && pendingSshSyncPreferences?.ready"
-            @click="resolveSshSyncPreferences('retry')"
-          >
-            {{ t("plugins.sshSyncPreferencesReview.retry") }}
-          </NvxButton>
-          <NvxButton
-            variant="secondary"
-            :disabled="sshSyncPreferencesReviewBusy"
-            @click="resolveSshSyncPreferences('keepLocal')"
-          >
-            {{ t("plugins.sshSyncPreferencesReview.keepLocal") }}
-          </NvxButton>
-          <NvxButton
-            variant="danger"
-            :disabled="sshSyncPreferencesReviewBusy || !pendingSshSyncPreferences?.ready"
-            @click="resolveSshSyncPreferences('useRemote')"
-          >
-            {{ t("plugins.sshSyncPreferencesReview.useRemote") }}
-          </NvxButton>
-        </div>
-      </template>
-    </NvxDialog>
 
     <NvxDialog
       plugin-protected
@@ -558,36 +455,6 @@ onBeforeUnmount(() => {
 <style scoped>
 .app-workspace { flex-basis: 0; }
 
-.app-sync-preferences-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--nvx-space-3);
-  padding: var(--nvx-space-2) var(--nvx-space-4);
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
-  background: var(--nvx-color-bg-surface);
-}
-
-.app-sync-preferences-groups {
-  display: grid;
-  gap: var(--nvx-space-2);
-  margin: 0;
-  padding-inline-start: var(--nvx-space-5);
-}
-
-.app-sync-preferences-groups li {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--nvx-space-3);
-}
-
-.app-sync-preferences-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--nvx-space-2);
-  width: 100%;
-}
 
 .app-main {
   position: relative;
@@ -603,6 +470,25 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   overflow: auto;
+}
+
+.app-main--route-pending > :not(.app-route-placeholder) {
+  visibility: hidden;
+}
+
+.app-route-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--nvx-color-text-secondary);
+  background: var(--nvx-color-bg-canvas);
+  opacity: 0;
+  animation: app-route-placeholder-show 0s 120ms forwards;
+}
+
+@keyframes app-route-placeholder-show {
+  to { opacity: 1; }
 }
 
 .app-plugin-region {

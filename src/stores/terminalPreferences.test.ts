@@ -13,27 +13,27 @@ describe("terminal preferences interaction", () => {
     expect(store.preferences.pasteWarning).toBe("always");
     expect(store.preferences.interaction).toEqual(DEFAULT_TERMINAL_INTERACTION);
   });
-  it("rejects invalid interaction data and keeps the previous value if storage fails", () => {
+  it("rejects invalid interaction data and keeps the previous value if storage fails", async () => {
     const store = useTerminalPreferencesStore();
-    expect(store.setInteraction({ ...DEFAULT_TERMINAL_INTERACTION, scrollback: 999 })).toBe(false);
+    expect(await store.setInteraction({ ...DEFAULT_TERMINAL_INTERACTION, scrollback: 999 })).toBe(false);
     const storageSpy = vi.spyOn(localStorage, "setItem").mockImplementation(() => { throw new Error("quota"); });
-    expect(store.setInteraction({ ...DEFAULT_TERMINAL_INTERACTION, scrollback: 9_000, scrollSensitivity: 3, smoothScrollDuration: 100, doubleClickSelection: "path" })).toBe(false);
+    expect(await store.setInteraction({ ...DEFAULT_TERMINAL_INTERACTION, scrollback: 9_000, scrollSensitivity: 3, smoothScrollDuration: 100, doubleClickSelection: "path" })).toBe(false);
     expect(store.preferences.interaction.scrollback).toBe(5_000);
     storageSpy.mockRestore();
   });
-  it("persists a complete interaction object under the existing v1 terminal features key", () => {
+  it("persists a complete interaction object under the existing v1 terminal features key", async () => {
     const store = useTerminalPreferencesStore();
     const interaction = { ...DEFAULT_TERMINAL_INTERACTION, scrollback: 9_000, scrollSensitivity: 3, smoothScrollDuration: 200 as const, doubleClickSelection: "address" as const, copyOnSelect: true, rightClickBehavior: "paste" as const, sshReconnectOnInput: false };
-    expect(store.setInteraction(interaction)).toBe(true);
+    expect(await store.setInteraction(interaction)).toBe(true);
     expect(JSON.parse(localStorage.getItem(TERMINAL_PREFERENCES_KEY) ?? "{}").interaction).toEqual(interaction);
   });
 
-  it("uses bounded per-Host keyboard overrides and atomically replaces only global interaction fields", () => {
+  it("uses bounded per-Host keyboard overrides and atomically replaces only global interaction fields", async () => {
     const store = useTerminalPreferencesStore();
     const hostId = "host-a";
     const highlights = { enabled: true, rules: DEFAULT_HIGHLIGHT_RULES.map((rule) => ({ ...rule })) };
-    expect(store.setHighlights(highlights)).toBe(true);
-    expect(store.setHighlights(highlights, hostId)).toBe(true);
+    expect(await store.setHighlights(highlights)).toBe(true);
+    expect(await store.setHighlights(highlights, hostId)).toBe(true);
     expect(store.setHostKeyboard(hostId, {
       mode: "override",
       keyboard: { optionAsMetaLeft: true, optionAsMetaRight: false, backspaceMode: "bs" },
@@ -53,18 +53,18 @@ describe("terminal preferences interaction", () => {
     const hostKeyboard = JSON.parse(JSON.stringify(store.preferences.hostKeyboard));
     const globalHighlights = JSON.parse(JSON.stringify(store.preferences.highlights));
 
-    expect(store.replaceGlobalInteraction(next, expected)).toBe(true);
+    expect(await store.replaceGlobalInteraction(next, expected)).toBe(true);
     expect(store.preferences.interaction).toEqual(next.interaction);
     expect(store.preferences.pasteWarning).toBe("always");
     expect(store.preferences.interaction.sshReconnectOnInput).toBe(false);
     expect(store.preferences.hostHighlights).toEqual(hostHighlights);
     expect(store.preferences.hostKeyboard).toEqual(hostKeyboard);
     expect(store.preferences.highlights).toEqual(globalHighlights);
-    expect(store.replaceGlobalInteraction(
+    expect(await store.replaceGlobalInteraction(
       { interaction: { ...store.preferences.interaction, sshReconnectOnInput: true }, pasteWarning: store.preferences.pasteWarning },
       { interaction: { ...store.preferences.interaction, sshReconnectOnInput: true }, pasteWarning: store.preferences.pasteWarning },
     )).toBe(false);
-    expect(store.replaceGlobalInteraction(expected, expected)).toBe(false);
+    expect(await store.replaceGlobalInteraction(expected, expected)).toBe(false);
 
     expect(store.setHostKeyboard(hostId, { mode: "inherit" })).toBe(true);
     expect(store.preferences.hostKeyboard[hostId]).toBeUndefined();

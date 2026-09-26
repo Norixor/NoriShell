@@ -23,7 +23,10 @@ vi.mock("../core-api/offline-backup-client", () => ({
   discardOfflineBackup: client.discardBackup,
 }));
 vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: client.secureVault }));
-vi.mock("../core-api/client", () => ({ fetchVaultStatus: client.vaultStatus }));
+vi.mock("../core-api/client", () => ({
+  fetchVaultStatus: client.vaultStatus,
+  parseCoreApiError: (value: unknown) => typeof value === "object" && value !== null && "code" in value ? value : null,
+}));
 
 import OfflineBackup from "./OfflineBackup.vue";
 
@@ -68,6 +71,21 @@ describe("OfflineBackup", () => {
     }));
     expect(wrapper.text()).not.toContain(message);
     useTipsStore().clearAll();
+    wrapper.unmount();
+  });
+
+  it("keeps the Vault merge uncertainty distinct from a generic import failure", async () => {
+    client.openBackup.mockResolvedValue({ handle: "opened-file", inventory: { ssh: true, desktop: false, credentials: false, vault: false } });
+    client.previewBackup.mockResolvedValue({ handle: "preview-handle", hostCount: 1, desktopProfileCount: 0, credentialCount: 0, duplicateHostCount: 0, duplicateDesktopProfileCount: 0, skippedCount: 0 });
+    client.applyBackup.mockRejectedValue({ code: "offline-backup-vault-merge-uncertain", messageKey: "offlineBackup.vaultMergeUncertain" });
+    const wrapper = mountBackup();
+    await wrapper.findAll("button").find((item) => item.text() === "Choose backup file")!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((item) => item.text() === "Preview import")!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((item) => item.text() === "Confirm import")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain(i18n.global.t("offlineBackup.vaultMergeUncertain"));
     wrapper.unmount();
   });
 

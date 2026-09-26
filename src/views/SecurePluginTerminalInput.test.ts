@@ -1,7 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import NvxSelect from "../components/ui/NvxSelect.vue";
 import type { PluginTerminalInputProposal } from "../core-api/generated/core-api";
 import { i18n } from "../locales";
 
@@ -32,8 +31,9 @@ describe("SecurePluginTerminalInput", () => {
     const wrapper = mount(SecurePluginTerminalInput, { global: { plugins: [i18n] } });
     await flushPromises();
     expect(wrapper.text()).toContain("It is not a safe command.");
-    wrapper.getComponent(NvxSelect).vm.$emit("update:modelValue", "always");
+    await wrapper.get('.nvx-secure-window__decision input[value="always"]').setValue();
     await wrapper.vm.$nextTick();
+    expect(wrapper.get(".nvx-secure-window__action-hint").text()).toContain("commands remain specific");
     await wrapper.get("footer button:last-child").trigger("click");
     await flushPromises();
     expect(client.decidePluginTerminalInput).toHaveBeenCalledWith(expect.objectContaining({ decision: "approve", policy: "always" }));

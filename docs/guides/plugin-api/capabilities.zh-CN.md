@@ -1,6 +1,6 @@
 # 能力与受保护操作
 
-`PluginCapability` 是可审阅的意图，绝不是环境权限。当前取值为 `uiPanel`、`uiNavigation`、`uiPage`、`uiWebviewIsolated`、`uiHostDomObserve`、`uiHostDomMutate`、`uiHostCss`、`clipboardWrite`、`terminalProvider`、`deviceSerial`、`terminalMetadata`、`terminalObserve`、`terminalAnnotation`、`terminalProposeInput`、`terminalRequestInput`、`hostMetadataRead`、`hostMutationPropose`、`hostSessionRequest`、`remoteInspect`、`remoteExecRequest`、`networkDomain`、`localFiles`、`localProcess`、`storagePlugin`、`credentialsPlugin`、`sftpRead`、`sftpWrite`、`metricsRead` 和 `sshSync`。
+`PluginCapability` 是可审阅的意图，绝不是环境权限。当前取值为 `uiPanel`、`uiNavigation`、`uiPage`、`uiWebviewIsolated`、`uiHostDomObserve`、`uiHostDomMutate`、`uiHostCss`、`clipboardWrite`、`terminalProvider`、`deviceSerial`、`terminalMetadata`、`terminalObserve`、`terminalAnnotation`、`terminalProposeInput`、`terminalRequestInput`、`hostMetadataRead`、`hostMutationPropose`、`hostSessionRequest`、`remoteInspect`、`remoteExecRequest`、`networkDomain`、`localFiles`、`localProcess`、`storagePlugin`、`credentialsPlugin`、`sftpRead`、`sftpWrite`、`metricsRead`、`sshSync`、`appPreferencesRead` 和 `terminalHistoryRead`。
 
 Core 会在准入和真正受保护写入前，核验 operation、精确 target、package identity/hash、当前 grant epoch、owner、scope 与 generation。因此 capability grant 不能序列化到 handle、复制给其他 resource，也不能跨 replacement/revoke 存活。网络支持类型化 HTTP、WSS、TCP、UDP 和 TLS resource。SFTP 与 remote exec 是独立 Core resource，均不暴露原始 SSH channel。本地 process 不是系统 sandbox。credential 输入与精确 origin 注入由 Core 控制。terminal input 是逐次受保护审批，实际写入时会重核对 target focus、input ownership 和 generation。
 
@@ -11,6 +11,10 @@ guest 只能通过 `permissions`、`permissionRevoke` 和 `permissionsForget` �
 `onOpen`、timer、provider callback 与 workflow 自动 step 都是后台上下文，不能打开 protected prompt、创建/解锁 Vault、请求 terminal input 或把可见 surface 当作批准。应返回 `interactionRequired`、`vaultMissing`、`vaultLocked` 或 `vaultRequiresReload`，等待明确用户 action。源码出现或 `describe` 列出均不代表 native、hardware、macOS 或 Windows 已验收；以[实施状态](../../../README.zh-CN.md#安装与快速开始)为准。
 
 
+## 分类权限
+
+`sshSync` 保护主机、凭据和远程桌面的 exchange 原语，不授予应用偏好或终端历史读取权。`appPreferencesRead` 与 `terminalHistoryRead` 是独立权限；后者还要求显式用户动作、历史采集已开启且 Vault 可用。`dataCatalog` 仅供发现，不构成授权。
+
 ## SSH 与远程桌面同步
 
-`sshSync` 同时承载可移植 SSH 与 RDP/VNC 配置。Core 负责范围、依赖、保存密码的加密及恢复；插件只声明端点并展示聚合事实，不能读取密码或原始配置。V3 新写入支持桌面配置；可读取受认证的 V2，旧客户端拒绝 V3。配置与密码可独立选择，取消范围不会删除本地对象。真实平台和云端验收边界见[实现状态](../../../README.zh-CN.md#安装与快速开始)。
+`sshSync` 提供按类别受保护的 exchange 原语。插件选择类别、HTTP 操作和冲突方向；Core 守住加密、秘密、本机应用与基线核验。Core service 接线通过 Cargo 检查；原生和端到端验收尚未完成。

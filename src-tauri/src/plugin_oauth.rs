@@ -7,7 +7,7 @@
 //! signer, provider ID and configuration digest.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fs::{self, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use norishell_core_api::SecretRefId;
+use norishell_core_api::{PluginOperationId, SecretRefId};
 use norishell_secret_vault::SecretKind;
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,8 @@ use crate::vault_service::{VaultSecretInsert, VaultService, VaultServiceError};
 const STATE_SCHEMA_VERSION: u16 = 2;
 const MAX_STATE_BYTES: u64 = 64 * 1024;
 const MAX_TOKEN_BYTES: usize = 256 * 1024;
+const MAX_TRANSFER_SIGNERS: usize = 4096;
+const MAX_TRANSFER_MARKERS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeAccountState {
@@ -72,6 +74,8 @@ pub(crate) enum NativeAuthError {
     VaultLocked,
     #[error("the local authorization state is unavailable")]
     StateUnavailable,
+    #[error("this account is not signed in")]
+    SessionMissing,
     #[error("another account operation is already running")]
     OperationInProgress,
     #[error("the saved account session has expired")]
@@ -108,6 +112,8 @@ struct StoredAuthState {
     configuration_sha256: String,
     refresh_token_ref: Option<String>,
     #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
     retired_secret_refs: Vec<String>,
 }
 
@@ -120,6 +126,7 @@ impl Default for StoredAuthState {
             profile_id: String::new(),
             configuration_sha256: String::new(),
             refresh_token_ref: None,
+            session_id: None,
             retired_secret_refs: Vec::new(),
         }
     }
@@ -199,6 +206,12 @@ enum CredentialAuthResponse {
     Challenge(PendingAuthChallenge),
 }
 
+#[derive(Clone, Copy)]
+enum TokenAcceptance {
+    NewSession,
+    Refresh,
+}
+
 impl PluginOAuthService {
     pub(crate) fn start(
         app_data_directory: impl AsRef<Path>,
@@ -220,6 +233,7 @@ impl PluginOAuthService {
             .join("oauth")
             .join(sha256_text(&configuration.plugin_id))
             .join(format!("{profile_hash}.json"));
+        transfer_matching_state(app_data_directory.as_ref(), &configuration, &state_path)?;
         let stored = load_state(&state_path).ok().and_then(|mut state| {
             // An empty account record owns no authorization material, so an
             // updated plugin/provider configuration can safely rebind it. A
@@ -304,6 +318,43 @@ impl PluginOAuthService {
 
     pub(crate) fn configuration_digest(&self) -> String {
         configuration_sha256(&self.configuration)
+    }
+
+    pub(crate) fn session_id(&self) -> Option<String> {
+        if !self.vault.is_unlocked() {
+            return None;
+        }
+        let (session_id, refresh_token_ref) = {
+            let runtime = self
+                .runtime
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if runtime.refresh_expired {
+                return None;
+            }
+            let stored = runtime.stored.as_ref()?;
+            (
+                stored.session_id.clone()?,
+                stored.refresh_token_ref.clone()?,
+            )
+        };
+        let secret_ref = SecretRefId::parse(&refresh_token_ref).ok()?;
+        let token = self
+            .vault
+            .read_secret(&secret_ref, SecretKind::OAuthRefreshToken)
+            .ok()?;
+        if token.expose().is_empty() || token.expose().len() > MAX_TOKEN_BYTES {
+            return None;
+        }
+        let runtime = self
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stored = runtime.stored.as_ref()?;
+        (!runtime.refresh_expired
+            && stored.session_id.as_deref() == Some(&session_id)
+            && stored.refresh_token_ref.as_deref() == Some(&refresh_token_ref))
+        .then_some(session_id)
     }
 
     pub(crate) fn matches_configuration(&self, configuration: &PluginOAuthConfiguration) -> bool {
@@ -419,7 +470,7 @@ impl PluginOAuthService {
         self.set_authorizing(false);
         match response? {
             CredentialAuthResponse::Token(token) => {
-                self.persist_token_response(token)?;
+                self.persist_token_response(token, TokenAcceptance::NewSession)?;
                 self.runtime
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -473,7 +524,7 @@ impl PluginOAuthService {
         self.set_authorizing(false);
         match response? {
             CredentialAuthResponse::Token(token) => {
-                self.persist_token_response(token)?;
+                self.persist_token_response(token, TokenAcceptance::NewSession)?;
                 self.runtime
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -524,12 +575,14 @@ impl PluginOAuthService {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 runtime.access_token = None;
                 runtime.refresh_expired = true;
+                drop(runtime);
+                self.invalidate_session_id()?;
                 return Err(NativeAuthError::RefreshExpired);
             }
             Err(error) => return Err(error),
         };
         let access = Zeroizing::new(response.access_token.clone());
-        self.persist_token_response(response)?;
+        self.persist_token_response(response, TokenAcceptance::Refresh)?;
         Ok(access)
     }
 
@@ -575,6 +628,7 @@ impl PluginOAuthService {
     fn persist_token_response(
         &self,
         mut response: OAuthTokenResponse,
+        acceptance: TokenAcceptance,
     ) -> Result<(), NativeAuthError> {
         validate_token_response(&response, &self.configuration.scopes)?;
         let new_ref = SecretRefId::new();
@@ -589,6 +643,11 @@ impl PluginOAuthService {
 
         let mut next = self.stored_state()?;
         next.configuration_sha256 = configuration_sha256(&self.configuration);
+        if matches!(acceptance, TokenAcceptance::NewSession)
+            || (next.session_id.is_none() && next.refresh_token_ref.is_some())
+        {
+            next.session_id = Some(Uuid::new_v4().to_string());
+        }
         if let Some(previous) = next.refresh_token_ref.replace(new_ref.as_str().to_owned())
             && previous != new_ref.as_str()
             && !next.retired_secret_refs.contains(&previous)
@@ -626,7 +685,7 @@ impl PluginOAuthService {
         let secret_ref = stored
             .refresh_token_ref
             .as_deref()
-            .ok_or(NativeAuthError::StateUnavailable)
+            .ok_or(NativeAuthError::SessionMissing)
             .and_then(|value| {
                 SecretRefId::parse(value).map_err(|_| NativeAuthError::StateUnavailable)
             })?;
@@ -641,6 +700,7 @@ impl PluginOAuthService {
 
     fn clear_persisted_session(&self) -> Result<(), NativeAuthError> {
         let mut next = self.stored_state()?;
+        next.session_id = None;
         if let Some(current) = next.refresh_token_ref.take()
             && !next.retired_secret_refs.contains(&current)
         {
@@ -660,6 +720,22 @@ impl PluginOAuthService {
             runtime.refresh_expired = false;
         }
         self.cleanup_retired_secrets()
+    }
+
+    fn invalidate_session_id(&self) -> Result<(), NativeAuthError> {
+        let mut next = self.stored_state()?;
+        if next.session_id.take().is_none() {
+            return Ok(());
+        }
+        if let Err(error) = persist_state(&self.state_path, &next) {
+            self.mark_state_unavailable();
+            return Err(error.into());
+        }
+        self.runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stored = Some(next);
+        Ok(())
     }
 
     fn cleanup_retired_secrets(&self) -> Result<(), NativeAuthError> {
@@ -713,6 +789,293 @@ impl PluginOAuthService {
     }
 }
 
+fn transfer_marker_path(app_data_directory: &Path, plugin_id: &str, new_signer: &str) -> PathBuf {
+    app_data_directory
+        .join("plugins")
+        .join("oauth")
+        .join(sha256_text(plugin_id))
+        .join(format!(".transfer-{new_signer}"))
+}
+
+fn transfer_rollback_path(
+    app_data_directory: &Path,
+    plugin_id: &str,
+    operation_id: &PluginOperationId,
+) -> PathBuf {
+    transfer_marker_path(app_data_directory, plugin_id, "").with_file_name(format!(
+        ".oauth-transfer-rollback-{}",
+        operation_id.as_str()
+    ))
+}
+
+fn read_transfer_signers(path: &Path) -> Result<Vec<String>, NativeAuthError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| NativeAuthError::StateUnavailable)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > (MAX_TRANSFER_SIGNERS * 65) as u64
+    {
+        return Err(NativeAuthError::StateUnavailable);
+    }
+    let value = fs::read_to_string(path).map_err(|_| NativeAuthError::StateUnavailable)?;
+    let signers = value.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut unique = BTreeSet::new();
+    if signers.is_empty()
+        || signers.len() > MAX_TRANSFER_SIGNERS
+        || signers
+            .iter()
+            .any(|signer| !valid_sha256(signer) || !unique.insert(signer))
+    {
+        return Err(NativeAuthError::StateUnavailable);
+    }
+    Ok(signers)
+}
+
+fn write_transfer_signers(path: &Path, signers: &[String]) -> Result<(), NativeAuthError> {
+    let parent = path.parent().ok_or(NativeAuthError::LocalCommit)?;
+    fs::create_dir_all(parent).map_err(|_| NativeAuthError::LocalCommit)?;
+    let temporary = parent.join(format!(".oauth-transfer-write-{}", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let result = (|| -> std::io::Result<()> {
+        let mut file = options.open(&temporary)?;
+        file.write_all(signers.join("\n").as_bytes())?;
+        file.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err(NativeAuthError::LocalCommit);
+    }
+    if replace_file(&temporary, path).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err(NativeAuthError::LocalCommit);
+    }
+    sync_parent_directory(parent).map_err(|_| NativeAuthError::LocalCommit)
+}
+
+pub(crate) fn record_oauth_signer_transfer(
+    app_data_directory: &Path,
+    plugin_id: &str,
+    old_signer: &str,
+    new_signer: &str,
+    operation_id: &PluginOperationId,
+) -> Result<(), NativeAuthError> {
+    if !valid_identifier(plugin_id, 160)
+        || !valid_sha256(old_signer)
+        || !valid_sha256(new_signer)
+        || old_signer == new_signer
+    {
+        return Err(NativeAuthError::StateUnavailable);
+    }
+    let path = transfer_marker_path(app_data_directory, plugin_id, new_signer);
+    let mut signers = match fs::symlink_metadata(&path) {
+        Ok(_) => read_transfer_signers(&path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return Err(NativeAuthError::StateUnavailable),
+    };
+    let rollback = transfer_rollback_path(app_data_directory, plugin_id, operation_id);
+    let parent = rollback.parent().ok_or(NativeAuthError::LocalCommit)?;
+    fs::create_dir_all(parent).map_err(|_| NativeAuthError::LocalCommit)?;
+    if fs::symlink_metadata(&rollback).is_ok() {
+        return Err(NativeAuthError::StateUnavailable);
+    }
+    let temporary = parent.join(format!(".oauth-transfer-write-{}", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let snapshot_text = format!("{new_signer}\n{}", signers.join("\n"));
+    let write_result = (|| -> std::io::Result<()> {
+        let mut snapshot = options.open(&temporary)?;
+        snapshot.write_all(snapshot_text.as_bytes())?;
+        snapshot.sync_all()
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err(NativeAuthError::LocalCommit);
+    }
+    if fs::rename(&temporary, &rollback).is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err(NativeAuthError::LocalCommit);
+    }
+    sync_parent_directory(parent).map_err(|_| NativeAuthError::LocalCommit)?;
+    if signers.first().is_some_and(|signer| signer == old_signer) {
+        return Ok(());
+    }
+    signers.retain(|signer| signer != old_signer);
+    signers.insert(0, old_signer.to_owned());
+    if signers.len() > MAX_TRANSFER_SIGNERS {
+        return Err(NativeAuthError::StateUnavailable);
+    }
+    write_transfer_signers(&path, &signers)
+}
+
+pub(crate) fn discard_oauth_signer_transfer(
+    app_data_directory: &Path,
+    plugin_id: &str,
+    operation_id: &PluginOperationId,
+) -> Result<(), NativeAuthError> {
+    let rollback = transfer_rollback_path(app_data_directory, plugin_id, operation_id);
+    let (new_signer, original) = match read_transfer_rollback(&rollback)? {
+        Some(snapshot) => snapshot,
+        None => return Ok(()),
+    };
+    let marker = transfer_marker_path(app_data_directory, plugin_id, &new_signer);
+    if original.is_empty() {
+        match fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                fs::remove_file(&marker).map_err(|_| NativeAuthError::LocalCommit)?;
+            }
+            Ok(_) => return Err(NativeAuthError::StateUnavailable),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(NativeAuthError::LocalCommit),
+        }
+    } else {
+        write_transfer_signers(&marker, &original)?;
+    }
+    finalize_oauth_signer_transfer(app_data_directory, plugin_id, operation_id)
+}
+
+fn read_transfer_rollback(path: &Path) -> Result<Option<(String, Vec<String>)>, NativeAuthError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(NativeAuthError::StateUnavailable),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > ((MAX_TRANSFER_SIGNERS + 1) * 65) as u64
+    {
+        return Err(NativeAuthError::StateUnavailable);
+    }
+    let value = fs::read_to_string(path).map_err(|_| NativeAuthError::StateUnavailable)?;
+    let (new_signer, previous) = value
+        .split_once('\n')
+        .ok_or(NativeAuthError::StateUnavailable)?;
+    if !valid_sha256(new_signer) {
+        return Err(NativeAuthError::StateUnavailable);
+    }
+    let signers = if previous.is_empty() {
+        Vec::new()
+    } else {
+        previous.lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let mut unique = BTreeSet::new();
+    if signers.len() > MAX_TRANSFER_SIGNERS
+        || signers
+            .iter()
+            .any(|signer| !valid_sha256(signer) || !unique.insert(signer))
+    {
+        return Err(NativeAuthError::StateUnavailable);
+    }
+    Ok(Some((new_signer.to_owned(), signers)))
+}
+
+pub(crate) fn finalize_oauth_signer_transfer(
+    app_data_directory: &Path,
+    plugin_id: &str,
+    operation_id: &PluginOperationId,
+) -> Result<(), NativeAuthError> {
+    let rollback = transfer_rollback_path(app_data_directory, plugin_id, operation_id);
+    match fs::symlink_metadata(&rollback) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::remove_file(&rollback).map_err(|_| NativeAuthError::LocalCommit)?;
+            sync_parent_directory(rollback.parent().ok_or(NativeAuthError::LocalCommit)?)
+                .map_err(|_| NativeAuthError::LocalCommit)
+        }
+        Ok(_) => Err(NativeAuthError::StateUnavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(NativeAuthError::LocalCommit),
+    }
+}
+
+fn transfer_matching_state(
+    app_data_directory: &Path,
+    configuration: &PluginOAuthConfiguration,
+    destination: &Path,
+) -> Result<(), NativeAuthError> {
+    let mut queue = VecDeque::from([configuration.signer_fingerprint_sha256.clone()]);
+    let mut visited = BTreeSet::new();
+    while let Some(signer) = queue.pop_front() {
+        if !visited.insert(signer.clone()) {
+            continue;
+        }
+        if visited.len() > MAX_TRANSFER_MARKERS {
+            return Err(NativeAuthError::StateUnavailable);
+        }
+        let marker = transfer_marker_path(app_data_directory, &configuration.plugin_id, &signer);
+        let old_signers = match fs::symlink_metadata(&marker) {
+            Ok(_) => read_transfer_signers(&marker)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(NativeAuthError::StateUnavailable),
+        };
+        for old_signer in old_signers {
+            if visited.contains(&old_signer) {
+                continue;
+            }
+            let mut previous = configuration.clone();
+            previous.signer_fingerprint_sha256 = old_signer.clone();
+            let previous_digest = configuration_sha256(&previous);
+            let previous_path = destination
+                .parent()
+                .ok_or(NativeAuthError::StateUnavailable)?
+                .join(format!(
+                    "{}.json",
+                    sha256_text(&format!(
+                        "{}\0{}\0{}\0{}",
+                        previous.plugin_id, old_signer, previous.profile_id, previous_digest
+                    ))
+                ));
+            if previous_path.exists() {
+                let mut state = load_state(&previous_path)?;
+                if state.owner_plugin_id != configuration.plugin_id
+                    || state.owner_signer_fingerprint_sha256 != old_signer
+                    || state.profile_id != configuration.profile_id
+                    || state.configuration_sha256 != previous_digest
+                {
+                    continue;
+                }
+                if destination.exists() {
+                    let current = load_state(destination)?;
+                    if current.owner_plugin_id == configuration.plugin_id
+                        && current.owner_signer_fingerprint_sha256
+                            == configuration.signer_fingerprint_sha256
+                        && current.profile_id == configuration.profile_id
+                        && current.configuration_sha256 == configuration_sha256(configuration)
+                        && current.refresh_token_ref == state.refresh_token_ref
+                        && current.session_id == state.session_id
+                    {
+                        fs::remove_file(&previous_path)
+                            .map_err(|_| NativeAuthError::LocalCommit)?;
+                        sync_parent_directory(
+                            destination.parent().ok_or(NativeAuthError::LocalCommit)?,
+                        )
+                        .map_err(|_| NativeAuthError::LocalCommit)?;
+                    }
+                    return Ok(());
+                }
+                state.owner_signer_fingerprint_sha256 =
+                    configuration.signer_fingerprint_sha256.clone();
+                state.configuration_sha256 = configuration_sha256(configuration);
+                persist_state(destination, &state).map_err(NativeAuthError::from)?;
+                fs::remove_file(&previous_path).map_err(|_| NativeAuthError::LocalCommit)?;
+                sync_parent_directory(destination.parent().ok_or(NativeAuthError::LocalCommit)?)
+                    .map_err(|_| NativeAuthError::LocalCommit)?;
+                return Ok(());
+            }
+            queue.push_back(old_signer);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn delete_plugin_oauth_data(
     app_data_directory: &Path,
     vault: &VaultService,
@@ -731,7 +1094,10 @@ pub(crate) fn delete_plugin_oauth_data(
         Err(_) => return Err(NativeAuthError::LocalCommit),
     };
     let mut matching = Vec::new();
-    for entry in entries.take(257) {
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_TRANSFER_MARKERS + 256 + 64 {
+            return Err(NativeAuthError::StateUnavailable);
+        }
         let entry = entry.map_err(|_| NativeAuthError::LocalCommit)?;
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
@@ -744,13 +1110,29 @@ pub(crate) fn delete_plugin_oauth_data(
         let state = load_state(&path)?;
         if state.owner_plugin_id == plugin_id {
             matching.push((path, state));
+            if matching.len() > 256 {
+                return Err(NativeAuthError::StateUnavailable);
+            }
         }
-    }
-    if matching.len() > 256 {
-        return Err(NativeAuthError::StateUnavailable);
     }
     for (path, state) in matching {
         delete_state_data(&path, vault, state)?;
+    }
+    for entry in fs::read_dir(&directory).map_err(|_| NativeAuthError::LocalCommit)? {
+        let entry = entry.map_err(|_| NativeAuthError::LocalCommit)?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".transfer-")
+            || name.starts_with(".oauth-transfer-write-")
+            || name.starts_with(".oauth-transfer-rollback-")
+        {
+            let metadata =
+                fs::symlink_metadata(entry.path()).map_err(|_| NativeAuthError::LocalCommit)?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(NativeAuthError::StateUnavailable);
+            }
+            fs::remove_file(entry.path()).map_err(|_| NativeAuthError::LocalCommit)?;
+        }
     }
     fs::remove_dir(&directory).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -775,6 +1157,7 @@ fn delete_state_data(
     {
         state.retired_secret_refs.push(current);
     }
+    state.session_id = None;
     persist_state(path, &state).map_err(NativeAuthError::from)?;
     let refs = state
         .retired_secret_refs
@@ -1032,6 +1415,10 @@ fn load_state(path: &Path) -> Result<StoredAuthState, NativeAuthError> {
         || (!state.configuration_sha256.is_empty() && !valid_sha256(&state.configuration_sha256))
         || state.retired_secret_refs.len() > 32
         || state
+            .session_id
+            .as_deref()
+            .is_some_and(|value| Uuid::parse_str(value).is_err())
+        || state
             .refresh_token_ref
             .iter()
             .chain(state.retired_secret_refs.iter())
@@ -1147,6 +1534,32 @@ mod tests {
         }
     }
 
+    fn test_token_response(refresh_token: &str) -> OAuthTokenResponse {
+        OAuthTokenResponse {
+            access_token: "test-access-token".to_owned(),
+            refresh_token: refresh_token.to_owned(),
+            token_type: "Bearer".to_owned(),
+            expires_in: 3600,
+            scope: None,
+            nonce: None,
+        }
+    }
+
+    #[test]
+    fn absent_session_is_distinct_from_corrupt_authorization_state() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let service = PluginOAuthService::start(
+            directory.path(),
+            VaultService::start(directory.path()),
+            test_configuration(),
+        )
+        .expect("start account service");
+        assert!(matches!(
+            service.read_refresh_token(),
+            Err(NativeAuthError::SessionMissing)
+        ));
+    }
+
     #[test]
     fn rejected_refresh_is_expired_while_server_failure_is_transient() {
         assert!(matches!(
@@ -1179,6 +1592,135 @@ mod tests {
     }
 
     #[test]
+    fn session_id_is_persisted_rotated_only_by_new_login_and_cleared_on_logout() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vault = VaultService::start(directory.path());
+        vault
+            .create_for_tests(b"test vault password")
+            .expect("create vault");
+        let configuration = test_configuration();
+        let service =
+            PluginOAuthService::start(directory.path(), vault.clone(), configuration.clone())
+                .expect("start account service");
+        assert_eq!(service.session_id(), None);
+
+        service
+            .persist_token_response(
+                test_token_response("first-refresh"),
+                TokenAcceptance::NewSession,
+            )
+            .expect("accept login token");
+        let first_id = service.session_id().expect("session ID after login");
+        assert_eq!(
+            load_state(&service.state_path).unwrap().session_id,
+            Some(first_id.clone())
+        );
+
+        service
+            .persist_token_response(
+                test_token_response("rotated-refresh"),
+                TokenAcceptance::Refresh,
+            )
+            .expect("rotate refresh token");
+        assert_eq!(service.session_id(), Some(first_id.clone()));
+
+        let restored = PluginOAuthService::start(directory.path(), vault.clone(), configuration)
+            .expect("restore account service");
+        assert_eq!(restored.session_id(), Some(first_id.clone()));
+
+        service.clear_persisted_session().expect("clear session");
+        assert_eq!(service.session_id(), None);
+        assert_eq!(restored.session_id(), None);
+        assert_eq!(load_state(&service.state_path).unwrap().session_id, None);
+
+        service
+            .persist_token_response(
+                test_token_response("next-login"),
+                TokenAcceptance::NewSession,
+            )
+            .expect("accept another login token");
+        assert_ne!(service.session_id(), Some(first_id));
+        vault.lock_for_tests().expect("lock vault");
+        assert_eq!(service.session_id(), None);
+    }
+
+    #[test]
+    fn legacy_session_without_id_becomes_identified_only_after_successful_refresh() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vault = VaultService::start(directory.path());
+        vault
+            .create_for_tests(b"test vault password")
+            .expect("create vault");
+        let configuration = test_configuration();
+        let service =
+            PluginOAuthService::start(directory.path(), vault.clone(), configuration.clone())
+                .expect("start account service");
+        service
+            .persist_token_response(
+                test_token_response("legacy-refresh"),
+                TokenAcceptance::NewSession,
+            )
+            .expect("accept token");
+        let mut legacy = load_state(&service.state_path).expect("load state");
+        legacy.session_id = None;
+        persist_state(&service.state_path, &legacy).expect("persist legacy state");
+        let mut legacy_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(service.state_path.as_path()).unwrap()).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("session_id");
+        fs::write(
+            service.state_path.as_path(),
+            serde_json::to_vec(&legacy_json).unwrap(),
+        )
+        .expect("write legacy record without session ID");
+        let restored = PluginOAuthService::start(directory.path(), vault, configuration)
+            .expect("restore legacy state");
+        assert_eq!(restored.session_id(), None);
+        restored
+            .persist_token_response(
+                test_token_response("legacy-rotated"),
+                TokenAcceptance::Refresh,
+            )
+            .expect("refresh legacy token");
+        let refreshed_id = restored.session_id().expect("new ID after refresh");
+        assert_eq!(
+            load_state(&restored.state_path).unwrap().session_id,
+            Some(refreshed_id)
+        );
+    }
+
+    #[test]
+    fn session_id_requires_a_present_refresh_secret_and_is_invalidated_on_rejection() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vault = VaultService::start(directory.path());
+        vault
+            .create_for_tests(b"test vault password")
+            .expect("create vault");
+        let configuration = test_configuration();
+        let service =
+            PluginOAuthService::start(directory.path(), vault.clone(), configuration.clone())
+                .expect("start account service");
+        service
+            .persist_token_response(test_token_response("refresh"), TokenAcceptance::NewSession)
+            .expect("accept token");
+        let stored = service.stored_state().expect("stored state");
+        let secret_ref = SecretRefId::parse(stored.refresh_token_ref.as_deref().unwrap()).unwrap();
+        vault.delete_secrets(&[secret_ref]).expect("remove secret");
+        assert_eq!(service.session_id(), None);
+
+        service
+            .persist_token_response(
+                test_token_response("replacement"),
+                TokenAcceptance::NewSession,
+            )
+            .expect("accept replacement token");
+        service.invalidate_session_id().expect("invalidate session");
+        assert_eq!(service.session_id(), None);
+        let restored = PluginOAuthService::start(directory.path(), vault, configuration)
+            .expect("restore invalidated state");
+        assert_eq!(restored.session_id(), None);
+    }
+
+    #[test]
     fn oauth_configuration_binds_signer_and_canonical_resource_origins() {
         let configuration = test_configuration();
         assert!(validate_configuration(&configuration).is_ok());
@@ -1200,6 +1742,235 @@ mod tests {
             configuration_sha256(&configuration),
             configuration_sha256(&different_origin)
         );
+    }
+
+    #[test]
+    fn same_version_signer_transfer_retains_login_only_for_identical_account_config() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vault = VaultService::start(directory.path());
+        vault
+            .create_for_tests(b"test vault password")
+            .expect("vault");
+        let old_configuration = test_configuration();
+        let old =
+            PluginOAuthService::start(directory.path(), vault.clone(), old_configuration.clone())
+                .expect("old account");
+        old.persist_token_response(test_token_response("refresh"), TokenAcceptance::NewSession)
+            .expect("save refresh token");
+        let old_path = old.state_path.as_path().to_path_buf();
+        let old_session = old.session_id();
+        let mut updated = old_configuration.clone();
+        updated.signer_fingerprint_sha256 = "b".repeat(64);
+        record_oauth_signer_transfer(
+            directory.path(),
+            &updated.plugin_id,
+            &old_configuration.signer_fingerprint_sha256,
+            &updated.signer_fingerprint_sha256,
+            &PluginOperationId::new(),
+        )
+        .expect("record authorized replacement");
+        let transferred =
+            PluginOAuthService::start(directory.path(), vault.clone(), updated.clone())
+                .expect("new account");
+        assert_eq!(
+            transferred.status().account_state,
+            NativeAccountState::Connected
+        );
+        assert_eq!(transferred.session_id(), old_session);
+        assert!(transferred.read_refresh_token().is_ok());
+        assert!(!old_path.exists());
+
+        let mut changed = updated;
+        changed.resource_origins = vec!["https://different.example.test".to_owned()];
+        let separate =
+            PluginOAuthService::start(directory.path(), vault, changed).expect("changed config");
+        assert_eq!(
+            separate.status().account_state,
+            NativeAccountState::Disconnected
+        );
+    }
+
+    #[test]
+    fn signer_transfer_cycle_finds_original_account_without_reusing_old_marker() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vault = VaultService::start(directory.path());
+        vault
+            .create_for_tests(b"test vault password")
+            .expect("vault");
+        let a = test_configuration();
+        let service = PluginOAuthService::start(directory.path(), vault.clone(), a.clone())
+            .expect("original account");
+        service
+            .persist_token_response(test_token_response("refresh"), TokenAcceptance::NewSession)
+            .expect("save account");
+        let session = service.session_id();
+        let b = "b".repeat(64);
+        let c = "c".repeat(64);
+        let first = PluginOperationId::new();
+        record_oauth_signer_transfer(
+            directory.path(),
+            &a.plugin_id,
+            &a.signer_fingerprint_sha256,
+            &b,
+            &first,
+        )
+        .expect("A to B");
+        finalize_oauth_signer_transfer(directory.path(), &a.plugin_id, &first).expect("finalize B");
+        let second = PluginOperationId::new();
+        record_oauth_signer_transfer(directory.path(), &a.plugin_id, &b, &c, &second)
+            .expect("B to C");
+        finalize_oauth_signer_transfer(directory.path(), &a.plugin_id, &second)
+            .expect("finalize C");
+        let failed = PluginOperationId::new();
+        record_oauth_signer_transfer(directory.path(), &a.plugin_id, &c, &b, &failed)
+            .expect("C to B");
+        discard_oauth_signer_transfer(directory.path(), &a.plugin_id, &failed)
+            .expect("rollback C to B");
+        assert_eq!(
+            read_transfer_signers(&transfer_marker_path(directory.path(), &a.plugin_id, &b))
+                .expect("remaining history"),
+            vec![a.signer_fingerprint_sha256.clone()],
+        );
+        record_oauth_signer_transfer(
+            directory.path(),
+            &a.plugin_id,
+            &c,
+            &b,
+            &PluginOperationId::new(),
+        )
+        .expect("retry C to B");
+        let mut returned = a;
+        returned.signer_fingerprint_sha256 = b;
+        let restored =
+            PluginOAuthService::start(directory.path(), vault, returned).expect("return to B");
+        assert_eq!(
+            restored.status().account_state,
+            NativeAccountState::Connected
+        );
+        assert_eq!(restored.session_id(), session);
+        assert!(restored.read_refresh_token().is_ok());
+    }
+
+    #[test]
+    fn failed_cycle_restores_marker_even_when_record_did_not_change_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let a = test_configuration();
+        let b = "b".repeat(64);
+        let first = PluginOperationId::new();
+        record_oauth_signer_transfer(
+            directory.path(),
+            &a.plugin_id,
+            &a.signer_fingerprint_sha256,
+            &b,
+            &first,
+        )
+        .expect("A to B");
+        finalize_oauth_signer_transfer(directory.path(), &a.plugin_id, &first).expect("commit B");
+        let second = PluginOperationId::new();
+        record_oauth_signer_transfer(
+            directory.path(),
+            &a.plugin_id,
+            &b,
+            &a.signer_fingerprint_sha256,
+            &second,
+        )
+        .expect("B to A");
+        finalize_oauth_signer_transfer(directory.path(), &a.plugin_id, &second).expect("commit A");
+        let marker = transfer_marker_path(directory.path(), &a.plugin_id, &b);
+        let original = read_transfer_signers(&marker).expect("original history");
+        let failed = PluginOperationId::new();
+        record_oauth_signer_transfer(
+            directory.path(),
+            &a.plugin_id,
+            &a.signer_fingerprint_sha256,
+            &b,
+            &failed,
+        )
+        .expect("repeat A to B");
+        discard_oauth_signer_transfer(directory.path(), &a.plugin_id, &failed)
+            .expect("rollback repeat");
+        assert_eq!(
+            read_transfer_signers(&marker).expect("restored history"),
+            original
+        );
+    }
+
+    #[test]
+    fn incomplete_unpublished_snapshot_cannot_block_recovery() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let configuration = test_configuration();
+        let next = "b".repeat(64);
+        let operation = PluginOperationId::new();
+        let marker = transfer_marker_path(directory.path(), &configuration.plugin_id, &next);
+        let parent = marker.parent().expect("oauth directory");
+        fs::create_dir_all(parent).expect("oauth directory");
+        let incomplete = parent.join(format!(".oauth-transfer-write-{}", Uuid::new_v4()));
+        fs::write(&incomplete, b"half-written snapshot").expect("interrupted temp write");
+        discard_oauth_signer_transfer(directory.path(), &configuration.plugin_id, &operation)
+            .expect("no published snapshot to recover");
+        assert!(!marker.exists());
+        record_oauth_signer_transfer(
+            directory.path(),
+            &configuration.plugin_id,
+            &configuration.signer_fingerprint_sha256,
+            &next,
+            &operation,
+        )
+        .expect("record independent of interrupted temp");
+        assert!(
+            read_transfer_rollback(&transfer_rollback_path(
+                directory.path(),
+                &configuration.plugin_id,
+                &operation,
+            ))
+            .expect("read complete snapshot")
+            .is_some()
+        );
+        discard_oauth_signer_transfer(directory.path(), &configuration.plugin_id, &operation)
+            .expect("restore original absence");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn long_update_chain_preserves_unstarted_account() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vault = VaultService::start(directory.path());
+        vault
+            .create_for_tests(b"test vault password")
+            .expect("vault");
+        let original = test_configuration();
+        let service = PluginOAuthService::start(directory.path(), vault.clone(), original.clone())
+            .expect("original account");
+        service
+            .persist_token_response(test_token_response("refresh"), TokenAcceptance::NewSession)
+            .expect("save account");
+        let session = service.session_id();
+        let mut previous = original.signer_fingerprint_sha256.clone();
+        for number in 1..=40 {
+            let next = format!("{number:064x}");
+            let operation = PluginOperationId::new();
+            record_oauth_signer_transfer(
+                directory.path(),
+                &original.plugin_id,
+                &previous,
+                &next,
+                &operation,
+            )
+            .expect("record update");
+            finalize_oauth_signer_transfer(directory.path(), &original.plugin_id, &operation)
+                .expect("commit update");
+            previous = next;
+        }
+        let mut latest = original;
+        latest.signer_fingerprint_sha256 = previous;
+        let restored = PluginOAuthService::start(directory.path(), vault, latest)
+            .expect("account after long update chain");
+        assert_eq!(
+            restored.status().account_state,
+            NativeAccountState::Connected
+        );
+        assert_eq!(restored.session_id(), session);
+        assert!(restored.read_refresh_token().is_ok());
     }
 
     #[test]
@@ -1327,9 +2098,14 @@ mod tests {
             profile_id: "primary".to_owned(),
             configuration_sha256: "b".repeat(64),
             refresh_token_ref: None,
+            session_id: None,
             retired_secret_refs: Vec::new(),
         };
         persist_state(&state_path, &state).expect("persist pointer");
+        for number in 0..260 {
+            let marker = oauth_directory.join(format!(".transfer-{number:064x}"));
+            write_transfer_signers(&marker, &["a".repeat(64)]).expect("history marker");
+        }
         let vault = VaultService::start(directory.path());
         delete_plugin_oauth_data(directory.path(), &vault, plugin_id).expect("delete plugin data");
         assert!(!oauth_directory.exists());

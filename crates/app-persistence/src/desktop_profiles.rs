@@ -26,7 +26,12 @@ pub fn validate_desktop_profile(profile: &DesktopProfile) -> Result<()> {
         || (profile.protocol == norishell_core_api::DesktopProtocol::Vnc
             && profile.audio_playback_enabled)
         || (profile.protocol == norishell_core_api::DesktopProtocol::Rdp
-            && profile.vnc_protocol_version != norishell_core_api::VncProtocolVersion::Auto)
+            && (profile.vnc_protocol_version != norishell_core_api::VncProtocolVersion::Auto
+                || profile.vnc_resolution_mode != norishell_core_api::VncResolutionMode::Server))
+        || (profile.protocol == norishell_core_api::DesktopProtocol::Vnc
+            && (profile.rdp_transport_mode != norishell_core_api::RdpTransportMode::Auto
+                || profile.rdp_graphics_mode != norishell_core_api::RdpGraphicsMode::Auto
+                || profile.rdp_resolution_mode != norishell_core_api::RdpResolutionMode::Fixed))
         || profile.width == 0
         || profile.height == 0
         || profile.width > 8192
@@ -477,6 +482,10 @@ mod tests {
             clipboard_enabled: false,
             audio_playback_enabled: false,
             vnc_protocol_version: norishell_core_api::VncProtocolVersion::Auto,
+            vnc_resolution_mode: norishell_core_api::VncResolutionMode::Server,
+            rdp_transport_mode: norishell_core_api::RdpTransportMode::Auto,
+            rdp_graphics_mode: norishell_core_api::RdpGraphicsMode::Auto,
+            rdp_resolution_mode: norishell_core_api::RdpResolutionMode::Fixed,
             revision: WireSequence::new(0),
         }
     }
@@ -520,11 +529,31 @@ mod tests {
             .unwrap()
             .remove("audioPlaybackEnabled");
         value.as_object_mut().unwrap().remove("vncProtocolVersion");
+        value.as_object_mut().unwrap().remove("vncResolutionMode");
+        value.as_object_mut().unwrap().remove("rdpTransportMode");
+        value.as_object_mut().unwrap().remove("rdpGraphicsMode");
+        value.as_object_mut().unwrap().remove("rdpResolutionMode");
         let restored: DesktopProfile = serde_json::from_value(value).unwrap();
         assert!(!restored.audio_playback_enabled);
         assert_eq!(
             restored.vnc_protocol_version,
             norishell_core_api::VncProtocolVersion::Auto
+        );
+        assert_eq!(
+            restored.vnc_resolution_mode,
+            norishell_core_api::VncResolutionMode::Server
+        );
+        assert_eq!(
+            restored.rdp_transport_mode,
+            norishell_core_api::RdpTransportMode::Auto
+        );
+        assert_eq!(
+            restored.rdp_graphics_mode,
+            norishell_core_api::RdpGraphicsMode::Auto
+        );
+        assert_eq!(
+            restored.rdp_resolution_mode,
+            norishell_core_api::RdpResolutionMode::Fixed
         );
         let mut audio = restored;
         audio.audio_playback_enabled = true;
@@ -536,6 +565,16 @@ mod tests {
                 .audio_playback_enabled
         );
         audio.protocol = norishell_core_api::DesktopProtocol::Vnc;
+        assert!(validate_desktop_profile(&audio).is_err());
+
+        audio.audio_playback_enabled = false;
+        audio.rdp_transport_mode = norishell_core_api::RdpTransportMode::TcpOnly;
+        assert!(validate_desktop_profile(&audio).is_err());
+        audio.rdp_transport_mode = norishell_core_api::RdpTransportMode::Auto;
+        audio.rdp_graphics_mode = norishell_core_api::RdpGraphicsMode::Bitmap;
+        assert!(validate_desktop_profile(&audio).is_err());
+        audio.rdp_graphics_mode = norishell_core_api::RdpGraphicsMode::Auto;
+        audio.rdp_resolution_mode = norishell_core_api::RdpResolutionMode::Adaptive;
         assert!(validate_desktop_profile(&audio).is_err());
     }
 
@@ -754,8 +793,13 @@ mod tests {
     fn desktop_profile_save_without_a_stage_remains_available() {
         let directory = tempfile::tempdir().unwrap();
         let mut repository = AppRepository::open(directory.path().join("desktop.sqlite3")).unwrap();
-        let saved = repository.save_desktop_profile(&profile()).unwrap();
+        let mut selected = profile();
+        selected.rdp_transport_mode = norishell_core_api::RdpTransportMode::TcpOnly;
+        selected.rdp_graphics_mode = norishell_core_api::RdpGraphicsMode::Bitmap;
+        selected.rdp_resolution_mode = norishell_core_api::RdpResolutionMode::Adaptive;
+        let saved = repository.save_desktop_profile(&selected).unwrap();
         assert!(saved.credential_ref_id.is_none());
+        assert_eq!(repository.list_desktop_profiles().unwrap(), vec![saved]);
         let receipt_count: i64 = repository
             .connection
             .query_row(
@@ -765,6 +809,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(receipt_count, 0);
+    }
+
+    #[test]
+    fn vnc_resolution_modes_persist_and_rdp_rejects_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut repository = AppRepository::open(directory.path().join("desktop.sqlite3")).unwrap();
+        let mut selected = profile();
+        selected.protocol = DesktopProtocol::Vnc;
+        selected.port = 5900;
+        for mode in [
+            norishell_core_api::VncResolutionMode::Fixed,
+            norishell_core_api::VncResolutionMode::Adaptive,
+        ] {
+            selected.vnc_resolution_mode = mode;
+            selected = repository.save_desktop_profile(&selected).unwrap();
+            assert_eq!(
+                repository.list_desktop_profiles().unwrap(),
+                vec![selected.clone()]
+            );
+        }
+        selected.protocol = DesktopProtocol::Rdp;
+        assert!(validate_desktop_profile(&selected).is_err());
     }
 
     #[test]

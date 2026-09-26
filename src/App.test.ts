@@ -1,10 +1,11 @@
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { createPinia } from "pinia";
-import { defineComponent, h, onMounted } from "vue";
-import { createMemoryHistory, createRouter } from "vue-router";
+import { defineComponent, h, onActivated, onMounted } from "vue";
+import { createMemoryHistory, createRouter, useRoute } from "vue-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App.vue";
+import { useRouteReveal } from "./routeReveal";
 import { usePluginsStore } from "./stores/plugins";
 import type { InstalledPluginSummary } from "./core-api/generated/core-api";
 
@@ -17,8 +18,6 @@ const hooks = vi.hoisted(() => ({
   listPluginNavigation: vi.fn().mockResolvedValue([]),
   runtimeInvalidated: undefined as undefined | ((event: { payload: { pluginId: string } }) => void),
   runtimeReady: undefined as undefined | ((event: { payload: InstalledPluginSummary }) => void),
-  preferencesPending: vi.fn().mockResolvedValue(null),
-  preferencesResolve: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
@@ -51,12 +50,6 @@ vi.mock("./core-api/client", () => ({
 vi.mock("./terminal-workspace-persistence", () => ({
   requestExitAfterTerminalWorkspaceFlush: hooks.flushAndExit,
 }));
-vi.mock("./ssh-sync-preferences-bridge", () => ({
-  startSshSyncPreferencesBridge: vi.fn().mockResolvedValue(() => {}),
-  getPendingSshSyncPreferences: hooks.preferencesPending,
-  resolvePendingSshSyncPreferences: hooks.preferencesResolve,
-}));
-
 const PluginTargetStub = defineComponent({
   name: "PluginTargetStub",
   props: {
@@ -68,12 +61,20 @@ const PluginTargetStub = defineComponent({
   setup: (props) => () => h("section", { class: "fixture-target" }, props.targetId),
 });
 
-async function mountApplication(path = "/terminal") {
+async function mountApplication(path = "/terminal", holdReadyOn: string[] = []) {
   const routeMounted = vi.fn();
+  const pendingReveals = new Map<string, () => void>();
   const routeComponent = defineComponent({
     name: "SshTerminalView",
     setup() {
-      onMounted(routeMounted);
+      const routePath = useRoute().path;
+      const reveal = useRouteReveal();
+      onMounted(() => {
+        routeMounted();
+        if (holdReadyOn.includes(routePath)) pendingReveals.set(routePath, reveal);
+        else reveal();
+      });
+      onActivated(() => { if (!holdReadyOn.includes(routePath)) reveal(); });
       return () => h("div", { class: "fixture-route" }, "Ordinary route");
     },
   });
@@ -104,7 +105,7 @@ async function mountApplication(path = "/terminal") {
     },
   });
   await flushPromises();
-  return { wrapper, router, routeMounted, pinia };
+  return { wrapper, router, routeMounted, pendingReveals, pinia };
 }
 
 const enabledPlugin: InstalledPluginSummary = {
@@ -138,49 +139,37 @@ describe("application exit failure", () => {
   });
 });
 
-describe("synchronized preference review", () => {
-  it("shows unresolved groups and waits for an explicit resolution", async () => {
-    hooks.preferencesPending.mockResolvedValue({
-      id: "review-1",
-      ready: true,
-      expected: { product: "NoriShell", version: 1, groups: {} },
-      desired: { product: "NoriShell", version: 1, groups: {} },
-      results: { appearance: "conflict" },
-    });
-    const { wrapper } = await mountApplication();
-    expect(wrapper.text()).toContain("plugins.sshSyncPreferencesReview.title");
-    expect(hooks.preferencesResolve).not.toHaveBeenCalled();
-
-    await wrapper.find(".app-sync-preferences-banner button").trigger("click");
-    expect(wrapper.text()).toContain("plugins.sshSyncPreferencesReview.states.conflict");
-    hooks.preferencesPending.mockResolvedValue(null);
-    const keepLocal = wrapper.findAll("button").find((button) => button.text().includes("plugins.sshSyncPreferencesReview.keepLocal"));
-    expect(keepLocal).toBeDefined();
-    await keepLocal!.trigger("click");
-    await flushPromises();
-    expect(hooks.preferencesResolve).toHaveBeenCalledWith("keepLocal");
-    expect(wrapper.find(".app-sync-preferences-banner").exists()).toBe(false);
-  });
-
-  it("allows only clearing an unconfirmed prepared restore", async () => {
-    hooks.preferencesPending.mockResolvedValue({
-      id: "prepared-1",
-      ready: false,
-      expected: { product: "NoriShell", version: 1, groups: {} },
-      desired: { product: "NoriShell", version: 1, groups: {} },
-      results: {},
-    });
-    const { wrapper } = await mountApplication();
-    await wrapper.find(".app-sync-preferences-banner button").trigger("click");
-    expect(wrapper.text()).toContain("plugins.sshSyncPreferencesReview.preparedDescription");
-    const button = (key: string) => wrapper.findAll("button").find((item) => item.text().includes(`plugins.sshSyncPreferencesReview.${key}`));
-    expect(button("retry")?.attributes("disabled")).toBeDefined();
-    expect(button("useRemote")?.attributes("disabled")).toBeDefined();
-    expect(button("keepLocal")?.attributes("disabled")).toBeUndefined();
-  });
-});
-
 describe("ordinary app content extension regions", () => {
+  it("shows a new route only after it reports ready and ignores a stale route", async () => {
+    const { wrapper, router, pendingReveals } = await mountApplication("/terminal", ["/hosts", "/sftp"]);
+    expect(wrapper.get(".app-main").attributes("aria-busy")).toBe("false");
+
+    await router.push("/hosts");
+    await flushPromises();
+    expect(wrapper.get(".app-main").attributes("aria-busy")).toBe("true");
+    expect(wrapper.get(".app-route-placeholder").text()).toBe("navigation.loading");
+
+    await router.push("/sftp");
+    await flushPromises();
+    pendingReveals.get("/hosts")?.();
+    await flushPromises();
+    expect(wrapper.get(".app-main").attributes("aria-busy")).toBe("true");
+
+    pendingReveals.get("/sftp")?.();
+    await flushPromises();
+    expect(wrapper.get(".app-main").attributes("aria-busy")).toBe("false");
+    expect(wrapper.find(".app-route-placeholder").exists()).toBe(false);
+  });
+
+  it("reveals a cached terminal when returning from another page", async () => {
+    const { wrapper, router } = await mountApplication("/terminal");
+    await router.push("/hosts");
+    await flushPromises();
+    await router.push("/terminal");
+    await flushPromises();
+    expect(wrapper.get(".app-main").attributes("aria-busy")).toBe("false");
+  });
+
   it("mounts the four registered targets without allocating empty regions or remounting the route", async () => {
     const { wrapper, routeMounted } = await mountApplication();
     const targets = wrapper.findAllComponents(PluginTargetStub);

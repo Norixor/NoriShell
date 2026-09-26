@@ -56,3 +56,5 @@ handle 来自资源创建结果。按 sequence 顺序处理事件并保持轮询
 ## 相关方法
 
 [describe](./describe.zh-CN.md) · [resourcesList](./resourcesList.zh-CN.md) · [resourceClose](./resourceClose.zh-CN.md)
+
+对 `httpExchange`，`network.httpExchangeCompleted` 提供不透明收据和可选响应 Blob 句柄；核对状态后交给 dataInspect 或 dataCheckpoint。事件不携带交换包字节。

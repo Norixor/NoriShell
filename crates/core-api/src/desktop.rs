@@ -22,6 +22,58 @@ pub enum VncProtocolVersion {
     Rfb38,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum VncResolutionMode {
+    #[default]
+    Server,
+    Fixed,
+    Adaptive,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum RdpTransportMode {
+    #[default]
+    Auto,
+    TcpOnly,
+    UdpRequired,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum RdpGraphicsMode {
+    #[default]
+    Auto,
+    RemoteFx,
+    Avc420,
+    Bitmap,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum RdpResolutionMode {
+    #[default]
+    Fixed,
+    Adaptive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum RdpTransportActual {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum RdpGraphicsActual {
+    Bitmap,
+    RemoteFx,
+    RemoteFxProgressive,
+    Avc420,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopAvailability {
@@ -51,6 +103,14 @@ pub struct DesktopProfile {
     pub audio_playback_enabled: bool,
     #[serde(default)]
     pub vnc_protocol_version: VncProtocolVersion,
+    #[serde(default)]
+    pub vnc_resolution_mode: VncResolutionMode,
+    #[serde(default)]
+    pub rdp_transport_mode: RdpTransportMode,
+    #[serde(default)]
+    pub rdp_graphics_mode: RdpGraphicsMode,
+    #[serde(default)]
+    pub rdp_resolution_mode: RdpResolutionMode,
     pub revision: WireSequence,
 }
 
@@ -138,6 +198,12 @@ pub struct DesktopSessionSummary {
     pub frame_sequence: WireSequence,
     pub audio_state: DesktopAudioState,
     pub audio_muted: bool,
+    #[serde(default)]
+    #[ts(optional)]
+    pub rdp_transport_actual: Option<RdpTransportActual>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub rdp_graphics_actual: Option<RdpGraphicsActual>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -146,6 +212,16 @@ pub struct DesktopSessionRequest {
     pub meta: RequestMeta,
     pub session_id: String,
     pub generation: WireSequence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopResolutionRequest {
+    pub meta: RequestMeta,
+    pub session_id: String,
+    pub generation: WireSequence,
+    pub width: u16,
+    pub height: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -282,7 +358,10 @@ impl std::fmt::Debug for DesktopPromptDecision {
 
 #[cfg(test)]
 mod tests {
-    use super::{DesktopPasswordStage, DesktopProfileSaveRequest};
+    use super::{
+        DesktopPasswordStage, DesktopProfileSaveRequest, RdpGraphicsMode, RdpResolutionMode,
+        RdpTransportMode, VncResolutionMode,
+    };
     use crate::{HostCreatePasswordStageId, OperationId};
 
     #[test]
@@ -333,6 +412,22 @@ mod tests {
         });
         let without_stage: DesktopProfileSaveRequest = serde_json::from_value(request).unwrap();
         assert!(without_stage.password_stage.is_none());
+        assert_eq!(
+            without_stage.profile.rdp_transport_mode,
+            RdpTransportMode::Auto
+        );
+        assert_eq!(
+            without_stage.profile.rdp_graphics_mode,
+            RdpGraphicsMode::Auto
+        );
+        assert_eq!(
+            without_stage.profile.rdp_resolution_mode,
+            RdpResolutionMode::Fixed
+        );
+        assert_eq!(
+            without_stage.profile.vnc_resolution_mode,
+            VncResolutionMode::Server
+        );
 
         let stage = DesktopPasswordStage {
             operation_id: OperationId::new(),

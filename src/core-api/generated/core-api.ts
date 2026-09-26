@@ -4,9 +4,21 @@ export type DesktopProtocol = "rdp" | "vnc";
 
 export type VncProtocolVersion = "auto" | "rfb33" | "rfb37" | "rfb38";
 
+export type RdpTransportMode = "auto" | "tcpOnly" | "udpRequired";
+
+export type RdpGraphicsMode = "auto" | "remoteFx" | "avc420" | "bitmap";
+
+export type RdpResolutionMode = "fixed" | "adaptive";
+
+export type VncResolutionMode = "server" | "fixed" | "adaptive";
+
+export type RdpTransportActual = "tcp" | "udp";
+
+export type RdpGraphicsActual = "bitmap" | "remoteFx" | "remoteFxProgressive" | "avc420";
+
 export type DesktopAvailability = { protocol: DesktopProtocol, available: boolean, reasonKey: string | null, presentation: string, };
 
-export type DesktopProfile = { id: string, label: string, protocol: DesktopProtocol, address: string, port: number, username: string, domain: string, hostId: HostId | null, gatewayHostId: HostId | null, credentialRefId: CredentialRefId | null, width: number, height: number, clipboardEnabled: boolean, audioPlaybackEnabled: boolean, vncProtocolVersion: VncProtocolVersion, revision: WireSequence, };
+export type DesktopProfile = { id: string, label: string, protocol: DesktopProtocol, address: string, port: number, username: string, domain: string, hostId: HostId | null, gatewayHostId: HostId | null, credentialRefId: CredentialRefId | null, width: number, height: number, clipboardEnabled: boolean, audioPlaybackEnabled: boolean, vncProtocolVersion: VncProtocolVersion, vncResolutionMode: VncResolutionMode, rdpTransportMode: RdpTransportMode, rdpGraphicsMode: RdpGraphicsMode, rdpResolutionMode: RdpResolutionMode, revision: WireSequence, };
 
 export type DesktopPasswordStage = { operationId: OperationId, idempotencyKey: string, stagedPasswordId: HostCreatePasswordStageId, };
 
@@ -23,13 +35,15 @@ export type DesktopOpenRequest = { meta: RequestMeta, operationId: string, profi
 
 export type DesktopSessionState = "connecting" | "needsInteraction" | "running" | "disconnecting" | "closed" | "failed";
 
-export type DesktopSessionSummary = { id: string, profile: DesktopProfile, generation: WireSequence, revision: WireSequence, state: DesktopSessionState, phase: string, failure: string | null, width: number, height: number, frameSequence: WireSequence, audioState: DesktopAudioState, audioMuted: boolean, };
+export type DesktopSessionSummary = { id: string, profile: DesktopProfile, generation: WireSequence, revision: WireSequence, state: DesktopSessionState, phase: string, failure: string | null, width: number, height: number, frameSequence: WireSequence, audioState: DesktopAudioState, audioMuted: boolean, rdpTransportActual?: RdpTransportActual, rdpGraphicsActual?: RdpGraphicsActual, };
 
 export type DesktopAudioState = "disabled" | "waiting" | "ready" | "unavailable" | "unsupported" | "closed";
 
 export type DesktopAudioMuteRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, muted: boolean, };
 
 export type DesktopSessionRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, };
+
+export type DesktopResolutionRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, width: number, height: number, };
 
 export type DesktopInputEvent = { "kind": "key", scanCode: number, keysym: number, down: boolean, } | { "kind": "pointer", x: number, y: number, buttons: number, } | { "kind": "wheel", x: number, y: number, deltaX: number, deltaY: number, } | { "kind": "text", text: string, } | { "kind": "clipboard", text: string, } | { "kind": "resize", width: number, height: number, } | { "kind": "releaseAll" };
 
@@ -58,6 +72,14 @@ export type DesktopPreferencesGetRequest = { meta: RequestMeta, };
 export type DesktopPreferencesReplaceRequest = { meta: RequestMeta, expectedRevision: WireSequence, preferences: DesktopPreferences, };
 
 export type DesktopPreferencesSnapshot = { preferences: DesktopPreferences, revision: WireSequence, };
+
+export type ApplicationPreferenceGroupId = "application" | "appearance" | "interaction" | "highlights" | "shortcuts" | "files";
+
+export type ApplicationPreferencesGetRequest = { meta: RequestMeta, group: ApplicationPreferenceGroupId, };
+
+export type ApplicationPreferencesReplaceRequest = { meta: RequestMeta, group: ApplicationPreferenceGroupId, expectedRevision: WireSequence | null, value: unknown, };
+
+export type ApplicationPreferencesSnapshot = { group: ApplicationPreferenceGroupId, revision: WireSequence | null, value: unknown, };
 
 export type NativeTrayLocale = "zh-CN" | "en";
 
@@ -211,7 +233,7 @@ export type SafeConflictVersion = { entityVersion: WireSequence | null, };
 
 export type CoreApiError = { code: string, category: ErrorCategory, retryStrategy: RetryStrategy, messageKey: string, params: { [key in string]: string }, requestId: RequestId | null, diagnosticId: string | null, conflict: SafeConflictVersion | null, };
 
-export type PluginCapability = "uiPanel" | "uiNavigation" | "uiPage" | "uiWebviewIsolated" | "uiHostDomObserve" | "uiHostDomMutate" | "uiHostCss" | "clipboardWrite" | "terminalProvider" | "deviceSerial" | "terminalMetadata" | "terminalObserve" | "terminalAnnotation" | "terminalProposeInput" | "terminalRequestInput" | "hostMetadataRead" | "hostMutationPropose" | "hostSessionRequest" | "remoteInspect" | "remoteExecRequest" | "networkDomain" | "localFiles" | "localProcess" | "storagePlugin" | "credentialsPlugin" | "sftpRead" | "sftpWrite" | "metricsRead" | "sshSync";
+export type PluginCapability = "uiPanel" | "uiNavigation" | "uiPage" | "uiWebviewIsolated" | "uiHostDomObserve" | "uiHostDomMutate" | "uiHostCss" | "clipboardWrite" | "terminalProvider" | "deviceSerial" | "terminalMetadata" | "terminalObserve" | "terminalAnnotation" | "terminalProposeInput" | "terminalRequestInput" | "hostMetadataRead" | "hostMutationPropose" | "hostSessionRequest" | "remoteInspect" | "remoteExecRequest" | "networkDomain" | "localFiles" | "localProcess" | "storagePlugin" | "credentialsPlugin" | "sftpRead" | "sftpWrite" | "metricsRead" | "sshSync" | "appPreferencesRead" | "terminalHistoryRead";
 
 export type PluginWorkflowTaskId = string;
 
@@ -225,7 +247,7 @@ export type PluginWorkflowTaskState = "running" | "dispatching" | "needsUserActi
 
 export type PluginWorkflowStepState = "dispatching" | "succeeded" | "failed" | "needsUserAction" | "outcomeUnknown" | "interrupted";
 
-export type PluginWorkflowApiMethod = "serialDevices" | "serialOpen" | "serialSend" | "protocolOpen" | "describe" | "permissions" | "permissionRequest" | "permissionRevoke" | "permissionsForget" | "resourcesList" | "resourceClose" | "subscriptionStart" | "timerStart" | "resourceEvents" | "networkStart" | "networkSend" | "remoteExecStart" | "remoteExecSend" | "processStart" | "processSend" | "sftpOpen" | "sftp" | "filePick" | "file" | "credential" | "storage" | "terminalRequestInput";
+export type PluginWorkflowApiMethod = "dataCatalog" | "dataRead" | "serialDevices" | "serialOpen" | "serialSend" | "protocolOpen" | "describe" | "permissions" | "permissionRequest" | "permissionRevoke" | "permissionsForget" | "resourcesList" | "resourceClose" | "subscriptionStart" | "timerStart" | "resourceEvents" | "networkStart" | "networkSend" | "remoteExecStart" | "remoteExecSend" | "processStart" | "processSend" | "sftpOpen" | "sftp" | "filePick" | "file" | "credential" | "storage" | "terminalRequestInput";
 
 export type PluginWorkflowTaskSummary = { taskId: PluginWorkflowTaskId, pluginId: PluginId, workflowId: string, state: PluginWorkflowTaskState, revision: WireSequence, currentStepId?: string, outcomeUnknown: boolean, cleanupIncomplete: boolean, createdAtUnixMs: number, updatedAtUnixMs: number, };
 
@@ -287,13 +309,62 @@ export type PluginAppNavigation = { "kind": "app", path: string, } | { "kind": "
 
 export type PluginApiCall = { callId: string, operation: PluginApiOperation, };
 
-export type PluginApiOperation = { "kind": "appRegister", registration: PluginAppRegistration, } | { "kind": "appNotify", notification: PluginAppNotification, } | { "kind": "appNavigate", destination: PluginAppNavigation, } | { "kind": "taskStart", workflowId: string, inputJson?: string, fileScopeHandles: Array<string>, } | { "kind": "taskGet", taskId: PluginWorkflowTaskId, } | { "kind": "taskList", } | { "kind": "taskCancel", taskId: PluginWorkflowTaskId, expectedRevision: WireSequence, } | { "kind": "taskResume", taskId: PluginWorkflowTaskId, expectedRevision: WireSequence, } | { "kind": "serialDevices", } | { "kind": "serialOpen", candidateId: string, settings: PluginSerialSettings, } | { "kind": "serialSend", request: PluginSerialSendRequest, } | { "kind": "protocolOpen", request: PluginProtocolOpen, } | { "kind": "describe", } | { "kind": "permissions", } | { "kind": "permissionRequest", capability: PluginCapability, } | { "kind": "permissionRevoke", permissionId: string, expectedPolicyRevision: WireSequence, } | { "kind": "permissionsForget", } | { "kind": "resourcesList", } | { "kind": "resourceClose", handle: string, } | { "kind": "subscriptionStart", topics: Array<PluginSubscriptionTopic>, } | { "kind": "timerStart", delayMs: number, intervalMs?: number, } | { "kind": "resourceEvents", handle: string, limit: number, } | { "kind": "networkStart", endpoint: PluginNetworkEndpointRequest, request: PluginNetworkStartRequest, } | { "kind": "networkSend", request: PluginNetworkSendRequest, } | { "kind": "remoteExecStart", request: PluginRemoteExecStartRequest, } | { "kind": "remoteExecSend", request: PluginRemoteExecSendRequest, } | { "kind": "processStart", program: string, arguments: Array<string>, timeoutMs: number, } | { "kind": "processSend", request: PluginProcessSendRequest, } | { "kind": "sftpOpen", hostHandle: string, rootPath: string, write: boolean, } | { "kind": "sftp", operation: PluginSftpOperation, } | { "kind": "filePick", pickerKind: PluginFilePickerKind, access: PluginFileAccessRequest, } | { "kind": "file", operation: PluginFileOperation, } | { "kind": "credential", operation: PluginCredentialOperation, } | { "kind": "storage", operation: PluginStorageOperation, } | { "kind": "terminalRequestInput", terminalHandle: string, payload: string, appendEnter: boolean, };
+export type PluginDataCategory = "hosts" | "credentials" | "desktopProfiles" | "appPreferences" | "terminalHistory";
+
+export type PluginDataCategoryDescriptor = { category: PluginDataCategory, requiredCapability: PluginCapability, canRead: boolean, canExport: boolean, canRestore: boolean,
+/**
+ * Preference groups are listed individually because only `desktop` is
+ * currently persisted and readable by Core.
+ */
+availableGroups?: Array<string>, unavailableGroups?: Array<string>, };
+
+export type PluginDataCatalog = { categories: Array<PluginDataCategoryDescriptor>, };
+
+export type PluginDataReadRequest = { category: PluginDataCategory, offset: number, limit: number, };
+
+export type PluginDataObjectKind = "host" | "desktopProfile" | "identity" | "credential" | "route" | "authenticationPlan" | "algorithmPolicy" | "heartbeatPolicy" | "monitoringPolicy" | "loginAutomation" | "secret";
+
+export type PluginDataObjectDisplay = { "kind": "host", label: string, address: string, port: number, } | { "kind": "credential", label: string, materialKind: string, } | { "kind": "desktopProfile", label: string, protocol: string, address: string, port: number, };
+
+export type PluginDataObjectDescriptor = { category: PluginDataCategory, kind: PluginDataObjectKind, stableId: string, objectHandle: string, equalityTag: string, updateTimeUnixMs: number | null, tombstone: boolean, dependency: boolean, display: PluginDataObjectDisplay | null, };
+
+export type PluginDataLocalCounts = { hostCount: number, credentialCount: number, desktopProfileCount: number, tombstoneCount: number, };
+
+export type PluginDataObjectSource = "local" | "remote";
+
+export type PluginDataObjectDecision = { objectHandle: string, source: PluginDataObjectSource, };
+
+export type PluginDataSnapshotRequest = { profileId: string, categories: Array<PluginDataCategory>, };
+
+export type PluginDataInspectRequest = { profileId: string, categories: Array<PluginDataCategory>, receiptHandle: string, bodyBlobHandle: string, };
+
+export type PluginDataComposeRequest = { profileId: string, categories: Array<PluginDataCategory>, localSnapshotHandle: string, remoteInspectionHandle: string, decisions: Array<PluginDataObjectDecision>, };
+
+export type PluginDataApplyRequest = { profileId: string, categories: Array<PluginDataCategory>, expectedLocalSnapshotHandle: string, composedHandle: string, exportHandle: string | null, authoritativeReceiptHandle: string, };
+
+export type PluginDataExportRequest = { profileId: string, categories: Array<PluginDataCategory>, sourceHandle: string, baseReceiptHandle: string, };
+
+export type PluginDataCheckpointRequest = { profileId: string, categories: Array<PluginDataCategory>, sourceHandle: string, authoritativeReceiptHandle: string, baseReceiptHandle: string | null, exportHandle: string | null, applyReceiptHandle: string | null, expectedLocalSnapshotHandle?: string, remoteInspectionHandle?: string, };
+
+export type PluginDataReleaseRequest = { profileId: string, stateHandles: Array<string>, blobHandles: Array<string>, receiptHandles: Array<string>, };
+
+export type PluginTerminalHistoryEntry = { entryId: string, scope: string, command: string, completedAtUnixMs: number, elapsedMillis: number, exitCode: number | null, };
+
+export type PluginDataReadResult = { "kind": "appPreferences", groups: Array<PluginPreferenceGroupSnapshot>, migrationRequired: Array<string>, } | { "kind": "terminalHistory", entries: Array<PluginTerminalHistoryEntry>, nextOffset: number | null, total: number, };
+
+export type PluginPreferenceGroupSnapshot = { group: string, revision: WireSequence, value: unknown, };
+
+export type PluginApiOperation = { "kind": "dataCatalog", } | { "kind": "dataRead", request: PluginDataReadRequest, } | { "kind": "dataSnapshot", request: PluginDataSnapshotRequest, } | { "kind": "dataInspect", request: PluginDataInspectRequest, } | { "kind": "dataCompose", request: PluginDataComposeRequest, } | { "kind": "dataApply", request: PluginDataApplyRequest, } | { "kind": "dataExport", request: PluginDataExportRequest, } | { "kind": "dataCheckpoint", request: PluginDataCheckpointRequest, } | { "kind": "dataRelease", request: PluginDataReleaseRequest, } | { "kind": "appRegister", registration: PluginAppRegistration, } | { "kind": "appNotify", notification: PluginAppNotification, } | { "kind": "appNavigate", destination: PluginAppNavigation, } | { "kind": "taskStart", workflowId: string, inputJson?: string, fileScopeHandles: Array<string>, } | { "kind": "taskGet", taskId: PluginWorkflowTaskId, } | { "kind": "taskList", } | { "kind": "taskCancel", taskId: PluginWorkflowTaskId, expectedRevision: WireSequence, } | { "kind": "taskResume", taskId: PluginWorkflowTaskId, expectedRevision: WireSequence, } | { "kind": "serialDevices", } | { "kind": "serialOpen", candidateId: string, settings: PluginSerialSettings, } | { "kind": "serialSend", request: PluginSerialSendRequest, } | { "kind": "protocolOpen", request: PluginProtocolOpen, } | { "kind": "describe", } | { "kind": "permissions", } | { "kind": "permissionRequest", capability: PluginCapability, } | { "kind": "permissionRevoke", permissionId: string, expectedPolicyRevision: WireSequence, } | { "kind": "permissionsForget", } | { "kind": "resourcesList", } | { "kind": "resourceClose", handle: string, } | { "kind": "subscriptionStart", topics: Array<PluginSubscriptionTopic>, } | { "kind": "timerStart", delayMs: number, intervalMs?: number, } | { "kind": "resourceEvents", handle: string, limit: number,
+/**
+ * Wait for a newly queued event, bounded by Core. Zero polls immediately.
+ */
+waitMs: number, } | { "kind": "networkStart", endpoint: PluginNetworkEndpointRequest, request: PluginNetworkStartRequest, } | { "kind": "networkSend", request: PluginNetworkSendRequest, } | { "kind": "remoteExecStart", request: PluginRemoteExecStartRequest, } | { "kind": "remoteExecSend", request: PluginRemoteExecSendRequest, } | { "kind": "processStart", program: string, arguments: Array<string>, timeoutMs: number, } | { "kind": "processSend", request: PluginProcessSendRequest, } | { "kind": "sftpOpen", hostHandle: string, rootPath: string, write: boolean, } | { "kind": "sftp", operation: PluginSftpOperation, } | { "kind": "filePick", pickerKind: PluginFilePickerKind, access: PluginFileAccessRequest, } | { "kind": "file", operation: PluginFileOperation, } | { "kind": "credential", operation: PluginCredentialOperation, } | { "kind": "storage", operation: PluginStorageOperation, } | { "kind": "terminalRequestInput", terminalHandle: string, payload: string, appendEnter: boolean, };
 
 export type PluginApiReply = { callId: string, outcome: PluginApiOutcome, };
 
 export type PluginApiOutcome = { "kind": "completed", value: PluginApiValue, } | { "kind": "failed", code: PluginApiErrorCode, };
 
-export type PluginApiValue = { "kind": "appAccepted", } | { "kind": "task", snapshot: PluginWorkflowTaskSnapshot, } | { "kind": "tasks", snapshots: Array<PluginWorkflowTaskSnapshot>, } | { "kind": "serialDevices", devices: Array<PluginSerialDeviceCandidate>, } | { "kind": "serialStarted", handle: string, } | { "kind": "serialSent", handle: string, } | { "kind": "protocolLaunched", launchId: string, } | { "kind": "description", api: PluginApiDescription, } | { "kind": "permissions", grants: Array<PluginCapabilityGrant>, policyRevision: WireSequence | null,
+export type PluginApiValue = { "kind": "dataCatalog", catalog: PluginDataCatalog, } | { "kind": "dataRead", result: PluginDataReadResult, } | { "kind": "dataSnapshot", snapshotHandle: string, keyPending: boolean, localCounts: PluginDataLocalCounts, objects: Array<PluginDataObjectDescriptor>, } | { "kind": "dataInspect", inspectionHandle: string, objects: Array<PluginDataObjectDescriptor>, remoteRevision: bigint, etag: string, migrationRequired: boolean, excludedCategories: Array<PluginDataCategory>, } | { "kind": "dataCompose", composedHandle: string, objects: Array<PluginDataObjectDescriptor>, } | { "kind": "dataApply", applyReceiptHandle: string, } | { "kind": "dataExport", exportHandle: string, blobHandle: string, revision: bigint, idempotencyKey: string, contentType: string, objects: Array<PluginDataObjectDescriptor>, } | { "kind": "dataCheckpoint", syncedAtUnixMs: number, } | { "kind": "dataRelease", } | { "kind": "appAccepted", } | { "kind": "task", snapshot: PluginWorkflowTaskSnapshot, } | { "kind": "tasks", snapshots: Array<PluginWorkflowTaskSnapshot>, } | { "kind": "serialDevices", devices: Array<PluginSerialDeviceCandidate>, } | { "kind": "serialStarted", handle: string, } | { "kind": "serialSent", handle: string, } | { "kind": "protocolLaunched", launchId: string, } | { "kind": "description", api: PluginApiDescription, } | { "kind": "permissions", grants: Array<PluginCapabilityGrant>, policyRevision: WireSequence | null,
 /**
  * Only this plugin's non-secret operation summaries are returned.
  */
@@ -303,7 +374,7 @@ export type PluginApiResourceEvent = { sequence: WireSequence, kind: PluginApiRe
 
 export type PluginApiResourceEventKind = { "kind": "serial", event: PluginSerialEvent, } | { "kind": "timerFired", } | { "kind": "cancelled", } | { "kind": "fileChanged", change: PluginFileWatchChange, } | { "kind": "sftp", event: PluginSftpEvent, } | { "kind": "subscription", event: PluginSubscriptionEvent, } | { "kind": "network", event: PluginNetworkEvent, } | { "kind": "processOutput", stream: PluginProcessOutputStream, data_base64: string, } | { "kind": "processExited", exit_code?: bigint, } | { "kind": "remoteExec", event: PluginRemoteExecEvent, };
 
-export type PluginApiErrorCode = "invalidRequest" | "permissionDenied" | "interactionRequired" | "vaultMissing" | "vaultLocked" | "vaultRequiresReload" | "unsupported" | "revoked" | "notFound" | "conflict" | "busy" | "quotaExceeded" | "timedOut" | "cancelled" | "outcomeUnknown" | "cleanupIncomplete" | "unavailable";
+export type PluginApiErrorCode = "invalidRequest" | "permissionDenied" | "interactionRequired" | "vaultMissing" | "vaultLocked" | "vaultRequiresReload" | "authorizationExpired" | "accountNotConnected" | "networkUnavailable" | "localStateChanged" | "ownerConflict" | "keyBindingConflict" | "revisionExhausted" | "restoreConflict" | "mergeInvalid" | "remoteRequestRejected" | "remoteDataInvalid" | "remoteFormatUnsupported" | "recoveryAuthenticationFailed" | "recoveryActionExpired" | "localDataInvalid" | "localKeyUnavailable" | "unsupported" | "revoked" | "notFound" | "conflict" | "busy" | "quotaExceeded" | "timedOut" | "cancelled" | "outcomeUnknown" | "cleanupIncomplete" | "unavailable";
 
 export type PluginApiDescription = { protocolMajor: number, protocolMinor: number, platform: string, methods: Array<PluginApiMethod>, limits: PluginApiLimits, };
 
@@ -499,13 +570,17 @@ export type PluginNetworkStartRequest = {
  * Includes connect, TLS handshake and first-response limits. It cannot disable the driver's
  * independent resource and cancellation checks.
  */
-timeoutMs: number, credential?: PluginNetworkCredentialRef, operation: PluginNetworkOperation, };
+timeoutMs: number, credential?: PluginNetworkCredentialRef,
+/**
+ * Core resolves this plugin-owned OAuth session for the frozen endpoint origin.
+ */
+oauthProfileId?: string, operation: PluginNetworkOperation, };
 
 export type PluginNetworkOperation = { "kind": "http", method: PluginHttpMethod, headers: Array<PluginNetworkHeader>,
 /**
  * Standard base64 without a data-URL prefix. This avoids unbounded JSON number arrays.
  */
-bodyBase64: string, } | { "kind": "webSocket", headers: Array<PluginNetworkHeader>, } | { "kind": "tcp", } | { "kind": "udp", } | { "kind": "tls", };
+bodyBase64: string, } | { "kind": "httpExchange", method: PluginHttpMethod, headers: Array<PluginNetworkHeader>, profileId: string, bodyBlobHandle?: string, maxResponseBytes: number, } | { "kind": "webSocket", headers: Array<PluginNetworkHeader>, } | { "kind": "tcp", } | { "kind": "udp", } | { "kind": "tls", };
 
 export type PluginHttpMethod = "get" | "head" | "post" | "put" | "patch" | "delete";
 
@@ -513,11 +588,11 @@ export type PluginNetworkHeader = { name: string, value: string, };
 
 export type PluginNetworkSendRequest = { handle: string, dataBase64: string, };
 
-export type PluginNetworkEvent = { "kind": "opened", protocol: PluginNetworkProtocol, peerAddress: string | null, } | { "kind": "httpResponse", status: number, headers: Array<PluginNetworkHeader>, } | { "kind": "data", dataBase64: string, } | { "kind": "datagram", dataBase64: string, } | { "kind": "closed", } | { "kind": "error", code: PluginNetworkErrorCode, };
+export type PluginNetworkEvent = { "kind": "opened", protocol: PluginNetworkProtocol, peerAddress: string | null, } | { "kind": "httpResponse", status: number, headers: Array<PluginNetworkHeader>, } | { "kind": "httpExchangeCompleted", receiptHandle: string, status: number, etag: string | null, bodyBlobHandle: string | null, byteLength: number, } | { "kind": "data", dataBase64: string, } | { "kind": "datagram", dataBase64: string, } | { "kind": "closed", } | { "kind": "error", code: PluginNetworkErrorCode, };
 
 export type PluginNetworkProtocol = "http" | "webSocket" | "tcp" | "udp" | "tls";
 
-export type PluginNetworkErrorCode = "invalidEndpoint" | "resolveFailed" | "connectFailed" | "tlsFailed" | "httpFailed" | "protocolFailed" | "timedOut" | "revoked" | "cancelled" | "unavailable";
+export type PluginNetworkErrorCode = "invalidEndpoint" | "resolveFailed" | "connectFailed" | "tlsFailed" | "httpFailed" | "protocolFailed" | "timedOut" | "quotaExceeded" | "outcomeUnknown" | "revoked" | "cancelled" | "unavailable";
 
 export type PluginProcessSendRequest = { handle: string, dataBase64: string,
 /**
@@ -838,7 +913,7 @@ export type PluginSshSyncDifferenceState = "unavailable" | "equal" | "localOnly"
 
 export type PluginSshSyncScopeMode = "allEligible" | "custom";
 
-export type PluginSshSyncStableErrorCode = "vaultMissing" | "vaultLocked" | "interactionRequired" | "authorizationDenied" | "authorizationExpired" | "accessDenied" | "quotaExceeded" | "networkUnavailable" | "serviceUnavailable" | "stateConflict" | "remoteDataInvalid" | "remoteFormatUnsupported" | "recoveryRemoteKeyAuthenticationFailed" | "recoveryActionExpired" | "localDataInvalid" | "preferencesUnavailable" | "localKeyUnavailable" | "operationBusy" | "operationRejected" | "internal";
+export type PluginSshSyncStableErrorCode = "vaultMissing" | "vaultLocked" | "interactionRequired" | "authorizationDenied" | "authorizationExpired" | "accountNotConnected" | "accessDenied" | "quotaExceeded" | "networkUnavailable" | "serviceUnavailable" | "stateConflict" | "localStateChanged" | "ownerConflict" | "keyBindingConflict" | "revisionExhausted" | "restoreConflict" | "mergeInvalid" | "remoteRequestRejected" | "remoteDataInvalid" | "remoteFormatUnsupported" | "recoveryRemoteKeyAuthenticationFailed" | "recoveryActionExpired" | "localDataInvalid" | "localKeyUnavailable" | "operationBusy" | "operationRejected" | "internal";
 
 export type PluginSshSyncStatus = { profileId: string, accountState: PluginSshSyncAccountState, operationState: PluginSshSyncOperationState, lastSyncAtUnixMs: bigint | null, hostCount: number, credentialCount: number, conflictCount: number, stableErrorCode: PluginSshSyncStableErrorCode | null,
 /**
@@ -846,7 +921,7 @@ export type PluginSshSyncStatus = { profileId: string, accountState: PluginSshSy
  */
 diagnosticCode?: string, httpStatus: number | null, remoteRevision: bigint | null, etag: string | null, previewId: string | null, exchangeSha256: string | null, localHostCount: number, localCredentialCount: number, remoteHostCount: number | null, remoteCredentialCount: number | null, differenceState: PluginSshSyncDifferenceState | null, scopeMode: PluginSshSyncScopeMode | null, desktopProfileCount: number, localDesktopProfileCount: number, remoteDesktopProfileCount: number | null, };
 
-export type SshSyncSecurePromptKind = "authorizeProvider" | "selectBackup" | "createRecoveryPassword" | "recoverExistingKey" | "createLocalVault" | "unlockSynchronizedVault" | "recoverSynchronizedKey" | "selectRestore" | "approveRestore" | "resolveConflicts" | "chooseSyncDirection" | "approveMergedDeletion" | "resetRemote";
+export type SshSyncSecurePromptKind = "authorizeProvider" | "selectBackup" | "createRecoveryPassword" | "recoverExistingKey" | "createLocalVault" | "unlockSynchronizedVault" | "recoverSynchronizedKey" | "selectRestore" | "approveRestore" | "resolveConflicts" | "chooseSyncDirection" | "approveDataApply" | "approveMergedDeletion" | "resetRemote";
 
 export type SshSyncSecureDifferenceKind = "desktopProfile" | "host" | "identity" | "credential" | "connectionRoute" | "authentication" | "algorithms" | "heartbeat" | "monitoring" | "loginAutomation" | "encryptedSecret" | "preferences";
 
@@ -868,7 +943,11 @@ export type SshSyncSecurePrompt = { desktopProfiles: Array<SshSyncSecureDesktopP
 /**
  * Saved local rules removed with deleted hosts; visible only in the protected review.
  */
-relatedForwardRuleLabels: Array<string>, };
+relatedForwardRuleLabels: Array<string>,
+/**
+ * True only when Core verified an authoritative PUT receipt for this apply.
+ */
+dataApplyUploaded: boolean, };
 
 export type SshSyncSecureDecision = "approve" | "cancel" | "keepLocal" | "useRemote" | "applyMerged";
 
@@ -885,7 +964,7 @@ clipboardText: string | null, hostApprovalId: PluginApprovalId | null, hostDomOp
 
 export type PluginUiFieldValue = { fieldId: PluginUiFieldId, value: string, };
 
-export type PluginSshSyncBrowserState = "notLoaded" | "ready" | "empty" | "needsCreation" | "needsUnlock" | "permissionDenied" | "failed";
+export type PluginSshSyncBrowserState = "notLoaded" | "ready" | "stale" | "empty" | "needsCreation" | "needsUnlock" | "permissionDenied" | "failed";
 
 export type PluginSshSyncBrowserCredentialMaterialKind = "password" | "privateKey" | "certificate" | "keyboardInteractive";
 
@@ -915,7 +994,7 @@ hostRowIds: Array<string>,
  */
 desktopProfileRowIds: Array<string>, updatedAtUnixMs: number | null, };
 
-export type PluginSshSyncBrowserSnapshot = { state: PluginSshSyncBrowserState, profileId: string, cacheRevision: WireSequence, hostCount: number, credentialCount: number, desktopProfileCount: number, hostRowsOmitted: number, credentialRowsOmitted: number, desktopProfileRowsOmitted: number, remoteUpdatedAtUnixMs: number | null, hosts: Array<PluginSshSyncBrowserHost>, credentials: Array<PluginSshSyncBrowserCredential>, desktopProfiles: Array<PluginSshSyncBrowserDesktopProfile>, };
+export type PluginSshSyncBrowserSnapshot = { state: PluginSshSyncBrowserState, profileId: string, cacheRevision: WireSequence, hostCount: number, credentialCount: number, desktopProfileCount: number, hostRowsOmitted: number, credentialRowsOmitted: number, desktopProfileRowsOmitted: number, remoteUpdatedAtUnixMs: number | null, verifiedAtUnixMs: number | null, hosts: Array<PluginSshSyncBrowserHost>, credentials: Array<PluginSshSyncBrowserCredential>, desktopProfiles: Array<PluginSshSyncBrowserDesktopProfile>, };
 
 export type PluginSshSyncBrowserReadRequest = { meta: RequestMeta, pluginId: PluginId, artifactFingerprintSha256: string, expectedPackageSha256: string, instanceGeneration: WireSequence, expectedStateVersion: WireSequence, expectedContributionRevision: WireSequence, targetId: PluginExtensionTargetId, contextHandle: PluginTargetContextHandle, expectedTargetRevision: WireSequence, nodeId: PluginUiNodeId, };
 
@@ -947,7 +1026,7 @@ export type PluginOperationKind = "install" | "update" | "disable" | "uninstall"
 
 export type PluginOperationState = "pending" | "running" | "awaitingCapabilities" | "succeeded" | "failed" | "cancelled";
 
-export type PluginErrorCode = "packageTooLarge" | "packageHashMismatch" | "packageArchiveInvalid" | "packagePathRejected" | "packageLimitsExceeded" | "manifestMismatch" | "capabilityRejected" | "protocolIncompatible" | "appVersionIncompatible" | "installConflict" | "runtimeRejected" | "runtimeQuotaExceeded" | "runtimeTimedOut" | "operationNotFound" | "invalidRequest";
+export type PluginErrorCode = "packageTooLarge" | "packageHashMismatch" | "packageArchiveInvalid" | "packagePathRejected" | "packageLimitsExceeded" | "manifestMismatch" | "capabilityRejected" | "protocolIncompatible" | "appVersionIncompatible" | "coreApiIncompatible" | "installConflict" | "runtimeRejected" | "runtimeQuotaExceeded" | "runtimeTimedOut" | "operationNotFound" | "invalidRequest";
 
 export type PluginCapabilityGrant = { capability: PluginCapability, granted: boolean, };
 
@@ -1008,6 +1087,10 @@ export type PluginLocalPackagePrepareRequest = { meta: RequestMeta, };
 export type PluginLocalPackageCancelRequest = { meta: RequestMeta, preparationId: string, };
 
 export type PluginLocalPackagePreview = { preparationId: string, pluginId: PluginId, name: string, author: string, version: string, packageSize: bigint, packageSha256: string, capabilities: Array<PluginCapability>, currentVersion: string | null, currentStateVersion: WireSequence | null,
+/**
+ * The prior artifact for this version can remain after uninstall.
+ */
+priorPackageSha256: string | null,
 /**
  * Only verified publisher continuity can retain installed decisions.
  */
@@ -2234,6 +2317,8 @@ export const coreApiCommands = {
   terminalWorkspaceLayoutReplace: "terminal_workspace_layout_replace",
   desktopPreferencesGet: "desktop_preferences_get",
   desktopPreferencesReplace: "desktop_preferences_replace",
+  applicationPreferencesGet: "application_preferences_get",
+  applicationPreferencesReplace: "application_preferences_replace",
   vaultStatus: "vault_status",
   vaultCreate: "vault_create",
   vaultUnlock: "vault_unlock",

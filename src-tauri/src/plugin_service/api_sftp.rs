@@ -49,7 +49,8 @@ impl PluginService {
                 "host": target.label, "endpoint": target.endpoint, "root": root_path,
                 "read": true, "write": write,
             })).map_err(|_| PluginApiErrorCode::InvalidRequest)?,
-            exact_scope: serde_json::json!({"host": target, "root": root_path, "write": write}),
+            exact_scope: serde_json::json!({"hostId": target.host_id, "endpoint": target.endpoint, "root": root_path, "write": write}),
+            policy_identity: Some(if write { "sftp.write.v1" } else { "sftp.read.v1" }),
             target_fence: Some(admission.clone()),
         }).await?;
         if !admission() || !read_scope() {

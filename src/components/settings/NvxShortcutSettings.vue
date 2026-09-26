@@ -14,6 +14,7 @@ import {
 import { detectDesktopPlatform } from "../../platform";
 import { exportJsonFile } from "../../platform-file-export";
 import { useShortcutsStore, type ShortcutSaveResult } from "../../stores/shortcuts";
+import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { useTipsStore } from "../../stores/tips";
 import { NvxButton, NvxDialog, NvxField, NvxIcon, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
 
@@ -90,6 +91,15 @@ function showSaveResult(result: ShortcutSaveResult, statusKey: "saved" | "disabl
   return false;
 }
 
+async function runSave(operation: () => Promise<ShortcutSaveResult>): Promise<ShortcutSaveResult | null> {
+  try { return await operation(); }
+  catch (error) {
+    recordingError.value = t(`applicationPreferenceErrors.${applicationPreferenceFailure(error)}`);
+    tips.show({ scope: "shortcuts", tone: "error", title: recordingError.value });
+    return null;
+  }
+}
+
 function openRecorder(command: ShortcutCommand) {
   recordingCommand.value = command;
   recordingBinding.value = selectedBindings.value[command.id];
@@ -119,26 +129,28 @@ function captureShortcut(event: KeyboardEvent) {
   recordingError.value = "";
 }
 
-function saveRecording() {
+async function saveRecording() {
   const command = recordingCommand.value;
   if (!command) return;
-  const result = shortcuts.setBinding(platform.value, command.id, recordingBinding.value);
-  if (showSaveResult(result, "saved")) closeRecorder();
+  const result = await runSave(() => shortcuts.setBinding(platform.value, command.id, recordingBinding.value));
+  if (result && showSaveResult(result, "saved")) closeRecorder();
 }
 
-function disable(command: ShortcutCommand) {
+async function disable(command: ShortcutCommand) {
   recordingError.value = "";
-  showSaveResult(shortcuts.setBinding(platform.value, command.id, null), "disabled");
+  const result = await runSave(() => shortcuts.setBinding(platform.value, command.id, null));
+  if (result) showSaveResult(result, "disabled");
 }
 
-function reset(command: ShortcutCommand) {
+async function reset(command: ShortcutCommand) {
   recordingError.value = "";
-  showSaveResult(shortcuts.resetBinding(platform.value, command.id), "reset");
+  const result = await runSave(() => shortcuts.resetBinding(platform.value, command.id));
+  if (result) showSaveResult(result, "reset");
 }
 
-function confirmResetAll() {
-  const result = shortcuts.resetAll(platform.value);
-  if (showSaveResult(result, "reset")) {
+async function confirmResetAll() {
+  const result = await runSave(() => shortcuts.resetAll(platform.value));
+  if (result && showSaveResult(result, "reset")) {
     resetDialogOpen.value = false;
     tips.show({ scope: "shortcuts", tone: "success", title: t("shortcuts.status.resetAll") });
   }
@@ -174,14 +186,15 @@ async function importFile(event: Event) {
   input.value = "";
   if (!file) return;
   try {
-    const result = shortcuts.importProfile(await file.text());
+    const result = await shortcuts.importProfile(await file.text());
     if (result.ok) {
       tips.show({ scope: "shortcuts", tone: "success", title: t("shortcuts.status.imported") });
       return;
     }
     tips.show({ scope: "shortcuts", tone: "error", title: importErrorMessage(result.reason) });
-  } catch {
-    tips.show({ scope: "shortcuts", tone: "error", title: t("shortcuts.errors.importRead") });
+  } catch (error) {
+    tips.show({ scope: "shortcuts", tone: "error", title: t(applicationPreferenceFailure(error) === "unknown"
+      ? "shortcuts.errors.importRead" : `applicationPreferenceErrors.${applicationPreferenceFailure(error)}`) });
   }
 }
 

@@ -52,7 +52,7 @@ pub struct PluginIsolatedBridgeRequest {
 )]
 pub enum PluginIsolatedBridgeAction {
     Call {
-        call: PluginApiCall,
+        call: Box<PluginApiCall>,
     },
     /// Consumes an immutable Core-held request; no replacement payload is accepted.
     Approve {

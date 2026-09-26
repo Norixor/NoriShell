@@ -30,6 +30,7 @@ use norishell_ssh_domain::{Endpoint, EndpointError, ssh_sha256_fingerprint};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 
+mod application_preferences;
 mod desktop_preferences;
 mod desktop_profiles;
 mod forward_rules;
@@ -58,7 +59,7 @@ use migrations::{
     migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6, migrate_v6_to_v7,
 };
 
-const SCHEMA_VERSION: i64 = 45;
+const SCHEMA_VERSION: i64 = 47;
 const ROOT_DISK_RESOURCE_ID: &str = "root";
 const AGGREGATE_NON_LOOPBACK_NETWORK_RESOURCE_ID: &str = "aggregateNonLoopback";
 const MAX_TERMINAL_WORKSPACE_LAYOUT_BYTES: usize = 256 * 1024;
@@ -90,6 +91,9 @@ pub(crate) fn remove_schema_added_after_fixture_version(
     connection: &Connection,
     fixture_version: i64,
 ) -> rusqlite::Result<()> {
+    if fixture_version < 46 {
+        connection.execute_batch("DROP TABLE IF EXISTS application_preferences;")?;
+    }
     if fixture_version < 45 {
         let mut statement = connection.prepare(
             "SELECT name FROM sqlite_master WHERE type = 'trigger'
@@ -1478,6 +1482,20 @@ pub enum SshSyncHttpUploadCompletionProof {
     },
 }
 
+/// Evidence for retiring an obsolete upload body before preparing a new body.
+/// The caller must authenticate the remote GET and validate the old body schema.
+/// An in-flight request can still win after the GET; its base ETag must be used
+/// as the CAS condition for the replacement upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SshSyncHttpUploadAbandonProof {
+    PreparedNotSent,
+    AuthenticatedRemoteAtBase {
+        remote_revision: u64,
+        remote_etag: Option<String>,
+        remote_body_sha256: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SshSyncScopeMembershipState {
     Included,
@@ -2720,6 +2738,95 @@ impl AppRepository {
                 fence.use_oauth,
                 u64_to_i64(fence.authorization_revision.get())?,
                 u64_to_i64(fence.configuration_revision.get())?
+            ],
+        )?;
+        if deleted != 1 {
+            return Err(AppPersistenceError::Conflict);
+        }
+        transaction.commit()?;
+        usize_to_u32(deleted)
+    }
+
+    /// Retires an exact obsolete PUT without treating it as a completed sync.
+    /// For a sent request, the caller must have authenticated a GET showing the
+    /// original base still occupies the remote slot. A replacement PUT must use
+    /// the same base ETag (or create-only precondition) and handle CAS failure.
+    pub fn abandon_ssh_sync_http_upload_attempt(
+        &mut self,
+        owner: &SshSyncProfileStateKey,
+        idempotency_key: &str,
+        body_sha256: &str,
+        expected_state_version: WireSequence,
+        fence: &SshSyncHttpUploadCompletionFence,
+        proof: &SshSyncHttpUploadAbandonProof,
+    ) -> Result<u32> {
+        let owner = normalized_ssh_sync_profile_state_key(owner)?;
+        let idempotency_key = normalized_upload_idempotency_key(idempotency_key)?;
+        validate_lower_sha256(body_sha256, "invalid SSH sync upload body digest")?;
+        let fence = normalized_ssh_sync_http_upload_completion_fence(fence)?;
+        validate_ssh_sync_http_upload_abandon_proof(proof)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(existing) = get_ssh_sync_http_upload_attempt_connection(&transaction, &owner)?
+        else {
+            transaction.commit()?;
+            return Ok(0);
+        };
+        if existing.input.http_method != SshSyncHttpMethod::Put
+            || existing.input.idempotency_key != idempotency_key
+            || existing.input.body_sha256 != body_sha256
+            || existing.state_version != expected_state_version
+            || existing.input.canonical_url != fence.canonical_url
+            || existing.input.http_method != fence.http_method
+            || existing.input.use_oauth != fence.use_oauth
+            || existing.input.authorization_revision != fence.authorization_revision
+            || existing.input.configuration_revision != fence.configuration_revision
+        {
+            return Err(AppPersistenceError::Conflict);
+        }
+        match (existing.state, proof) {
+            (
+                SshSyncHttpUploadAttemptState::Prepared,
+                SshSyncHttpUploadAbandonProof::PreparedNotSent,
+            ) => {}
+            (
+                SshSyncHttpUploadAttemptState::Sent | SshSyncHttpUploadAttemptState::Verifying,
+                SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+                    remote_revision,
+                    remote_etag,
+                    remote_body_sha256,
+                },
+            ) if *remote_revision == existing.input.base_revision
+                && remote_etag == &existing.input.base_etag
+                && remote_body_sha256.as_deref() != Some(body_sha256)
+                && match existing.input.base_revision {
+                    0 => remote_body_sha256.is_none(),
+                    _ => remote_body_sha256.is_some(),
+                } => {}
+            _ => return Err(AppPersistenceError::Conflict),
+        }
+        let deleted = transaction.execute(
+            "DELETE FROM ssh_sync_http_upload_attempts
+             WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2
+               AND profile_id = ?3 AND idempotency_key = ?4 AND body_sha256 = ?5
+               AND state_version = ?6 AND canonical_url = ?7 AND http_method = 'PUT'
+               AND use_oauth = ?8 AND authorization_revision = ?9
+               AND configuration_revision = ?10 AND base_revision = ?11
+               AND base_etag IS ?12",
+            params![
+                owner.plugin_id.as_str(),
+                owner.signer_fingerprint_sha256,
+                owner.profile_id,
+                idempotency_key,
+                body_sha256,
+                u64_to_i64(expected_state_version.get())?,
+                fence.canonical_url,
+                fence.use_oauth,
+                u64_to_i64(fence.authorization_revision.get())?,
+                u64_to_i64(fence.configuration_revision.get())?,
+                u64_to_i64(existing.input.base_revision)?,
+                existing.input.base_etag,
             ],
         )?;
         if deleted != 1 {
@@ -4181,8 +4288,8 @@ impl AppRepository {
                 },
             )
             .optional()?;
-        if let Some(existing) = version_existing {
-            if existing
+        if let Some(version_record) = version_existing {
+            if version_record
                 != (
                     u64_to_i64(package_size)?,
                     candidate.package_sha256.clone(),
@@ -4193,7 +4300,39 @@ impl AppRepository {
                     })?,
                 )
             {
-                return Err(AppPersistenceError::Conflict);
+                let replacing_active = existing.as_ref().is_some_and(|installed| {
+                    installed.active_version == candidate.active_version
+                        && installed.package_sha256 == version_record.1
+                        && installed.package_sha256 != candidate.package_sha256
+                });
+                // Uninstall may retain version metadata while removing the active
+                // installation. A newly approved install may replace that history;
+                // the installer has already verified that no active pointer exists.
+                let reinstalling_after_uninstall =
+                    existing.is_none() && version_record.1 != candidate.package_sha256;
+                if !replacing_active && !reinstalling_after_uninstall {
+                    return Err(AppPersistenceError::Conflict);
+                }
+                transaction.execute(
+                    "UPDATE plugin_installed_versions
+                     SET package_size = ?3, package_sha256 = ?4,
+                         publisher_key_base64 = ?5, publisher_signature_base64 = ?6,
+                         capabilities_json = ?7, installed_at_ms = ?8
+                     WHERE plugin_id = ?1 AND version = ?2 AND package_sha256 = ?9",
+                    params![
+                        candidate.plugin_id.as_str(),
+                        candidate.active_version,
+                        u64_to_i64(package_size)?,
+                        candidate.package_sha256,
+                        publisher_key_base64,
+                        publisher_signature_base64,
+                        serde_json::to_string(&candidate.capabilities).map_err(|_| {
+                            AppPersistenceError::InvalidInput("invalid plugin capabilities")
+                        })?,
+                        candidate.updated_at_unix_ms,
+                        version_record.1,
+                    ],
+                )?;
             }
         } else {
             transaction.execute(
@@ -4245,6 +4384,31 @@ impl AppRepository {
                 candidate.updated_at_unix_ms,
             ],
         )?;
+        if let Some(previous) = existing.as_ref().filter(|previous| {
+            previous.signer_fingerprint_sha256 != candidate.signer_fingerprint_sha256
+        }) {
+            let target_has_data: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM plugin_private_storage
+                 WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2)",
+                params![
+                    candidate.plugin_id.as_str(),
+                    candidate.signer_fingerprint_sha256
+                ],
+                |row| row.get(0),
+            )?;
+            if target_has_data {
+                return Err(AppPersistenceError::Conflict);
+            }
+            transaction.execute(
+                "UPDATE plugin_private_storage SET signer_fingerprint_sha256 = ?3
+                 WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2",
+                params![
+                    candidate.plugin_id.as_str(),
+                    previous.signer_fingerprint_sha256,
+                    candidate.signer_fingerprint_sha256
+                ],
+            )?;
+        }
         if let Some(settings) = settings {
             install_plugin_settings(
                 &transaction,
@@ -4401,6 +4565,22 @@ impl AppRepository {
             .map_err(AppPersistenceError::from)
     }
 
+    pub fn plugin_installed_version_package_sha256(
+        &self,
+        plugin_id: &PluginId,
+        version: &str,
+    ) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT package_sha256 FROM plugin_installed_versions
+                 WHERE plugin_id = ?1 AND version = ?2",
+                params![plugin_id.as_str(), version],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppPersistenceError::from)
+    }
+
     pub fn list_plugin_installations(&self) -> Result<Vec<PluginInstalledRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT plugin_id, name, publisher, signer_fingerprint_sha256,
@@ -4546,6 +4726,10 @@ impl AppRepository {
             ],
         )?;
         if !retain_version_metadata {
+            transaction.execute(
+                "DELETE FROM plugin_private_storage WHERE plugin_id = ?1",
+                [plugin_id.as_str()],
+            )?;
             transaction.execute(
                 "DELETE FROM plugin_installed_versions WHERE plugin_id = ?1",
                 [plugin_id.as_str()],
@@ -8347,6 +8531,37 @@ fn validate_ssh_sync_http_upload_completion_proof(
             )?;
             validate_strong_etag(authenticated_remote_etag)
         }
+    }
+}
+
+fn validate_ssh_sync_http_upload_abandon_proof(
+    proof: &SshSyncHttpUploadAbandonProof,
+) -> Result<()> {
+    let SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+        remote_revision,
+        remote_etag,
+        remote_body_sha256,
+    } = proof
+    else {
+        return Ok(());
+    };
+    if *remote_revision > i64::MAX as u64 {
+        return Err(AppPersistenceError::InvalidInput(
+            "authenticated SSH sync revision exceeds the supported bound",
+        ));
+    }
+    match (*remote_revision, remote_etag, remote_body_sha256) {
+        (0, None, None) => Ok(()),
+        (0, _, _) => Err(AppPersistenceError::InvalidInput(
+            "authenticated SSH sync empty base is invalid",
+        )),
+        (_, Some(etag), Some(body_sha256)) => {
+            validate_strong_etag(etag)?;
+            validate_lower_sha256(body_sha256, "invalid observed SSH sync upload body digest")
+        }
+        _ => Err(AppPersistenceError::InvalidInput(
+            "authenticated SSH sync base is incomplete",
+        )),
     }
 }
 
@@ -14037,6 +14252,8 @@ fn special_plugin_capability(capability: PluginCapability) -> bool {
             | PluginCapability::TerminalProvider
             | PluginCapability::CredentialsPlugin
             | PluginCapability::SshSync
+            | PluginCapability::AppPreferencesRead
+            | PluginCapability::TerminalHistoryRead
     )
 }
 
@@ -14244,6 +14461,8 @@ fn plugin_capability_to_db(value: PluginCapability) -> &'static str {
         PluginCapability::CredentialsPlugin => "credentials.plugin",
         PluginCapability::MetricsRead => "metrics.read",
         PluginCapability::SshSync => "ssh.sync",
+        PluginCapability::AppPreferencesRead => "app.preferences.read",
+        PluginCapability::TerminalHistoryRead => "terminal.history.read",
     }
 }
 
@@ -14278,6 +14497,8 @@ fn plugin_capability_from_db(value: &str) -> rusqlite::Result<PluginCapability> 
         "credentials.plugin" => Ok(PluginCapability::CredentialsPlugin),
         "metrics.read" => Ok(PluginCapability::MetricsRead),
         "ssh.sync" => Ok(PluginCapability::SshSync),
+        "app.preferences.read" => Ok(PluginCapability::AppPreferencesRead),
+        "terminal.history.read" => Ok(PluginCapability::TerminalHistoryRead),
         _ => Err(invalid_column(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "invalid plugin capability",
@@ -15537,21 +15758,21 @@ mod tests {
         HostCreatePasswordStageState, KnownHostObservation, LoginAutomationSecretStageState,
         PluginActivationPermissions, PluginCatalogEntryRecord, PluginCatalogTrustRecord,
         PluginInstalledRecord, PluginOperationPhase, PluginPermissionBinding, SshSyncHttpMethod,
-        SshSyncHttpUploadAttemptInput, SshSyncHttpUploadAttemptState,
-        SshSyncHttpUploadCompletionFence, SshSyncHttpUploadCompletionProof, SshSyncLocalObjectId,
-        SshSyncLoginAutomation, SshSyncLoginAutomationStep, SshSyncObjectKind,
-        SshSyncObjectMappingInput, SshSyncOwnedCreateBatch, SshSyncOwnedCredentialDelete,
-        SshSyncOwnedCredentialUpdate, SshSyncOwnedDesktopProfileDelete,
-        SshSyncOwnedDesktopProfileUpdate, SshSyncOwnedHostBaseVersions, SshSyncOwnedHostDelete,
-        SshSyncOwnedHostUpdate, SshSyncOwnedIdentityDelete, SshSyncOwnedIdentityUpdate,
-        SshSyncOwnedMetadataDelta, SshSyncOwnedSecretDelete, SshSyncOwnedSecretReplacement,
-        SshSyncProfileKeyBinding, SshSyncProfileRemoteBaseline, SshSyncProfileScope,
-        SshSyncProfileScopeMode, SshSyncProfileStateCreate, SshSyncProfileStateKey,
-        SshSyncRestoreCredentialInput, SshSyncRestoreCredentialMaterial,
-        SshSyncRestoreDesktopProfileInput, SshSyncRestoreHostInput, SshSyncRestoreIdentityInput,
-        SshSyncRestorePlan, SshSyncRestoreSagaInput, SshSyncScopeMembershipInput,
-        SshSyncScopeMembershipState, migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5,
-        migrate_v5_to_v6, migrate_v6_to_v7,
+        SshSyncHttpUploadAbandonProof, SshSyncHttpUploadAttemptInput,
+        SshSyncHttpUploadAttemptState, SshSyncHttpUploadCompletionFence,
+        SshSyncHttpUploadCompletionProof, SshSyncLocalObjectId, SshSyncLoginAutomation,
+        SshSyncLoginAutomationStep, SshSyncObjectKind, SshSyncObjectMappingInput,
+        SshSyncOwnedCreateBatch, SshSyncOwnedCredentialDelete, SshSyncOwnedCredentialUpdate,
+        SshSyncOwnedDesktopProfileDelete, SshSyncOwnedDesktopProfileUpdate,
+        SshSyncOwnedHostBaseVersions, SshSyncOwnedHostDelete, SshSyncOwnedHostUpdate,
+        SshSyncOwnedIdentityDelete, SshSyncOwnedIdentityUpdate, SshSyncOwnedMetadataDelta,
+        SshSyncOwnedSecretDelete, SshSyncOwnedSecretReplacement, SshSyncProfileKeyBinding,
+        SshSyncProfileRemoteBaseline, SshSyncProfileScope, SshSyncProfileScopeMode,
+        SshSyncProfileStateCreate, SshSyncProfileStateKey, SshSyncRestoreCredentialInput,
+        SshSyncRestoreCredentialMaterial, SshSyncRestoreDesktopProfileInput,
+        SshSyncRestoreHostInput, SshSyncRestoreIdentityInput, SshSyncRestorePlan,
+        SshSyncRestoreSagaInput, SshSyncScopeMembershipInput, SshSyncScopeMembershipState,
+        migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6, migrate_v6_to_v7,
     };
 
     fn repository(directory: &tempfile::TempDir) -> AppRepository {
@@ -15731,7 +15952,11 @@ mod tests {
             height: 900,
             clipboard_enabled: true,
             audio_playback_enabled: true,
+            rdp_transport_mode: norishell_core_api::RdpTransportMode::Auto,
+            rdp_graphics_mode: norishell_core_api::RdpGraphicsMode::Auto,
+            rdp_resolution_mode: norishell_core_api::RdpResolutionMode::Fixed,
             vnc_protocol_version: norishell_core_api::VncProtocolVersion::Auto,
+            vnc_resolution_mode: norishell_core_api::VncResolutionMode::Server,
             revision: WireSequence::new(0),
         }
     }
@@ -20124,6 +20349,107 @@ mod tests {
     }
 
     #[test]
+    fn same_version_replacement_migrates_private_storage_atomically() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut repository = repository(&directory);
+        let plugin_id = PluginId::parse("com.norishell.same-version").expect("plugin id");
+        let original = PluginInstalledRecord {
+            plugin_id: plugin_id.clone(),
+            name: "Same version".to_owned(),
+            publisher: "Local".to_owned(),
+            signer_fingerprint_sha256: "a".repeat(64),
+            active_version: "1.0.0".to_owned(),
+            package_sha256: "a".repeat(64),
+            capabilities: vec![PluginCapability::UiPanel],
+            state: PluginInstallState::Disabled,
+            state_version: WireSequence::new(1),
+            installed_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        };
+        repository
+            .activate_plugin_installation(None, &original, 100, "", "", true, None)
+            .expect("initial install");
+        let original_owner = super::PluginPrivateStorageOwner {
+            plugin_id: plugin_id.clone(),
+            signer_fingerprint_sha256: original.signer_fingerprint_sha256.clone(),
+        };
+        repository
+            .set_plugin_private_storage_kv(
+                &original_owner,
+                "offline-cache",
+                b"retained",
+                0,
+                &|| true,
+            )
+            .expect("save private data");
+        let replacement = PluginInstalledRecord {
+            signer_fingerprint_sha256: "b".repeat(64),
+            package_sha256: "b".repeat(64),
+            state_version: WireSequence::new(2),
+            updated_at_unix_ms: 2,
+            ..original.clone()
+        };
+        repository
+            .connection
+            .execute(
+                "INSERT INTO plugin_private_storage
+             (plugin_id, signer_fingerprint_sha256, namespace, storage_key, chunk_index,
+              value_bytes, value_revision, store_revision)
+             VALUES (?1, ?2, 'cache', 'collision', 0, X'01', 1, 1)",
+                rusqlite::params![plugin_id.as_str(), replacement.signer_fingerprint_sha256],
+            )
+            .expect("simulate stale target owner");
+        assert!(matches!(
+            repository.activate_plugin_installation(
+                Some(WireSequence::new(1)),
+                &replacement,
+                101,
+                "",
+                "",
+                true,
+                None,
+            ),
+            Err(AppPersistenceError::Conflict)
+        ));
+        assert_eq!(
+            repository.get_plugin_installation(&plugin_id).unwrap(),
+            original
+        );
+        repository.connection.execute(
+            "DELETE FROM plugin_private_storage WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2",
+            rusqlite::params![plugin_id.as_str(), replacement.signer_fingerprint_sha256],
+        ).expect("remove collision");
+        repository
+            .activate_plugin_installation(
+                Some(WireSequence::new(1)),
+                &replacement,
+                101,
+                "",
+                "",
+                true,
+                None,
+            )
+            .expect("replace version and owner");
+        let replacement_owner = super::PluginPrivateStorageOwner {
+            plugin_id: plugin_id.clone(),
+            signer_fingerprint_sha256: replacement.signer_fingerprint_sha256.clone(),
+        };
+        assert_eq!(
+            repository
+                .get_plugin_private_storage_kv(&replacement_owner, "offline-cache", &|| true,)
+                .unwrap()
+                .entry
+                .unwrap()
+                .value_bytes,
+            b"retained"
+        );
+        assert!(matches!(
+            repository.get_plugin_private_storage_kv(&original_owner, "offline-cache", &|| true,),
+            Err(AppPersistenceError::Conflict)
+        ));
+    }
+
+    #[test]
     fn plugin_installation_requires_approval_for_expansion_and_artifact_identity_change() {
         let directory = tempfile::tempdir().expect("tempdir");
         let mut repository = repository(&directory);
@@ -20240,6 +20566,14 @@ mod tests {
             Err(AppPersistenceError::Conflict)
         ));
 
+        let retained_owner = super::PluginPrivateStorageOwner {
+            plugin_id: plugin_id.clone(),
+            signer_fingerprint_sha256: expanded.signer_fingerprint_sha256.clone(),
+        };
+        repository
+            .set_plugin_private_storage_kv(&retained_owner, "saved", b"retained", 0, &|| true)
+            .expect("save plugin data before uninstall");
+
         let uninstall_operation_id = PluginOperationId::new();
         let uninstall = repository
             .begin_plugin_operation(
@@ -20275,6 +20609,81 @@ mod tests {
             )
             .expect("retained versions");
         assert_eq!(retained_versions, 2);
+        let retained_storage: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM plugin_private_storage WHERE plugin_id = ?1",
+                [plugin_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("retained storage");
+        assert!(retained_storage > 0);
+
+        let reinstall = PluginInstalledRecord {
+            signer_fingerprint_sha256: "3".repeat(64),
+            package_sha256: "f".repeat(64),
+            state: PluginInstallState::Disabled,
+            state_version: WireSequence::new(1),
+            installed_at_unix_ms: 4,
+            updated_at_unix_ms: 4,
+            ..expanded
+        };
+        repository
+            .activate_plugin_installation(
+                None,
+                &reinstall,
+                1024,
+                &"G".repeat(44),
+                &"H".repeat(88),
+                true,
+                None,
+            )
+            .expect("reinstall a changed package after retaining version metadata");
+        assert_eq!(
+            repository.get_plugin_installation(&plugin_id).unwrap(),
+            reinstall
+        );
+        let retained_hash: String = repository
+            .connection
+            .query_row(
+                "SELECT package_sha256 FROM plugin_installed_versions
+                 WHERE plugin_id = ?1 AND version = ?2",
+                rusqlite::params![plugin_id.as_str(), reinstall.active_version],
+                |row| row.get(0),
+            )
+            .expect("replaced retained version metadata");
+        assert_eq!(retained_hash, reinstall.package_sha256);
+
+        let removal_operation_id = PluginOperationId::new();
+        let removal = repository
+            .begin_plugin_operation(
+                &removal_operation_id,
+                Some(&plugin_id),
+                PluginOperationKind::Uninstall,
+                "uninstall-fixture-delete-data",
+                &"d".repeat(64),
+                None,
+                Some("2.0.0"),
+            )
+            .expect("begin delete-data uninstall");
+        repository
+            .uninstall_plugin(
+                &plugin_id,
+                reinstall.state_version,
+                &removal_operation_id,
+                removal.state_version,
+                false,
+            )
+            .expect("delete retained plugin data");
+        let remaining_storage: i64 = repository
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM plugin_private_storage WHERE plugin_id = ?1",
+                [plugin_id.as_str()],
+                |row| row.get(0),
+            )
+            .expect("remaining plugin storage");
+        assert_eq!(remaining_storage, 0);
     }
 
     #[test]
@@ -23059,6 +23468,319 @@ mod tests {
         assert_eq!(
             repository.list_ssh_sync_vault_gc(&owner.key).unwrap()[0].secret_ref_id,
             shared_secret
+        );
+    }
+
+    #[test]
+    fn obsolete_prepared_upload_can_be_replaced_only_by_its_exact_owner_and_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut repository = repository(&directory);
+        let profile = ssh_sync_profile_fixture("obsolete-prepared");
+        repository.ensure_ssh_sync_profile_state(&profile).unwrap();
+        let input = SshSyncHttpUploadAttemptInput {
+            owner: profile.key.clone(),
+            canonical_url: "https://sync.example/exchange".to_owned(),
+            http_method: SshSyncHttpMethod::Put,
+            use_oauth: true,
+            authorization_revision: WireSequence::new(3),
+            configuration_revision: WireSequence::new(7),
+            base_revision: 0,
+            base_etag: None,
+            target_revision: 1,
+            keyed_content_sha256: "a".repeat(64),
+            body_sha256: "b".repeat(64),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        let created = repository
+            .ensure_ssh_sync_http_upload_attempt(&input)
+            .unwrap();
+        let fence = SshSyncHttpUploadCompletionFence {
+            canonical_url: input.canonical_url.clone(),
+            http_method: input.http_method,
+            use_oauth: input.use_oauth,
+            authorization_revision: input.authorization_revision,
+            configuration_revision: input.configuration_revision,
+        };
+        let abandon = |repository: &mut AppRepository,
+                       owner,
+                       idempotency_key: &str,
+                       body_sha256: &str,
+                       version,
+                       fence: &SshSyncHttpUploadCompletionFence| {
+            repository.abandon_ssh_sync_http_upload_attempt(
+                owner,
+                idempotency_key,
+                body_sha256,
+                version,
+                fence,
+                &SshSyncHttpUploadAbandonProof::PreparedNotSent,
+            )
+        };
+        let mut other_owner = input.owner.clone();
+        other_owner.profile_id = "other-profile".to_owned();
+        assert_eq!(
+            abandon(
+                &mut repository,
+                &other_owner,
+                &input.idempotency_key,
+                &input.body_sha256,
+                created.state_version,
+                &fence,
+            )
+            .unwrap(),
+            0
+        );
+        for (key, body, version, fence) in [
+            (
+                uuid::Uuid::new_v4().to_string(),
+                input.body_sha256.clone(),
+                created.state_version,
+                fence.clone(),
+            ),
+            (
+                input.idempotency_key.clone(),
+                "c".repeat(64),
+                created.state_version,
+                fence.clone(),
+            ),
+            (
+                input.idempotency_key.clone(),
+                input.body_sha256.clone(),
+                WireSequence::new(2),
+                fence.clone(),
+            ),
+            (
+                input.idempotency_key.clone(),
+                input.body_sha256.clone(),
+                created.state_version,
+                SshSyncHttpUploadCompletionFence {
+                    configuration_revision: WireSequence::new(8),
+                    ..fence.clone()
+                },
+            ),
+        ] {
+            assert!(matches!(
+                abandon(&mut repository, &input.owner, &key, &body, version, &fence),
+                Err(AppPersistenceError::Conflict)
+            ));
+        }
+        assert!(matches!(
+            repository.abandon_ssh_sync_http_upload_attempt(
+                &input.owner,
+                &input.idempotency_key,
+                &input.body_sha256,
+                created.state_version,
+                &fence,
+                &SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+                    remote_revision: 0,
+                    remote_etag: None,
+                    remote_body_sha256: None,
+                },
+            ),
+            Err(AppPersistenceError::Conflict)
+        ));
+        assert_eq!(
+            abandon(
+                &mut repository,
+                &input.owner,
+                &input.idempotency_key,
+                &input.body_sha256,
+                created.state_version,
+                &fence,
+            )
+            .unwrap(),
+            1
+        );
+        let mut replacement = input.clone();
+        replacement.body_sha256 = "d".repeat(64);
+        replacement.idempotency_key = uuid::Uuid::new_v4().to_string();
+        repository
+            .ensure_ssh_sync_http_upload_attempt(&replacement)
+            .unwrap();
+    }
+
+    #[test]
+    fn obsolete_sent_upload_requires_authenticated_exact_base_before_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data/norishell.sqlite3");
+        let profile = ssh_sync_profile_fixture("obsolete-sent");
+        let input = SshSyncHttpUploadAttemptInput {
+            owner: profile.key.clone(),
+            canonical_url: "https://sync.example/exchange".to_owned(),
+            http_method: SshSyncHttpMethod::Put,
+            use_oauth: true,
+            authorization_revision: WireSequence::new(3),
+            configuration_revision: WireSequence::new(7),
+            base_revision: 4,
+            base_etag: Some("\"revision-4\"".to_owned()),
+            target_revision: 5,
+            keyed_content_sha256: "a".repeat(64),
+            body_sha256: "b".repeat(64),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        let fence = SshSyncHttpUploadCompletionFence {
+            canonical_url: input.canonical_url.clone(),
+            http_method: input.http_method,
+            use_oauth: input.use_oauth,
+            authorization_revision: input.authorization_revision,
+            configuration_revision: input.configuration_revision,
+        };
+        let mut repository = AppRepository::open(&database_path).unwrap();
+        repository.ensure_ssh_sync_profile_state(&profile).unwrap();
+        let created = repository
+            .ensure_ssh_sync_http_upload_attempt(&input)
+            .unwrap();
+        let sent = repository
+            .advance_ssh_sync_http_upload_attempt(
+                &input.owner,
+                created.state_version,
+                SshSyncHttpUploadAttemptState::Sent,
+            )
+            .unwrap();
+        drop(repository);
+        let mut repository = AppRepository::open(&database_path).unwrap();
+        let exact_base = SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+            remote_revision: 4,
+            remote_etag: Some("\"revision-4\"".to_owned()),
+            remote_body_sha256: Some("c".repeat(64)),
+        };
+        for proof in [
+            SshSyncHttpUploadAbandonProof::PreparedNotSent,
+            SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+                remote_revision: 5,
+                remote_etag: Some("\"revision-4\"".to_owned()),
+                remote_body_sha256: Some("c".repeat(64)),
+            },
+            SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+                remote_revision: 4,
+                remote_etag: Some("\"revision-5\"".to_owned()),
+                remote_body_sha256: Some("c".repeat(64)),
+            },
+            SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+                remote_revision: 4,
+                remote_etag: Some("\"revision-4\"".to_owned()),
+                remote_body_sha256: Some(input.body_sha256.clone()),
+            },
+        ] {
+            assert!(matches!(
+                repository.abandon_ssh_sync_http_upload_attempt(
+                    &input.owner,
+                    &input.idempotency_key,
+                    &input.body_sha256,
+                    sent.state_version,
+                    &fence,
+                    &proof,
+                ),
+                Err(AppPersistenceError::Conflict)
+            ));
+        }
+        let verifying = repository
+            .advance_ssh_sync_http_upload_attempt(
+                &input.owner,
+                sent.state_version,
+                SshSyncHttpUploadAttemptState::Verifying,
+            )
+            .unwrap();
+        assert!(matches!(
+            repository.abandon_ssh_sync_http_upload_attempt(
+                &input.owner,
+                &input.idempotency_key,
+                &input.body_sha256,
+                sent.state_version,
+                &fence,
+                &exact_base,
+            ),
+            Err(AppPersistenceError::Conflict)
+        ));
+        assert_eq!(
+            repository
+                .abandon_ssh_sync_http_upload_attempt(
+                    &input.owner,
+                    &input.idempotency_key,
+                    &input.body_sha256,
+                    verifying.state_version,
+                    &fence,
+                    &exact_base,
+                )
+                .unwrap(),
+            1
+        );
+        let mut replacement = input.clone();
+        replacement.body_sha256 = "d".repeat(64);
+        replacement.idempotency_key = uuid::Uuid::new_v4().to_string();
+        repository
+            .ensure_ssh_sync_http_upload_attempt(&replacement)
+            .unwrap();
+    }
+
+    #[test]
+    fn sent_create_upload_requires_authenticated_remote_absence() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut repository = repository(&directory);
+        let profile = ssh_sync_profile_fixture("obsolete-create");
+        repository.ensure_ssh_sync_profile_state(&profile).unwrap();
+        let input = SshSyncHttpUploadAttemptInput {
+            owner: profile.key.clone(),
+            canonical_url: "https://sync.example/exchange".to_owned(),
+            http_method: SshSyncHttpMethod::Put,
+            use_oauth: false,
+            authorization_revision: WireSequence::new(3),
+            configuration_revision: WireSequence::new(7),
+            base_revision: 0,
+            base_etag: None,
+            target_revision: 1,
+            keyed_content_sha256: "a".repeat(64),
+            body_sha256: "b".repeat(64),
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+        };
+        let created = repository
+            .ensure_ssh_sync_http_upload_attempt(&input)
+            .unwrap();
+        let sent = repository
+            .advance_ssh_sync_http_upload_attempt(
+                &input.owner,
+                created.state_version,
+                SshSyncHttpUploadAttemptState::Sent,
+            )
+            .unwrap();
+        let fence = SshSyncHttpUploadCompletionFence {
+            canonical_url: input.canonical_url.clone(),
+            http_method: input.http_method,
+            use_oauth: input.use_oauth,
+            authorization_revision: input.authorization_revision,
+            configuration_revision: input.configuration_revision,
+        };
+        assert!(matches!(
+            repository.abandon_ssh_sync_http_upload_attempt(
+                &input.owner,
+                &input.idempotency_key,
+                &input.body_sha256,
+                sent.state_version,
+                &fence,
+                &SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+                    remote_revision: 0,
+                    remote_etag: None,
+                    remote_body_sha256: Some("c".repeat(64)),
+                },
+            ),
+            Err(AppPersistenceError::InvalidInput(_))
+        ));
+        assert_eq!(
+            repository
+                .abandon_ssh_sync_http_upload_attempt(
+                    &input.owner,
+                    &input.idempotency_key,
+                    &input.body_sha256,
+                    sent.state_version,
+                    &fence,
+                    &SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+                        remote_revision: 0,
+                        remote_etag: None,
+                        remote_body_sha256: None,
+                    },
+                )
+                .unwrap(),
+            1
         );
     }
 

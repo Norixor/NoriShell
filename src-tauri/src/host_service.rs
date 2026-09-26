@@ -2015,7 +2015,11 @@ mod tests {
             height: 720,
             clipboard_enabled: false,
             audio_playback_enabled: false,
+            rdp_transport_mode: norishell_core_api::RdpTransportMode::Auto,
+            rdp_graphics_mode: norishell_core_api::RdpGraphicsMode::Auto,
+            rdp_resolution_mode: norishell_core_api::RdpResolutionMode::Fixed,
             vnc_protocol_version: norishell_core_api::VncProtocolVersion::Auto,
+            vnc_resolution_mode: norishell_core_api::VncResolutionMode::Server,
             revision: WireSequence::new(0),
         };
         let saved = service

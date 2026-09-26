@@ -26,7 +26,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `sftpRead`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `sftpRead`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 hostHandle comes from a Core host context, not a HostId or SSH session ID. Core approves rootPath before issuing a root handle; write=true also requires sftpWrite. The connection is independent of existing terminals.
 

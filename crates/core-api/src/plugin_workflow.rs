@@ -161,6 +161,8 @@ pub enum PluginWorkflowStepState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum PluginWorkflowApiMethod {
+    DataCatalog,
+    DataRead,
     SerialDevices,
     SerialOpen,
     SerialSend,
@@ -195,6 +197,8 @@ impl PluginWorkflowApiMethod {
     #[allow(unreachable_patterns)] // future host-only operations deliberately map to None.
     pub const fn from_operation(operation: &PluginApiOperation) -> Option<Self> {
         Some(match operation {
+            PluginApiOperation::DataCatalog { .. } => Self::DataCatalog,
+            PluginApiOperation::DataRead { .. } => Self::DataRead,
             PluginApiOperation::SerialDevices { .. } => Self::SerialDevices,
             PluginApiOperation::SerialOpen { .. } => Self::SerialOpen,
             PluginApiOperation::SerialSend { .. } => Self::SerialSend,

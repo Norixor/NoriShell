@@ -1,10 +1,11 @@
 # Generated Core API type directory
 
-Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every TypeScript declaration emitted by that exporter: **868 types** across **48 public modules**. This is an internal application contract, never a guest SDK permission surface.
+Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every TypeScript declaration emitted by that exporter: **869 types** across **49 public modules**. This is an internal application contract, never a guest SDK permission surface.
 
 | Type | Source module |
 | --- | --- |
 | `DesktopProtocol` | `desktop` |
+| `VncProtocolVersion` | `desktop` |
 | `DesktopAvailability` | `desktop` |
 | `DesktopProfile` | `desktop` |
 | `DesktopPasswordStage` | `desktop` |
@@ -126,6 +127,25 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `PluginAppIntegrationListRequest` | `plugin_app_integration` |
 | `PluginAppNavigation` | `plugin_app_integration` |
 | `PluginApiCall` | `plugin_api` |
+| `PluginDataCategory` | `plugin_data_api` |
+| `PluginDataCategoryDescriptor` | `plugin_data_api` |
+| `PluginDataCatalog` | `plugin_data_api` |
+| `PluginDataReadRequest` | `plugin_data_api` |
+| `PluginDataObjectKind` | `plugin_data_api` |
+| `PluginDataObjectDisplay` | `plugin_data_api` |
+| `PluginDataObjectDescriptor` | `plugin_data_api` |
+| `PluginDataLocalCounts` | `plugin_data_api` |
+| `PluginDataObjectSource` | `plugin_data_api` |
+| `PluginDataObjectDecision` | `plugin_data_api` |
+| `PluginDataSnapshotRequest` | `plugin_data_api` |
+| `PluginDataInspectRequest` | `plugin_data_api` |
+| `PluginDataComposeRequest` | `plugin_data_api` |
+| `PluginDataApplyRequest` | `plugin_data_api` |
+| `PluginDataExportRequest` | `plugin_data_api` |
+| `PluginDataCheckpointRequest` | `plugin_data_api` |
+| `PluginDataReleaseRequest` | `plugin_data_api` |
+| `PluginTerminalHistoryEntry` | `plugin_data_api` |
+| `PluginDataReadResult` | `plugin_data_api` |
 | `PluginApiOperation` | `plugin_api` |
 | `PluginApiReply` | `plugin_api` |
 | `PluginApiOutcome` | `plugin_api` |
@@ -345,6 +365,7 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `PluginSshSyncUploadTarget` | `plugin_ui` |
 | `PluginSshSyncDownloadSource` | `plugin_ui` |
 | `PluginSshSyncDeleteTarget` | `plugin_ui` |
+| `PluginSshSyncConflictPolicy` | `plugin_ui` |
 | `PluginSshSyncRequest` | `plugin_ui` |
 | `PluginSshSyncAccountState` | `plugin_ui` |
 | `PluginSshSyncOperationState` | `plugin_ui` |
@@ -667,10 +688,6 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `SshSessionInputLeaseChange` | `ssh_terminal` |
 | `SshSessionEventPayload` | `ssh_terminal` |
 | `SshSessionEvent` | `ssh_terminal` |
-| `NativeTerminalShellKind` | `native_terminal` |
-| `NativeTerminalCaptureState` | `native_terminal` |
-| `NativeTerminalActivity` | `native_terminal` |
-| `NativeTerminalCaptureFailureCode` | `native_terminal` |
 | `NativeTerminalSettings` | `native_terminal` |
 | `NativeTerminalSettingsGetRequest` | `native_terminal` |
 | `NativeTerminalSettingsReplaceRequest` | `native_terminal` |
@@ -678,12 +695,8 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `NativeTerminalSshInputFence` | `native_terminal` |
 | `NativeTerminalLocalInputFence` | `native_terminal` |
 | `NativeTerminalInputFence` | `native_terminal` |
-| `NativeTerminalEnableRequest` | `native_terminal` |
+| `NativeTerminalHistoryRecordRequest` | `native_terminal` |
 | `NativeTerminalSessionScope` | `native_terminal` |
-| `NativeTerminalSessionStatus` | `native_terminal` |
-| `NativeTerminalCommandCompletion` | `native_terminal` |
-| `NativeTerminalSnapshotRequest` | `native_terminal` |
-| `NativeTerminalSnapshot` | `native_terminal` |
 | `NativeTerminalHistoryScope` | `native_terminal` |
 | `NativeTerminalHistoryListRequest` | `native_terminal` |
 | `NativeTerminalHistoryEntry` | `native_terminal` |

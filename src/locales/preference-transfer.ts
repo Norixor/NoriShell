@@ -11,6 +11,9 @@ export const preferenceTransferZhCN = {
   compare: "查看配置差异", before: "当前配置", after: "将应用的配置", noChanges: "与当前设置相同。",
   applyImport: "确认导入所选组", applyReset: "确认恢复所选组默认设置",
   results: { pending: "待确认", applying: "应用中", applied: "已应用", unchanged: "无需更改", conflict: "设置已变化，请重新预览", failed: "应用失败，请重新预览" },
+  syncFailureCodes: { adapterUnavailable: "缺少此设置的处理模块。", invalidCurrent: "本机设置当前无法读取。", invalidExpected: "同步基准设置无效。", invalidDesired: "远端设置无效。", readFailed: "读取本机设置失败。", applyRejected: "设置未被应用，请检查当前状态。", applyFailed: "写入设置失败。" },
+  syncErrors: { invalidInput: "同步设置无效，请重新检查。", requiresReload: "同步记录需要重新加载，请重启应用。", staleOperation: "同步状态已变化，请刷新后重试。", noPending: "待处理的同步设置已不存在，请刷新。", reviewRequired: "还有待处理的同步设置，请先完成检查。", newSyncRequired: "这次同步尚未确认，请重新发起同步。" },
+  diagnosticId: "诊断编号：{id}",
   errors: { tooLarge: "文件超过 256 KiB 限制。", emptySelection: "请至少选择一个可用组。", invalidFile: "不是受支持的 NoriShell 偏好文件。", invalidGroup: "文件含未知设置或无效数据，未应用任何更改。", unavailableGroup: "部分所选设置当前不可读取。取消选择该组后重试。", failed: "操作未完成。请检查文件和桌面服务状态后重试。" },
 };
 
@@ -27,5 +30,8 @@ export const preferenceTransferEn = {
   compare: "Compare configuration", before: "Current configuration", after: "Configuration to apply", noChanges: "Already matches the current settings.",
   applyImport: "Confirm import of selected groups", applyReset: "Confirm reset of selected groups",
   results: { pending: "Awaiting confirmation", applying: "Applying", applied: "Applied", unchanged: "No change needed", conflict: "Settings changed; preview again", failed: "Failed; preview again" },
+  syncFailureCodes: { adapterUnavailable: "The settings handler is unavailable.", invalidCurrent: "Current local settings could not be read.", invalidExpected: "The sync baseline is invalid.", invalidDesired: "The remote settings are invalid.", readFailed: "Local settings could not be read.", applyRejected: "The settings were not applied. Check their current state.", applyFailed: "The settings could not be saved." },
+  syncErrors: { invalidInput: "The sync settings are invalid. Review them and retry.", requiresReload: "The sync record needs to be reloaded. Restart the app.", staleOperation: "The sync state changed. Refresh and retry.", noPending: "These pending settings no longer exist. Refresh the view.", reviewRequired: "Synced settings still need review.", newSyncRequired: "This sync was not confirmed. Start a new sync." },
+  diagnosticId: "Diagnostic ID: {id}",
   errors: { tooLarge: "The file exceeds the 256 KiB limit.", emptySelection: "Select at least one available group.", invalidFile: "This is not a supported NoriShell preference file.", invalidGroup: "The file contains unknown settings or invalid data. Nothing was applied.", unavailableGroup: "Some selected settings cannot be read. Deselect those groups and try again.", failed: "The operation did not complete. Check the file and desktop service, then try again." },
 };

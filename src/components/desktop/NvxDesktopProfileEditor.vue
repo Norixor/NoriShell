@@ -3,14 +3,15 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { NvxButton, NvxCheckbox, NvxDialog, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
+import NvxDesktopDisplaySettings from "./NvxDesktopDisplaySettings.vue";
 import NvxDesktopPasswordFields from "./NvxDesktopPasswordFields.vue";
 import { desktopClient } from "../../core-api/desktop-client";
-import { listCredentialRefs, listHosts, listIdentities } from "../../core-api/client";
+import { listCredentialRefs, listHosts, listIdentities, parseCoreApiError } from "../../core-api/client";
 import type { CredentialRefSummary, DesktopProfile, HostSummary, VncProtocolVersion } from "../../core-api/generated/core-api";
 
 const props = defineProps<{ profileId?: string }>();
 const emit = defineEmits<{ saved: [profile: DesktopProfile]; cancel: []; closeCancelled: [] }>();
-const { t } = useI18n();
+const { t, te } = useI18n();
 
 const hosts = ref<HostSummary[]>([]);
 const credentials = ref<CredentialRefSummary[]>([]);
@@ -19,6 +20,15 @@ const baseline = ref(signature(draft.value));
 const passwordFields = ref<InstanceType<typeof NvxDesktopPasswordFields> | null>(null);
 const passwordDirty = ref(false);
 const loading = ref(true), failed = ref(false), invalid = ref(false), busy = ref(false), closing = ref(false), confirmClose = ref(false);
+const failureText = ref("");
+const failureCode = ref("");
+function showFailure(error: unknown) {
+  const failure = parseCoreApiError(error);
+  failureText.value = (failure?.messageKey && te(failure.messageKey) ? t(failure.messageKey, failure.params) : t("desktop.error"))
+    + (failure?.diagnosticId ? ` ${t("diagnostics.id", { id: failure.diagnosticId })}` : "");
+  failureCode.value = failure?.code ?? "";
+  failed.value = true;
+}
 const gateways = computed(() => [{ value: "", label: t("desktop.direct") }, ...hosts.value.map((host) => ({ value: host.hostId, label: host.label }))]);
 const dirty = computed(() => signature(draft.value) !== baseline.value || passwordDirty.value);
 
@@ -30,7 +40,7 @@ function fresh(): DesktopProfile {
   return {
     id: crypto.randomUUID(), label: "", protocol: "rdp", address: "", port: 3389,
     username: "", domain: "", hostId: null, gatewayHostId: null, credentialRefId: null,
-    width: 1280, height: 800, clipboardEnabled: false, audioPlaybackEnabled: false, vncProtocolVersion: "auto", revision: "0",
+    width: 1280, height: 800, rdpTransportMode: "auto", rdpGraphicsMode: "auto", rdpResolutionMode: "fixed", vncResolutionMode: "server", clipboardEnabled: false, audioPlaybackEnabled: false, vncProtocolVersion: "auto", revision: "0",
   };
 }
 
@@ -42,6 +52,8 @@ async function load() {
   const epoch = ++loadEpoch;
   loading.value = true;
   failed.value = false;
+  failureText.value = "";
+  failureCode.value = "";
   invalid.value = false;
   try {
     const [savedProfiles, savedHosts, identities] = await Promise.all([
@@ -54,14 +66,18 @@ async function load() {
     const profile = props.profileId
       ? savedProfiles.find((item) => item.id === props.profileId)
       : undefined;
-    if (props.profileId && !profile) throw new Error("Desktop profile unavailable");
+    if (props.profileId && !profile) {
+      failureText.value = t("desktop.profileErrors.notFound");
+      failed.value = true;
+      return;
+    }
     draft.value = profile ? { ...profile } : fresh();
     baseline.value = signature(draft.value);
     passwordDirty.value = false;
     hosts.value = savedHosts;
     credentials.value = savedCredentials;
-  } catch {
-    if (!disposed && epoch === loadEpoch) failed.value = true;
+  } catch (error) {
+    if (!disposed && epoch === loadEpoch) showFailure(error);
   } finally {
     if (!disposed && epoch === loadEpoch) loading.value = false;
   }
@@ -72,10 +88,14 @@ function changeProtocol(protocol: string) {
   draft.value.protocol = protocol;
   if (protocol === "vnc") {
     draft.value.audioPlaybackEnabled = false;
+    draft.value.rdpTransportMode = "auto";
+    draft.value.rdpGraphicsMode = "auto";
+    draft.value.rdpResolutionMode = "fixed";
     draft.value.username = "";
     draft.value.domain = "";
   } else {
     draft.value.vncProtocolVersion = "auto";
+    draft.value.vncResolutionMode = "server";
   }
   draft.value.port = protocol === "rdp" ? 3389 : 5900;
 }
@@ -106,6 +126,7 @@ async function save() {
     return;
   }
   invalid.value = false;
+  failed.value = false;
   busy.value = true;
   try {
     const fields = passwordFields.value;
@@ -125,8 +146,8 @@ async function save() {
         if (!disposed) credentials.value = updated;
       } catch { /* The saved profile remains authoritative until the next editor load. */ }
     }
-  } catch {
-    if (!disposed) failed.value = true;
+  } catch (error) {
+    if (!disposed) showFailure(error);
   } finally {
     busy.value = false;
   }
@@ -187,8 +208,9 @@ defineExpose({ requestClose, dirty, busy: closeBusy });
     <NvxInlineNotice
       v-else-if="failed"
       tone="error"
-      :title="t('desktop.error')"
+      :title="failureText || t('desktop.error')"
     >
+      <span v-if="failureCode">{{ failureCode }}</span>
       <NvxButton
         variant="ghost"
         @click="load"
@@ -312,21 +334,10 @@ defineExpose({ requestClose, dirty, busy: closeBusy });
           @update:model-value="draft.gatewayHostId = $event || null"
         />
       </NvxField>
-      <NvxField
-        v-for="dimension in (['width', 'height'] as const)"
-        :key="dimension"
-        :for-id="`desktop-${dimension}`"
-        :label="t(`desktop.${dimension}`)"
-      >
-        <NvxInput
-          :id="`desktop-${dimension}`"
-          :model-value="String(draft[dimension])"
-          type="number"
-          :min="200"
-          :max="8192"
-          @update:model-value="draft[dimension] = Number($event)"
-        />
-      </NvxField>
+      <NvxDesktopDisplaySettings
+        v-model="draft"
+        class="desktop-profile-editor__wide"
+      />
       <NvxCheckbox
         v-if="draft.protocol === 'rdp'"
         v-model="draft.audioPlaybackEnabled"

@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `localFiles`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `localFiles`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 rootHandle comes from filePick. Read/write chunks are at most 16 KiB, materialized files 64 MiB, and listing pages 100 entries. Existing writes require the current fingerprint; omitting expectedFingerprint is create-only. Rename never overwrites. watchStart returns a separate event handle.
 

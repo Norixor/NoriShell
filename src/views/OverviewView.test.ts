@@ -16,6 +16,8 @@ const client = vi.hoisted(() => ({
   respondMetricsKeyboardInteractive: vi.fn(),
   retryMetrics: vi.fn(),
 }));
+const revealRoute = vi.hoisted(() => vi.fn());
+vi.mock("../routeReveal", () => ({ useRouteReveal: () => revealRoute }));
 
 vi.mock("../core-api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../core-api/client")>();
@@ -131,6 +133,31 @@ describe("OverviewView Core operation boundaries", () => {
     client.secureChallenge.mockReset().mockReturnValue(new Promise(() => undefined));
     vi.clearAllMocks();
     i18n.global.locale.value = "en";
+  });
+
+  it("reveals only after the first overview snapshot settles", async () => {
+    let resolveSnapshot!: (value: ServerOverviewSnapshot) => void;
+    const pendingSnapshot = new Promise<ServerOverviewSnapshot>((resolve) => { resolveSnapshot = resolve; });
+    client.fetchServerOverview.mockReturnValueOnce(pendingSnapshot);
+    client.reconcileMetrics.mockResolvedValue([]);
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/overview", component: OverviewView }] });
+    await router.push("/overview");
+    await router.isReady();
+    const wrapper = mount(OverviewView, { global: { plugins: [createPinia(), router, i18n] } });
+    await flushPromises();
+    expect(revealRoute).not.toHaveBeenCalled();
+    resolveSnapshot(snapshot());
+    await flushPromises();
+    expect(revealRoute).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("reveals the overview error state when the first snapshot fails", async () => {
+    client.fetchServerOverview.mockRejectedValueOnce(new Error("snapshot unavailable"));
+    const { wrapper } = await mountView(snapshot());
+    expect(revealRoute).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain(i18n.global.t("overview.loadFailed"));
+    wrapper.unmount();
   });
 
   it("reconciles monitoring and creates one explicit terminal operation", async () => {

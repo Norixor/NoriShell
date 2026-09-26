@@ -4,8 +4,9 @@ use crate::{
     transient_credential_service::TransientCredentialService, vault_service::VaultService,
 };
 use norishell_core_api::{
-    CredentialImportRequest, CredentialKind, CredentialRefId, IdentityId, OperationId, RequestId,
-    RequestMeta, TransientCredentialPrepareRequest, WireSequence,
+    CoreApiError, CredentialImportRequest, CredentialKind, CredentialRefId, ErrorCategory,
+    IdentityId, OperationId, RequestId, RequestMeta, RetryStrategy,
+    TransientCredentialPrepareRequest, WireSequence,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Mutex, time::Duration};
@@ -50,6 +51,68 @@ pub struct SecureCredentialPrompt {
     label: String,
     persistent: bool,
     replacement: bool,
+}
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct SecureCredentialCommandError(Box<CoreApiError>);
+
+impl From<&str> for SecureCredentialCommandError {
+    fn from(value: &str) -> Self {
+        let (category, retry, message_key) = match value {
+            "secureCredentialDenied" => (
+                ErrorCategory::Permission,
+                RetryStrategy::Never,
+                "secureWindow.credential.denied",
+            ),
+            "secureCredentialInvalidInput" => (
+                ErrorCategory::Validation,
+                RetryStrategy::Never,
+                "secureWindow.credential.invalidInput",
+            ),
+            "secureCredentialExpired" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::Never,
+                "secureWindow.credential.expired",
+            ),
+            "secureCredentialUnavailable" => (
+                ErrorCategory::Unavailable,
+                RetryStrategy::RefreshSnapshot,
+                "secureWindow.credential.unavailable",
+            ),
+            "secureCredentialFailed" => (
+                ErrorCategory::Internal,
+                RetryStrategy::Never,
+                "secureWindow.credential.failed",
+            ),
+            _ => {
+                let diagnostic_id = uuid::Uuid::new_v4().to_string();
+                eprintln!("secure credential command failed: diagnostic_id={diagnostic_id}");
+                return Self(Box::new(CoreApiError::safe_internal(
+                    RequestId::new(),
+                    diagnostic_id,
+                )));
+            }
+        };
+        let mut error = crate::core_api_error::core_error(
+            RequestId::new(),
+            value,
+            category,
+            retry,
+            message_key,
+        );
+        if value == "secureCredentialFailed" {
+            let diagnostic_id = uuid::Uuid::new_v4().to_string();
+            eprintln!("secure credential operation failed: diagnostic_id={diagnostic_id}");
+            error.diagnostic_id = Some(diagnostic_id);
+        }
+        Self(error)
+    }
+}
+
+impl From<String> for SecureCredentialCommandError {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
 }
 
 struct Answer {
@@ -125,11 +188,14 @@ pub async fn secure_credential_open(
     hosts: State<'_, HostService>,
     vault: State<'_, VaultService>,
     metrics: State<'_, MetricsSessionService>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, SecureCredentialCommandError> {
     // Opening is deliberately main-window-only. The child has no command that can open another
     // credential prompt, and it can return only an opaque Core-issued reference.
-    if window.label() != "main" || !valid_open_request(&request) {
+    if window.label() != "main" {
         return Err("secureCredentialDenied".into());
+    }
+    if !valid_open_request(&request) {
+        return Err("secureCredentialInvalidInput".into());
     }
     let id = uuid::Uuid::now_v7().to_string();
     let (sender, receiver) = oneshot::channel();
@@ -295,7 +361,7 @@ pub async fn secure_credential_open(
     };
     credential_ref_id
         .map(Some)
-        .map_err(|_| "secureCredentialFailed".to_owned())
+        .map_err(|_| "secureCredentialFailed".into())
 }
 
 #[tauri::command]
@@ -303,7 +369,7 @@ pub fn secure_credential_get(
     id: String,
     window: WebviewWindow,
     service: State<'_, SecureCredentialService>,
-) -> Result<SecureCredentialPrompt, String> {
+) -> Result<SecureCredentialPrompt, SecureCredentialCommandError> {
     require_window(&window, &id)?;
     service
         .pending
@@ -321,7 +387,7 @@ pub fn secure_credential_submit(
     passphrase: String,
     window: WebviewWindow,
     service: State<'_, SecureCredentialService>,
-) -> Result<(), String> {
+) -> Result<(), SecureCredentialCommandError> {
     require_window(&window, &id)?;
     let answer = Answer {
         secret: Zeroizing::new(secret),
@@ -343,7 +409,7 @@ pub fn secure_credential_submit(
         || answer.passphrase.len() > MAX_PASSWORD_BYTES
         || matches!(prompt.kind, SecureCredentialKind::Password) && !answer.passphrase.is_empty()
     {
-        return Err("secureCredentialDenied".into());
+        return Err("secureCredentialInvalidInput".into());
     }
     let pending = service
         .pending
@@ -362,7 +428,7 @@ pub fn secure_credential_cancel(
     id: String,
     window: WebviewWindow,
     service: State<'_, SecureCredentialService>,
-) -> Result<(), String> {
+) -> Result<(), SecureCredentialCommandError> {
     require_window(&window, &id)?;
     service
         .pending
@@ -375,6 +441,15 @@ pub fn secure_credential_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_credential_input_is_not_a_window_permission_failure() {
+        let denied = SecureCredentialCommandError::from("secureCredentialDenied");
+        let invalid = SecureCredentialCommandError::from("secureCredentialInvalidInput");
+        assert_eq!(denied.0.code, "secureCredentialDenied");
+        assert_eq!(invalid.0.code, "secureCredentialInvalidInput");
+        assert_ne!(denied.0.category, invalid.0.category);
+    }
 
     #[test]
     fn prompt_window_requires_the_exact_prompt_label() {

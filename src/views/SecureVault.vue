@@ -4,8 +4,9 @@ import { useI18n } from "vue-i18n";
 import NvxSecureWindow from "../components/layout/NvxSecureWindow.vue";
 import { NvxButton, NvxCheckbox, NvxField, NvxInlineNotice, NvxInput } from "../components/ui";
 import { secureVaultClient, type SecureVaultPrompt } from "../core-api/secure-vault-client";
+import { parseCoreApiError } from "../core-api/client";
 import { MIN_NEW_SECRET_PASSWORD_CHARACTERS, passwordCharacterCount } from "../password-policy";
-const { t } = useI18n();
+const { t, te } = useI18n();
 const id = new URLSearchParams(window.location.search).get("prompt") ?? "";
 const prompt = ref<SecureVaultPrompt | null>(null);
 const password = ref("");
@@ -13,10 +14,18 @@ const confirmation = ref("");
 const confirmed = ref(false);
 const pending = ref(false);
 const failed = ref(false);
+const failureText = ref("");
+function showFailure(error: unknown) {
+  const failure = parseCoreApiError(error);
+  failureText.value = (failure?.messageKey && te(failure.messageKey) ? t(failure.messageKey) : t("sshHosts.vault.failed"))
+    + (failure?.diagnosticId ? ` ${t("diagnostics.id", { id: failure.diagnosticId })}` : "");
+  failed.value = true;
+}
 const resetStep = ref(false);
 const resetPhrase = ref("");
 const resetConfirmed = ref(false);
 const resetError = ref<"failed" | "changed" | "uncertain" | null>(null);
+const resetFailureText = ref("");
 const creating = computed(() => prompt.value?.kind === "create");
 const canReset = computed(() => prompt.value?.kind === "unlock" && prompt.value.canReset);
 const automatic = computed(() => prompt.value?.kind === "enableAutoUnlock");
@@ -57,12 +66,14 @@ function enterReset() {
   clear();
   failed.value = false;
   resetError.value = null;
+  resetFailureText.value = "";
   resetStep.value = true;
 }
 function leaveReset() {
   if (pending.value) return;
   clearReset();
   resetError.value = null;
+  resetFailureText.value = "";
   resetStep.value = false;
 }
 async function submit() {
@@ -71,30 +82,38 @@ async function submit() {
   failed.value = false;
   const request = secureVaultClient.submit(id, password.value, confirmation.value, confirmed.value);
   clear();
-  try { await request; } catch { failed.value = true; pending.value = false; }
+  try { await request; } catch (error) { showFailure(error); pending.value = false; }
 }
 async function cancel() {
   if (pending.value) return;
   clear();
   pending.value = true;
-  try { await secureVaultClient.cancel(id); } catch { failed.value = true; pending.value = false; }
+  try { await secureVaultClient.cancel(id); } catch (error) { showFailure(error); pending.value = false; }
 }
 async function submitReset() {
   if (pending.value || !resetReady.value) return;
   pending.value = true;
   resetError.value = null;
+  resetFailureText.value = "";
   const request = secureVaultClient.reset(id, resetPhrase.value, resetConfirmed.value);
   clearReset();
   try {
     await request;
   } catch (error) {
-    const code = String(error);
-    resetError.value = code.includes("secureVaultResetChanged") ? "changed"
-      : code.includes("secureVaultResetUncertain") ? "uncertain" : "failed";
+    const code = parseCoreApiError(error)?.code;
+    resetError.value = code === "secureVaultResetChanged" ? "changed"
+      : code === "secureVaultResetUncertain" ? "uncertain" : "failed";
+    const failure = parseCoreApiError(error);
+    if (resetError.value === "failed" && failure?.messageKey && te(failure.messageKey)) {
+      resetFailureText.value = t(failure.messageKey);
+    }
+    if (resetError.value === "failed" && failure?.diagnosticId) {
+      resetFailureText.value += ` ${t("diagnostics.id", { id: failure.diagnosticId })}`;
+    }
     pending.value = false;
   }
 }
-onMounted(async () => { try { prompt.value = await secureVaultClient.get(id); } catch { failed.value = true; } });
+onMounted(async () => { try { prompt.value = await secureVaultClient.get(id); } catch (error) { showFailure(error); } });
 onBeforeUnmount(() => { clear(); clearReset(); });
 </script>
 
@@ -169,7 +188,7 @@ onBeforeUnmount(() => { clear(); clearReset(); });
           v-if="failed"
           tone="error"
         >
-          {{ t("sshHosts.vault.failed") }}
+          {{ failureText || t("sshHosts.vault.failed") }}
         </NvxInlineNotice>
       </template>
       <template v-else>
@@ -201,7 +220,7 @@ onBeforeUnmount(() => { clear(); clearReset(); });
           v-if="resetError"
           tone="error"
         >
-          {{ t(`sshHosts.vault.reset.${resetError}`) }}
+          {{ resetFailureText || t(`sshHosts.vault.reset.${resetError}`) }}
         </NvxInlineNotice>
       </template>
       <button

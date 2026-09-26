@@ -11,8 +11,8 @@ use norishell_desktop_protocol::{
     EngineEvent, EventSink, Result, frame_len,
 };
 use tokio::{
-    sync::{mpsc, watch},
-    time::timeout,
+    sync::{mpsc, oneshot, watch},
+    time::{Instant, timeout},
 };
 use vnc::{
     ClientKeyEvent, ClientMouseEvent, HardenedVncClient, HardenedVncOptions, Rect, VncError,
@@ -25,6 +25,7 @@ pub use vnc::VncVersion;
 const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_WHEEL_STEPS: usize = 120;
 const MAX_JPEG_BYTES: usize = 32 * 1024 * 1024;
+const RESIZE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// VNC's legacy challenge-response password is never cloned into UI state or
 /// error values. `allow_unauthenticated` is false by caller choice by default.
@@ -33,14 +34,15 @@ pub struct VncOptions {
     pub allow_unauthenticated: bool,
     pub clipboard_enabled: bool,
     pub version: Option<VncVersion>,
+    /// Fixed mode requests this size before the session becomes Ready.
+    pub initial_resize: Option<(u16, u16)>,
 }
 
 /// Runs one already-connected VNC RFB session.
 ///
-/// The adapter intentionally does not negotiate cursor pseudo-encoding or
-/// client-driven desktop resize: `DesktopFrame` has no cursor-shape channel,
-/// and RFB ExtendedDesktopSize has a distinct negotiation contract. Server
-/// DesktopSize updates are handled and bounded.
+/// Cursor pseudo-encoding is not negotiated because `DesktopFrame` has no
+/// cursor-shape channel. Remote resize requires a server ExtendedDesktopSize
+/// advertisement and a matching server result.
 pub async fn run(
     stream: BoxedDesktopIo,
     options: VncOptions,
@@ -53,6 +55,7 @@ pub async fn run(
         allow_unauthenticated,
         clipboard_enabled,
         version,
+        initial_resize,
     } = options;
     let mut client = HardenedVncClient::connect(
         stream,
@@ -67,15 +70,24 @@ pub async fn run(
     .await
     .map_err(map_error)?;
 
-    events(EngineEvent::Ready);
-    let result = run_connected(
-        &mut client,
-        &mut commands,
-        &mut control,
-        clipboard_enabled,
-        Arc::clone(&events),
-    )
-    .await;
+    let result = if let Some((width, height)) = initial_resize {
+        await_initial_resize(&mut client, &mut control, &events, width, height).await
+    } else {
+        Ok(())
+    };
+    let result = if result.is_ok() {
+        events(EngineEvent::Ready);
+        run_connected(
+            &mut client,
+            &mut commands,
+            &mut control,
+            clipboard_enabled,
+            Arc::clone(&events),
+        )
+        .await
+    } else {
+        result
+    };
     client.shutdown().await;
     let queued_error = result
         .as_ref()
@@ -84,6 +96,77 @@ pub async fn run(
         .unwrap_or(EngineError::Cancelled);
     complete_queued_commands(&mut commands, queued_error);
     result
+}
+
+async fn await_initial_resize(
+    client: &mut HardenedVncClient,
+    control: &mut EngineControl,
+    events: &EventSink,
+    width: u16,
+    height: u16,
+) -> Result<()> {
+    let mut frame = None;
+    let mut dirty = false;
+    // The first non-incremental update must contain ExtendedDesktopSize if
+    // the server supports SetDesktopSize. A stalled initial update is not a
+    // resize capability advertisement.
+    timeout(RESIZE_TIMEOUT, async {
+        loop {
+            tokio::select! {
+                () = stopped(&mut control.stop) => return Err(EngineError::Cancelled),
+                event = client.next_event() => {
+                    let event = event.map_err(map_error)?;
+                    let complete = matches!(event, VncEvent::FramebufferUpdateComplete);
+                    handle_server_event(event, &mut frame, &mut dirty, events)?;
+                    if complete { break; }
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| EngineError::VncResolutionUnavailable)??;
+    timeout(CONTROL_WRITE_TIMEOUT, client.resize(width, height))
+        .await
+        .map_err(|_| EngineError::VncResolutionNotApplied)?
+        .map_err(map_resize_write_error)?;
+    timeout(RESIZE_TIMEOUT, async {
+        loop {
+            tokio::select! {
+                () = stopped(&mut control.stop) => return Err(EngineError::Cancelled),
+                event = client.next_event() => {
+                    let event = event.map_err(map_error)?;
+                    if let VncEvent::ResizeResult { applied, status } = event {
+                        return resize_result(applied, status);
+                    }
+                    handle_server_event(event, &mut frame, &mut dirty, events)?;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| EngineError::VncResolutionNotApplied)?
+}
+
+struct PendingResize {
+    completion: oneshot::Sender<Result<()>>,
+    deadline: Instant,
+}
+
+fn resize_result(applied: bool, status: u16) -> Result<()> {
+    match (applied, status) {
+        (true, 0) => Ok(()),
+        (false, 0) => Err(EngineError::VncResolutionNotApplied),
+        _ => Err(EngineError::VncResolutionRejected),
+    }
+}
+
+fn map_resize_write_error(error: VncError) -> EngineError {
+    match error {
+        VncError::UnsupportedOperation => EngineError::VncResolutionUnavailable,
+        VncError::Timeout => EngineError::VncResolutionNotApplied,
+        other => map_error(other),
+    }
 }
 
 async fn run_connected(
@@ -98,11 +181,15 @@ async fn run_connected(
     let mut input = InputState::default();
     let mut commands_open = true;
     let mut focus_open = true;
+    let mut pending_resize: Option<PendingResize> = None;
 
     loop {
         tokio::select! {
             biased;
             () = stopped(&mut control.stop) => {
+                if let Some(pending) = pending_resize.take() {
+                    let _ = pending.completion.send(Err(EngineError::Cancelled));
+                }
                 release_all(client, &mut input).await;
                 return Err(EngineError::Cancelled);
             }
@@ -112,14 +199,70 @@ async fn run_connected(
                 }
                 release_all(client, &mut input).await;
             }
+            () = async {
+                if let Some(pending) = &pending_resize {
+                    tokio::time::sleep_until(pending.deadline).await;
+                }
+            }, if pending_resize.is_some() => {
+                let pending = pending_resize.take().unwrap();
+                let _ = pending.completion.send(Err(EngineError::VncResolutionNotApplied));
+                // The vendor writer still owns this request. Close the session so a
+                // late server result cannot be mistaken for a later resize.
+                return Err(EngineError::VncResolutionNotApplied);
+            }
             server_event = client.next_event() => {
-                let server_event = server_event.map_err(map_error)?;
-                handle_server_event(server_event, &mut frame, &mut dirty, &events)?;
+                let server_event = match server_event {
+                    Ok(event) => event,
+                    Err(error) => {
+                        let error = map_error(error);
+                        if let Some(pending) = pending_resize.take() {
+                            let _ = pending.completion.send(Err(error));
+                        }
+                        return Err(error);
+                    }
+                };
+                if let VncEvent::ResizeResult { applied, status } = server_event {
+                    if let Some(pending) = pending_resize.take() {
+                        let _ = pending.completion.send(resize_result(applied, status));
+                    }
+                } else {
+                    if let Err(error) = handle_server_event(server_event, &mut frame, &mut dirty, &events) {
+                        if let Some(pending) = pending_resize.take() {
+                            let _ = pending.completion.send(Err(error));
+                        }
+                        return Err(error);
+                    }
+                }
             }
             command = commands.recv(), if commands_open => {
                 match command {
                     Some(command) => {
-                        handle_command(client, command, control, clipboard_enabled, &mut input).await;
+                        if let DesktopInput::Resize { width, height } = command.input {
+                            if !control.accepts(&command) || command.input.validate().is_err() {
+                                let error = if !control.accepts(&command) { rejection_for(control) } else { command.input.validate().unwrap_err() };
+                                let _ = command.completion.send(Err(error));
+                            } else if pending_resize.is_some() {
+                                let _ = command.completion.send(Err(EngineError::VncResolutionNotApplied));
+                            } else {
+                                let result = timeout(CONTROL_WRITE_TIMEOUT, client.resize(width, height))
+                                    .await.map_err(|_| EngineError::VncResolutionNotApplied)
+                                    .and_then(|result| result.map_err(map_resize_write_error));
+                                match result {
+                                    Ok(()) => pending_resize = Some(PendingResize {
+                                        completion: command.completion,
+                                        deadline: Instant::now() + RESIZE_TIMEOUT,
+                                    }),
+                                    Err(error) => {
+                                        let _ = command.completion.send(Err(error));
+                                        if error != EngineError::VncResolutionUnavailable {
+                                            return Err(error);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            handle_command(client, command, control, clipboard_enabled, &mut input).await;
+                        }
                     }
                     None => commands_open = false,
                 }
@@ -188,6 +331,7 @@ fn handle_server_event(
         }
         VncEvent::Text(text) => sink(EngineEvent::Clipboard(text)),
         VncEvent::Bell => {}
+        VncEvent::ResizeResult { .. } => {}
         // The hardened vendor path never emits these for this negotiation;
         // retain failure-closed behavior if that invariant changes.
         VncEvent::SetPixelFormat(_) | VncEvent::SetCursor(_, _) => {
@@ -621,6 +765,224 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fixed_resize_waits_for_a_matching_server_ack_before_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            server_handshake_none(&mut stream, 1, 1).await;
+            send_extended_update(&mut stream, 0, 0, 1, 1, 7, 9).await;
+            let request = read_resize_request(&mut stream).await;
+            assert_eq!(request[..8], [251, 0, 0, 2, 0, 2, 1, 0]);
+            assert_eq!(request[8..12], 7_u32.to_be_bytes());
+            assert_eq!(request[20..24], 9_u32.to_be_bytes());
+            send_extended_update(&mut stream, 1, 0, 2, 2, 7, 9).await;
+            sleep(Duration::from_millis(200)).await;
+        });
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (_epoch_tx, epoch_rx) = watch::channel(0_u64);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+        let sink: EventSink = Arc::new(move |event| {
+            if matches!(event, EngineEvent::Ready)
+                && let Some(sender) = ready_tx.lock().unwrap().take()
+            {
+                let _ = sender.send(());
+            }
+        });
+        let task = tokio::spawn(run(
+            Box::new(TcpStream::connect(address).await.unwrap()),
+            VncOptions {
+                password: Zeroizing::new(String::new()),
+                allow_unauthenticated: true,
+                clipboard_enabled: false,
+                version: None,
+                initial_resize: Some((2, 2)),
+            },
+            command_rx,
+            EngineControl {
+                stop: stop_rx,
+                focus_epoch: epoch_rx,
+            },
+            sink,
+        ));
+        timeout(TEST_TIMEOUT, ready_rx).await.unwrap().unwrap();
+        stop_tx.send(true).unwrap();
+        assert_eq!(
+            timeout(TEST_TIMEOUT, task).await.unwrap().unwrap(),
+            Err(EngineError::Cancelled)
+        );
+        timeout(TEST_TIMEOUT, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn fixed_resize_distinguishes_absent_rejected_and_unapplied() {
+        for (extended, status, expected) in [
+            (false, 0, EngineError::VncResolutionUnavailable),
+            (true, 1, EngineError::VncResolutionRejected),
+            (true, 0, EngineError::VncResolutionNotApplied),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                server_handshake_none(&mut stream, 1, 1).await;
+                if extended {
+                    send_extended_update(&mut stream, 0, 0, 1, 1, 7, 0).await;
+                    let _request = read_resize_request(&mut stream).await;
+                    send_extended_update(&mut stream, 1, status, 1, 1, 7, 0).await;
+                } else {
+                    stream.write_all(&[0, 0, 0, 0]).await.unwrap();
+                }
+            });
+            let (_stop_tx, stop_rx) = watch::channel(false);
+            let (_epoch_tx, epoch_rx) = watch::channel(0_u64);
+            let (_command_tx, command_rx) = mpsc::channel(1);
+            let result = timeout(
+                TEST_TIMEOUT,
+                run(
+                    Box::new(TcpStream::connect(address).await.unwrap()),
+                    VncOptions {
+                        password: Zeroizing::new(String::new()),
+                        allow_unauthenticated: true,
+                        clipboard_enabled: false,
+                        version: None,
+                        initial_resize: Some((2, 2)),
+                    },
+                    command_rx,
+                    EngineControl {
+                        stop: stop_rx,
+                        focus_epoch: epoch_rx,
+                    },
+                    Arc::new(|_| {}),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, Err(expected));
+            timeout(TEST_TIMEOUT, server).await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_resize_completes_only_after_remote_result() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            server_handshake_none(&mut stream, 1, 1).await;
+            send_extended_update(&mut stream, 0, 0, 1, 1, 7, 0).await;
+            let request = read_resize_request(&mut stream).await;
+            assert_eq!(request[..8], [251, 0, 0, 2, 0, 2, 1, 0]);
+            let _ = request_tx.send(());
+            let _ = ack_rx.await;
+            send_extended_update(&mut stream, 1, 0, 2, 2, 7, 0).await;
+            sleep(Duration::from_millis(200)).await;
+        });
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (_epoch_tx, epoch_rx) = watch::channel(0_u64);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (frame_tx, frame_rx) = oneshot::channel();
+        let frame_tx = Arc::new(Mutex::new(Some(frame_tx)));
+        let sink: EventSink = Arc::new(move |event| {
+            if let EngineEvent::Frame(_) = event
+                && let Some(sender) = frame_tx.lock().unwrap().take()
+            {
+                let _ = sender.send(());
+            }
+        });
+        let task = tokio::spawn(run(
+            Box::new(TcpStream::connect(address).await.unwrap()),
+            VncOptions {
+                password: Zeroizing::new(String::new()),
+                allow_unauthenticated: true,
+                clipboard_enabled: false,
+                version: None,
+                initial_resize: None,
+            },
+            command_rx,
+            EngineControl {
+                stop: stop_rx,
+                focus_epoch: epoch_rx,
+            },
+            sink,
+        ));
+        timeout(TEST_TIMEOUT, frame_rx).await.unwrap().unwrap();
+        let (completion_tx, mut completion_rx) = oneshot::channel();
+        command_tx
+            .send(EngineCommand {
+                input: DesktopInput::Resize {
+                    width: 2,
+                    height: 2,
+                },
+                focus_epoch: None,
+                completion: completion_tx,
+            })
+            .await
+            .unwrap();
+        timeout(TEST_TIMEOUT, request_rx).await.unwrap().unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), &mut completion_rx)
+                .await
+                .is_err()
+        );
+        ack_tx.send(()).unwrap();
+        assert_eq!(
+            timeout(TEST_TIMEOUT, completion_rx).await.unwrap().unwrap(),
+            Ok(())
+        );
+        stop_tx.send(true).unwrap();
+        assert_eq!(
+            timeout(TEST_TIMEOUT, task).await.unwrap().unwrap(),
+            Err(EngineError::Cancelled)
+        );
+        timeout(TEST_TIMEOUT, server).await.unwrap().unwrap();
+    }
+
+    async fn send_extended_update(
+        stream: &mut TcpStream,
+        reason: u16,
+        status: u16,
+        width: u16,
+        height: u16,
+        id: u32,
+        flags: u32,
+    ) {
+        let mut update = vec![0, 0, 0, 1];
+        append_rect_header(&mut update, reason, status, width, height, -308);
+        update.extend_from_slice(&[1, 0, 0, 0]);
+        update.extend_from_slice(&id.to_be_bytes());
+        update.extend_from_slice(&[0; 4]);
+        update.extend_from_slice(&width.to_be_bytes());
+        update.extend_from_slice(&height.to_be_bytes());
+        update.extend_from_slice(&flags.to_be_bytes());
+        stream.write_all(&update).await.unwrap();
+    }
+
+    async fn read_resize_request(stream: &mut TcpStream) -> [u8; 24] {
+        loop {
+            let mut kind = [0_u8; 1];
+            stream.read_exact(&mut kind).await.unwrap();
+            match kind[0] {
+                3 => {
+                    let mut update = [0_u8; 9];
+                    stream.read_exact(&mut update).await.unwrap();
+                }
+                251 => {
+                    let mut request = [0_u8; 24];
+                    request[0] = 251;
+                    stream.read_exact(&mut request[1..]).await.unwrap();
+                    return request;
+                }
+                other => panic!("unexpected client message {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn loopback_handshake_composes_raw_and_copyrect_then_releases_input() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -665,6 +1027,7 @@ mod tests {
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
                 version: None,
+                initial_resize: None,
             },
             command_rx,
             EngineControl {
@@ -691,7 +1054,7 @@ mod tests {
                     keysym: u32::from(b'a'),
                     down: true,
                 },
-                focus_epoch: 0,
+                focus_epoch: Some(0),
                 completion: completion_tx,
             })
             .await
@@ -742,6 +1105,7 @@ mod tests {
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
                 version: None,
+                initial_resize: None,
             },
             command_rx,
             EngineControl {
@@ -795,6 +1159,7 @@ mod tests {
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
                 version: None,
+                initial_resize: None,
             },
             command_rx,
             EngineControl {
@@ -851,6 +1216,7 @@ mod tests {
                 allow_unauthenticated: false,
                 clipboard_enabled: false,
                 version: Some(VncVersion::RFB33),
+                initial_resize: None,
             },
             command_rx,
             EngineControl {
@@ -908,6 +1274,7 @@ mod tests {
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
                 version: None,
+                initial_resize: None,
             },
             command_rx,
             EngineControl {
@@ -926,7 +1293,7 @@ mod tests {
                     y: 0,
                     buttons: 1,
                 },
-                focus_epoch: 0,
+                focus_epoch: Some(0),
                 completion: completion_tx,
             })
             .await
@@ -966,6 +1333,7 @@ mod tests {
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
                 version: None,
+                initial_resize: None,
             },
             command_rx,
             EngineControl {
@@ -1022,6 +1390,7 @@ mod tests {
                 allow_unauthenticated: true,
                 clipboard_enabled: false,
                 version: None,
+                initial_resize: None,
             },
             command_rx,
             EngineControl {
@@ -1067,6 +1436,7 @@ mod tests {
                 allow_unauthenticated: false,
                 clipboard_enabled: false,
                 version: None,
+                initial_resize: None,
             },
             command_rx,
             EngineControl {
@@ -1135,6 +1505,11 @@ mod tests {
         let encodings = usize::from(u16::from_be_bytes([encoding_header[2], encoding_header[3]]));
         let mut encoding_values = vec![0_u8; encodings * 4];
         stream.read_exact(&mut encoding_values).await.unwrap();
+        assert!(
+            encoding_values
+                .chunks_exact(4)
+                .any(|encoding| encoding == (-308_i32).to_be_bytes())
+        );
         let mut request = [0_u8; 10];
         stream.read_exact(&mut request).await.unwrap();
         assert_eq!(request[0], 3);

@@ -17,7 +17,8 @@ use std::{
 };
 
 use norishell_core_api::{
-    PLUGIN_PROTOCOL_MAJOR, PLUGIN_PROTOCOL_MINOR, PluginHostMessageKind, PluginHostRequest,
+    CORE_API_MAJOR, CORE_API_MINOR, PLUGIN_PROTOCOL_MAJOR, PLUGIN_PROTOCOL_MINOR,
+    PluginHostMessageKind, PluginHostRequest,
 };
 use norishell_plugin_platform::{PackageLimits, RuntimeLimits, WasmRuntime, inspect_local_package};
 use semver::Version;
@@ -26,7 +27,7 @@ use sha2::{Digest, Sha256};
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 const TOOL_NAME: &str = "norishell-plugin-dev";
-const DEFAULT_APP_VERSION: &str = "0.1.0";
+const DEFAULT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_ARCHITECTURE: &str = "universal";
 const ZIP_TIME: (u16, u8, u8, u8, u8, u8) = (2026, 9, 10, 0, 0, 0);
 
@@ -140,7 +141,7 @@ fn scaffold(arguments: &[OsString]) -> Result<()> {
     write_new(
         &destination.join("manifest.json"),
         format!(
-            "{{\n  \"pluginId\": {},\n  \"name\": {},\n  \"publisher\": \"Example publisher (self-reported)\",\n  \"version\": \"0.1.0\",\n  \"protocolMajor\": {PLUGIN_PROTOCOL_MAJOR},\n  \"protocolMinor\": {PLUGIN_PROTOCOL_MINOR},\n  \"platform\": \"desktop\",\n  \"architectures\": [\"universal\"],\n  \"capabilities\": [],\n  \"minimumAppVersion\": \"{DEFAULT_APP_VERSION}\"\n}}\n",
+            "{{\n  \"pluginId\": {},\n  \"name\": {},\n  \"publisher\": \"Example publisher (self-reported)\",\n  \"version\": \"0.1.0\",\n  \"protocolMajor\": {PLUGIN_PROTOCOL_MAJOR},\n  \"protocolMinor\": {PLUGIN_PROTOCOL_MINOR},\n  \"platform\": \"desktop\",\n  \"architectures\": [\"universal\"],\n  \"capabilities\": [],\n  \"minimumAppVersion\": \"{DEFAULT_APP_VERSION}\",\n  \"minimumCoreApiVersion\": {{\"major\": {CORE_API_MAJOR}, \"minor\": {CORE_API_MINOR}}}\n}}\n",
             serde_json::to_string(&plugin_id).expect("string JSON"),
             serde_json::to_string(&name).expect("string JSON"),
         )

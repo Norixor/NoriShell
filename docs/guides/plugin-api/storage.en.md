@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `storagePlugin`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `storagePlugin`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 Do not store secrets. Use standard Base64 without a data URL prefix. KV/blob mutations echo entry revision; use 0 for creation. schemaCommit applies declarative mutations in one transaction, not executable migration code. Cache entries may expire; an absent entry is not a decode error. Storage u64 revisions are JSON integers, unlike WireSequence.
 

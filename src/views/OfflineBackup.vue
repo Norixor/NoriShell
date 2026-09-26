@@ -14,7 +14,7 @@ import {
   type OfflineVaultImportMode,
   type OpenedOfflineBackup,
 } from "../core-api/offline-backup-client";
-import { fetchVaultStatus } from "../core-api/client";
+import { fetchVaultStatus, parseCoreApiError } from "../core-api/client";
 import { requestSecureVault } from "../core-api/secure-vault-client";
 import { useTipsStore } from "../stores/tips";
 import {
@@ -25,7 +25,7 @@ import {
   NvxSelect,
 } from "../components/ui";
 
-const { t } = useI18n();
+const { t, te } = useI18n();
 const tips = useTipsStore();
 const exportSelection = ref<OfflineBackupSelection>({
   ssh: true,
@@ -86,6 +86,20 @@ function clearMessages() {
 function showError(key: string) {
   tips.show({ scope: "offline-backup", tone: "error", title: t(key) });
 }
+function showFailure(error: unknown, fallback: string) {
+  const failure = parseCoreApiError(error);
+  const key = failure?.messageKey && te(failure.messageKey) ? failure.messageKey : fallback;
+  tips.show({
+    scope: "offline-backup",
+    tone: "error",
+    title: t(key),
+    message: failure?.diagnosticId ? t("diagnostics.id", { id: failure.diagnosticId }) : undefined,
+  });
+}
+function failureKey(error: unknown, fallback: string): string {
+  const messageKey = parseCoreApiError(error)?.messageKey;
+  return messageKey && te(messageKey) ? messageKey : fallback;
+}
 
 async function exportFile() {
   clearMessages();
@@ -101,8 +115,8 @@ async function exportFile() {
     }
     const saved = await exportOfflineBackup({ ...exportSelection.value });
     if (saved) tips.show({ scope: "offline-backup", tone: "success", title: t("offlineBackup.exportSuccess") });
-  } catch {
-    showError("offlineBackup.exportFailed");
+  } catch (error) {
+    showFailure(error, "offlineBackup.exportFailed");
   } finally {
     busy.value = false;
   }
@@ -126,8 +140,8 @@ async function openFile() {
       credentials: false,
       vault: false,
     };
-  } catch {
-    showError("offlineBackup.openFailed");
+  } catch (error) {
+    showFailure(error, "offlineBackup.openFailed");
   } finally {
     busy.value = false;
   }
@@ -168,9 +182,7 @@ async function previewImport() {
   } catch (failure) {
     preview.value = null;
     previewVaultMode.value = null;
-    showError(String(failure).includes("offline-backup-vault-already-exists")
-      ? "offlineBackup.targetNotFresh"
-      : "offlineBackup.previewFailed");
+    showFailure(failure, "offlineBackup.previewFailed");
   } finally {
     busy.value = false;
   }
@@ -192,20 +204,13 @@ async function applyImport() {
     previewVaultMode.value = null;
     window.dispatchEvent(new Event("norishell:vault-changed"));
   } catch (failure) {
-    if (String(failure).includes("offline-backup-cancelled")) return;
-    const key = String(failure).includes("offline-backup-vault-restored-configs-failed")
-      ? "offlineBackup.vaultRestoredPartial"
-      : String(failure).includes("offline-backup-vault-merge-uncertain")
-        ? "offlineBackup.vaultMergeUncertain"
-        : String(failure).includes("offline-backup-vault-merge-failed")
-          ? "offlineBackup.vaultMergeFailed"
-          : String(failure).includes("offline-backup-target-not-fresh")
-            ? "offlineBackup.targetNotFresh"
-            : "offlineBackup.importFailed";
+    if (parseCoreApiError(failure)?.code === "offline-backup-cancelled") return;
+    const key = failureKey(failure, "offlineBackup.importFailed");
     if (key === "offlineBackup.vaultRestoredPartial" || key === "offlineBackup.vaultMergeUncertain") {
-      recoveryError.value = t(key);
+      const diagnosticId = parseCoreApiError(failure)?.diagnosticId;
+      recoveryError.value = t(key) + (diagnosticId ? ` ${t("diagnostics.id", { id: diagnosticId })}` : "");
     } else {
-      showError(key);
+      showFailure(failure, "offlineBackup.importFailed");
     }
     opened.value = null;
     preview.value = null;

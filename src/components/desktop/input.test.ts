@@ -16,10 +16,22 @@ describe("desktop wire boundary", () => {
   });
   it("reserves tab shortcuts on both platforms", () => { expect(reservedDesktopKey({ code: "Digit9", metaKey: true, ctrlKey: false })).toBe(true); expect(reservedDesktopKey({ code: "Digit1", metaKey: false, ctrlKey: true })).toBe(true); expect(reservedDesktopKey({ code: "KeyA", metaKey: false, ctrlKey: true })).toBe(false); });
   it("rejects stale, truncated, oversized or mismatched frames", () => {
-    const frame = new ArrayBuffer(20), view = new DataView(frame); view.setBigUint64(0, 12n, true); view.setUint32(8, 1, true); view.setUint32(12, 1, true);
+    const frame = new ArrayBuffer(44), view = new DataView(frame); view.setBigUint64(0, 12n, true);
+    view.setUint32(16, 1, true); view.setUint32(20, 1, true); view.setUint32(32, 1, true); view.setUint32(36, 1, true);
     expect(decodeDesktopFrame(frame, 12n)).toBeNull(); expect(decodeDesktopFrame(frame, 11n)?.rgba.length).toBe(4);
-    expect(() => decodeDesktopFrame(frame.slice(0, 19), 0n)).toThrow("invalidFrame");
-    view.setUint32(8, 100000, true); expect(() => decodeDesktopFrame(frame, 0n)).toThrow("invalidFrame");
+    expect(() => decodeDesktopFrame(frame.slice(0, 43), 0n)).toThrow("invalidFrame");
+    view.setUint32(16, 100000, true); expect(() => decodeDesktopFrame(frame, 0n)).toThrow("invalidFrame");
     expect(() => decodeDesktopFrame(new ArrayBuffer(8), 0n)).toThrow("invalidFrame");
+  });
+  it("requires a full image for base zero and bounds a patch within the screen", () => {
+    const frame = new ArrayBuffer(44), view = new DataView(frame);
+    view.setBigUint64(0, 8n, true); view.setBigUint64(8, 7n, true);
+    view.setUint32(16, 2, true); view.setUint32(20, 2, true);
+    view.setUint32(24, 1, true); view.setUint32(28, 1, true);
+    view.setUint32(32, 1, true); view.setUint32(36, 1, true);
+    expect(decodeDesktopFrame(frame, 7n)).toMatchObject({ base: 7n, x: 1, y: 1, rectWidth: 1, rectHeight: 1 });
+    view.setBigUint64(8, 0n, true); expect(() => decodeDesktopFrame(frame, 7n)).toThrow("invalidFrame");
+    view.setBigUint64(8, 7n, true); view.setUint32(24, 2, true);
+    expect(() => decodeDesktopFrame(frame, 7n)).toThrow("invalidFrame");
   });
 });

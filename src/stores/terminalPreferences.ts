@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { corePreferencesEnabled, saveApplicationPreferences } from "../core-api/application-preferences";
 
 import { DEFAULT_HIGHLIGHT_RULES, validateHighlightConfiguration, type HighlightConfiguration, type HostHighlightConfiguration } from "../terminal/highlighting";
 import { DEFAULT_TERMINAL_INTERACTION, parseStoredInteractionPreferences, validateInteractionPreferences, type InteractionPreferences } from "../terminal/interaction-preferences";
@@ -93,22 +94,47 @@ function load(): TerminalPreferences {
 
 export const useTerminalPreferencesStore = defineStore("terminalPreferences", () => {
   const preferences = ref(load());
+  function globalInteraction(): TerminalGlobalInteractionPreferences {
+    return { interaction: { ...preferences.value.interaction }, pasteWarning: preferences.value.pasteWarning };
+  }
+  function hydrateCorePreferences(interaction: TerminalGlobalInteractionPreferences, highlights: HighlightConfiguration) {
+    preferences.value = {
+      ...preferences.value,
+      interaction: { ...interaction.interaction },
+      pasteWarning: interaction.pasteWarning,
+      highlights: { enabled: highlights.enabled, rules: highlights.rules.map((rule) => ({ ...rule })) },
+    };
+  }
   function save(next: TerminalPreferences) {
     try { localStorage.setItem(TERMINAL_PREFERENCES_KEY, JSON.stringify(next)); }
     catch { return false; }
     preferences.value = next;
     return true;
   }
-  function setPasteWarning(pasteWarning: PasteWarningMode) {
+  async function setPasteWarning(pasteWarning: PasteWarningMode) {
     if (!isPasteWarningMode(pasteWarning)) return false;
+    if (corePreferencesEnabled()) {
+      const expected = globalInteraction();
+      const next = { ...expected, pasteWarning };
+      if (!await saveApplicationPreferences("interaction", next, expected)) return false;
+      preferences.value = { ...preferences.value, pasteWarning };
+      return true;
+    }
     return save({ ...preferences.value, pasteWarning });
   }
-  function setInteraction(interaction: InteractionPreferences) {
+  async function setInteraction(interaction: InteractionPreferences) {
     if (!validateInteractionPreferences(interaction)) return false;
+    if (corePreferencesEnabled()) {
+      const expected = globalInteraction();
+      const next = { ...expected, interaction: { ...interaction } };
+      if (!await saveApplicationPreferences("interaction", next, expected)) return false;
+      preferences.value = { ...preferences.value, interaction: { ...interaction } };
+      return true;
+    }
     return save({ ...preferences.value, interaction: { ...interaction } });
   }
   /** For F04 import, compare and replace both global fields in one write; Host-bound preferences never participate. */
-  function replaceGlobalInteraction(
+  async function replaceGlobalInteraction(
     next: TerminalGlobalInteractionPreferences,
     expected: TerminalGlobalInteractionPreferences,
   ) {
@@ -116,22 +142,32 @@ export const useTerminalPreferencesStore = defineStore("terminalPreferences", ()
       || !validateInteractionPreferences(expected.interaction)
       || !isPasteWarningMode(next.pasteWarning)
       || !isPasteWarningMode(expected.pasteWarning)) return false;
-    const current: TerminalGlobalInteractionPreferences = {
-      interaction: preferences.value.interaction,
-      pasteWarning: preferences.value.pasteWarning,
-    };
+    const current = globalInteraction();
     if (current.pasteWarning !== expected.pasteWarning
       || !sameInteraction(current.interaction, expected.interaction)) return false;
+    if (corePreferencesEnabled()) {
+      if (!await saveApplicationPreferences("interaction", next, current)) return false;
+      preferences.value = { ...preferences.value, interaction: { ...next.interaction }, pasteWarning: next.pasteWarning };
+      return true;
+    }
     return save({
       ...preferences.value,
       interaction: { ...next.interaction },
       pasteWarning: next.pasteWarning,
     });
   }
-  function setHighlights(config: HighlightConfiguration, hostId?: string, mode: HostHighlightConfiguration["mode"] = "custom") {
+  async function setHighlights(config: HighlightConfiguration, hostId?: string, mode: HostHighlightConfiguration["mode"] = "custom") {
     if (!validateHighlightConfiguration(config)) return false;
     const copy = { enabled: config.enabled, rules: config.rules.map((rule) => ({ ...rule })) };
-    if (!hostId) return save({ ...preferences.value, highlights: copy });
+    if (!hostId) {
+      if (corePreferencesEnabled()) {
+        const expected = preferences.value.highlights;
+        if (!await saveApplicationPreferences("highlights", copy, expected)) return false;
+        preferences.value = { ...preferences.value, highlights: copy };
+        return true;
+      }
+      return save({ ...preferences.value, highlights: copy });
+    }
     if (!/^[a-zA-Z0-9-]{1,80}$/.test(hostId) || !["inherit", "custom", "disabled"].includes(mode)) return false;
     const hostHighlights = { ...preferences.value.hostHighlights };
     if (mode === "inherit") delete hostHighlights[hostId];
@@ -157,5 +193,5 @@ export const useTerminalPreferencesStore = defineStore("terminalPreferences", ()
     const host = hostId ? preferences.value.hostKeyboard[hostId] : undefined;
     return host?.mode === "override" ? { ...host.keyboard } : fallback;
   }
-  return { preferences, setPasteWarning, setInteraction, replaceGlobalInteraction, setHighlights, resolvedHighlights, setHostKeyboard, resolvedKeyboard };
+  return { preferences, globalInteraction, hydrateCorePreferences, setPasteWarning, setInteraction, replaceGlobalInteraction, setHighlights, resolvedHighlights, setHostKeyboard, resolvedKeyboard };
 });

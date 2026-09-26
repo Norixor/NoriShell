@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `sftpRead`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `sftpRead`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 rootHandle comes from sftpOpen; directoryHandle, entryHandle, and precondition come from list/read. Mutations also require sftpWrite. Pages are at most 100 entries, chunks 16 KiB, and staged uploads 64 MiB. Only regular files and real directories are exposed. Do not invent remote paths or session IDs. Upload ordered chunks, then commit; abort on failure. Closing the root also cleans staging.
 

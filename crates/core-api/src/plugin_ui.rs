@@ -827,17 +827,24 @@ pub enum PluginSshSyncStableErrorCode {
     InteractionRequired,
     AuthorizationDenied,
     AuthorizationExpired,
+    AccountNotConnected,
     AccessDenied,
     QuotaExceeded,
     NetworkUnavailable,
     ServiceUnavailable,
     StateConflict,
+    LocalStateChanged,
+    OwnerConflict,
+    KeyBindingConflict,
+    RevisionExhausted,
+    RestoreConflict,
+    MergeInvalid,
+    RemoteRequestRejected,
     RemoteDataInvalid,
     RemoteFormatUnsupported,
     RecoveryRemoteKeyAuthenticationFailed,
     RecoveryActionExpired,
     LocalDataInvalid,
-    PreferencesUnavailable,
     LocalKeyUnavailable,
     OperationBusy,
     OperationRejected,
@@ -901,6 +908,7 @@ pub enum SshSyncSecurePromptKind {
     ApproveRestore,
     ResolveConflicts,
     ChooseSyncDirection,
+    ApproveDataApply,
     ApproveMergedDeletion,
     ResetRemote,
 }
@@ -1028,6 +1036,9 @@ pub struct SshSyncSecurePrompt {
     /// Saved local rules removed with deleted hosts; visible only in the protected review.
     #[serde(default)]
     pub related_forward_rule_labels: Vec<String>,
+    /// True only when Core verified an authoritative PUT receipt for this apply.
+    #[serde(default)]
+    pub data_apply_uploaded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

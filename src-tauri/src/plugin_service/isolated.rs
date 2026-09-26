@@ -370,7 +370,7 @@ impl PluginService {
                     }
                     crate::plugin_api::validate_call(call)
                         .map_err(|_| plugin_validation_error(request_id.clone()))?;
-                    (call.clone(), false)
+                    (call.as_ref().clone(), false)
                 }
                 PluginIsolatedBridgeAction::Approve { pending_id } => {
                     let call = surface

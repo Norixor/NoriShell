@@ -11,7 +11,7 @@ import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
 import { useTipsStore } from "../../stores/tips";
 import { detectDesktopPlatform } from "../../platform";
 import { terminalFontCssFamily } from "../../terminal-theme";
-import { createTerminalHighlighter } from "../../terminal/xtermHighlighting";
+import { createTerminalHighlighter, type HighlightSuspensionReason } from "../../terminal/xtermHighlighting";
 import { TerminalDraftTracker } from "../../terminal/draft";
 import { captureTerminalInput } from "../../terminal-input-target";
 import { wordSeparatorForDoubleClickSelection } from "../../terminal/interaction-preferences";
@@ -49,7 +49,7 @@ const { t } = useI18n();
 const preferences = useTerminalPreferencesStore();
 const tips = useTipsStore();
 const pasteGuard = ref<InstanceType<typeof NvxTerminalPasteGuard> | null>(null);
-const highlightFailed = ref(false);
+const highlightFailure = ref<HighlightSuspensionReason | null>(null);
 const contextPosition = ref({ left: 0, top: 0 });
 const bellFlash = ref(false);
 const contextLinkUrl = ref<string | null>(null);
@@ -871,7 +871,7 @@ onMounted(async () => {
   terminal.attachCustomKeyEventHandler(handleTerminalCustomKeyEvent);
   if (host.value) terminal.open(host.value);
   linkProviderDisposable = terminal.registerLinkProvider(terminalHttpLinkProvider());
-  highlighter = createTerminalHighlighter(terminal, (failed) => { highlightFailed.value = failed; });
+  highlighter = createTerminalHighlighter(terminal, (reason) => { highlightFailure.value = reason; });
   highlighter.update(preferences.resolvedHighlights(props.hostId));
   ghostWriteListener = terminal.onWriteParsed(() => {
     observeBufferState();
@@ -1011,10 +1011,10 @@ onBeforeUnmount(() => {
       class="nvx-terminal-view__host"
     />
     <span
-      v-if="highlightFailed"
+      v-if="highlightFailure"
       class="nvx-terminal-view__highlight-error"
       role="status"
-    >{{ t('terminalEnhancements.highlightSuspended') }}</span>
+    >{{ t(`terminalEnhancements.highlightSuspended.${highlightFailure}`) }}</span>
     <div
       v-if="contextMenuOpen"
       class="nvx-terminal-view__context-menu"

@@ -8,12 +8,28 @@ import NvxCodeEditor from "../ui/NvxCodeEditor.vue";
 import type { SftpFilePreview, SftpFileTailResult } from "../../core-api/generated/core-api";
 import type { ToolTarget } from "../../tool-windows";
 import { createUuidV7 } from "../../core-api/ids";
+import { parseCoreApiError } from "../../core-api/client";
 const props = defineProps<{ target: Extract<ToolTarget, { kind: 'sftpFile' }> }>();
 const emit = defineEmits<{ saved: []; cancel: []; closeCancelled: [] }>();
-const { t } = useI18n();
+const { t, te } = useI18n();
 const content = ref<SftpFilePreview['content'] | null>(null), text = ref(''), original = ref('');
 const loading = ref(true), failed = ref(false), saving = ref(false), active = ref(false), image = ref(''), discard = ref(false), reset = ref(false), trimmed = ref(false);
 const saveFailed = ref(false);
+const failedReason = ref<string | null>(null);
+function failureReason(error: unknown): string {
+  const coreError = parseCoreApiError(error);
+  const diagnostic = coreError?.diagnosticId ? ` ${t("diagnostics.id", { id: coreError.diagnosticId })}` : "";
+  const reason = coreError?.code === "sftp.conflict" ? "conflict"
+    : coreError?.code === "sftp.invalid_input" ? "invalidInput"
+      : coreError?.code === "sftp.unsafe_no_replace_unsupported" ? "unsafeCommit"
+        : coreError?.code === "sftp.cleanup_incomplete" ? "cleanupIncomplete"
+          : coreError?.code === "sftp.length_mismatch" ? "lengthMismatch" : null;
+  if (reason) return t(`sftp.fileUtilities.failures.${reason}`) + diagnostic;
+  if (coreError?.code === "tool_window.read_only") return t("sftpToolWindow.readOnly") + diagnostic;
+  if (coreError?.code === "tool_window.content_too_large") return t("sftpToolWindow.contentTooLarge") + diagnostic;
+  if (coreError?.messageKey && te(coreError.messageKey)) return t(coreError.messageKey) + diagnostic;
+  return t("sftp.fileUtilities.failures.protocol") + diagnostic;
+}
 const root = ref<HTMLElement | null>(null);
 const editor = ref<{
   focus(): void;
@@ -55,7 +71,7 @@ async function poll() {
     if (text.value.length > 262144) { text.value = text.value.slice(-262144); trimmed.value = true; }
     offset = result.nextOffset;
     timer = setTimeout(() => void poll(), BigInt(offset) < BigInt(result.totalSize) ? 40 : 1000);
-  } catch { if (!disposed && epoch === pollEpoch) { failed.value = true; active.value = false; } }
+  } catch (error) { if (!disposed && epoch === pollEpoch) { failed.value = true; failedReason.value = failureReason(error); active.value = false; } }
 }
 function toggleTail() { pollEpoch += 1; active.value = !active.value; clearTimeout(timer); if (active.value) { failed.value = false; void poll(); } }
 function focusSearchInput() { void nextTick(() => root.value?.querySelector<HTMLInputElement>(".file-window__search input")?.focus()); }
@@ -85,13 +101,13 @@ function handleKeydown(event: KeyboardEvent) {
 }
 async function save() {
   if (readonly.value || !dirty.value || saving.value || tooLarge.value) return;
-  saving.value = true; failed.value = false; saveFailed.value = false;
+  saving.value = true; failed.value = false; saveFailed.value = false; failedReason.value = null;
   const submitted = serializedText.value;
   try {
     await invoke('tool_file_save', { text: submitted, meta: { requestId: crypto.randomUUID() }, operationId: createUuidV7() });
     original.value = text.value;
     emit('saved');
-  } catch { failed.value = true; saveFailed.value = true; }
+  } catch (error) { failed.value = true; saveFailed.value = true; failedReason.value = failureReason(error); }
   finally { saving.value = false; }
 }
 onMounted(async () => {
@@ -103,7 +119,7 @@ onMounted(async () => {
       text.value = result.content.text.replace(/\r\n?/g, '\n'); original.value = text.value; offset = result.content.endOffset;
       if (props.target.tail) toggleTail();
     } else image.value = URL.createObjectURL(new Blob([new Uint8Array(result.content.bytes)], { type: result.content.mediaType }));
-  } catch { failed.value = true; }
+  } catch (error) { failed.value = true; failedReason.value = failureReason(error); }
   finally { loading.value = false; }
 });
 onBeforeUnmount(() => { disposed = true; active.value = false; clearTimeout(timer); if (image.value) URL.revokeObjectURL(image.value); resolveClose(false); });
@@ -126,7 +142,9 @@ onBeforeUnmount(() => { disposed = true; active.value = false; clearTimeout(time
         v-if="failed"
         tone="error"
         :title="t(saveFailed ? 'sftp.saveFailed' : 'sftp.previewFailed')"
-      />
+      >
+        {{ failedReason }}
+      </NvxInlineNotice>
       <NvxInlineNotice
         v-if="tooLarge"
         tone="warning"

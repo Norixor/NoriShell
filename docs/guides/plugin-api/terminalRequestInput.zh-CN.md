@@ -30,7 +30,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`terminalRequestInput`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`terminalRequestInput`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 terminalHandle 来自 Core 当前终端上下文。只能响应显式用户动作；Core 在实际写入前复核终端 generation、焦点和输入所有权。inputApprovalRequested 需要等待授权结果；inputSent 表示输入写入，不表示 shell 命令完成。 当前 Wasm isolated 入口总是返回 interactionRequired；真正写入只能经宿主的 declarative action 路径。不能通过 api_request 伪造焦点或改变入口身份。
 

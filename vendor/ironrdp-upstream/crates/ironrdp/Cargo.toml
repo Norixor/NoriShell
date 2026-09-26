@@ -1,0 +1,54 @@
+[package]
+name = "ironrdp"
+version = "0.17.0"
+readme = "README.md"
+description = "A meta crate re-exporting IronRDP crates for convenience"
+edition.workspace = true
+rust-version = "1.94"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = ["core", "pdu"]
+core = ["dep:ironrdp-core"]
+pdu = ["dep:ironrdp-pdu"]
+cliprdr = ["dep:ironrdp-cliprdr"]
+connector = ["dep:ironrdp-connector"]
+session = ["dep:ironrdp-session"]
+graphics = ["dep:ironrdp-graphics"]
+input = ["dep:ironrdp-input"]
+svc = ["dep:ironrdp-svc"]
+dvc = ["dep:ironrdp-dvc"]
+rdpsnd = ["dep:ironrdp-rdpsnd"]
+displaycontrol = ["dep:ironrdp-displaycontrol"]
+rdpei = ["dep:ironrdp-rdpei"]
+# TLS backends for the client (exactly one is required when the client is enabled).
+# Optional client subsystems, forwarded so consumers can opt in without naming `ironrdp-client`.
+
+# Internal (PRIVATE!) features used to aid testing.
+# Don't rely on these whatsoever. They may disappear at any time.
+
+[dependencies]
+ironrdp-core = { path = "../ironrdp-core", version = "0.2", optional = true } # public
+ironrdp-pdu = { path = "../ironrdp-pdu", version = "0.9", optional = true } # public
+ironrdp-cliprdr = { path = "../ironrdp-cliprdr", version = "0.7", optional = true } # public
+ironrdp-connector = { path = "../ironrdp-connector", version = "0.10", optional = true } # public
+ironrdp-session = { path = "../ironrdp-session", version = "0.11", optional = true } # public
+ironrdp-graphics = { path = "../ironrdp-graphics", version = "0.9", optional = true } # public
+ironrdp-input = { path = "../ironrdp-input", version = "0.7", optional = true } # public
+ironrdp-svc = { path = "../ironrdp-svc", version = "0.8", optional = true } # public
+ironrdp-dvc = { path = "../ironrdp-dvc", version = "0.8", optional = true } # public
+ironrdp-rdpsnd = { path = "../ironrdp-rdpsnd", version = "0.9", optional = true } # public
+ironrdp-displaycontrol = { path = "../ironrdp-displaycontrol", version = "0.8", optional = true } # public
+ironrdp-rdpei = { path = "../ironrdp-rdpei", version = "0.1", optional = true } # public
+
+[lints]
+workspace = true

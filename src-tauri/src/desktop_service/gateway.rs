@@ -1,4 +1,5 @@
-//! Desktop connection routes. Protocol engines receive only a byte stream, with no knowledge of gateways, hosts, or Vault.
+//! Desktop connection routes. Engines receive a byte stream and, for direct routes only, its peer address.
+//! Gateways, hosts, and Vault stay owned by Core.
 use super::{DesktopService, Session, prompts::clear_decision};
 use crate::{
     connection_profile::resolve_long_lived_connection_profile,
@@ -15,7 +16,7 @@ use norishell_ssh_transport::{
     HostKeyDecision, HostKeyVerifier, ObservedHostKey, SshForwardTransport, TransportCloseHandle,
     TransportError, VerifyFuture,
 };
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, task::JoinSet};
 use zeroize::Zeroizing;
 
@@ -45,7 +46,7 @@ impl GatewayCleanup {
 pub(super) async fn connect(
     service: &DesktopService,
     session: &Arc<Session>,
-) -> Result<(BoxedDesktopIo, GatewayCleanup)> {
+) -> Result<(BoxedDesktopIo, Option<SocketAddr>, GatewayCleanup)> {
     let profile = session.summary().profile;
     let endpoint = Endpoint::parse(&profile.address, profile.port)
         .map_err(|_| EngineError::InvalidConfiguration)?;
@@ -66,7 +67,11 @@ pub(super) async fn connect(
         stream
             .set_nodelay(true)
             .map_err(|_| EngineError::ConnectionLost)?;
-        return Ok((Box::new(stream), cleanup));
+        // The UDP companion must target the peer of this established TCP route.
+        let udp_peer = stream
+            .peer_addr()
+            .map_err(|_| EngineError::ConnectionLost)?;
+        return Ok((Box::new(stream), Some(udp_peer), cleanup));
     };
     let snapshot = service
         .hosts
@@ -153,7 +158,7 @@ pub(super) async fn connect(
         )
         .await;
     match channel {
-        Ok(channel) => Ok((Box::new(channel), cleanup)),
+        Ok(channel) => Ok((Box::new(channel), None, cleanup)),
         Err(_) => {
             cleanup.close().await?;
             Err(EngineError::ConnectionLost)

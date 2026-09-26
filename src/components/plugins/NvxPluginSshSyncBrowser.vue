@@ -47,7 +47,7 @@ const navigation = computed(() => [
   { id: "credentials" as const, label: t("desktopSync.credentials"), icon: KeyRound, count: hasCounts.value ? snapshot.value?.credentialCount : null },
   { id: "desktops" as const, label: t("desktopSync.desktops"), icon: Monitor, count: hasCounts.value ? snapshot.value?.desktopProfileCount : null },
 ]);
-const hasCounts = computed(() => phase.value === "ready" && (snapshot.value?.state === "ready" || snapshot.value?.state === "empty"));
+const hasCounts = computed(() => phase.value === "ready" && (snapshot.value?.state === "ready" || snapshot.value?.state === "empty" || snapshot.value?.state === "stale"));
 const hostById = computed(() => new Map((snapshot.value?.hosts ?? []).map((host) => [host.rowId, host])));
 const desktopById = computed(() => new Map((snapshot.value?.desktopProfiles ?? []).map((profile) => [profile.rowId, profile])));
 const normalizedQuery = computed(() => query.value.trim().toLocaleLowerCase());
@@ -151,10 +151,12 @@ const statusText = computed(() => {
   if (snapshot.value?.state === "needsUnlock") return t("desktopSync.locked");
   if (snapshot.value?.state === "permissionDenied") return t("desktopSync.permissionDenied");
   if (snapshot.value?.state === "failed") return t("desktopSync.failed");
+  if (snapshot.value?.state === "stale") return t("desktopSync.staleEmpty");
   if (snapshot.value?.state === "empty") return t("desktopSync.emptyCloud");
   return t("desktopSync.unavailable");
 });
-const hasSnapshot = computed(() => phase.value === "ready" && snapshot.value?.state === "ready");
+const hasSnapshot = computed(() => phase.value === "ready" && (snapshot.value?.state === "ready" || snapshot.value?.state === "stale")
+  && ((snapshot.value?.hosts.length ?? 0) + (snapshot.value?.credentials.length ?? 0) + (snapshot.value?.desktopProfiles.length ?? 0) > 0));
 
 function credentialKind(kind: string) {
   const key = kind === "password" ? "password" : kind === "privateKey" ? "privateKey"
@@ -282,6 +284,13 @@ onBeforeUnmount(() => {
       </button>
     </nav>
     <div class="ssh-sync-browser__content">
+      <p
+        v-if="phase === 'ready' && snapshot?.state === 'stale'"
+        class="ssh-sync-browser__stale"
+        role="status"
+      >
+        {{ t('desktopSync.stale', { time: formatUpdated(snapshot.verifiedAtUnixMs) }) }}
+      </p>
       <div
         v-if="view === 'overview'"
         class="ssh-sync-browser__overview"
@@ -526,6 +535,7 @@ onBeforeUnmount(() => {
 .ssh-sync-browser__count { font-variant-numeric: tabular-nums; font-size: var(--nvx-font-size-xs); }
 .ssh-sync-browser__content, .ssh-sync-browser__overview, .ssh-sync-browser__list { min-width: 0; }
 .ssh-sync-browser__overview { display: grid; gap: var(--nvx-space-4); }
+.ssh-sync-browser__stale { margin: 0 0 var(--nvx-space-3); color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-sm); }
 .ssh-sync-browser__panel { min-width: 0; }
 .ssh-sync-browser__header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--nvx-space-4); padding: 0 0 var(--nvx-space-3); }
 .ssh-sync-browser__header h2, .ssh-sync-browser__details h3 { margin: 0; color: var(--nvx-color-text-primary); font-size: var(--nvx-font-size-md); font-weight: var(--nvx-font-weight-semibold); }

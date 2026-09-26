@@ -431,6 +431,41 @@ impl ResourceRegistry {
         Ok((taken, backpressured))
     }
 
+    pub async fn take_events_wait(
+        &self,
+        owner: &ResourceOwner,
+        handle: &str,
+        limit: u16,
+        wait_ms: u32,
+        fence: &super::ResourceFence,
+    ) -> Result<(Vec<PluginApiResourceEvent>, bool), PluginApiErrorCode> {
+        if wait_ms == 0 {
+            return self.take_events(owner, handle, limit);
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(u64::from(wait_ms));
+        loop {
+            if !fence() {
+                return Err(PluginApiErrorCode::Revoked);
+            }
+            // Register before inspecting the queue so an event arriving between
+            // inspection and suspension cannot be missed.
+            let notified = self.events_ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let events = self.take_events(owner, handle, limit)?;
+            if !events.0.is_empty() || events.1 {
+                return Ok(events);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(events);
+            }
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = tokio::time::sleep_until(deadline) => return Ok(events),
+            }
+        }
+    }
+
     /// Waits for the resource driver to acknowledge one owner-scoped outbound payload. This is a
     /// delivery handoff, not a claim that remote peer received the bytes.
     pub async fn send(
@@ -619,6 +654,32 @@ mod tests {
             package: "b".repeat(64),
             generation: WireSequence::new(1),
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_event_wait_receives_later_network_completion() {
+        let registry = ResourceRegistry::default();
+        let owner = owner();
+        let handle = registry
+            .spawn(owner.clone(), "network", |mut cancel, events| async move {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                events.emit(PluginApiResourceEventKind::TimerFired {})?;
+                let _ = cancel.changed().await;
+                Ok(())
+            })
+            .unwrap();
+        let fence: super::super::ResourceFence = Arc::new(|| true);
+        let waited = registry
+            .take_events_wait(&owner, &handle, 1, 1_000, &fence)
+            .await
+            .unwrap();
+        assert_eq!(waited.0.len(), 1);
+        let timed_out = registry
+            .take_events_wait(&owner, &handle, 1, 10, &fence)
+            .await
+            .unwrap();
+        assert!(timed_out.0.is_empty());
+        registry.close(&owner, &handle).await.unwrap();
     }
 
     #[tokio::test]

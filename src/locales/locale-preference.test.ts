@@ -17,7 +17,7 @@ describe("system language preference", () => {
     expect(validateApplicationPreferences(DEFAULT_APPLICATION_PREFERENCES)).toBe(true);
   });
 
-  it("follows language changes without replacing the saved preference or a manual override", () => {
+  it("follows language changes without replacing the saved preference or a manual override", async () => {
     localStorage.clear();
     setActivePinia(createPinia());
     const languages = vi.spyOn(navigator, "languages", "get").mockReturnValue(["zh-CN"]);
@@ -28,10 +28,10 @@ describe("system language preference", () => {
     window.dispatchEvent(new Event("languagechange"));
     expect(store.locale).toBe("en");
     expect(document.documentElement.lang).toBe("en");
-    store.setLocale("zh-CN");
+    await store.setLocale("zh-CN");
     window.dispatchEvent(new Event("languagechange"));
     expect(store.locale).toBe("zh-CN");
-    store.setLocale("system");
+    await store.setLocale("system");
     expect(store.applicationPreferences().locale).toBe("system");
     expect(JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY)!).locale).toBe("system");
     store.$dispose();

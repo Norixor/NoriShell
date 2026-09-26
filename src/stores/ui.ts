@@ -2,6 +2,10 @@ import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref, watch } from "vue";
 
 import { useAppThemeStore } from "./appTheme";
+import { cloneDefaultAppThemeProfile } from "../app-theme";
+import { corePreferencesEnabled, saveApplicationPreferences } from "../core-api/application-preferences";
+import { parseCoreApiError } from "../core-api/client";
+import { publishSecureWindowAppearance } from "../secure-window-appearance";
 import { validateApplicationPreferences, validateAppearancePreferences, type ApplicationPreferences, type AppearancePreferences } from "../ui-transfer";
 import { applyUiZoom, isUiZoom, type UiZoom } from "../ui-zoom";
 import { i18n, resolveLocale, type LocalePreference } from "../locales";
@@ -176,6 +180,52 @@ export const useUiStore = defineStore("ui", () => {
     );
   }
 
+  async function commitApplication(next: ApplicationPreferences) {
+    if (corePreferencesEnabled()) {
+      if (!await saveApplicationPreferences("application", next, applicationPreferences())) return false;
+      publishSecureWindowAppearance(next);
+      return true;
+    }
+    try {
+      persistPreferences({ ...next, theme: resolveThemePreference(next.themePreference, window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false) });
+      return true;
+    } catch { return false; }
+  }
+
+  async function commitAppearance(next: AppearancePreferences) {
+    if (corePreferencesEnabled()) return saveApplicationPreferences("appearance", next, appearancePreferences());
+    const uiAppearance: AppearancePreferences = { ...next };
+    delete uiAppearance.appTheme;
+    try { persistPreferences(uiAppearance); return true; }
+    catch { return false; }
+  }
+
+  function hydrateCorePreferences(application: ApplicationPreferences, appearance: AppearancePreferences) {
+    themePreference.value = application.themePreference;
+    theme.value = resolveThemePreference(application.themePreference, window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false);
+    localePreference.value = application.locale;
+    uiZoom.value = application.uiZoom;
+    terminalStartupBehavior.value = application.terminalStartupBehavior;
+    newTerminalBehavior.value = application.newTerminalBehavior;
+    singlePaneTabCloseBehavior.value = application.singlePaneTabCloseBehavior;
+    terminalThemeMode.value = appearance.terminalThemeMode;
+    terminalFontFamily.value = appearance.terminalFontFamily;
+    terminalFontSize.value = appearance.terminalFontSize;
+    terminalFontWeight.value = parseTerminalFontWeight(appearance.terminalFontWeight);
+    terminalBoldFontWeight.value = parseTerminalFontWeight(appearance.terminalBoldFontWeight);
+    terminalLineHeight.value = appearance.terminalLineHeight;
+    terminalLetterSpacing.value = appearance.terminalLetterSpacing;
+    terminalCursorStyle.value = appearance.terminalCursorStyle;
+    terminalCursorBlink.value = appearance.terminalCursorBlink;
+    customTerminalPalette.value = { ...appearance.customTerminalPalette };
+    customTerminalPaletteName.value = appearance.customTerminalPaletteName;
+    hasCustomTerminalPalette.value = appearance.terminalThemeMode === "custom" || appearance.customTerminalPaletteName.length > 0;
+    appTheme.hydrateCorePreferences(appearance.appTheme ?? cloneDefaultAppThemeProfile());
+    if (corePreferencesEnabled()) publishSecureWindowAppearance(application);
+    syncSystemThemeListener();
+    applyDocumentPreferences();
+  }
+
   function applyDocumentPreferences() {
     document.documentElement.dataset.theme = theme.value;
     appTheme.applyTheme(theme.value);
@@ -198,7 +248,7 @@ export const useUiStore = defineStore("ui", () => {
 
   function applyPreferences() {
     applyDocumentPreferences();
-    persistPreferences();
+    if (!corePreferencesEnabled()) persistPreferences();
   }
 
   let removeSystemThemeListener: (() => void) | undefined;
@@ -229,10 +279,10 @@ export const useUiStore = defineStore("ui", () => {
     try {
       await applyUiZoom(value);
       appliedUiZoom.value = value;
-      if (persist) persistPreferences({ uiZoom: value });
+      if (persist && !await commitApplication({ ...applicationPreferences(), uiZoom: value })) throw new Error("preference save failed");
       uiZoom.value = value;
       return true;
-    } catch {
+    } catch (error) {
       // Restore the actual view when persistence fails; if native rollback fails, retain the actual zoom for layout avoidance.
       if (appliedUiZoom.value !== previous) {
         try {
@@ -240,6 +290,7 @@ export const useUiStore = defineStore("ui", () => {
           appliedUiZoom.value = previous;
         } catch { /* The Settings page reports failure and never presents an unknown native state as success. */ }
       }
+      if (corePreferencesEnabled() && parseCoreApiError(error)?.code.startsWith("application_preferences.")) throw error;
       return false;
     } finally {
       uiZoomBusy.value = false;
@@ -250,6 +301,10 @@ export const useUiStore = defineStore("ui", () => {
     return { themePreference: themePreference.value, locale: localePreference.value, uiZoom: uiZoom.value,
       terminalStartupBehavior: terminalStartupBehavior.value, newTerminalBehavior: newTerminalBehavior.value,
       singlePaneTabCloseBehavior: singlePaneTabCloseBehavior.value };
+  }
+
+  function legacyApplicationPreferences(): ApplicationPreferences {
+    return { ...applicationPreferences(), locale: stored.locale === "en" || stored.locale === "zh-CN" ? stored.locale : "system" };
   }
 
   function appearancePreferences(): AppearancePreferences {
@@ -274,7 +329,7 @@ export const useUiStore = defineStore("ui", () => {
       }
       if (JSON.stringify(applicationPreferences()) !== JSON.stringify(expected)) throw new Error("preference changed");
       const nextTheme = resolveThemePreference(next.themePreference, window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false);
-      persistPreferences({ ...next, theme: nextTheme });
+      if (!await commitApplication(next)) throw new Error("preference save failed");
       themePreference.value = next.themePreference;
       theme.value = nextTheme;
       localePreference.value = next.locale;
@@ -285,27 +340,30 @@ export const useUiStore = defineStore("ui", () => {
       syncSystemThemeListener();
       applyDocumentPreferences();
       return true;
-    } catch {
+    } catch (error) {
       if (appliedUiZoom.value !== previousZoom) {
         try { await applyUiZoom(previousZoom); appliedUiZoom.value = previousZoom; }
         catch { /* Retain the actual zoom projection and let the caller report failure. */ }
       }
+      if (corePreferencesEnabled() && parseCoreApiError(error)?.code.startsWith("application_preferences.")) throw error;
       return false;
     } finally { uiZoomBusy.value = false; }
   }
 
-  function replaceAppearancePreferences(next: unknown, expected: AppearancePreferences) {
+  async function replaceAppearancePreferences(next: unknown, expected: AppearancePreferences) {
     if (!validateAppearancePreferences(next)
       || JSON.stringify(appearancePreferences()) !== JSON.stringify(expected)) return false;
     const expectedThemeProfile = expected.appTheme ?? appTheme.appThemePreferences();
     const nextThemeProfile = next.appTheme ?? expectedThemeProfile;
-    if (!appTheme.replaceAppThemePreferences(nextThemeProfile, expectedThemeProfile)) return false;
-    const uiAppearance: AppearancePreferences = { ...next };
-    delete uiAppearance.appTheme;
-    try { persistPreferences(uiAppearance); } catch {
-      // The transfer group must not report success after only the separate profile was saved.
-      appTheme.replaceAppThemePreferences(expectedThemeProfile, nextThemeProfile);
-      return false;
+    if (corePreferencesEnabled()) {
+      if (!await commitAppearance({ ...next, appTheme: nextThemeProfile })) return false;
+      appTheme.hydrateCorePreferences(nextThemeProfile);
+    } else {
+      if (!await appTheme.replaceAppThemePreferences(nextThemeProfile, expectedThemeProfile)) return false;
+      if (!await commitAppearance(next)) {
+        await appTheme.replaceAppThemePreferences(expectedThemeProfile, nextThemeProfile);
+        return false;
+      }
     }
     terminalThemeMode.value = next.terminalThemeMode;
     terminalFontFamily.value = next.terminalFontFamily;
@@ -323,46 +381,46 @@ export const useUiStore = defineStore("ui", () => {
     return true;
   }
 
-  function setLocale(value: LocalePreference) {
-    persistPreferences({ locale: value });
+  async function setLocale(value: LocalePreference) {
+    if (!await commitApplication({ ...applicationPreferences(), locale: value })) return false;
     localePreference.value = value;
     applyDocumentPreferences();
+    return true;
   }
 
-  function setTerminalStartupBehavior(value: TerminalStartupBehavior) {
+  async function setTerminalStartupBehavior(value: TerminalStartupBehavior) {
+    if (!await commitApplication({ ...applicationPreferences(), terminalStartupBehavior: value })) return false;
     terminalStartupBehavior.value = value;
-    applyPreferences();
+    return true;
   }
 
-  function setNewTerminalBehavior(value: NewTerminalBehavior) {
+  async function setNewTerminalBehavior(value: NewTerminalBehavior) {
+    if (!await commitApplication({ ...applicationPreferences(), newTerminalBehavior: value })) return false;
     newTerminalBehavior.value = value;
-    applyPreferences();
+    return true;
   }
 
-  function setSinglePaneTabCloseBehavior(value: SinglePaneTabCloseBehavior) {
+  async function setSinglePaneTabCloseBehavior(value: SinglePaneTabCloseBehavior) {
+    if (!await commitApplication({ ...applicationPreferences(), singlePaneTabCloseBehavior: value })) return false;
     singlePaneTabCloseBehavior.value = value;
-    applyPreferences();
+    return true;
   }
 
-  function toggleTheme() {
-    setThemePreference(theme.value === "light" ? "dark" : "light");
+  async function toggleTheme() {
+    return setThemePreference(theme.value === "light" ? "dark" : "light");
   }
 
   function setTheme(value: Theme) {
     return setThemePreference(value);
   }
 
-  function setThemePreference(value: ThemePreference) {
+  async function setThemePreference(value: ThemePreference) {
     const nextTheme = resolveThemePreference(
       value,
       window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
     );
 
-    try {
-      persistPreferences({ theme: nextTheme, themePreference: value });
-    } catch {
-      return false;
-    }
+    if (!await commitApplication({ ...applicationPreferences(), themePreference: value })) return false;
 
     themePreference.value = value;
     theme.value = nextTheme;
@@ -371,91 +429,38 @@ export const useUiStore = defineStore("ui", () => {
     return true;
   }
 
-  function setTerminalThemeMode(value: TerminalThemeMode) {
-    terminalThemeMode.value = value;
-    applyPreferences();
+  async function updateAppearance(patch: Partial<AppearancePreferences>) {
+    const next = { ...appearancePreferences(), ...patch };
+    if (!validateAppearancePreferences(next) || !await commitAppearance(next)) return false;
+    hydrateCorePreferences(applicationPreferences(), next);
+    return true;
   }
 
-  function setTerminalFontFamily(value: string) {
-    terminalFontFamily.value = normalizeTerminalFontFamily(value);
-    applyPreferences();
-  }
-
-  function setTerminalFontSize(value: string | number) {
-    terminalFontSize.value = parseTerminalFontSize(value);
-    applyPreferences();
-  }
-
-  function setTerminalFontWeight(value: string | number) {
-    terminalFontWeight.value = parseTerminalFontWeight(value);
-    applyPreferences();
-  }
-
+  function setTerminalThemeMode(value: TerminalThemeMode) { return updateAppearance({ terminalThemeMode: value }); }
+  function setTerminalFontFamily(value: string) { return updateAppearance({ terminalFontFamily: normalizeTerminalFontFamily(value) }); }
+  function setTerminalFontSize(value: string | number) { return updateAppearance({ terminalFontSize: parseTerminalFontSize(value) }); }
+  function setTerminalFontWeight(value: string | number) { return updateAppearance({ terminalFontWeight: parseTerminalFontWeight(value) }); }
   function setTerminalBoldFontWeight(value: string | number) {
-    terminalBoldFontWeight.value = parseTerminalFontWeight(
-      value,
-      DEFAULT_TERMINAL_BOLD_FONT_WEIGHT,
-    );
-    applyPreferences();
+    return updateAppearance({ terminalBoldFontWeight: parseTerminalFontWeight(value, DEFAULT_TERMINAL_BOLD_FONT_WEIGHT) });
   }
-
-  function setTerminalLineHeight(value: string | number) {
-    terminalLineHeight.value = parseTerminalLineHeight(value);
-    applyPreferences();
-  }
-
-  function setTerminalLetterSpacing(value: string | number) {
-    terminalLetterSpacing.value = parseTerminalLetterSpacing(value);
-    applyPreferences();
-  }
-
-  function setTerminalCursorStyle(value: TerminalCursorStyle) {
-    terminalCursorStyle.value = parseTerminalCursorStyle(value);
-    applyPreferences();
-  }
-
-  function setTerminalCursorBlink(value: boolean) {
-    terminalCursorBlink.value = value;
-    applyPreferences();
-  }
-
+  function setTerminalLineHeight(value: string | number) { return updateAppearance({ terminalLineHeight: parseTerminalLineHeight(value) }); }
+  function setTerminalLetterSpacing(value: string | number) { return updateAppearance({ terminalLetterSpacing: parseTerminalLetterSpacing(value) }); }
+  function setTerminalCursorStyle(value: TerminalCursorStyle) { return updateAppearance({ terminalCursorStyle: parseTerminalCursorStyle(value) }); }
+  function setTerminalCursorBlink(value: boolean) { return updateAppearance({ terminalCursorBlink: value }); }
   function setCustomTerminalColor(key: TerminalColorKey, value: string) {
-    if (!isHexColor(value)) return;
-    customTerminalPalette.value = {
-      ...customTerminalPalette.value,
-      [key]: value.toLowerCase(),
-    };
-    applyPreferences();
+    if (!isHexColor(value)) return Promise.resolve(false);
+    return updateAppearance({ customTerminalPalette: { ...customTerminalPalette.value, [key]: value.toLowerCase() } });
   }
-
   function resetCustomTerminalPalette() {
-    customTerminalPalette.value = cloneTerminalPalette(
-      theme.value === "light" ? LIGHT_TERMINAL_PALETTE : DARK_TERMINAL_PALETTE,
-    );
-    applyPreferences();
+    return updateAppearance({ customTerminalPalette: cloneTerminalPalette(theme.value === "light" ? LIGHT_TERMINAL_PALETTE : DARK_TERMINAL_PALETTE) });
   }
 
-  function saveCustomTerminalPalette(name: string, palette: TerminalPalette) {
+  async function saveCustomTerminalPalette(name: string, palette: TerminalPalette) {
     const customName = normalizeCustomTerminalPaletteName(name);
     const parsedPalette = parseTerminalPalette(palette);
     if (!customName || !parsedPalette) return false;
 
-    try {
-      persistPreferences({
-        terminalThemeMode: "custom",
-        customTerminalPalette: parsedPalette,
-        customTerminalPaletteName: customName,
-      });
-    } catch {
-      return false;
-    }
-
-    customTerminalPaletteName.value = customName;
-    customTerminalPalette.value = parsedPalette;
-    hasCustomTerminalPalette.value = true;
-    terminalThemeMode.value = "custom";
-    applyDocumentPreferences();
-    return true;
+    return updateAppearance({ terminalThemeMode: "custom", customTerminalPalette: parsedPalette, customTerminalPaletteName: customName });
   }
 
   return {
@@ -466,7 +471,9 @@ export const useUiStore = defineStore("ui", () => {
     uiZoomBusy,
     setUiZoom,
     applicationPreferences,
+    legacyApplicationPreferences,
     appearancePreferences,
+    hydrateCorePreferences,
     replaceApplicationPreferences,
     replaceAppearancePreferences,
     locale,

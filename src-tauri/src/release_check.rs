@@ -57,20 +57,48 @@ fn supports_auto_install() -> bool {
 #[serde(rename_all = "camelCase")]
 enum ReleaseCheckFailureCode {
     WindowNotAllowed,
-    Unavailable,
+    RequestFailed,
+    HttpRejected,
+    ResponseTooLarge,
+    InvalidResponse,
+    InvalidCurrentVersion,
+    Internal,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ReleaseCheckFailure {
     code: ReleaseCheckFailureCode,
+    message_key: &'static str,
+    diagnostic_id: Option<String>,
 }
 
 impl ReleaseCheckFailure {
-    const fn unavailable() -> Self {
+    const fn new(code: ReleaseCheckFailureCode) -> Self {
+        let message_key = match code {
+            ReleaseCheckFailureCode::WindowNotAllowed => "releases.checkErrors.windowNotAllowed",
+            ReleaseCheckFailureCode::RequestFailed => "releases.checkErrors.requestFailed",
+            ReleaseCheckFailureCode::HttpRejected => "releases.checkErrors.httpRejected",
+            ReleaseCheckFailureCode::ResponseTooLarge => "releases.checkErrors.responseTooLarge",
+            ReleaseCheckFailureCode::InvalidResponse => "releases.checkErrors.invalidResponse",
+            ReleaseCheckFailureCode::InvalidCurrentVersion => {
+                "releases.checkErrors.invalidCurrentVersion"
+            }
+            ReleaseCheckFailureCode::Internal => "releases.checkErrors.internal",
+        };
         Self {
-            code: ReleaseCheckFailureCode::Unavailable,
+            code,
+            message_key,
+            diagnostic_id: None,
         }
+    }
+
+    fn internal() -> Self {
+        let diagnostic_id = uuid::Uuid::new_v4().to_string();
+        eprintln!("release_check internal failure: diagnostic_id={diagnostic_id}");
+        let mut failure = Self::new(ReleaseCheckFailureCode::Internal);
+        failure.diagnostic_id = Some(diagnostic_id);
+        failure
     }
 }
 
@@ -125,17 +153,21 @@ async fn read_bounded_response(
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(ReleaseCheckFailure::unavailable());
+        return Err(ReleaseCheckFailure::new(
+            ReleaseCheckFailureCode::ResponseTooLarge,
+        ));
     }
 
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| ReleaseCheckFailure::unavailable())?
+        .map_err(|_| ReleaseCheckFailure::new(ReleaseCheckFailureCode::RequestFailed))?
     {
         if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(body.len()) {
-            return Err(ReleaseCheckFailure::unavailable());
+            return Err(ReleaseCheckFailure::new(
+                ReleaseCheckFailureCode::ResponseTooLarge,
+            ));
         }
         body.extend_from_slice(&chunk);
     }
@@ -147,9 +179,9 @@ pub(crate) async fn release_check<R: tauri::Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<ReleaseCheckResponse, ReleaseCheckFailure> {
     if window.label() != MAIN_WINDOW_LABEL {
-        return Err(ReleaseCheckFailure {
-            code: ReleaseCheckFailureCode::WindowNotAllowed,
-        });
+        return Err(ReleaseCheckFailure::new(
+            ReleaseCheckFailureCode::WindowNotAllowed,
+        ));
     }
 
     let client = reqwest::Client::builder()
@@ -158,22 +190,24 @@ pub(crate) async fn release_check<R: tauri::Runtime>(
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("NoriShell/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|_| ReleaseCheckFailure::unavailable())?;
+        .map_err(|_| ReleaseCheckFailure::internal())?;
     let response = client
         .get(GITHUB_RELEASES_API)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .map_err(|_| ReleaseCheckFailure::unavailable())?;
+        .map_err(|_| ReleaseCheckFailure::new(ReleaseCheckFailureCode::RequestFailed))?;
     if !response.status().is_success() {
-        return Err(ReleaseCheckFailure::unavailable());
+        return Err(ReleaseCheckFailure::new(
+            ReleaseCheckFailureCode::HttpRejected,
+        ));
     }
 
     let body = read_bounded_response(response).await?;
     let releases = serde_json::from_slice::<Vec<GithubRelease>>(&body)
-        .map_err(|_| ReleaseCheckFailure::unavailable())?;
+        .map_err(|_| ReleaseCheckFailure::new(ReleaseCheckFailureCode::InvalidResponse))?;
     let current = Version::parse(env!("CARGO_PKG_VERSION"))
-        .map_err(|_| ReleaseCheckFailure::unavailable())?;
+        .map_err(|_| ReleaseCheckFailure::new(ReleaseCheckFailureCode::InvalidCurrentVersion))?;
     Ok(evaluate_releases(current, releases))
 }
 
@@ -182,9 +216,9 @@ pub(crate) fn release_update_readiness<R: tauri::Runtime>(
     window: WebviewWindow<R>,
 ) -> Result<norishell_core_api::ExitReadiness, ReleaseCheckFailure> {
     if window.label() != MAIN_WINDOW_LABEL {
-        return Err(ReleaseCheckFailure {
-            code: ReleaseCheckFailureCode::WindowNotAllowed,
-        });
+        return Err(ReleaseCheckFailure::new(
+            ReleaseCheckFailureCode::WindowNotAllowed,
+        ));
     }
     Ok(crate::lifecycle::current_update_readiness(
         window.app_handle(),

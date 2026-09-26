@@ -88,7 +88,7 @@ pub(crate) async fn upgrade(
     stream: BoxedDesktopIo,
     name: &str,
     approve: Option<&CertificateApproval>,
-) -> Result<(BoxedDesktopIo, Vec<u8>)> {
+) -> Result<(BoxedDesktopIo, Vec<u8>, Vec<u8>)> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -112,6 +112,7 @@ pub(crate) async fn upgrade(
         .with_custom_certificate_verifier(verifier.clone())
         .with_no_client_auth();
     config.resumption = rustls::client::Resumption::disabled();
+    config.key_log = Arc::new(rustls::NoKeyLog);
     let name_tls =
         ServerName::try_from(name.to_owned()).map_err(|_| EngineError::InvalidConfiguration)?;
     let tls = TlsConnector::from(Arc::new(config))
@@ -143,7 +144,8 @@ pub(crate) async fn upgrade(
         .peer_certificates()
         .and_then(|certs| certs.first())
         .ok_or(EngineError::CertificateRejected)?;
-    let cert = x509_cert::Certificate::from_der(cert.as_ref())
+    let leaf_der = cert.as_ref().to_vec();
+    let cert = x509_cert::Certificate::from_der(&leaf_der)
         .map_err(|_| EngineError::CertificateRejected)?;
     let public_key = cert
         .tbs_certificate
@@ -152,7 +154,7 @@ pub(crate) async fn upgrade(
         .as_bytes()
         .ok_or(EngineError::CertificateRejected)?
         .to_vec();
-    Ok((Box::new(tls), public_key))
+    Ok((Box::new(tls), public_key, leaf_der))
 }
 
 #[cfg(test)]
@@ -249,10 +251,11 @@ mod tests {
             assert_eq!(challenge.sha256_fingerprint, fingerprint);
             Box::pin(async { true })
         });
-        let (stream, key) = upgrade(Box::new(client), "rdp.test", Some(&approved))
+        let (stream, key, leaf) = upgrade(Box::new(client), "rdp.test", Some(&approved))
             .await
             .unwrap();
         assert!(!key.is_empty());
+        assert!(!leaf.is_empty());
         task.await.unwrap().unwrap();
         drop(stream);
     }

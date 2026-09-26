@@ -21,6 +21,8 @@ export const specialPluginCapabilities: ReadonlySet<PluginCapability> = new Set(
   "sftpRead",
   "sftpWrite",
   "sshSync",
+  "appPreferencesRead",
+  "terminalHistoryRead",
 ]);
 
 export const isSpecialPluginCapability = (capability: PluginCapability) => specialPluginCapabilities.has(capability);

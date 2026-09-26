@@ -38,6 +38,7 @@ use crate::plugin_credential_service::CredentialLease;
 use super::{
     ResourceCommand, ResourceCommandReceiver, ResourceEventWriter, ResourceFence, ResourceOwner,
     ResourceRegistry,
+    blobs::{ExchangeBlobStore, MAX_EXCHANGE_BLOB_BYTES, NetworkReceipt},
 };
 
 const MAX_NETWORK_ADDRESSES: usize = 16;
@@ -49,6 +50,53 @@ const MAX_NETWORK_BODY_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_DATA_BYTES: usize = 8 * 1024;
 const MIN_TIMEOUT_MILLISECONDS: u32 = 100;
 const MAX_TIMEOUT_MILLISECONDS: u32 = 120_000;
+const MAX_SAFE_REVISION: u64 = 9_007_199_254_740_991;
+
+#[derive(Default)]
+struct ExchangeRequestPreconditions {
+    if_match: Option<String>,
+    expected_next_revision: Option<u64>,
+    idempotency_key: Option<String>,
+}
+
+fn parse_safe_revision(value: &str) -> Option<u64> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| (1..=MAX_SAFE_REVISION).contains(value))
+}
+
+fn exchange_request_preconditions(
+    headers: &[PluginNetworkHeader],
+) -> Result<ExchangeRequestPreconditions, PluginApiErrorCode> {
+    let mut result = ExchangeRequestPreconditions::default();
+    for header in headers {
+        if header.name.eq_ignore_ascii_case("if-match") {
+            if result.if_match.is_some() || header.value.is_empty() || header.value.len() > 512 {
+                return Err(PluginApiErrorCode::InvalidRequest);
+            }
+            result.if_match = Some(header.value.clone());
+        } else if header
+            .name
+            .eq_ignore_ascii_case("x-norishell-expected-next-revision")
+        {
+            if result.expected_next_revision.is_some() {
+                return Err(PluginApiErrorCode::InvalidRequest);
+            }
+            result.expected_next_revision =
+                Some(parse_safe_revision(&header.value).ok_or(PluginApiErrorCode::InvalidRequest)?);
+        } else if header.name.eq_ignore_ascii_case("idempotency-key") {
+            if result.idempotency_key.is_some()
+                || header.value.is_empty()
+                || header.value.len() > 128
+            {
+                return Err(PluginApiErrorCode::InvalidRequest);
+            }
+            result.idempotency_key = Some(header.value.clone());
+        }
+    }
+    Ok(result)
+}
 
 /// Resolves one URL once. The returned value, including all addresses, is what Core binds into its
 /// secure approval; `NetworkDriver::start` must receive this exact frozen value later.
@@ -143,7 +191,7 @@ impl NetworkDriver {
         request: PluginNetworkStartRequest,
         fence: ResourceFence,
     ) -> Result<String, PluginApiErrorCode> {
-        Self::start_with_credential(resources, owner, endpoint, request, fence, None)
+        Self::start_with_credential(resources, owner, endpoint, request, fence, None, None)
     }
 
     pub(crate) fn start_with_credential(
@@ -153,14 +201,18 @@ impl NetworkDriver {
         request: PluginNetworkStartRequest,
         fence: ResourceFence,
         credential: Option<CredentialLease>,
+        blobs: Option<ExchangeBlobStore>,
     ) -> Result<String, PluginApiErrorCode> {
         validate_start(&endpoint, &request)?;
-        if request.credential.is_some() != credential.is_some() {
+        if (request.credential.is_some() || request.oauth_profile_id.is_some())
+            != credential.is_some()
+        {
             return Err(PluginApiErrorCode::PermissionDenied);
         }
         let fence: ResourceFence = if let Some(lease) = credential.as_ref() {
             let headers = match &request.operation {
                 PluginNetworkOperation::Http { headers, .. }
+                | PluginNetworkOperation::HttpExchange { headers, .. }
                 | PluginNetworkOperation::WebSocket { headers } => headers,
                 _ => return Err(PluginApiErrorCode::InvalidRequest),
             };
@@ -201,6 +253,48 @@ impl NetworkDriver {
                     .await;
                     Ok(())
                 })
+            }
+            PluginNetworkOperation::HttpExchange {
+                method,
+                headers,
+                profile_id,
+                body_blob_handle,
+                max_response_bytes,
+            } => {
+                let blobs = blobs.ok_or(PluginApiErrorCode::Unavailable)?;
+                let preconditions = exchange_request_preconditions(&headers)?;
+                let body = body_blob_handle
+                    .as_deref()
+                    .map(|handle| blobs.get(&owner, &profile_id, handle, &fence))
+                    .transpose()?;
+                let request_body_sha256 = body.as_ref().map(|blob| blob.sha256.clone());
+                let body = body.map_or_else(Vec::new, |blob| blob.bytes.as_slice().to_vec());
+                let resource_owner = owner.clone();
+                resources.spawn(
+                    owner,
+                    "network-http-exchange",
+                    move |cancel, events| async move {
+                        drive_http_exchange(
+                            cancel,
+                            events,
+                            endpoint,
+                            request.timeout_ms,
+                            method,
+                            headers,
+                            body,
+                            profile_id,
+                            max_response_bytes,
+                            request_body_sha256,
+                            preconditions,
+                            blobs,
+                            resource_owner,
+                            fence,
+                            credential,
+                        )
+                        .await;
+                        Ok(())
+                    },
+                )
             }
             PluginNetworkOperation::WebSocket { headers } => resources.spawn_with_commands(
                 owner,
@@ -305,7 +399,7 @@ pub(crate) fn validate_start(
         (&endpoint.scheme, &request.operation),
         (
             PluginNetworkScheme::Http | PluginNetworkScheme::Https,
-            PluginNetworkOperation::Http { .. }
+            PluginNetworkOperation::Http { .. } | PluginNetworkOperation::HttpExchange { .. }
         ) | (
             PluginNetworkScheme::Ws | PluginNetworkScheme::Wss,
             PluginNetworkOperation::WebSocket { .. }
@@ -324,6 +418,26 @@ pub(crate) fn validate_start(
     {
         return Err(PluginApiErrorCode::InvalidRequest);
     }
+    if request.oauth_profile_id.is_some()
+        && (request.credential.is_some()
+            || !matches!(
+                endpoint.scheme,
+                PluginNetworkScheme::Http | PluginNetworkScheme::Https
+            )
+            || !matches!(
+                request.operation,
+                PluginNetworkOperation::HttpExchange { .. }
+            )
+            || request.oauth_profile_id.as_ref().is_some_and(|profile| {
+                profile.is_empty()
+                    || profile.len() > 80
+                    || !profile.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            }))
+    {
+        return Err(PluginApiErrorCode::InvalidRequest);
+    }
     match &request.operation {
         PluginNetworkOperation::Http {
             headers,
@@ -332,6 +446,41 @@ pub(crate) fn validate_start(
         } => {
             validate_headers(headers, false)?;
             let _ = decode_bounded(body_base64, MAX_NETWORK_BODY_BYTES)?;
+        }
+        PluginNetworkOperation::HttpExchange {
+            method,
+            headers,
+            profile_id,
+            body_blob_handle,
+            max_response_bytes,
+        } => {
+            validate_headers(headers, false)?;
+            // OAuth is injected by Core. Reject guest Authorization before acquiring a lease.
+            if request.oauth_profile_id.is_some()
+                && headers
+                    .iter()
+                    .any(|header| header.name.eq_ignore_ascii_case("authorization"))
+            {
+                return Err(PluginApiErrorCode::InvalidRequest);
+            }
+            let _ = exchange_request_preconditions(headers)?;
+            if !matches!(method, PluginHttpMethod::Get | PluginHttpMethod::Put)
+                || profile_id.is_empty()
+                || profile_id.len() > 80
+                || !profile_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                || *max_response_bytes == 0
+                || usize::try_from(*max_response_bytes)
+                    .map_or(true, |limit| limit > MAX_EXCHANGE_BLOB_BYTES)
+                || (matches!(method, PluginHttpMethod::Get) && body_blob_handle.is_some())
+                || (matches!(method, PluginHttpMethod::Put) && body_blob_handle.is_none())
+                || body_blob_handle
+                    .as_ref()
+                    .is_some_and(|handle| uuid::Uuid::parse_str(handle).is_err())
+            {
+                return Err(PluginApiErrorCode::InvalidRequest);
+            }
         }
         PluginNetworkOperation::WebSocket { headers } => validate_headers(headers, true)?,
         PluginNetworkOperation::Tcp {}
@@ -830,6 +979,322 @@ async fn drive_http(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_http_exchange(
+    mut cancel: watch::Receiver<bool>,
+    events: ResourceEventWriter,
+    endpoint: PreparedNetworkEndpoint,
+    timeout_ms: u32,
+    method: PluginHttpMethod,
+    headers: Vec<PluginNetworkHeader>,
+    body: Vec<u8>,
+    profile_id: String,
+    max_response_bytes: u32,
+    request_body_sha256: Option<String>,
+    preconditions: ExchangeRequestPreconditions,
+    blobs: ExchangeBlobStore,
+    owner: ResourceOwner,
+    fence: ResourceFence,
+    credential: Option<CredentialLease>,
+) {
+    if !fence() {
+        return;
+    }
+    let addresses = match socket_addresses(&endpoint) {
+        Ok(addresses) => addresses,
+        Err(_) => {
+            emit_error(
+                &events,
+                &mut cancel,
+                &fence,
+                PluginNetworkErrorCode::InvalidEndpoint,
+            )
+            .await;
+            return;
+        }
+    };
+    let client = match Client::builder()
+        .no_proxy()
+        .no_hickory_dns()
+        .redirect(redirect::Policy::none())
+        .resolve_to_addrs(&endpoint.host, &addresses)
+        .timeout(Duration::from_millis(u64::from(timeout_ms)))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            emit_error(
+                &events,
+                &mut cancel,
+                &fence,
+                PluginNetworkErrorCode::Unavailable,
+            )
+            .await;
+            return;
+        }
+    };
+    let http_method = match method {
+        PluginHttpMethod::Get => Method::GET,
+        PluginHttpMethod::Put => Method::PUT,
+        _ => unreachable!("validated exchange method"),
+    };
+    let mut request = client
+        .request(http_method, &endpoint.canonical_url)
+        .body(body);
+    for header in headers {
+        let Ok(name) = reqwest::header::HeaderName::from_bytes(header.name.as_bytes()) else {
+            emit_error(
+                &events,
+                &mut cancel,
+                &fence,
+                PluginNetworkErrorCode::ProtocolFailed,
+            )
+            .await;
+            return;
+        };
+        let Ok(value) = reqwest::header::HeaderValue::from_str(&header.value) else {
+            emit_error(
+                &events,
+                &mut cancel,
+                &fence,
+                PluginNetworkErrorCode::ProtocolFailed,
+            )
+            .await;
+            return;
+        };
+        request = request.header(name, value);
+    }
+    if let Some(credential) = credential {
+        let Ok((name, value)) = sensitive_credential_header(&credential) else {
+            return;
+        };
+        request = request.header(name, value);
+    }
+    let write_started = matches!(method, PluginHttpMethod::Put);
+    let mut response = match guarded(request.send(), &mut cancel, &fence, timeout_ms).await {
+        Guarded::Completed(Ok(response)) => response,
+        Guarded::Completed(Err(error)) => {
+            let code = if write_started {
+                PluginNetworkErrorCode::OutcomeUnknown
+            } else if error.is_timeout() {
+                PluginNetworkErrorCode::TimedOut
+            } else {
+                PluginNetworkErrorCode::HttpFailed
+            };
+            emit_error(&events, &mut cancel, &fence, code).await;
+            return;
+        }
+        Guarded::TimedOut => {
+            let code = if write_started {
+                PluginNetworkErrorCode::OutcomeUnknown
+            } else {
+                PluginNetworkErrorCode::TimedOut
+            };
+            emit_error(&events, &mut cancel, &fence, code).await;
+            return;
+        }
+        Guarded::Cancelled | Guarded::Revoked => return,
+    };
+    let status = response.status().as_u16();
+    if ["etag", "x-norishell-revision", "x-norishell-next-revision"]
+        .iter()
+        .any(|name| response.headers().get_all(*name).iter().nth(1).is_some())
+    {
+        emit_error(
+            &events,
+            &mut cancel,
+            &fence,
+            if write_started {
+                PluginNetworkErrorCode::OutcomeUnknown
+            } else {
+                PluginNetworkErrorCode::ProtocolFailed
+            },
+        )
+        .await;
+        return;
+    }
+    let etag = match response.headers().get(reqwest::header::ETAG) {
+        Some(value) => match value.to_str() {
+            Ok(text) if !text.is_empty() && text.len() <= 512 => Some(text.to_owned()),
+            _ => {
+                emit_error(
+                    &events,
+                    &mut cancel,
+                    &fence,
+                    if write_started {
+                        PluginNetworkErrorCode::OutcomeUnknown
+                    } else {
+                        PluginNetworkErrorCode::ProtocolFailed
+                    },
+                )
+                .await;
+                return;
+            }
+        },
+        None => None,
+    };
+    let response_revision = match response.headers().get("x-norishell-revision") {
+        Some(value) => match value.to_str().ok().and_then(parse_safe_revision) {
+            Some(revision) => Some(revision),
+            _ => {
+                emit_error(
+                    &events,
+                    &mut cancel,
+                    &fence,
+                    if write_started {
+                        PluginNetworkErrorCode::OutcomeUnknown
+                    } else {
+                        PluginNetworkErrorCode::ProtocolFailed
+                    },
+                )
+                .await;
+                return;
+            }
+        },
+        None => None,
+    };
+    let response_next_revision = match response.headers().get("x-norishell-next-revision") {
+        Some(value) => match value.to_str().ok().and_then(parse_safe_revision) {
+            Some(revision) => Some(revision),
+            None => {
+                emit_error(
+                    &events,
+                    &mut cancel,
+                    &fence,
+                    if write_started {
+                        PluginNetworkErrorCode::OutcomeUnknown
+                    } else {
+                        PluginNetworkErrorCode::ProtocolFailed
+                    },
+                )
+                .await;
+                return;
+            }
+        },
+        None => None,
+    };
+    let mut response_body = Vec::new();
+    loop {
+        match guarded(response.chunk(), &mut cancel, &fence, timeout_ms).await {
+            Guarded::Completed(Ok(Some(chunk))) => {
+                if response_body.len().saturating_add(chunk.len()) > max_response_bytes as usize {
+                    emit_error(
+                        &events,
+                        &mut cancel,
+                        &fence,
+                        if write_started {
+                            PluginNetworkErrorCode::OutcomeUnknown
+                        } else {
+                            PluginNetworkErrorCode::QuotaExceeded
+                        },
+                    )
+                    .await;
+                    return;
+                }
+                response_body.extend_from_slice(&chunk);
+            }
+            Guarded::Completed(Ok(None)) => break,
+            Guarded::Completed(Err(error)) => {
+                let code = if write_started {
+                    PluginNetworkErrorCode::OutcomeUnknown
+                } else if error.is_timeout() {
+                    PluginNetworkErrorCode::TimedOut
+                } else {
+                    PluginNetworkErrorCode::HttpFailed
+                };
+                emit_error(&events, &mut cancel, &fence, code).await;
+                return;
+            }
+            Guarded::TimedOut => {
+                emit_error(
+                    &events,
+                    &mut cancel,
+                    &fence,
+                    if write_started {
+                        PluginNetworkErrorCode::OutcomeUnknown
+                    } else {
+                        PluginNetworkErrorCode::TimedOut
+                    },
+                )
+                .await;
+                return;
+            }
+            Guarded::Cancelled | Guarded::Revoked => return,
+        }
+    }
+    let byte_length = response_body.len() as u32;
+    let response_blob = match blobs.insert(&owner, &profile_id, response_body, &fence) {
+        Ok(blob) => blob,
+        Err(_) => {
+            emit_error(
+                &events,
+                &mut cancel,
+                &fence,
+                if write_started {
+                    PluginNetworkErrorCode::OutcomeUnknown
+                } else {
+                    PluginNetworkErrorCode::QuotaExceeded
+                },
+            )
+            .await;
+            return;
+        }
+    };
+    let endpoint_origin = match reqwest::Url::parse(&endpoint.canonical_url) {
+        Ok(url) => url.origin().ascii_serialization(),
+        Err(_) => return,
+    };
+    let receipt_handle = match blobs.insert_receipt(
+        &owner,
+        &profile_id,
+        NetworkReceipt {
+            endpoint_origin,
+            resource_url: endpoint.canonical_url.clone(),
+            method: if write_started { "PUT" } else { "GET" }.to_owned(),
+            status,
+            etag: etag.clone(),
+            response_revision,
+            response_next_revision,
+            request_if_match: preconditions.if_match,
+            request_expected_next_revision: preconditions.expected_next_revision,
+            request_idempotency_key: preconditions.idempotency_key,
+            request_body_sha256,
+            response_body_sha256: Some(response_blob.sha256),
+            response_blob_handle: Some(response_blob.handle.clone()),
+        },
+        &fence,
+    ) {
+        Ok(handle) => handle,
+        Err(_) => {
+            emit_error(
+                &events,
+                &mut cancel,
+                &fence,
+                if write_started {
+                    PluginNetworkErrorCode::OutcomeUnknown
+                } else {
+                    PluginNetworkErrorCode::QuotaExceeded
+                },
+            )
+            .await;
+            return;
+        }
+    };
+    let _ = emit(
+        &events,
+        &mut cancel,
+        &fence,
+        PluginNetworkEvent::HttpExchangeCompleted {
+            receipt_handle,
+            status,
+            etag,
+            body_blob_handle: Some(response_blob.handle),
+            byte_length,
+        },
+    )
+    .await;
 }
 
 fn response_headers(headers: &reqwest::header::HeaderMap) -> Vec<PluginNetworkHeader> {
@@ -1821,6 +2286,7 @@ mod tests {
     fn http_get() -> PluginNetworkStartRequest {
         PluginNetworkStartRequest {
             credential: None,
+            oauth_profile_id: None,
             timeout_ms: 2_000,
             operation: PluginNetworkOperation::Http {
                 method: PluginHttpMethod::Get,
@@ -1889,9 +2355,196 @@ mod tests {
     }
 
     #[test]
+    fn exchange_rejects_ambiguous_revisions_and_mixed_credentials() {
+        let mut request = PluginNetworkStartRequest {
+            timeout_ms: 2_000,
+            credential: None,
+            oauth_profile_id: None,
+            operation: PluginNetworkOperation::HttpExchange {
+                method: PluginHttpMethod::Put,
+                headers: vec![PluginNetworkHeader {
+                    name: "X-NoriShell-Expected-Next-Revision".to_owned(),
+                    value: "0".to_owned(),
+                }],
+                profile_id: "primary".to_owned(),
+                body_blob_handle: Some(uuid::Uuid::new_v4().to_string()),
+                max_response_bytes: 1_024,
+            },
+        };
+        let https = endpoint(PluginNetworkScheme::Https);
+        assert_eq!(
+            validate_start(&https, &request),
+            Err(PluginApiErrorCode::InvalidRequest)
+        );
+        if let PluginNetworkOperation::HttpExchange { headers, .. } = &mut request.operation {
+            headers[0].value = "2".to_owned();
+            headers.push(PluginNetworkHeader {
+                name: "x-norishell-expected-next-revision".to_owned(),
+                value: "3".to_owned(),
+            });
+        }
+        assert_eq!(
+            validate_start(&https, &request),
+            Err(PluginApiErrorCode::InvalidRequest)
+        );
+        if let PluginNetworkOperation::HttpExchange { headers, .. } = &mut request.operation {
+            headers.pop();
+        }
+        request.oauth_profile_id = Some("primary".to_owned());
+        request.credential = Some(credential_ref());
+        assert_eq!(
+            validate_start(&https, &request),
+            Err(PluginApiErrorCode::InvalidRequest)
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_response_stays_in_owner_blob_and_receipt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nETag: \"v2\"\r\nX-NoriShell-Revision: 2\r\nX-NoriShell-Next-Revision: 3\r\nConnection: close\r\n\r\nhello").await.unwrap();
+        });
+        let endpoint = prepare_endpoint(&PluginNetworkEndpointRequest {
+            endpoint: format!("http://127.0.0.1:{port}/exchange"),
+        })
+        .await
+        .unwrap();
+        let resources = ResourceRegistry::default();
+        let blobs = ExchangeBlobStore::default();
+        let owner = owner();
+        let fence: ResourceFence = Arc::new(|| true);
+        let request = PluginNetworkStartRequest {
+            timeout_ms: 2_000,
+            credential: None,
+            oauth_profile_id: None,
+            operation: PluginNetworkOperation::HttpExchange {
+                method: PluginHttpMethod::Get,
+                headers: vec![],
+                profile_id: "primary".to_owned(),
+                body_blob_handle: None,
+                max_response_bytes: 1_024,
+            },
+        };
+        let handle = NetworkDriver::start_with_credential(
+            &resources,
+            owner.clone(),
+            endpoint,
+            request,
+            fence.clone(),
+            None,
+            Some(blobs.clone()),
+        )
+        .unwrap();
+        let events = events_until(&resources, &owner, &handle, 1).await;
+        assert_eq!(events.len(), 1);
+        let PluginApiResourceEventKind::Network {
+            event:
+                PluginNetworkEvent::HttpExchangeCompleted {
+                    receipt_handle,
+                    status,
+                    body_blob_handle,
+                    byte_length,
+                    ..
+                },
+        } = &events[0].kind
+        else {
+            panic!("expected opaque exchange completion");
+        };
+        assert_eq!((*status, *byte_length), (200, 5));
+        let receipt = blobs
+            .get_receipt(&owner, "primary", receipt_handle, &fence)
+            .unwrap();
+        assert_eq!(receipt.etag.as_deref(), Some("\"v2\""));
+        assert_eq!(receipt.response_revision, Some(2));
+        assert_eq!(receipt.response_next_revision, Some(3));
+        let blob = blobs
+            .get(
+                &owner,
+                "primary",
+                body_blob_handle.as_deref().unwrap(),
+                &fence,
+            )
+            .unwrap();
+        assert_eq!(blob.bytes.as_slice(), b"hello");
+        resources.close(&owner, &handle).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn timed_out_exchange_write_has_unknown_outcome_and_no_receipt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+        let endpoint = prepare_endpoint(&PluginNetworkEndpointRequest {
+            endpoint: format!("http://127.0.0.1:{port}/exchange"),
+        })
+        .await
+        .unwrap();
+        let resources = ResourceRegistry::default();
+        let blobs = ExchangeBlobStore::default();
+        let owner = owner();
+        let fence: ResourceFence = Arc::new(|| true);
+        let body = blobs
+            .insert(&owner, "primary", b"ciphertext".to_vec(), &fence)
+            .unwrap();
+        let request = PluginNetworkStartRequest {
+            timeout_ms: 100,
+            credential: None,
+            oauth_profile_id: None,
+            operation: PluginNetworkOperation::HttpExchange {
+                method: PluginHttpMethod::Put,
+                headers: vec![PluginNetworkHeader {
+                    name: "Idempotency-Key".to_owned(),
+                    value: uuid::Uuid::new_v4().to_string(),
+                }],
+                profile_id: "primary".to_owned(),
+                body_blob_handle: Some(body.handle),
+                max_response_bytes: 1_024,
+            },
+        };
+        let handle = NetworkDriver::start_with_credential(
+            &resources,
+            owner.clone(),
+            endpoint,
+            request,
+            fence.clone(),
+            None,
+            Some(blobs.clone()),
+        )
+        .unwrap();
+        let events = events_until(&resources, &owner, &handle, 1).await;
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PluginApiResourceEventKind::Network {
+                event: PluginNetworkEvent::Error {
+                    code: PluginNetworkErrorCode::OutcomeUnknown
+                }
+            }
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event.kind,
+            PluginApiResourceEventKind::Network {
+                event: PluginNetworkEvent::HttpExchangeCompleted { .. }
+            }
+        )));
+        resources.close(&owner, &handle).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
     fn credential_network_requests_are_limited_to_https_and_wss() {
         let http = PluginNetworkStartRequest {
             credential: Some(credential_ref()),
+            oauth_profile_id: None,
             timeout_ms: 2_000,
             operation: PluginNetworkOperation::Http {
                 method: PluginHttpMethod::Get,
@@ -1901,6 +2554,7 @@ mod tests {
         };
         let websocket = PluginNetworkStartRequest {
             credential: Some(credential_ref()),
+            oauth_profile_id: None,
             timeout_ms: 2_000,
             operation: PluginNetworkOperation::WebSocket { headers: vec![] },
         };
@@ -1922,6 +2576,7 @@ mod tests {
 
         let request = PluginNetworkStartRequest {
             credential: Some(credential_ref()),
+            oauth_profile_id: None,
             timeout_ms: 2_000,
             operation: PluginNetworkOperation::Http {
                 method: PluginHttpMethod::Get,
@@ -1940,6 +2595,7 @@ mod tests {
                 request,
                 Arc::new(|| true),
                 Some(credential_lease(true)),
+                None,
             ),
             Err(PluginApiErrorCode::InvalidRequest)
         );
@@ -1966,6 +2622,7 @@ mod tests {
 
         let request = PluginNetworkStartRequest {
             credential: Some(credential_ref()),
+            oauth_profile_id: None,
             timeout_ms: 2_000,
             operation: PluginNetworkOperation::Http {
                 method: PluginHttpMethod::Get,
@@ -1981,9 +2638,85 @@ mod tests {
                 request,
                 Arc::new(|| true),
                 Some(credential_lease(false)),
+                None,
             ),
             Err(PluginApiErrorCode::Revoked)
         ));
+    }
+
+    #[test]
+    fn oauth_exchange_rejects_guest_authorization_in_any_case() {
+        for name in ["Authorization", "authorization", "aUtHoRiZaTiOn"] {
+            let request = PluginNetworkStartRequest {
+                credential: None,
+                oauth_profile_id: Some("primary".to_owned()),
+                timeout_ms: 2_000,
+                operation: PluginNetworkOperation::HttpExchange {
+                    method: PluginHttpMethod::Get,
+                    headers: vec![PluginNetworkHeader {
+                        name: name.to_owned(),
+                        value: "guest-value".to_owned(),
+                    }],
+                    profile_id: "primary".to_owned(),
+                    body_blob_handle: None,
+                    max_response_bytes: 1024,
+                },
+            };
+            assert_eq!(
+                validate_start(&endpoint(PluginNetworkScheme::Https), &request),
+                Err(PluginApiErrorCode::InvalidRequest)
+            );
+        }
+
+        let request = PluginNetworkStartRequest {
+            credential: None,
+            oauth_profile_id: None,
+            timeout_ms: 2_000,
+            operation: PluginNetworkOperation::HttpExchange {
+                method: PluginHttpMethod::Get,
+                headers: vec![PluginNetworkHeader {
+                    name: "Authorization".to_owned(),
+                    value: "guest-value".to_owned(),
+                }],
+                profile_id: "primary".to_owned(),
+                body_blob_handle: None,
+                max_response_bytes: 1024,
+            },
+        };
+        assert!(validate_start(&endpoint(PluginNetworkScheme::Https), &request).is_ok());
+    }
+
+    #[test]
+    fn exchange_rejects_a_guest_header_matching_any_core_credential_name() {
+        let request = PluginNetworkStartRequest {
+            credential: Some(credential_ref()),
+            oauth_profile_id: None,
+            timeout_ms: 2_000,
+            operation: PluginNetworkOperation::HttpExchange {
+                method: PluginHttpMethod::Get,
+                headers: vec![PluginNetworkHeader {
+                    name: "x-API-key".to_owned(),
+                    value: "guest-value".to_owned(),
+                }],
+                profile_id: "primary".to_owned(),
+                body_blob_handle: None,
+                max_response_bytes: 1024,
+            },
+        };
+        let mut lease = credential_lease(true);
+        lease.header_name = "X-Api-Key".to_owned();
+        assert_eq!(
+            NetworkDriver::start_with_credential(
+                &ResourceRegistry::default(),
+                owner(),
+                endpoint(PluginNetworkScheme::Https),
+                request,
+                Arc::new(|| true),
+                Some(lease),
+                None,
+            ),
+            Err(PluginApiErrorCode::InvalidRequest)
+        );
     }
 
     #[tokio::test]
@@ -2052,6 +2785,7 @@ mod tests {
             endpoint,
             PluginNetworkStartRequest {
                 credential: None,
+                oauth_profile_id: None,
                 timeout_ms: 2_000,
                 operation: PluginNetworkOperation::Tcp {},
             },
@@ -2097,6 +2831,7 @@ mod tests {
             endpoint,
             PluginNetworkStartRequest {
                 credential: None,
+                oauth_profile_id: None,
                 timeout_ms: 2_000,
                 operation: PluginNetworkOperation::Udp {},
             },
@@ -2146,6 +2881,7 @@ mod tests {
             endpoint,
             PluginNetworkStartRequest {
                 credential: None,
+                oauth_profile_id: None,
                 timeout_ms: 2_000,
                 operation: PluginNetworkOperation::WebSocket { headers: vec![] },
             },
@@ -2202,6 +2938,7 @@ mod tests {
             .unwrap(),
             PluginNetworkStartRequest {
                 credential: None,
+                oauth_profile_id: None,
                 timeout_ms: 2_000,
                 operation: PluginNetworkOperation::Tcp {},
             },
@@ -2260,6 +2997,7 @@ mod tests {
             .unwrap(),
             PluginNetworkStartRequest {
                 credential: None,
+                oauth_profile_id: None,
                 timeout_ms: 2_000,
                 operation: PluginNetworkOperation::Udp {},
             },
@@ -2327,6 +3065,7 @@ mod tests {
             .unwrap(),
             PluginNetworkStartRequest {
                 credential: None,
+                oauth_profile_id: None,
                 timeout_ms: 2_000,
                 operation: PluginNetworkOperation::WebSocket { headers: vec![] },
             },

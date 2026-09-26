@@ -5,6 +5,7 @@ import {
   UI_PREFERENCES_KEY,
 } from "./ui-preferences";
 import { disableDefaultWebviewContextMenu } from "./webview-context-menu";
+import { SECURE_WINDOW_APPEARANCE_KEY } from "./secure-window-appearance";
 
 let removeSystemThemeListener: (() => void) | undefined;
 
@@ -12,7 +13,8 @@ let removeSystemThemeListener: (() => void) | undefined;
 export function applySecureWindowAppearance() {
   let stored: { locale?: unknown; theme?: unknown; themePreference?: unknown } = {};
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) ?? "{}");
+    const parsed: unknown = JSON.parse(localStorage.getItem(SECURE_WINDOW_APPEARANCE_KEY)
+      ?? localStorage.getItem(UI_PREFERENCES_KEY) ?? "{}");
     if (parsed && typeof parsed === "object") stored = parsed;
   } catch { /* Corrupt or unavailable preferences fall back to application defaults. */ }
   i18n.global.locale.value = resolveLocale(stored.locale === "en" || stored.locale === "zh-CN" ? stored.locale : "system");
@@ -39,7 +41,7 @@ export function initializeSecureWindowAppearance() {
   disableDefaultWebviewContextMenu();
   applySecureWindowAppearance();
   const onStorage = (event: StorageEvent) => {
-    if (event.key === UI_PREFERENCES_KEY || event.key === null) applySecureWindowAppearance();
+    if (event.key === SECURE_WINDOW_APPEARANCE_KEY || event.key === UI_PREFERENCES_KEY || event.key === null) applySecureWindowAppearance();
   };
   const dispose = () => {
     window.removeEventListener("storage", onStorage);

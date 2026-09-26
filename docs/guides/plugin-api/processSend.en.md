@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `localProcess`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `localProcess`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 Use the handle from processStart. closeStdin defaults to false; true requires dataBase64="". processSent acknowledges the stdin writer only; consume processOutput/processExited for output and exit.
 

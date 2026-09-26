@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use norishell_core_api::{
@@ -30,6 +31,8 @@ pub(crate) struct SshSyncBrowserCacheBinding {
     pub(crate) authorization_epoch: WireSequence,
     pub(crate) account_epoch: u64,
     pub(crate) account_configuration_sha256: String,
+    pub(crate) oauth_session_id: Option<String>,
+    pub(crate) source_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -92,6 +95,10 @@ impl SshSyncBrowserCache {
                     desktop_profile_rows_omitted: desktop_profile_count
                         .saturating_sub(bounded_count(desktop_profiles.len())),
                     remote_updated_at_unix_ms,
+                    verified_at_unix_ms: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok()),
                     hosts,
                     credentials,
                     desktop_profiles,
@@ -118,6 +125,19 @@ impl SshSyncBrowserCache {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.revision = state.revision.saturating_add(1).max(1);
         let cache_revision = WireSequence::new(state.revision);
+        if let Some(entry) = state.entries.get_mut(&namespace(binding))
+            && entry.binding == *binding
+            && matches!(
+                entry.snapshot.state,
+                PluginSshSyncBrowserState::Ready
+                    | PluginSshSyncBrowserState::Empty
+                    | PluginSshSyncBrowserState::Stale
+            )
+        {
+            entry.snapshot.state = PluginSshSyncBrowserState::Stale;
+            entry.snapshot.cache_revision = cache_revision;
+            return;
+        }
         state.entries.insert(
             namespace(binding),
             BrowserCacheEntry {
@@ -129,6 +149,35 @@ impl SshSyncBrowserCache {
                 ),
             },
         );
+    }
+
+    pub(crate) fn restore_stale(
+        &self,
+        binding: &SshSyncBrowserCacheBinding,
+        bundle: &PortableBundleV1,
+        remote_updated_at_unix_ms: Option<i64>,
+        verified_at_unix_ms: i64,
+        fence: &dyn Fn() -> bool,
+    ) {
+        self.publish(binding, bundle, remote_updated_at_unix_ms, fence);
+        if !fence() {
+            self.invalidate_profile(&binding.plugin_id, &binding.profile_id);
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = state.entries.get_mut(&namespace(binding))
+            && entry.binding == *binding
+        {
+            entry.snapshot.state = PluginSshSyncBrowserState::Stale;
+            entry.snapshot.verified_at_unix_ms = Some(verified_at_unix_ms);
+        }
+        drop(state);
+        if !fence() {
+            self.invalidate_profile(&binding.plugin_id, &binding.profile_id);
+        }
     }
 
     pub(crate) fn read(
@@ -212,6 +261,7 @@ pub(crate) fn empty_snapshot(
         credential_rows_omitted: 0,
         desktop_profile_rows_omitted: 0,
         remote_updated_at_unix_ms: None,
+        verified_at_unix_ms: None,
         hosts: Vec::new(),
         credentials: Vec::new(),
         desktop_profiles: Vec::new(),
@@ -426,6 +476,8 @@ mod tests {
             authorization_epoch: WireSequence::new(7),
             account_epoch: 9,
             account_configuration_sha256: "c".repeat(64),
+            oauth_session_id: Some("session-a".to_owned()),
+            source_url: Some("https://example.test/exchange".to_owned()),
         }
     }
 
@@ -470,6 +522,7 @@ mod tests {
             .collect();
         PortableBundleV1 {
             schema: BundleSchema::V2,
+            selected_categories: None,
             revision: 3,
             objects: PortableObjects {
                 hosts,
@@ -530,6 +583,10 @@ mod tests {
                 clipboard_enabled: true,
                 audio_playback_enabled: true,
                 vnc_protocol_version: norishell_ssh_profile_sync::PortableVncProtocolVersion::Auto,
+                vnc_resolution_mode: Default::default(),
+                rdp_transport_mode: Default::default(),
+                rdp_graphics_mode: Default::default(),
+                rdp_resolution_mode: Default::default(),
             })
             .collect();
         bundle
@@ -643,6 +700,45 @@ mod tests {
         assert_eq!(snapshot.state, PluginSshSyncBrowserState::Ready);
         assert_eq!(snapshot.desktop_profile_count, 1);
         assert_eq!(snapshot.desktop_profiles.len(), 1);
+    }
+
+    #[test]
+    fn transient_failure_keeps_verified_rows_and_time_but_never_invents_rows() {
+        let cache = SshSyncBrowserCache::default();
+        let binding = binding();
+        cache.mark_failed(&binding, &|| true);
+        assert_eq!(
+            cache.read(&binding, &|| true).state,
+            PluginSshSyncBrowserState::Failed
+        );
+
+        cache.publish(&binding, &bundle(1, 1), Some(42), &|| true);
+        let verified = cache.read(&binding, &|| true);
+        assert!(verified.verified_at_unix_ms.is_some());
+        cache.mark_failed(&binding, &|| true);
+        let stale = cache.read(&binding, &|| true);
+        assert_eq!(stale.state, PluginSshSyncBrowserState::Stale);
+        assert_eq!(stale.hosts, verified.hosts);
+        assert_eq!(stale.credentials, verified.credentials);
+        assert_eq!(stale.remote_updated_at_unix_ms, Some(42));
+        assert_eq!(stale.verified_at_unix_ms, verified.verified_at_unix_ms);
+    }
+
+    #[test]
+    fn restored_ciphertext_projection_remains_stale_with_original_verification_time() {
+        let cache = SshSyncBrowserCache::default();
+        let binding = binding();
+        cache.restore_stale(&binding, &bundle(1, 0), Some(42), 77, &|| true);
+        let snapshot = cache.read(&binding, &|| true);
+        assert_eq!(snapshot.state, PluginSshSyncBrowserState::Stale);
+        assert_eq!(snapshot.verified_at_unix_ms, Some(77));
+        assert_eq!(snapshot.remote_updated_at_unix_ms, Some(42));
+        assert_eq!(snapshot.hosts.len(), 1);
+        cache.invalidate_profile(&binding.plugin_id, &binding.profile_id);
+        assert_eq!(
+            cache.read(&binding, &|| true).state,
+            PluginSshSyncBrowserState::NotLoaded
+        );
     }
 
     #[test]

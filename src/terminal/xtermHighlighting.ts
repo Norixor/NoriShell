@@ -5,6 +5,7 @@ import type { HighlightConfiguration, HighlightMatch, HighlightRule } from "./hi
 interface CellPosition { row: number; column: number; width: number }
 interface LogicalLine { text: string; positions: CellPosition[] }
 interface HighlightDecoration { marker: IMarker; decoration: IDisposable; column: number; width: number; foreground: string; background: string }
+export type HighlightSuspensionReason = "worker-unavailable" | "worker-error" | "evaluation-failed" | "startup-timeout" | "scan-timeout";
 
 /** Map UTF-16 match positions back to real cells; wide characters, combining characters, and soft wraps never change output. */
 export function visibleHighlightLines(terminal: Terminal): LogicalLine[] {
@@ -44,9 +45,10 @@ export function highlightCellRanges(line: LogicalLine, start: number, end: numbe
   return ranges;
 }
 
-export function createTerminalHighlighter(terminal: Terminal, report: (failed: boolean) => void) {
+export function createTerminalHighlighter(terminal: Terminal, report: (reason: HighlightSuspensionReason | null) => void) {
   let config: HighlightConfiguration = { enabled: false, rules: [] };
   let worker: Worker | null = null;
+  let workerResponded = false;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   let revision = 0;
@@ -66,13 +68,14 @@ export function createTerminalHighlighter(terminal: Terminal, report: (failed: b
     timeout = undefined;
     worker?.terminate();
     worker = null;
+    workerResponded = false;
     pending = false;
   }
-  function suspend() {
+  function suspend(reason: HighlightSuspensionReason) {
     stopWorker();
     suspended = true;
     clearDecorations();
-    report(true);
+    report(reason);
   }
   function run() {
     scheduled = undefined;
@@ -84,17 +87,22 @@ export function createTerminalHighlighter(terminal: Terminal, report: (failed: b
     const id = ++requestId;
     const viewport = terminal.buffer.active.viewportY;
     const rules = new Map<string, HighlightRule>(config.rules.map((rule) => [rule.id, rule]));
+    const coldWorker = worker === null;
     try {
-      const coldWorker = worker === null;
       worker ??= new Worker(new URL("./highlight.worker.ts", import.meta.url), { type: "module" });
+    } catch { suspend("worker-unavailable"); return; }
+    try {
       const activeWorker = worker;
-      worker.onerror = () => { if (worker === activeWorker) suspend(); };
+      worker.onerror = () => { if (worker === activeWorker) suspend(workerResponded ? "worker-error" : "worker-unavailable"); };
+      worker.onmessageerror = () => { if (worker === activeWorker) suspend("worker-error"); };
       worker.onmessage = (event: MessageEvent<{ requestId: number; matches: HighlightMatch[]; failed?: boolean }>) => {
-        if (disposed || worker !== activeWorker || event.data.requestId !== id) return;
+        if (disposed || worker !== activeWorker) return;
+        workerResponded = true;
+        if (event.data.requestId !== id) return;
         clearTimeout(timeout);
         timeout = undefined;
         pending = false;
-        if (event.data.failed) { suspend(); return; }
+        if (event.data.failed || !Array.isArray(event.data.matches)) { suspend("evaluation-failed"); return; }
         if (config.enabled && terminal.buffer.active.type === "normal") {
           const buffer = terminal.buffer.active;
           const currentLines = version === revision && viewport === buffer.viewportY ? lines : visibleHighlightLines(terminal);
@@ -141,8 +149,8 @@ export function createTerminalHighlighter(terminal: Terminal, report: (failed: b
       worker.postMessage({ requestId: id, lines: lines.map((line) => line.text), rules: config.rules.map((rule) => ({ ...rule })) });
       // The first reply includes module Worker startup; later scans keep the shorter regex budget.
       // Do not retry the same configuration automatically after a timeout.
-      timeout = setTimeout(suspend, coldWorker ? 2_000 : 500);
-    } catch { suspend(); }
+      timeout = setTimeout(() => suspend(coldWorker ? "startup-timeout" : "scan-timeout"), coldWorker ? 2_000 : 500);
+    } catch { suspend(coldWorker ? "worker-unavailable" : "worker-error"); }
   }
   function schedule() {
     if (scheduled === undefined && !disposed && !suspended && config.enabled) scheduled = setTimeout(run, 80);
@@ -164,7 +172,7 @@ export function createTerminalHighlighter(terminal: Terminal, report: (failed: b
       config = { enabled: value.enabled, rules: value.rules.map((rule) => ({ ...rule })) };
       revision++;
       suspended = false;
-      report(false);
+      report(null);
       stopWorker();
       clearDecorations();
       schedule();

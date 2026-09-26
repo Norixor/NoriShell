@@ -1,4 +1,4 @@
-//! Builds exact operation scopes from Core-owned targets, never guest-supplied identity.
+//! Builds remembered operation scopes from Core-owned targets, never guest-supplied identity.
 
 use crate::{
     plugin_operation_policy::PreparedOperationPolicy, ssh_session_service::SessionChannelLease,
@@ -18,7 +18,7 @@ impl PluginService {
         operation: PluginApprovalOperation,
         action_label: &str,
         host_id: &norishell_core_api::HostId,
-        mutation: Option<&PluginHostMutationPatch>,
+        _mutation: Option<&PluginHostMutationPatch>,
         session_kind: Option<PluginHostSessionKind>,
     ) -> Option<PreparedOperationPolicy> {
         let snapshot = self
@@ -34,12 +34,10 @@ impl PluginService {
                 action_label,
                 &snapshot.host.label,
                 &(
+                    action_label,
                     host_id,
-                    &snapshot.host,
-                    &snapshot.config.route_plan,
-                    &snapshot.config.authentication_plan,
-                    &snapshot.config.algorithm_policy,
-                    mutation,
+                    &snapshot.host.address,
+                    snapshot.host.port,
                     session_kind,
                 ),
             )
@@ -61,11 +59,11 @@ impl PluginService {
         else {
             return None;
         };
-        let (host, config) = self
+        let host = self
             .hosts
             .with_plugin_repository(|repository| {
                 let snapshot = repository.get_host_connection_snapshot(host_id)?;
-                Ok((snapshot.host, snapshot.config))
+                Ok(snapshot.host)
             })
             .ok()?;
         if host.state_version != *expected_host_state_version
@@ -74,6 +72,24 @@ impl PluginService {
         {
             return None;
         }
+        let scope = if matches!(
+            operation,
+            PluginApprovalOperation::RemoteExecute | PluginApprovalOperation::TerminalInput
+        ) {
+            serde_json::json!({
+                "hostId": host_id,
+                "endpoint": lease.endpoint,
+                "action": action_label,
+                "command": payload,
+            })
+        } else {
+            serde_json::json!({
+                "hostId": host_id,
+                "endpoint": lease.endpoint,
+                "operation": operation,
+                "target": payload,
+            })
+        };
         self.operation_policies
             .prepare(
                 installed,
@@ -86,15 +102,7 @@ impl PluginService {
                 operation,
                 action_label,
                 &host.label,
-                &(
-                    host_id,
-                    &lease.endpoint,
-                    &config.route_plan,
-                    &config.authentication_plan,
-                    &config.algorithm_policy,
-                    action_label,
-                    payload,
-                ),
+                &scope,
             )
             .ok()
     }

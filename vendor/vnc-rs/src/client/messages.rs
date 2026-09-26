@@ -10,6 +10,12 @@ pub(super) enum ClientMsg {
     KeyEvent(u32, bool),
     PointerEvent(u16, u16, u8),
     ClientCutText(String),
+    SetDesktopSize {
+        width: u16,
+        height: u16,
+        screen_id: u32,
+        flags: u32,
+    },
 }
 
 impl ClientMsg {
@@ -114,6 +120,26 @@ impl ClientMsg {
                 let mut payload = vec![6_u8, 0, 0, 0];
                 payload.write_u32(s.len() as u32).await?;
                 payload.write_all(s.as_bytes()).await?;
+                writer.write_all(&payload).await?;
+                Ok(())
+            }
+            ClientMsg::SetDesktopSize {
+                width,
+                height,
+                screen_id,
+                flags,
+            } => {
+                // One screen spanning the requested framebuffer. Retain its
+                // server-assigned identity and opaque flags across changes.
+                let mut payload = vec![251, 0];
+                payload.extend_from_slice(&width.to_be_bytes());
+                payload.extend_from_slice(&height.to_be_bytes());
+                payload.extend_from_slice(&[1, 0]);
+                payload.extend_from_slice(&screen_id.to_be_bytes());
+                payload.extend_from_slice(&[0; 4]);
+                payload.extend_from_slice(&width.to_be_bytes());
+                payload.extend_from_slice(&height.to_be_bytes());
+                payload.extend_from_slice(&flags.to_be_bytes());
                 writer.write_all(&payload).await?;
                 Ok(())
             }

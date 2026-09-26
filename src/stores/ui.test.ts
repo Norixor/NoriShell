@@ -39,12 +39,12 @@ describe("application theme preference", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it("keeps the resolved Theme contract while following system changes", () => {
+  it("keeps the resolved Theme contract while following system changes", async () => {
     const systemTheme = stubSystemTheme(false);
     const store = useUiStore();
 
-    expect(store.setThemePreference("system")).toBe(true);
-    store.setTerminalThemeMode("nord");
+    expect(await store.setThemePreference("system")).toBe(true);
+    await store.setTerminalThemeMode("nord");
     const fixedTerminalPalette = store.resolvedTerminalPalette;
     expect(store.themePreference).toBe("system");
     expect(store.theme).toBe("light");
@@ -59,7 +59,7 @@ describe("application theme preference", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(store.resolvedTerminalPalette).toBe(fixedTerminalPalette);
 
-    expect(store.setTheme("light")).toBe(true);
+    expect(await store.setTheme("light")).toBe(true);
     systemTheme.setMatches(false);
     expect(store.themePreference).toBe("light");
     expect(store.theme).toBe("light");
@@ -70,7 +70,7 @@ describe("application theme preference", () => {
     store.$dispose();
   });
 
-  it("migrates legacy fixed themes and leaves the effective theme unchanged when saving fails", () => {
+  it("migrates legacy fixed themes and leaves the effective theme unchanged when saving fails", async () => {
     localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({ theme: "dark" }));
     const store = useUiStore();
     expect(store.themePreference).toBe("dark");
@@ -80,7 +80,7 @@ describe("application theme preference", () => {
       throw new Error("quota");
     });
 
-    expect(store.setThemePreference("light")).toBe(false);
+    expect(await store.setThemePreference("light")).toBe(false);
     expect(store.themePreference).toBe("dark");
     expect(store.theme).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");

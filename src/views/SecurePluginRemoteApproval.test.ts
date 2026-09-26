@@ -36,6 +36,8 @@ describe("SecurePluginRemoteApproval", () => {
     expect(wrapper.get(".nvx-secure-window__content").find("img").exists()).toBe(false);
     expect(wrapper.findAll("pre")[0]?.text()).toContain("<img src=x onerror=alert(1)>");
     expect(wrapper.get(".secure-remote__body").find("footer").exists()).toBe(false);
+    expect(wrapper.get(".nvx-secure-window__decision").findAll("input[type=radio]")).toHaveLength(2);
+    expect(wrapper.get(".nvx-secure-window__scroll").find("input[type=radio]").exists()).toBe(false);
     await wrapper.get("footer button:last-child").trigger("click");
     await flushPromises();
     expect(client.decidePluginRemoteApproval).toHaveBeenCalledWith({ approvalId: prompt.approvalId, expectedStateVersion: "1", decision: "approve", policy: "once", expiry: "unlimited" });
@@ -53,7 +55,7 @@ describe("SecurePluginRemoteApproval", () => {
     expect(wrapper.get("h1").text()).toBe("Stop this forward");
     expect(wrapper.text()).toContain("127.0.0.1:43001");
     expect(wrapper.text()).toContain("localhost:8080");
-    expect(wrapper.find("input").exists()).toBe(false);
+    expect(wrapper.find("input[type=password]").exists()).toBe(false);
     await wrapper.get("footer button:first-child").trigger("click");
     await flushPromises();
     expect(client.decidePluginRemoteApproval).toHaveBeenCalledWith({ approvalId: prompt.approvalId, expectedStateVersion: "1", decision: "reject", policy: "once", expiry: "unlimited" });
@@ -77,6 +79,8 @@ describe("SecurePluginRemoteApproval", () => {
     expect(wrapper.text()).toContain("Network access target");
     expect(wrapper.text()).not.toContain("Current SSH connection");
     expect(wrapper.text()).toContain("Query the selected resolver");
+    expect(wrapper.get(".secure-remote__request-details").attributes("open")).toBeUndefined();
+    expect(wrapper.get(".secure-remote__request-details summary").text()).toBe("Request details");
     expect(wrapper.find("pre").text()).toContain("UDP 198.51.100.24:443");
     expect(wrapper.find(".secure-remote__route").exists()).toBe(false);
     expect(wrapper.text()).toContain("Production");
@@ -197,7 +201,7 @@ describe("SecurePluginRemoteApproval", () => {
   it("remembers only an exact operation and resets a new unavailable approval to once", async () => {
     const wrapper = mount(SecurePluginRemoteApproval, { global: { plugins: [i18n] } });
     await flushPromises();
-    wrapper.getComponent(NvxSelect).vm.$emit("update:modelValue", "always");
+    await wrapper.get('input[value="always"]').setValue();
     await wrapper.vm.$nextTick();
     expect(wrapper.get("footer button:last-child").text()).toBe("Allow and remember");
     await wrapper.get("footer button:last-child").trigger("click");
@@ -208,9 +212,7 @@ describe("SecurePluginRemoteApproval", () => {
     client.getPluginRemoteApproval.mockResolvedValue({ ...prompt, approvalId: "019d0000-0000-7000-8000-000000000902", rememberPolicy: "unavailable" });
     const next = mount(SecurePluginRemoteApproval, { global: { plugins: [i18n] } });
     await flushPromises();
-    const options = next.getComponent(NvxSelect).props("options");
-    if (!Array.isArray(options) || options[1] === undefined) throw new Error("missing always option");
-    expect(options[1]).toMatchObject({ disabled: true });
+    expect(next.get('input[value="always"]').attributes("disabled")).toBeDefined();
     await next.get("footer button:first-child").trigger("click");
     await flushPromises();
     expect(client.decidePluginRemoteApproval).toHaveBeenLastCalledWith(expect.objectContaining({ policy: "once" }));

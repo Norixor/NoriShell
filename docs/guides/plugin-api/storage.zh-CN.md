@@ -24,7 +24,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`storagePlugin`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`storagePlugin`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 不保存秘密。Base64 是标准编码，不带 data URL 前缀；KV/Blob 写入回传条目 revision，新建使用 0。schemaCommit 在一个事务中应用声明的 mutation，不运行迁移代码。缓存可能过期，缺少 entry 不是解码失败。storage 的 u64 revision 是 JSON 整数，区别于 WireSequence。
 

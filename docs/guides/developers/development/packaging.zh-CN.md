@@ -29,6 +29,7 @@ my-plugin-0.1.0.zip
 | `architectures` | string[] | 是 | 声明适用架构；通用 Wasm 示例使用 `["universal"]` |
 | `capabilities` | string[] | 是 | 申请的能力，最多 32 项且不能重复；声明不等于批准 |
 | `minimumAppVersion` | string | 是 | 最低适用应用版本；按实际使用的能力选择 |
+| `minimumCoreApiVersion` | `{ major, minor }` | 同步插件必填 | 插件使用的最低 Core API 版本。安装和启用时要求 major 相同且 Core minor 不低于要求；不匹配返回独立的 `coreApiIncompatible` 错误。旧同步插件未声明时提示升级，其他旧插件仍按原有校验处理。 |
 | `publisherKeyId` | string 或 null | 否 | 发布者签名相关元数据，不应填入伪造值 |
 | `publisherSignature` | string 或 null | 否 | 对应签名；字符串存在不等于本地导入已验证发布者 |
 | `packageUrl` | string 或 null | 否 | 包来源元数据；本地开发包可省略，不会因此自动发布 |
@@ -97,6 +98,6 @@ CARGO_INCREMENTAL=0 cargo run --locked -p norishell-plugin-sdk --bin norishell-p
 1. 在 NoriShell 的插件管理中导入 ZIP，核对名称、版本、发布者说明与申请的权限。
 2. 通过宿主流程批准实际需要的能力，启用后打开插件并执行核心动作。
 3. 检查允许、拒绝、取消和禁用后的行为，确认界面与资源都能正确结束。
-4. 更新时保持同一插件身份并提升版本，重新构建、检查和导入候选包。内容或权限变化应重新接受宿主核验，不应复用旧 package 的句柄。
+4. 正式更新保持同一插件身份并提升版本，重新构建、检查和导入候选包。开发期间也可导入同版本但不同哈希的包，在原导入确认中核对新旧哈希和数据交接提示；新包不能继承无签名旧包的权限。内容或权限变化仍须接受宿主核验，不应复用旧 package 的句柄。
 
 `pack` 与 `check` 不会安装、授权或发布插件。面向用户交付前，需要在目标应用与平台实测自己的候选包；参见[错误与排查](./errors.zh-CN.md)。

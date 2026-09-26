@@ -4,6 +4,15 @@ Every row is a `PluginApiOperation` variant inside [`PluginApiCall`](types.en.md
 
 | Method | Request payload | Completed result |
 | --- | --- | --- |
+| [`dataCatalog`](./dataCatalog.en.md) | category-scoped request | `dataCatalog` |
+| [`dataRead`](./dataRead.en.md) | category-scoped request | `dataRead` |
+| [`dataSnapshot`](./dataSnapshot.en.md) | category-scoped request | `dataSnapshot` |
+| [`dataInspect`](./dataInspect.en.md) | category-scoped request | `dataInspect` |
+| [`dataCompose`](./dataCompose.en.md) | category-scoped request | `dataCompose` |
+| [`dataApply`](./dataApply.en.md) | category-scoped request | `dataApply` |
+| [`dataExport`](./dataExport.en.md) | category-scoped request | `dataExport` |
+| [`dataCheckpoint`](./dataCheckpoint.en.md) | category-scoped request | `dataCheckpoint` |
+| [`dataRelease`](./dataRelease.en.md) | exact temporary handles | `dataRelease` |
 | `appRegister` | [`PluginAppRegistration`](types.en.md#pluginappregistration) | `appAccepted` |
 | `appNotify` | [`PluginAppNotification`](types.en.md#pluginappnotification) | `appAccepted` |
 | `appNavigate` | [`PluginAppNavigation`](types.en.md#pluginappnavigation) | `appAccepted` |

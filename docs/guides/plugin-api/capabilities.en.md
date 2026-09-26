@@ -1,6 +1,6 @@
 # Capabilities and protected operations
 
-`PluginCapability` is reviewable intent, never ambient authority. Current values are `uiPanel`, `uiNavigation`, `uiPage`, `uiWebviewIsolated`, `uiHostDomObserve`, `uiHostDomMutate`, `uiHostCss`, `clipboardWrite`, `terminalProvider`, `deviceSerial`, `terminalMetadata`, `terminalObserve`, `terminalAnnotation`, `terminalProposeInput`, `terminalRequestInput`, `hostMetadataRead`, `hostMutationPropose`, `hostSessionRequest`, `remoteInspect`, `remoteExecRequest`, `networkDomain`, `localFiles`, `localProcess`, `storagePlugin`, `credentialsPlugin`, `sftpRead`, `sftpWrite`, `metricsRead`, and `sshSync`.
+`PluginCapability` is reviewable intent, never ambient authority. Current values are `uiPanel`, `uiNavigation`, `uiPage`, `uiWebviewIsolated`, `uiHostDomObserve`, `uiHostDomMutate`, `uiHostCss`, `clipboardWrite`, `terminalProvider`, `deviceSerial`, `terminalMetadata`, `terminalObserve`, `terminalAnnotation`, `terminalProposeInput`, `terminalRequestInput`, `hostMetadataRead`, `hostMutationPropose`, `hostSessionRequest`, `remoteInspect`, `remoteExecRequest`, `networkDomain`, `localFiles`, `localProcess`, `storagePlugin`, `credentialsPlugin`, `sftpRead`, `sftpWrite`, `metricsRead`, `sshSync`, `appPreferencesRead`, and `terminalHistoryRead`.
 
 Core validates the operation, exact target, package identity/hash, current grant epoch, owner, scope, and generation at admission and again immediately before a protected write. A capability grant therefore cannot be serialized into a handle, copied to another resource, or survive replacement/revocation. Network supports typed HTTP, WSS, TCP, UDP, and TLS resources. SFTP and remote exec remain independent Core resources; neither gives a raw SSH channel. A local process is not a system sandbox. Credential input and exact-origin injection are Core-controlled. Terminal input is a one-time protected approval that rechecks target focus, input ownership, and generation at the real write.
 
@@ -11,6 +11,10 @@ The guest may inspect or revoke only its own current remembered-operation summar
 `onOpen`, timer, provider callbacks, and workflow automatic steps are background contexts. They must never open protected prompts, create/unlock a Vault, request terminal input, or turn a visible surface into approval. Return `interactionRequired`, `vaultMissing`, `vaultLocked`, or `vaultRequiresReload` and wait for an explicit user action. Source presence and a `describe` entry do not establish native, hardware, macOS, or Windows acceptance; consult [implementation status](../../../README.md#installation-and-quick-start).
 
 
+## Category permissions
+
+`sshSync` guards hosts, credentials and desktopProfiles exchange primitives; it does not grant AppPreferences or TerminalHistory reads. `appPreferencesRead` and `terminalHistoryRead` are independent grants. Terminal history also requires explicit user action, active collection and an available Vault. `dataCatalog` is descriptive, not authority.
+
 ## SSH and remote desktop synchronization
 
-`sshSync` covers portable SSH and RDP/VNC profiles. Core owns selection, dependencies, saved-password encryption and restore; plugins declare endpoints and receive aggregate facts, never passwords or raw profiles. New writes use V3; authenticated V2 remains readable and older clients reject V3. Profile and password selection are independent; excluding an item does not delete local data. See [implementation status](../../../README.md#installation-and-quick-start) for platform and cloud acceptance.
+`sshSync` supports category-scoped exchange primitives. The plugin chooses categories, HTTP operations and conflicts; Core guards encryption, secrets, local apply and baseline verification. Core service wiring passes a Cargo check; native and end-to-end acceptance remain open.

@@ -24,7 +24,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`localFiles`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`localFiles`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 rootHandle 来自 filePick。单次读写块最多 16 KiB，物化文件最多 64 MiB，列表最多 100 项。修改现有文件必须回传最新 fingerprint；write 省略 expectedFingerprint 仅允许新建。rename 不覆盖目标。watchStart 返回独立事件句柄。
 

@@ -30,7 +30,7 @@ function contribution(): PluginUiContribution {
 function snapshot(overrides: Partial<PluginSshSyncBrowserSnapshot> = {}): PluginSshSyncBrowserSnapshot {
   return {
     state: "ready", profileId: "primary", cacheRevision: "1", hostCount: 2, credentialCount: 1, desktopProfileCount: 1,
-    hostRowsOmitted: 0, credentialRowsOmitted: 0, desktopProfileRowsOmitted: 0, remoteUpdatedAtUnixMs: null,
+    hostRowsOmitted: 0, credentialRowsOmitted: 0, desktopProfileRowsOmitted: 0, remoteUpdatedAtUnixMs: null, verifiedAtUnixMs: null,
     hosts: [
       { rowId: "h1", label: "Production", address: "192.0.2.10", port: 22, username: "deploy", tags: ["prod"], updatedAtUnixMs: 1727000000000 },
       { rowId: "h2", label: "Staging", address: "2001:db8::2", port: 2222, username: null, tags: [], updatedAtUnixMs: null },
@@ -125,6 +125,16 @@ describe("NvxPluginSshSyncBrowser", () => {
     expect(wrapper.emitted("field")).toBeUndefined();
     expect(mocks.read).toHaveBeenCalledTimes(1);
     expect(wrapper.html()).not.toContain("SecretRef");
+  });
+
+  it("shows verified cloud rows as stale after a transient fetch failure", async () => {
+    mocks.read.mockResolvedValue(snapshot({ state: "stale", verifiedAtUnixMs: 1727000000000 }));
+    const wrapper = render();
+    await flushPromises();
+    await tab(wrapper, 1);
+    expect(wrapper.text()).toContain("Production");
+    expect(wrapper.get(".ssh-sync-browser__stale").text()).toContain("last verified copy");
+    expect(wrapper.get(".ssh-sync-browser__count").text()).toBe("2");
   });
 
   it("shows real totals and explicitly identifies bounded omitted rows and associations", async () => {

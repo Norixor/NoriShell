@@ -25,7 +25,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `deviceSerial`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `deviceSerial`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 candidateId must come from serialDevices; baudRate is 300–4000000. Other settings use the enum strings in the type reference. Core rechecks device identity after protected confirmation. Observe serial opened/data/error/closed events for actual state.
 

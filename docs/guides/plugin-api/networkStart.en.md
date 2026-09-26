@@ -25,9 +25,11 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `networkDomain`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `networkDomain`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
-Core freezes the resolved endpoint and performs protected approval. Do not provide resolved IPs, proxies, or authorization flags. credential optionally references a credential handle/revision. After receiving the handle, consume network opened, httpResponse, data, closed, or error events. endpoint is at most 2048 bytes; timeoutMs is 100–120000.
+Core freezes the resolved endpoint and performs protected approval. A remembered approval covers the same plugin, protocol, host, port, and resolved address set; changing the path, method, request content, or page action does not prompt again. A changed destination requires approval. Each request and any credential permission are still checked. Do not provide resolved IPs, proxies, or authorization flags. credential optionally references a credential handle/revision. After receiving the handle, consume network opened, httpResponse, data, closed, or error events. endpoint is at most 2048 bytes; timeoutMs is 100–120000.
+
+`request.oauthProfileId` asks Core to inject the current profile's OAuth bearer for the frozen, authorized origin; it cannot be combined with `credential`. For encrypted synchronization, choose `operation.kind="httpExchange"` with `profileId`, optional Core `bodyBlobHandle`, and a bounded `maxResponseBytes`. The plugin chooses method and ETag/CAS headers; Core retains bodies and returns `httpExchangeCompleted` through `resourceEvents`. A started handle does not prove a remote write. This bridge is still under runtime integration.
 
 ## Example call
 

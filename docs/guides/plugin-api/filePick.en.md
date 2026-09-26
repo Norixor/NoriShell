@@ -26,7 +26,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `localFiles`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `localFiles`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 Native selection requires an explicit user action. Each omitted access boolean defaults to false. Use an empty relativePath for a file handle and relative paths for a directory handle; arbitrary absolute paths cannot replace selection.
 

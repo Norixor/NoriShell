@@ -6,8 +6,8 @@ use std::{
 };
 
 use norishell_core_api::{
-    PLUGIN_PROTOCOL_MAJOR, PLUGIN_PROTOCOL_MINOR, PLUGIN_THEME_PROTOCOL_MINOR, PluginCapability,
-    PluginId, PluginPackageKind, ThemeDefinition,
+    CoreApiVersion, PLUGIN_PROTOCOL_MAJOR, PLUGIN_PROTOCOL_MINOR, PLUGIN_THEME_PROTOCOL_MINOR,
+    PluginCapability, PluginId, PluginPackageKind, ThemeDefinition,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,22 @@ pub struct PluginManifest {
     pub package_url: Option<String>,
     pub capabilities: Vec<PluginCapability>,
     pub minimum_app_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_core_api_version: Option<CoreApiVersion>,
+}
+
+pub fn plugin_core_api_compatible(manifest: &PluginManifest) -> bool {
+    // The former sshSync broker is no longer an authority for a plugin-owned
+    // exchange. A sync package must explicitly declare the Core data API it uses.
+    if manifest.capabilities.contains(&PluginCapability::SshSync)
+        && manifest.minimum_core_api_version.is_none()
+    {
+        return false;
+    }
+    manifest.minimum_core_api_version.is_none_or(|minimum| {
+        minimum.major == CoreApiVersion::current().major
+            && minimum.minor <= CoreApiVersion::current().minor
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -458,6 +474,12 @@ fn validate_local_manifest(
         Version::parse(&manifest.version).map_err(|_| PluginPlatformError::ManifestMismatch)?;
     let minimum = Version::parse(&manifest.minimum_app_version)
         .map_err(|_| PluginPlatformError::ManifestMismatch)?;
+    if current_app_version < &minimum {
+        return Err(PluginPlatformError::AppVersionIncompatible);
+    }
+    if !plugin_core_api_compatible(manifest) {
+        return Err(PluginPlatformError::CoreApiIncompatible);
+    }
     let valid_text = |value: &str, maximum: usize| {
         !value.trim().is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
     };
@@ -482,7 +504,6 @@ fn validate_local_manifest(
                 .architectures
                 .iter()
                 .any(|value| value == current_architecture))
-        || current_app_version < &minimum
         || manifest.capabilities.len() > 32
         || unique_capabilities.len() != manifest.capabilities.len()
         || manifest
@@ -556,7 +577,7 @@ mod tests {
     };
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-    use super::{PackageLimits, PluginManifest, inspect_local_package};
+    use super::{PackageLimits, PluginManifest, inspect_local_package, validate_local_manifest};
 
     fn manifest() -> PluginManifest {
         PluginManifest {
@@ -573,7 +594,39 @@ mod tests {
             package_url: Some("https://plugins.example.test/fixture.zip".to_owned()),
             capabilities: vec![PluginCapability::UiPanel],
             minimum_app_version: "0.1.0".to_owned(),
+            minimum_core_api_version: None,
         }
+    }
+
+    #[test]
+    fn core_api_requirement_rejects_newer_or_different_core() {
+        let app = semver::Version::parse("0.1.4").expect("version");
+        let mut plugin = manifest();
+        let current = norishell_core_api::CoreApiVersion::current();
+        plugin.minimum_core_api_version = Some(current);
+        assert!(validate_local_manifest(&plugin, &app, "universal").is_ok());
+        plugin.minimum_core_api_version = Some(norishell_core_api::CoreApiVersion {
+            major: current.major,
+            minor: current.minor + 1,
+        });
+        assert!(matches!(
+            validate_local_manifest(&plugin, &app, "universal"),
+            Err(crate::PluginPlatformError::CoreApiIncompatible)
+        ));
+        plugin.capabilities.push(PluginCapability::SshSync);
+        plugin.minimum_core_api_version = None;
+        assert!(matches!(
+            validate_local_manifest(&plugin, &app, "universal"),
+            Err(crate::PluginPlatformError::CoreApiIncompatible)
+        ));
+        plugin.minimum_core_api_version = Some(norishell_core_api::CoreApiVersion {
+            major: current.major + 1,
+            minor: 0,
+        });
+        assert!(matches!(
+            validate_local_manifest(&plugin, &app, "universal"),
+            Err(crate::PluginPlatformError::CoreApiIncompatible)
+        ));
     }
 
     fn write_package(path: &std::path::Path, extra_names: &[&str]) {

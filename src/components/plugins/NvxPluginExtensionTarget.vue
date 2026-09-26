@@ -77,12 +77,13 @@ function showFeedback(title: string, tone: NvxTipTone = "info", message?: string
   });
 }
 
-function syncFailureMessage(profile: string, code: string | null, diagnostic?: string | null) {
+function syncFailureMessage(profile: string, code: string | null, diagnostic?: string | null, httpStatus?: number | null) {
   const key = code ? `plugins.sshSync.errors.${code}` : "";
   const message = key && te(key)
     ? t(key)
     : t("plugins.sshSync.operationFailed", { profile, code: code ?? "unknown" });
-  return diagnostic ? `${message} [${diagnostic}]` : message;
+  const withStatus = httpStatus === null || httpStatus === undefined ? message : `${message} (HTTP ${httpStatus})`;
+  return diagnostic ? `${withStatus} [${diagnostic}]` : withStatus;
 }
 
 async function loadContributions(current: PluginTargetLease) {
@@ -255,13 +256,13 @@ async function invoke(
     const tone = status.operationState === "failed"
       ? "error"
       : status.operationState === "needsReview" ? "warning" : "info";
-    const title = status.operationState === "succeeded"
+    const title = status.operationState === "failed" || status.stableErrorCode !== null
+      ? syncFailureMessage(status.profileId, status.stableErrorCode, status.diagnosticCode, status.httpStatus)
+      : status.operationState === "succeeded"
       ? t("plugins.sshSync.operationSucceeded", { profile: status.profileId })
       : status.operationState === "needsReview"
         ? t("plugins.sshSync.operationNeedsReview", { profile: status.profileId })
-        : status.operationState === "failed"
-          ? syncFailureMessage(status.profileId, status.stableErrorCode, status.diagnosticCode)
-          : t("plugins.sshSync.operationIdle", { profile: status.profileId });
+        : t("plugins.sshSync.operationIdle", { profile: status.profileId });
     if (!automatic) {
       showFeedback(title, tone);
     }

@@ -162,6 +162,7 @@ impl ProtocolDemo {
                 request: PluginNetworkStartRequest {
                     timeout_ms: 5_000,
                     credential: None,
+                    oauth_profile_id: None,
                     operation: PluginNetworkOperation::Tcp {},
                 },
             },

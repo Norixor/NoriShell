@@ -239,8 +239,17 @@ onMounted(async () => {
           <p class="secure-remote__reason">
             {{ content.reason }}
           </p>
-          <h2>{{ t("plugins.remoteApproval.accessDetails") }}</h2>
-          <pre>{{ content.details }}</pre>
+          <details
+            v-if="content.operation === 'networkRequest'"
+            class="secure-remote__request-details"
+          >
+            <summary>{{ t("plugins.remoteApproval.accessDetails") }}</summary>
+            <pre>{{ content.details }}</pre>
+          </details>
+          <template v-else>
+            <h2>{{ t("plugins.remoteApproval.accessDetails") }}</h2>
+            <pre>{{ content.details }}</pre>
+          </template>
         </template>
         <template v-else-if="forwardRoute">
           <div class="secure-remote__route">
@@ -288,9 +297,26 @@ onMounted(async () => {
           :disabled="pending"
           :remember-policy="rememberPolicy"
           :risk="content.kind === 'access' ? accessRisk : 'remote'"
+          part="details"
         />
       </template>
     </div>
+    <template
+      v-if="prompt && content && !takesSecret && !failed"
+      #decision
+    >
+      <NvxPluginApprovalPolicy
+        v-model="policy"
+        v-model:model-expiry="expiry"
+        :disabled="pending"
+        :remember-policy="rememberPolicy"
+        :risk="content.kind === 'access' ? accessRisk : 'remote'"
+        part="choice"
+      />
+    </template>
+    <template #actionHint>
+      {{ policy === "always" ? t("plugins.approvalPolicy.exactOperation") : t("window.approvalHint") }}
+    </template>
     <template #actions>
       <NvxButton
         variant="secondary"
@@ -327,4 +353,6 @@ onMounted(async () => {
 .secure-remote__connection span { margin-left: var(--nvx-space-2); font-size: var(--nvx-font-size-xs); color: var(--nvx-color-text-secondary); }
 .secure-remote__connection code { display: block; overflow-wrap: anywhere; color: var(--nvx-color-text-secondary); }
 .secure-remote__reason, .secure-remote__actual { color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-xs); }
+.secure-remote__request-details summary { cursor: pointer; color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-xs); }
+.secure-remote__request-details pre { margin-top: var(--nvx-space-2); }
 </style>

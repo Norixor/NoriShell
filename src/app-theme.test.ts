@@ -64,15 +64,15 @@ describe("application theme contract", () => {
     expect(store.themes.find((item) => item.source === "plugin")?.enabled).toBe(false);
     const profile = cloneDefaultAppThemeProfile();
     profile.darkThemeId = "plugin:org.norishell.midnight:midnight";
-    expect(store.saveProfile(profile)).toBe(true);
+    expect(await store.saveProfile(profile)).toBe(true);
     expect(store.resolveTheme("dark").id).toBe("norishell-dark");
   });
 
-  it("never imports an embedded external definition and updates CSS only after persistence", () => {
+  it("never imports an embedded external definition and updates CSS only after persistence", async () => {
     const store = useAppThemeStore();
     const profile = cloneDefaultAppThemeProfile();
     profile.overrides[BUILTIN_LIGHT_THEME_ID] = { colors: { accent: "#123456" }, fontSize: 15 };
-    expect(store.saveProfile(profile)).toBe(true);
+    expect(await store.saveProfile(profile)).toBe(true);
     store.applyTheme("light");
     expect(document.documentElement.style.getPropertyValue("--nvx-color-accent")).toBe("#123456");
     expect(document.documentElement.style.getPropertyValue("--nvx-font-size-body")).toBe("15px");
@@ -81,16 +81,16 @@ describe("application theme contract", () => {
 
     const previous = store.appThemePreferences();
     vi.spyOn(localStorage, "setItem").mockImplementationOnce(() => { throw new Error("quota"); });
-    expect(store.saveProfile({ ...profile, lightThemeId: BUILTIN_DARK_THEME_ID })).toBe(false);
+    expect(await store.saveProfile({ ...profile, lightThemeId: BUILTIN_DARK_THEME_ID })).toBe(false);
     expect(store.appThemePreferences()).toEqual(previous);
     expect(JSON.parse(localStorage.getItem(APP_THEME_PREFERENCES_KEY) ?? "null")).toEqual(previous);
   });
 
-  it("rejects a saved unreadable selection and resolves stale package overrides to their verified base", () => {
+  it("rejects a saved unreadable selection and resolves stale package overrides to their verified base", async () => {
     const store = useAppThemeStore();
     const profile = cloneDefaultAppThemeProfile();
     profile.overrides[BUILTIN_LIGHT_THEME_ID] = { colors: { onAccent: "#123456" } };
-    expect(store.saveProfile(profile)).toBe(false);
+    expect(await store.saveProfile(profile)).toBe(false);
     expect(store.resolveTheme("light", profile).colors.onAccent).toBe(BUILTIN_APP_THEMES.light.colors.onAccent);
   });
 
@@ -142,7 +142,7 @@ describe("application theme contract", () => {
     const profile = cloneDefaultAppThemeProfile();
     profile.lightThemeId = "plugin:org.norishell.clear:clear";
     profile.overrides[profile.lightThemeId] = { colors: { accent: "#123456" } };
-    expect(store.saveProfile(profile)).toBe(true);
+    expect(await store.saveProfile(profile)).toBe(true);
 
     await store.refreshThemes();
     expect(store.resolveTheme("light").colors.accent).toBe("#f0f0f0");

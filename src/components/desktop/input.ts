@@ -25,9 +25,16 @@ export function desktopPointerButtons(event: Pick<PointerEvent, "type" | "button
 }
 export function decodeDesktopFrame(buffer: ArrayBuffer, after: bigint) {
   if (!buffer.byteLength) return null;
-  if (buffer.byteLength < 16) throw new Error("invalidFrame");
-  const view = new DataView(buffer), sequence = view.getBigUint64(0, true), width = view.getUint32(8, true), height = view.getUint32(12, true);
+  if (buffer.byteLength < 40) throw new Error("invalidFrame");
+  const view = new DataView(buffer), sequence = view.getBigUint64(0, true), base = view.getBigUint64(8, true);
+  const width = view.getUint32(16, true), height = view.getUint32(20, true);
+  const x = view.getUint32(24, true), y = view.getUint32(28, true);
+  const rectWidth = view.getUint32(32, true), rectHeight = view.getUint32(36, true);
   if (sequence <= after) return null;
-  if (!width || !height || width > 8192 || height > 8192 || width * height > 16_777_216 || buffer.byteLength !== 16 + width * height * 4) throw new Error("invalidFrame");
-  return { sequence, width, height, rgba: new Uint8ClampedArray(buffer, 16) };
+  if (!width || !height || width > 8192 || height > 8192 || width * height > 16_777_216
+    || !rectWidth || !rectHeight || x + rectWidth > width || y + rectHeight > height
+    || buffer.byteLength !== 40 + rectWidth * rectHeight * 4
+    || (base === 0n && (x !== 0 || y !== 0 || rectWidth !== width || rectHeight !== height))
+    || base >= sequence) throw new Error("invalidFrame");
+  return { sequence, base, width, height, x, y, rectWidth, rectHeight, rgba: new Uint8ClampedArray(buffer, 40) };
 }

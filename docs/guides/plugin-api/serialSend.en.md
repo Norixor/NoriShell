@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `deviceSerial`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `deviceSerial`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 Use the handle from serialOpen; one decoded send is at most 8 KiB. Continue reading serial events to observe device state.
 

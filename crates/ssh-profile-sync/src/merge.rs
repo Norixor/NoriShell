@@ -4,8 +4,9 @@ use std::{
 };
 
 use crate::{
-    BundleSchema, PortableBundleV1, PortableItemUpdateTime, PortableObjectId, PortableObjectKind,
-    PortableObjects, PortablePreferencesV1, PortableTombstone, Result, SyncCodecError,
+    BundleSchema, PortableBundleV1, PortableDataCategory, PortableItemUpdateTime, PortableObjectId,
+    PortableObjectKind, PortableObjects, PortablePreferencesV1, PortableTombstone, Result,
+    SyncCodecError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,33 @@ pub fn merge_bundles_three_way_with_policies(
     base.validate()?;
     local.validate()?;
     remote.validate()?;
+    let all_v6 = [base, local, remote]
+        .iter()
+        .all(|bundle| bundle.schema == BundleSchema::V6);
+    if !all_v6
+        && [base, local, remote]
+            .iter()
+            .any(|bundle| bundle.schema == BundleSchema::V6)
+    {
+        return Err(SyncCodecError::InvalidBundle(
+            "mixed bundle v6 merge requires projection",
+        ));
+    }
+    let normalized_scope = |bundle: &PortableBundleV1| {
+        bundle.selected_categories.clone().unwrap_or_else(|| {
+            vec![
+                PortableDataCategory::Hosts,
+                PortableDataCategory::Credentials,
+                PortableDataCategory::DesktopProfiles,
+            ]
+        })
+    };
+    let scope = normalized_scope(base);
+    if all_v6 && (normalized_scope(local) != scope || normalized_scope(remote) != scope) {
+        return Err(SyncCodecError::InvalidBundle(
+            "bundle category scopes differ",
+        ));
+    }
     let base_tombstones = tombstone_set(base);
     let local_tombstones = tombstone_set(local);
     let remote_tombstones = tombstone_set(remote);
@@ -94,8 +122,11 @@ pub fn merge_bundles_three_way_with_policies(
         deletion_resolution,
         now_unix_ms,
     );
-    let (preferences, preference_conflicts) =
-        merge_preferences(base, local, remote, conflict_resolution, now_unix_ms);
+    let (preferences, preference_conflicts) = if all_v6 {
+        (None, 0)
+    } else {
+        merge_preferences(base, local, remote, conflict_resolution, now_unix_ms)
+    };
     if object_conflicts > 0 || preference_conflicts > 0 {
         return Ok(BundleMergeOutcome::Conflicts {
             count: u32::try_from(object_conflicts.saturating_add(preference_conflicts))
@@ -225,10 +256,17 @@ pub fn merge_bundles_three_way_with_policies(
     let update_times = merge_update_times(&objects, &secrets, &tombstones, base, local, remote);
     let preference_update_times = merge_preference_times(preferences.as_ref(), base, local, remote);
     let merged = PortableBundleV1 {
-        schema: if preferences.is_some() {
+        schema: if all_v6 {
+            BundleSchema::V6
+        } else if preferences.is_some() {
             BundleSchema::V5
         } else {
             BundleSchema::V3
+        },
+        selected_categories: if all_v6 && scope.len() != 3 {
+            Some(scope)
+        } else {
+            None
         },
         revision,
         objects,
@@ -361,7 +399,7 @@ fn resolve_conflicts(
             let side = conflict_resolution.expect("explicit side");
             let selected = if bundles
                 .iter()
-                .all(|bundle| bundle.schema == BundleSchema::V5)
+                .all(|bundle| matches!(bundle.schema, BundleSchema::V5 | BundleSchema::V6))
             {
                 conflicts.clone()
             } else {
@@ -589,8 +627,9 @@ fn merge_values<T: Clone + PartialEq>(
         );
         let local_result = apply_edit(base_value, &local_edit);
         let remote_result = apply_edit(base_value, &remote_edit);
-        let local_changed = changed(base_value, &local_edit, &local_result);
-        let remote_changed = changed(base_value, &remote_edit, &remote_result);
+        let base_deleted = base_tombstones.contains(&(kind, value_id));
+        let local_changed = changed(base_value, base_deleted, &local_edit, &local_result);
+        let remote_changed = changed(base_value, base_deleted, &remote_edit, &remote_result);
         let selected = if let Some(side) = resolved_sides.get(&(kind, value_id)) {
             match side {
                 BundleConflictResolution::KeepLocal => local_result,
@@ -601,7 +640,7 @@ fn merge_values<T: Clone + PartialEq>(
             match (local_changed, remote_changed) {
                 (false, false) => Applied {
                     value: base_value,
-                    tombstone: false,
+                    tombstone: base_deleted,
                 },
                 (true, false) => local_result,
                 (false, true) => remote_result,
@@ -670,8 +709,9 @@ fn conflict_ids<T: PartialEq>(
             );
             let local_result = apply_edit(base_value, &local_edit);
             let remote_result = apply_edit(base_value, &remote_edit);
-            (changed(base_value, &local_edit, &local_result)
-                && changed(base_value, &remote_edit, &remote_result)
+            let base_deleted = base_tombstones.contains(&(kind, value_id));
+            (changed(base_value, base_deleted, &local_edit, &local_result)
+                && changed(base_value, base_deleted, &remote_edit, &remote_result)
                 && (local_result.value != remote_result.value
                     || local_result.tombstone != remote_result.tombstone))
                 .then_some((kind, value_id))
@@ -1139,8 +1179,13 @@ fn apply_edit<'a, T>(base: Option<&'a T>, edit: &Edit<&'a T>) -> Applied<'a, T> 
     }
 }
 
-fn changed<T: PartialEq>(base: Option<&T>, edit: &Edit<&T>, result: &Applied<'_, T>) -> bool {
-    !matches!(edit, Edit::NoOpinion) && result.value != base
+fn changed<T: PartialEq>(
+    base: Option<&T>,
+    base_deleted: bool,
+    edit: &Edit<&T>,
+    result: &Applied<'_, T>,
+) -> bool {
+    !matches!(edit, Edit::NoOpinion) && (result.value != base || result.tombstone != base_deleted)
 }
 
 fn tombstone_set(bundle: &PortableBundleV1) -> BTreeSet<(PortableObjectKind, PortableObjectId)> {
@@ -1157,11 +1202,11 @@ mod tests {
 
     use crate::{
         BundleSchema, HeartbeatMode, PortableAlgorithmPolicy, PortableAuthenticationPlan,
-        PortableBundleV1, PortableCredential, PortableCredentialMaterial, PortableDesktopProfile,
-        PortableDesktopProtocol, PortableHeartbeatPolicy, PortableHost, PortableIdentity,
-        PortableItemUpdateTime, PortableMonitoringPolicy, PortableObjectId, PortableObjectKind,
-        PortableObjects, PortablePreferencesV1, PortableRoute, PortableSecret, PortableSecretKind,
-        PortableTombstone, RouteIngress, SecretBytes,
+        PortableBundleV1, PortableCredential, PortableCredentialMaterial, PortableDataCategory,
+        PortableDesktopProfile, PortableDesktopProtocol, PortableHeartbeatPolicy, PortableHost,
+        PortableIdentity, PortableItemUpdateTime, PortableMonitoringPolicy, PortableObjectId,
+        PortableObjectKind, PortableObjects, PortablePreferencesV1, PortableRoute, PortableSecret,
+        PortableSecretKind, PortableTombstone, RouteIngress, SecretBytes,
     };
 
     use super::{
@@ -1211,6 +1256,7 @@ mod tests {
         let identity_id = id(3);
         PortableBundleV1 {
             schema: BundleSchema::V2,
+            selected_categories: None,
             revision: 1,
             preferences: None,
             objects: PortableObjects {
@@ -1331,6 +1377,7 @@ mod tests {
         };
         PortableBundleV1 {
             schema: BundleSchema::V2,
+            selected_categories: None,
             revision: 1,
             preferences: None,
             objects,
@@ -1356,6 +1403,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn v6_merge_preserves_authenticated_category_scope() {
+        let mut base = host_bundle(false, false);
+        base.schema = BundleSchema::V6;
+        base.selected_categories = Some(vec![PortableDataCategory::Hosts]);
+        let BundleMergeOutcome::Merged(merged) =
+            merge_bundles_three_way(&base, &base, &base, 2).unwrap()
+        else {
+            panic!("unchanged subset must merge");
+        };
+        assert_eq!(merged.selected_categories, base.selected_categories);
+
+        let mut expanded = base.clone();
+        expanded.selected_categories = None;
+        assert!(merge_bundles_three_way(&base, &base, &expanded, 2).is_err());
+    }
+
     fn shared_secret_bundle(secret: &[u8], include_first_credential: bool) -> PortableBundleV1 {
         let identity_id = id(20);
         let first_id = id(21);
@@ -1367,6 +1431,7 @@ mod tests {
         }
         PortableBundleV1 {
             schema: BundleSchema::V2,
+            selected_categories: None,
             revision: 1,
             preferences: None,
             objects: PortableObjects {
@@ -1539,6 +1604,10 @@ mod tests {
                 clipboard_enabled: true,
                 audio_playback_enabled: true,
                 vnc_protocol_version: crate::PortableVncProtocolVersion::Auto,
+                vnc_resolution_mode: crate::PortableVncResolutionMode::Server,
+                rdp_transport_mode: crate::PortableRdpTransportMode::Auto,
+                rdp_graphics_mode: crate::PortableRdpGraphicsMode::Auto,
+                rdp_resolution_mode: crate::PortableRdpResolutionMode::Fixed,
             });
         bundle
     }
@@ -1562,6 +1631,85 @@ mod tests {
         };
         assert!(deleted.secrets.is_empty());
         assert_eq!(deleted.tombstones, bundle(None, true).tombstones);
+    }
+
+    #[test]
+    fn remote_historical_tombstone_and_time_survive_merge() {
+        let base = v5(bundle(None, false));
+        let local = base.clone();
+        let mut remote = base.clone();
+        let tombstone = PortableTombstone {
+            kind: PortableObjectKind::Host,
+            id: id(99),
+        };
+        remote.tombstones.push(tombstone);
+        timed(&mut remote, tombstone.kind, tombstone.id, 200);
+
+        let BundleMergeOutcome::Merged(merged) =
+            merge_bundles_three_way(&base, &local, &remote, 2).expect("historical deletion")
+        else {
+            panic!("historical deletion must merge");
+        };
+        assert_eq!(merged.tombstones, remote.tombstones);
+        assert_eq!(merged.update_times, remote.update_times);
+    }
+
+    #[test]
+    fn unchanged_historical_tombstone_survives_the_next_merge() {
+        let mut base = v5(bundle(None, false));
+        let tombstone = PortableTombstone {
+            kind: PortableObjectKind::Host,
+            id: id(99),
+        };
+        base.tombstones.push(tombstone);
+        timed(&mut base, tombstone.kind, tombstone.id, 200);
+
+        let BundleMergeOutcome::Merged(merged) =
+            merge_bundles_three_way(&base, &base, &base, 2).expect("unchanged history")
+        else {
+            panic!("unchanged history must merge");
+        };
+        assert_eq!(merged.tombstones, base.tombstones);
+        assert_eq!(merged.update_times, base.update_times);
+    }
+
+    #[test]
+    fn new_live_value_conflicts_with_remote_historical_tombstone() {
+        let base = v5(bundle(None, false));
+        let local = v5(bundle(Some(b"new"), false));
+        let mut remote = base.clone();
+        for (kind, value_id) in [
+            (PortableObjectKind::Credential, id(2)),
+            (PortableObjectKind::Secret, id(1)),
+        ] {
+            remote
+                .tombstones
+                .push(PortableTombstone { kind, id: value_id });
+            timed(&mut remote, kind, value_id, 200);
+        }
+
+        assert!(matches!(
+            merge_bundles_three_way(&base, &local, &remote, 2).expect("conflict result"),
+            BundleMergeOutcome::Conflicts { count } if count > 0
+        ));
+    }
+
+    #[test]
+    fn inherited_tombstone_is_not_a_new_local_delete_against_remote_revive() {
+        let mut base = v5(bundle(None, true));
+        timed(&mut base, PortableObjectKind::Credential, id(2), 100);
+        timed(&mut base, PortableObjectKind::Secret, id(1), 100);
+        let local = base.clone();
+        let remote = v5(bundle(Some(b"restored"), false));
+
+        let BundleMergeOutcome::Merged(merged) =
+            merge_bundles_three_way(&base, &local, &remote, 2).expect("remote revive")
+        else {
+            panic!("remote revive must merge without a false conflict");
+        };
+        assert_eq!(merged.objects.credentials, remote.objects.credentials);
+        assert_eq!(merged.secrets, remote.secrets);
+        assert!(merged.tombstones.is_empty());
     }
 
     #[test]

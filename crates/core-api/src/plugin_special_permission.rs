@@ -132,6 +132,7 @@ mod tests {
                 capabilities: Vec::new(),
                 current_version: None,
                 current_state_version: None,
+                prior_package_sha256: None,
                 retained_capability_grants: Vec::new(),
                 approved_special_grants: Vec::new(),
                 special_permission_expires_at_unix_ms: None,
