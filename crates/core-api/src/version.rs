@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub const CORE_API_MAJOR: u16 = 1;
-pub const CORE_API_MINOR: u16 = 88;
+pub const CORE_API_MINOR: u16 = 89;
 pub const PLUGIN_PROTOCOL_MAJOR: u16 = 1;
 pub const PLUGIN_TEMPLATE_ON_OPEN_PROTOCOL_MINOR: u16 = 11;
 pub const PLUGIN_SETTINGS_PROTOCOL_MINOR: u16 = 12;
@@ -120,8 +120,8 @@ mod tests {
     #[test]
     fn current_version_exposes_install_permission_target_minor() {
         assert_eq!(CORE_API_MAJOR, 1);
-        assert_eq!(CORE_API_MINOR, 88);
-        assert_eq!(CoreApiVersion::current().minor, 88);
+        assert_eq!(CORE_API_MINOR, 89);
+        assert_eq!(CoreApiVersion::current().minor, 89);
         assert_eq!(PLUGIN_TEMPLATE_ON_OPEN_PROTOCOL_MINOR, 11);
         assert_eq!(PLUGIN_SETTINGS_PROTOCOL_MINOR, 12);
         assert_eq!(PLUGIN_API_PROTOCOL_MINOR, 13);

@@ -43,14 +43,14 @@
 
 ## 安装与快速开始
 
-当前版本：**[v0.1.4](https://github.com/Norixor/NoriShell/releases/tag/v0.1.4)**。按设备选择安装包或免安装 ZIP。
+当前版本：**[v0.1.5](https://github.com/Norixor/NoriShell/releases/tag/v0.1.5)**。按设备选择安装包或免安装 ZIP。
 
 | 平台 | 架构 | 安装包 | 免安装 ZIP |
 | --- | --- | --- | --- |
-| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_arm64.zip) |
-| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_x64.zip) |
-| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_x64.zip) |
-| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_arm64.zip) |
+| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_arm64.zip) |
+| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_x64.zip) |
+| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_x64.zip) |
+| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_arm64.zip) |
 
 使用 macOS 安装包时，将 NoriShell 拖入“应用程序”；Windows 安装包按向导安装。ZIP 版使用同样的本机配置与数据目录，运行前请完整解压。Windows ZIP 版需要系统已安装 WebView2 Runtime。
 
@@ -75,7 +75,7 @@
 - **本地数据与安全。** 密码和私钥保存在加密 Vault 中；首次 SSH 连接确认服务器指纹，已信任指纹变化时阻断连接。Telnet 会在连接前提示明文传输风险。
 - **插件与主题。** 通过本地 ZIP 导入或升级 WebAssembly 插件，使用前审批所需权限；可安装主题插件。
 
-如需多端同步，按[自建同步指南](docs/guides/users/self-host-sync.zh-CN.md)部署服务端并导入插件。在第一台设备上传后，于其他设备点击“立即同步”；恢复已有加密数据需要首次上传设备的 Vault 密码。
+如需多端同步，按[自建同步指南](docs/guides/users/self-host-sync.zh-CN.md)部署服务端并导入插件。明确选择同步主机、已保存凭据和远程桌面配置；应用偏好保留在各设备本机。恢复已有加密数据需要首次上传设备的 Vault 密码。服务不可用时，同步页可显示最近一次验证的云端列表及获取时间；操作变更前请刷新核对。
 
 ## 未来计划
 

@@ -14,6 +14,7 @@ import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { useTipsStore } from "../stores/tips";
 import { onToolWindowChanged, openToolWindow } from "../tool-windows";
 import { useRouteReveal } from "../routeReveal";
+import { onSavedConnectionsChanged } from "../saved-connections";
 defineOptions({ name: "DesktopView" });
 const { t, te } = useI18n(), router = useRouter(), workspace = useWorkspaceTabsStore(), tips = useTipsStore();
 const revealRoute = useRouteReveal();
@@ -140,9 +141,19 @@ async function refresh() {
   finally { snapshotBusy = false; }
 }
 async function poll() { if (disposed) return; if (active.value && !document.hidden) await refresh(); if (!disposed) timer = setTimeout(() => void poll(), 750); }
+let profilesSequence = 0;
+async function refreshProfiles() {
+  const sequence = ++profilesSequence;
+  try {
+    const saved = await desktopClient.profiles();
+    if (!disposed && sequence === profilesSequence) profiles.value = saved;
+  } catch (error) {
+    if (!disposed && sequence === profilesSequence) throw error;
+  }
+}
 async function load() {
   loading.value = true; failed.value = false; failureText.value = "";
-  try { const [saved, available] = await Promise.all([desktopClient.profiles(), desktopClient.availability()]); availability.value = available; profiles.value = saved; await refresh(); }
+  try { const [, available] = await Promise.all([refreshProfiles(), desktopClient.availability()]); availability.value = available; await refresh(); }
   catch (error) { pageFailure(error); }
   finally { loading.value = false; }
 }
@@ -266,6 +277,7 @@ const unregister = workspace.registerDesktopController({ activate, close: (id) =
 watch([sessions, activeId, busy, () => t("desktop.title")], () => workspace.syncDesktopState({ tabs: sessions.value.map((session) => ({ groupId: `desktop:${session.id}`, label: session.profile.label, stateLabel: t(`desktop.states.${session.state}`) })), activeTabId: activeId.value ? `desktop:${activeId.value}` : "", busy: busy.value }), { deep: true, immediate: true });
 let focusOperation = "";
 let disposeToolWindowListener: (() => void) | undefined;
+let disposeSavedConnectionsListener: (() => void) | undefined;
 watch(() => router.currentRoute.value.query.focusOperation, async (operation) => {
   if (typeof operation !== "string" || operation === focusOperation || router.currentRoute.value.path !== "/desktop") return;
   focusOperation = operation;
@@ -289,8 +301,11 @@ onMounted(() => {
   void onToolWindowChanged((kind) => { if (kind === "desktopEditor") void load(); }).then((dispose) => {
     if (disposed) dispose(); else disposeToolWindowListener = dispose;
   }).catch(() => { /* The desktop list remains usable when tool-window notifications are unavailable. */ });
+  void onSavedConnectionsChanged(() => { void refreshProfiles().catch(noticeFailure); }).then((dispose) => {
+    if (disposed) dispose(); else disposeSavedConnectionsListener = dispose;
+  }).catch(() => { /* Initial and activation reads still load saved profiles. */ });
 });
-onActivated(() => { active.value = true; workspace.terminalController?.deactivate(); void refresh(); if (initialRouteReady) revealRoute(); });
+onActivated(() => { active.value = true; workspace.terminalController?.deactivate(); void refresh(); void refreshProfiles().catch(noticeFailure); if (initialRouteReady) revealRoute(); });
 onDeactivated(() => { active.value = false; void display.value?.invalidate(); });
 onBeforeUnmount(() => {
   void leaveFullscreen();
@@ -298,7 +313,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("webkitfullscreenchange", fullscreenChanged);
   window.removeEventListener("keydown", fullscreenKey, true);
   window.removeEventListener("keyup", fullscreenKey, true);
-  disposed = true; clearTimeout(timer); disposeToolWindowListener?.(); unregister(); });
+  disposed = true; clearTimeout(timer); disposeToolWindowListener?.(); disposeSavedConnectionsListener?.(); unregister(); });
 </script>
 <template>
   <section

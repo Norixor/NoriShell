@@ -50,7 +50,7 @@
 
 ## 分类数据
 
-Core API 1.88 声明了分类数据方法。`dataCatalog`、`dataRead` 和受保护数据操作已在 Core service 接线；原生及端到端同步尚待验收。自建同步插件只选 hosts、credentials、desktopProfiles。
+Core API 1.89 声明了分类数据方法。`dataCatalog`、`dataRead` 和受保护数据操作已在 Core service 接线；原生及端到端同步尚待验收。自建同步插件只选 hosts、credentials、desktopProfiles。
 
 | 方法 | 结果 kind |
 | --- | --- |
@@ -59,6 +59,7 @@ Core API 1.88 声明了分类数据方法。`dataCatalog`、`dataRead` 和受保
 | [dataSnapshot](./dataSnapshot.zh-CN.md) | `dataSnapshot` |
 | [dataInspect](./dataInspect.zh-CN.md) | `dataInspect` |
 | [dataCompose](./dataCompose.zh-CN.md) | `dataCompose` |
+| [dataReview](./dataReview.zh-CN.md) | `dataReview` |
 | [dataApply](./dataApply.zh-CN.md) | `dataApply` |
 | [dataExport](./dataExport.zh-CN.md) | `dataExport` |
 | [dataCheckpoint](./dataCheckpoint.zh-CN.md) | `dataCheckpoint` |

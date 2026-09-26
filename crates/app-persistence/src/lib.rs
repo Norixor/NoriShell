@@ -59,7 +59,7 @@ use migrations::{
     migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6, migrate_v6_to_v7,
 };
 
-const SCHEMA_VERSION: i64 = 47;
+const SCHEMA_VERSION: i64 = 48;
 const ROOT_DISK_RESOURCE_ID: &str = "root";
 const AGGREGATE_NON_LOOPBACK_NETWORK_RESOURCE_ID: &str = "aggregateNonLoopback";
 const MAX_TERMINAL_WORKSPACE_LAYOUT_BYTES: usize = 256 * 1024;
@@ -91,6 +91,19 @@ pub(crate) fn remove_schema_added_after_fixture_version(
     connection: &Connection,
     fixture_version: i64,
 ) -> rusqlite::Result<()> {
+    if fixture_version < 48 {
+        let mut statement = connection.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'
+             AND name LIKE 'ssh_sync_business_generation_%'",
+        )?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for name in names {
+            connection.execute_batch(&format!("DROP TRIGGER \"{name}\";"))?;
+        }
+        connection.execute_batch("DROP TABLE IF EXISTS ssh_sync_business_generation;")?;
+    }
     if fixture_version < 46 {
         connection.execute_batch("DROP TABLE IF EXISTS application_preferences;")?;
     }
@@ -804,13 +817,11 @@ pub struct SshSyncRestoreSagaBegin {
     pub created: bool,
 }
 
-/// Connection-local and database-wide SQLite change counters captured around
-/// a staged SSH sync restore. The pair is meaningful only for the repository
-/// instance that produced it.
+/// Persistent generation of business state that affects SSH sync or offline
+/// import. It excludes operational writes such as Known Host verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SshSyncChangeFence {
-    pub connection_total_changes: u64,
-    pub database_data_version: u64,
+    pub business_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1715,7 +1726,9 @@ impl AppRepository {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(expected_fence) = expected_fence {
-            require_ssh_sync_change_fence(&transaction, expected_fence)?;
+            require_ssh_sync_change_fence(&transaction, expected_fence).inspect_err(|_| {
+                eprintln!("SSH sync owned restore rejected: saga_begin_fence");
+            })?;
         }
         if let Some(existing) = get_restore_saga(&transaction, &normalized.attempt_id)? {
             if !same_restore_saga(&existing, &normalized) {
@@ -3204,7 +3217,9 @@ impl AppRepository {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(expected_fence) = expected_fence {
-            require_ssh_sync_change_fence(&transaction, expected_fence)?;
+            require_ssh_sync_change_fence(&transaction, expected_fence).inspect_err(|_| {
+                eprintln!("SSH sync owned restore rejected: metadata_fence");
+            })?;
         }
         if let Some(result) = read_owned_delta_replay(
             &transaction,
@@ -3230,6 +3245,7 @@ impl AppRepository {
             }
             let preview = preview_restore_plan(&transaction, plan)?;
             if preview.conflict_count != 0 {
+                eprintln!("SSH sync owned restore rejected: create_plan_preview");
                 return Err(AppPersistenceError::Conflict);
             }
             let mut expected_new_refs = preview.new_secret_ref_ids.clone();
@@ -3250,7 +3266,11 @@ impl AppRepository {
             {
                 return Err(AppPersistenceError::IdempotencyConflict);
             }
-            preflight_owned_create_mappings(&transaction, &owner, plan, mappings)?;
+            preflight_owned_create_mappings(&transaction, &owner, plan, mappings).inspect_err(
+                |_| {
+                    eprintln!("SSH sync owned restore rejected: create_mappings");
+                },
+            )?;
             created_count = preview.create_count;
             create_saga_present = true;
         } else if !delta.secret_replacements.is_empty() {
@@ -3258,7 +3278,9 @@ impl AppRepository {
                 "SSH sync Secret replacement requires a restore create fence",
             ));
         }
-        preflight_owned_delta(&transaction, &owner, delta)?;
+        preflight_owned_delta(&transaction, &owner, delta).inspect_err(|_| {
+            eprintln!("SSH sync owned restore rejected: owned_delta_preflight");
+        })?;
         let now = unix_time_ms();
         let mut gc_candidates = BTreeMap::<String, &'static str>::new();
 
@@ -3268,7 +3290,9 @@ impl AppRepository {
         }
 
         for update in &delta.desktop_profile_updates {
-            apply_owned_desktop_profile_update(&transaction, update)?;
+            apply_owned_desktop_profile_update(&transaction, update).inspect_err(|_| {
+                eprintln!("SSH sync owned restore rejected: desktop_update");
+            })?;
         }
 
         for update in &delta.identity_updates {
@@ -3309,7 +3333,11 @@ impl AppRepository {
             gc_candidates.insert(delete.secret_ref_id.as_str().to_owned(), "secret_deleted");
         }
 
-        sync_item_times::apply_local_item_time_overrides(&transaction, item_times)?;
+        sync_item_times::apply_local_item_time_overrides(&transaction, item_times).inspect_err(
+            |_| {
+                eprintln!("SSH sync owned restore rejected: item_times");
+            },
+        )?;
 
         if let Some(memberships) = &memberships {
             replace_ssh_sync_scope_memberships_connection(&transaction, &owner, memberships, now)?;
@@ -8927,11 +8955,13 @@ fn normalized_owned_credential_material(
 }
 
 fn current_ssh_sync_change_fence(connection: &Connection) -> Result<SshSyncChangeFence> {
-    let database_data_version =
-        connection.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))?;
+    let generation: i64 = connection.query_row(
+        "SELECT generation FROM ssh_sync_business_generation WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
     Ok(SshSyncChangeFence {
-        connection_total_changes: connection.total_changes(),
-        database_data_version: u64::try_from(database_data_version)
+        business_generation: u64::try_from(generation)
             .map_err(|_| AppPersistenceError::InvalidStoredData)?,
     })
 }
@@ -9115,8 +9145,14 @@ fn preflight_owned_delta(
             SshSyncObjectKind::DesktopProfile,
             &value.portable_object_id,
             value.profile.id.as_str(),
-        )?;
-        require_desktop_profile_revision(connection, &value.profile.id, value.expected_revision)?;
+        )
+        .inspect_err(|_| {
+            eprintln!("SSH sync owned restore rejected: desktop_mapping");
+        })?;
+        require_desktop_profile_revision(connection, &value.profile.id, value.expected_revision)
+            .inspect_err(|_| {
+                eprintln!("SSH sync owned restore rejected: desktop_revision_preflight");
+            })?;
     }
     for value in &delta.desktop_profile_deletes {
         require_exclusive_owned_mapping(
@@ -9865,6 +9901,7 @@ fn apply_owned_desktop_profile_update(
     let mut profile = update.profile.clone();
     profile.id = normalized_desktop_profile_id(&profile.id)?;
     if !desktop_profile_references_valid(transaction, &profile)? {
+        eprintln!("SSH sync owned restore rejected: desktop_references");
         return Err(AppPersistenceError::Conflict);
     }
     let next = next_revision(update.expected_revision)?;
@@ -9895,6 +9932,7 @@ fn apply_owned_desktop_profile_update(
     if changed == 1 {
         Ok(())
     } else {
+        eprintln!("SSH sync owned restore rejected: desktop_revision_update");
         Err(AppPersistenceError::Conflict)
     }
 }
@@ -24322,6 +24360,172 @@ mod tests {
                 .list_ssh_sync_scope_memberships(&owner.key)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn v48_business_generation_preserves_existing_data_and_ignores_known_hosts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("migration.sqlite");
+        let mut repository = AppRepository::open(&path).unwrap();
+        let host = repository
+            .create_host("Existing", "existing.example", 22, None, None, false)
+            .unwrap();
+        super::remove_schema_added_after_fixture_version(&repository.connection, 47).unwrap();
+        repository
+            .connection
+            .pragma_update(None, "user_version", 47)
+            .unwrap();
+        drop(repository);
+
+        let first = AppRepository::open(&path).unwrap();
+        let mut second = AppRepository::open(&path).unwrap();
+        assert_eq!(first.list_hosts().unwrap()[0].host_id, host.host_id);
+        let staged = first.ssh_sync_change_fence().unwrap();
+        assert_eq!(staged.business_generation, 0);
+        second
+            .trust_known_host("existing.example", 22, "ssh-ed25519", b"key-a")
+            .unwrap();
+        second
+            .record_known_host_verified("existing.example", 22, "ssh-ed25519", b"key-a")
+            .unwrap();
+        assert_eq!(first.ssh_sync_change_fence().unwrap(), staged);
+        second
+            .connection
+            .execute(
+                "UPDATE hosts SET label = 'Changed' WHERE id = ?1",
+                [host.host_id.as_str()],
+            )
+            .unwrap();
+        assert!(first.ssh_sync_change_fence().unwrap().business_generation > 0);
+    }
+
+    #[test]
+    fn business_generation_fences_edits_relations_mappings_scope_and_deletes_across_connections() {
+        fn assert_stale_after_write(
+            first: &AppRepository,
+            second: &AppRepository,
+            write: impl FnOnce(&Connection) -> rusqlite::Result<usize>,
+        ) {
+            let staged = first.ssh_sync_change_fence().unwrap();
+            assert!(write(&second.connection).unwrap() > 0);
+            let transaction = first.connection.unchecked_transaction().unwrap();
+            assert!(matches!(
+                super::require_ssh_sync_change_fence(&transaction, &staged),
+                Err(AppPersistenceError::Conflict)
+            ));
+            transaction.rollback().unwrap();
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut first = repository(&directory);
+        let second = repository(&directory);
+        let host = first
+            .create_host("Business host", "business.example", 22, None, None, false)
+            .unwrap();
+        let tag = first.create_host_tag("Business tag").unwrap();
+        let owner = ssh_sync_profile_fixture("business-generation");
+        first.ensure_ssh_sync_profile_state(&owner).unwrap();
+        let portable_id = uuid::Uuid::new_v4().to_string();
+
+        assert_stale_after_write(&first, &second, |db| {
+            db.execute(
+                "UPDATE hosts SET label = 'Edited' WHERE id = ?1",
+                [host.host_id.as_str()],
+            )
+        });
+        assert_stale_after_write(&first, &second, |db| {
+            db.execute(
+                "INSERT INTO host_tag_assignments (host_id, tag_id) VALUES (?1, ?2)",
+                params![host.host_id.as_str(), tag.tag_id.as_str()],
+            )
+        });
+        assert_stale_after_write(&first, &second, |db| {
+            db.execute(
+                "INSERT INTO ssh_sync_object_mappings
+                 (plugin_id, signer_fingerprint_sha256, profile_id, object_kind,
+                  portable_object_id, local_object_id, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, 'host', ?4, ?5, 0, 0)",
+                params![
+                    owner.key.plugin_id.as_str(),
+                    owner.key.signer_fingerprint_sha256,
+                    owner.key.profile_id,
+                    portable_id,
+                    host.host_id.as_str(),
+                ],
+            )
+        });
+        assert_stale_after_write(&first, &second, |db| {
+            db.execute(
+                "UPDATE ssh_sync_profile_states SET updated_at_ms = updated_at_ms + 1
+                 WHERE plugin_id = ?1 AND signer_fingerprint_sha256 = ?2 AND profile_id = ?3",
+                params![
+                    owner.key.plugin_id.as_str(),
+                    owner.key.signer_fingerprint_sha256,
+                    owner.key.profile_id,
+                ],
+            )
+        });
+        assert_stale_after_write(&first, &second, |db| {
+            db.execute(
+                "INSERT INTO ssh_sync_scope_memberships
+                 (plugin_id, signer_fingerprint_sha256, profile_id, object_kind,
+                  portable_object_id, membership, updated_at_ms)
+                 VALUES (?1, ?2, ?3, 'host', ?4, 'included', 0)",
+                params![
+                    owner.key.plugin_id.as_str(),
+                    owner.key.signer_fingerprint_sha256,
+                    owner.key.profile_id,
+                    portable_id,
+                ],
+            )
+        });
+        assert_stale_after_write(&first, &second, |db| {
+            db.execute(
+                "INSERT INTO forward_rules
+                 (id, label, host_id, rule_json, state_version, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'Bound rule', ?2, '{}', 1, 0, 0)",
+                params![uuid::Uuid::new_v4().to_string(), host.host_id.as_str()],
+            )
+        });
+        assert_stale_after_write(&first, &second, |db| {
+            db.execute("DELETE FROM forward_rules", [])
+        });
+        assert_stale_after_write(&first, &second, |db| {
+            db.execute("DELETE FROM hosts WHERE id = ?1", [host.host_id.as_str()])
+        });
+    }
+
+    #[test]
+    fn business_generation_overflow_aborts_the_business_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut repository = repository(&directory);
+        let host = repository
+            .create_host("Before", "overflow.example", 22, None, None, false)
+            .unwrap();
+        repository
+            .connection
+            .execute(
+                "UPDATE ssh_sync_business_generation SET generation = ?1 WHERE singleton = 1",
+                [i64::MAX],
+            )
+            .unwrap();
+        assert!(
+            repository
+                .connection
+                .execute(
+                    "UPDATE hosts SET label = 'After' WHERE id = ?1",
+                    [host.host_id.as_str()]
+                )
+                .is_err()
+        );
+        assert_eq!(repository.list_hosts().unwrap()[0].label, "Before");
+        assert_eq!(
+            repository
+                .ssh_sync_change_fence()
+                .unwrap()
+                .business_generation,
+            i64::MAX as u64
         );
     }
 

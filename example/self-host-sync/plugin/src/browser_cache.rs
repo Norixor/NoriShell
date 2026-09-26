@@ -34,7 +34,7 @@ impl BrowserCache {
         let Ok(value) = serde_json::from_str::<Value>(encoded) else {
             return;
         };
-        if !matches!(value["schema"].as_u64(), Some(1 | 2 | 3))
+        if !matches!(value["schema"].as_u64(), Some(1..=3))
             || value["origin"].as_str() != origin
             || origin.is_none()
         {

@@ -9,6 +9,7 @@
 | [`dataSnapshot`](./dataSnapshot.zh-CN.md) | 按类别划分的请求 | `dataSnapshot` |
 | [`dataInspect`](./dataInspect.zh-CN.md) | 按类别划分的请求 | `dataInspect` |
 | [`dataCompose`](./dataCompose.zh-CN.md) | 按类别划分的请求 | `dataCompose` |
+| [`dataReview`](./dataReview.zh-CN.md) | 按类别划分的请求 | `dataReview` |
 | [`dataApply`](./dataApply.zh-CN.md) | 按类别划分的请求 | `dataApply` |
 | [`dataExport`](./dataExport.zh-CN.md) | 按类别划分的请求 | `dataExport` |
 | [`dataCheckpoint`](./dataCheckpoint.zh-CN.md) | 按类别划分的请求 | `dataCheckpoint` |

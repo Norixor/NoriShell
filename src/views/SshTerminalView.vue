@@ -15,6 +15,7 @@ import {
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { useRouteReveal } from "../routeReveal";
+import { onSavedConnectionsChanged } from "../saved-connections";
 
 import {
   NvxLocalTerminalPane,
@@ -988,7 +989,11 @@ async function refreshVaultState(): Promise<VaultState | null> {
   }
 }
 
+let savedHostsSequence = 0;
+let unlistenSavedConnections: (() => void) | null = null;
+let terminalViewDisposed = false;
 async function refreshSavedHosts() {
+  const sequence = ++savedHostsSequence;
   if (import.meta.env.DEV && route.query.visualFixture === "terminalLauncher") {
     const entries = terminalLauncherVisualFixture();
     recentHostEntries.value = entries;
@@ -998,13 +1003,16 @@ async function refreshSavedHosts() {
   if (!canUseDesktopCore()) return;
   try {
     const entries = await listHostCatalog("recentlyConnected");
+    if (terminalViewDisposed || sequence !== savedHostsSequence) return;
     recentHostEntries.value = entries
       .filter((entry) => entry.recentConnection !== null)
       .slice(0, 8);
     savedHosts.value = entries.slice(0, 8).map((entry) => entry.host);
   } catch {
-    recentHostEntries.value = [];
-    savedHosts.value = [];
+    if (!terminalViewDisposed && sequence === savedHostsSequence) {
+      recentHostEntries.value = [];
+      savedHosts.value = [];
+    }
   }
 }
 
@@ -2310,6 +2318,8 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  terminalViewDisposed = true;
+  unlistenSavedConnections?.();
   vaultPromptMode.value = null;
   unlistenPluginProtocolLaunch?.();
   unlistenPluginProtocolLaunch = null;
@@ -2328,6 +2338,9 @@ onBeforeUnmount(() => {
 });
 
 onMounted(async () => {
+  void onSavedConnectionsChanged(() => { void refreshSavedHosts(); }).then((unlisten) => {
+    if (terminalViewDisposed) unlisten(); else unlistenSavedConnections = unlisten;
+  }).catch(() => { /* Activation also refreshes saved Hosts. */ });
   window.addEventListener("focus", reconcileTerminalAfterForeground);
   document.addEventListener("visibilitychange", handleTerminalVisibilityChange);
   unregisterWorkspaceFlush = registerTerminalWorkspaceFlush(flushTerminalWorkspaceLayout);

@@ -43,14 +43,14 @@ Working on a server often means switching between terminal tabs, file transfer w
 
 ## Installation and quick start
 
-Latest release: **[v0.1.4](https://github.com/Norixor/NoriShell/releases/tag/v0.1.4)**. Choose an installer or a standalone ZIP for your device.
+Latest release: **[v0.1.5](https://github.com/Norixor/NoriShell/releases/tag/v0.1.5)**. Choose an installer or a standalone ZIP for your device.
 
 | Platform | Architecture | Installer | Standalone ZIP |
 | --- | --- | --- | --- |
-| macOS 13 or later | Apple Silicon (ARM64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_arm64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_arm64.zip) |
-| macOS 13 or later | Intel (x64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_x64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_macos_x64.zip) |
-| Windows | x64 (Intel / AMD) | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_x64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_x64.zip) |
-| Windows | ARM64 | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_arm64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.4/NoriShell_0.1.4_windows_arm64.zip) |
+| macOS 13 or later | Apple Silicon (ARM64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_arm64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_arm64.zip) |
+| macOS 13 or later | Intel (x64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_x64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_x64.zip) |
+| Windows | x64 (Intel / AMD) | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_x64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_x64.zip) |
+| Windows | ARM64 | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_arm64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_arm64.zip) |
 
 For a macOS installer, drag NoriShell into Applications; on Windows, follow the installer. ZIP builds use the same local settings and data directories. Extract the full archive before running. The Windows ZIP requires WebView2 Runtime to be installed.
 
@@ -75,7 +75,7 @@ Open **Settings → About** and click “Check for updates”. The macOS and Win
 - **Local data and security.** Keep passwords and private keys in the encrypted Vault. Confirm a server fingerprint on first SSH connection; a change to a trusted fingerprint blocks the connection. Telnet warns about plaintext traffic before connecting.
 - **Plugins and themes.** Import or upgrade WebAssembly plugins from local ZIP files and approve their permissions. Theme plugins are supported.
 
-For sync across devices, follow the [self-hosted sync guide](docs/guides/users/self-host-sync.en.md) to deploy the server and import the plugin. Upload from the first device, then select “Sync now” on the others. Restoring existing encrypted data requires that first device's Vault password.
+For sync across devices, follow the [self-hosted sync guide](docs/guides/users/self-host-sync.en.md) to deploy the server and import the plugin. Sync hosts, saved credentials, and remote desktop profiles explicitly; app preferences stay on each device. Restoring existing encrypted data requires the first uploader's Vault password. When the server is unavailable, the Sync page can show the last verified cloud list with its fetch time; refresh it before acting on changes.
 
 ## Future
 

@@ -47,10 +47,23 @@ const createsLocalVault = computed(() => prompt.value?.kind === "createLocalVaul
 const isRemoteReset = computed(() => prompt.value?.kind === "resetRemote");
 const isDirectionChoice = computed(() => prompt.value?.kind === "chooseSyncDirection");
 const isDataApply = computed(() => prompt.value?.kind === "approveDataApply");
+const isDataReview = computed(() => prompt.value?.kind === "reviewDataChoices");
+const selectedReview = computed(() => {
+  if (!selectedDirection.value) return null;
+  const source = selectedDirection.value === "keepLocal" ? "local" : "remote";
+  return prompt.value?.dataReviewChoices.find((choice) => choice.source === source) ?? null;
+});
+const reviewSides = computed(() => {
+  if (!prompt.value || !selectedReview.value) return [];
+  return [
+    { name: "local", before: { hostCount: prompt.value.hostCount, credentialCount: prompt.value.credentialCount, desktopProfileCount: prompt.value.desktopProfileCount }, after: selectedReview.value.local },
+    { name: "remote", before: { hostCount: prompt.value.remoteHostCount, credentialCount: prompt.value.remoteCredentialCount, desktopProfileCount: prompt.value.remoteDesktopProfileCount }, after: selectedReview.value.remote },
+  ];
+});
 const isDataApplyUploaded = computed(() => isDataApply.value && prompt.value?.dataApplyUploaded === true);
 const isConflictChoice = computed(() => prompt.value?.kind === "resolveConflicts");
 const isMergedDeletion = computed(() => prompt.value?.kind === "approveMergedDeletion");
-const requiresDirectionChoice = computed(() => ["resolveConflicts", "chooseSyncDirection"].includes(prompt.value?.kind ?? ""));
+const requiresDirectionChoice = computed(() => ["resolveConflicts", "chooseSyncDirection", "reviewDataChoices"].includes(prompt.value?.kind ?? ""));
 const createsPassword = computed(() => createsLocalVault.value || prompt.value?.kind === "createRecoveryPassword");
 const passwordTooShort = computed(() => createsPassword.value && !!vaultPassword.value
   && passwordCharacterCount(vaultPassword.value) < MIN_NEW_SECRET_PASSWORD_CHARACTERS);
@@ -190,6 +203,7 @@ async function load() {
 
 async function decide(decision: "approve" | "cancel" | "keepLocal" | "useRemote" | "applyMerged") {
   if (!prompt.value || pending.value) return;
+  if (isDataReview.value && decision !== "cancel" && !selectedReview.value) return;
   pending.value = true;
   const submitPassword = decision === "approve" && asksForPassword.value
     ? vaultPassword.value
@@ -257,7 +271,7 @@ onBeforeUnmount(() => {
     <template v-else-if="prompt">
       <dl
         class="secure-sync__requester"
-        :class="{ 'secure-sync__requester--comparison': isDirectionChoice || isConflictChoice || isMergedDeletion || isDataApply }"
+        :class="{ 'secure-sync__requester--comparison': isDirectionChoice || isConflictChoice || isMergedDeletion || isDataApply || isDataReview }"
       >
         <div><dt>{{ t("plugins.sshSync.requestingPlugin") }}</dt><dd>{{ prompt.pluginId }}</dd></div>
         <div><dt>{{ t("plugins.sshSync.providerProfile") }}</dt><dd>{{ prompt.profileId }}</dd></div>
@@ -267,13 +281,13 @@ onBeforeUnmount(() => {
       </dl>
       <NvxInlineNotice
         v-if="!asksForPassword"
-        :tone="isRemoteReset ? 'error' : isDirectionChoice || isConflictChoice || isMergedDeletion || isDataApply ? 'warning' : 'info'"
-        :title="t(isRemoteReset ? 'plugins.sshSync.remoteResetWarningTitle' : isDataApply ? 'plugins.sshSync.dataApplyWarningTitle' : isMergedDeletion ? 'plugins.sshSync.mergedDeletionWarningTitle' : isConflictChoice ? 'plugins.sshSync.conflictWarningTitle' : isDirectionChoice ? 'plugins.sshSync.directionWarningTitle' : 'plugins.sshSync.securityTitle')"
+        :tone="isRemoteReset ? 'error' : isDirectionChoice || isConflictChoice || isMergedDeletion || isDataApply || isDataReview ? 'warning' : 'info'"
+        :title="t(isRemoteReset ? 'plugins.sshSync.remoteResetWarningTitle' : isDataReview ? 'plugins.sshSync.dataReviewWarningTitle' : isDataApply ? 'plugins.sshSync.dataApplyWarningTitle' : isMergedDeletion ? 'plugins.sshSync.mergedDeletionWarningTitle' : isConflictChoice ? 'plugins.sshSync.conflictWarningTitle' : isDirectionChoice ? 'plugins.sshSync.directionWarningTitle' : 'plugins.sshSync.securityTitle')"
       >
-        {{ t(isRemoteReset ? "plugins.sshSync.remoteResetWarningDescription" : isDataApplyUploaded ? "plugins.sshSync.dataApplyUploadedWarningDescription" : isDataApply ? "plugins.sshSync.dataApplyDownloadedWarningDescription" : isMergedDeletion ? "plugins.sshSync.mergedDeletionWarningDescription" : isConflictChoice ? "plugins.sshSync.conflictWarningDescription" : isDirectionChoice ? "plugins.sshSync.directionWarningDescription" : "plugins.sshSync.securityDescription") }}
+        {{ t(isRemoteReset ? "plugins.sshSync.remoteResetWarningDescription" : isDataReview ? "plugins.sshSync.dataReviewWarningDescription" : isDataApplyUploaded ? "plugins.sshSync.dataApplyUploadedWarningDescription" : isDataApply ? "plugins.sshSync.dataApplyDownloadedWarningDescription" : isMergedDeletion ? "plugins.sshSync.mergedDeletionWarningDescription" : isConflictChoice ? "plugins.sshSync.conflictWarningDescription" : isDirectionChoice ? "plugins.sshSync.directionWarningDescription" : "plugins.sshSync.securityDescription") }}
       </NvxInlineNotice>
       <NvxInlineNotice
-        v-if="(isDirectionChoice || isMergedDeletion || isDataApply) && prompt.relatedForwardRuleLabels.length"
+        v-if="(isDirectionChoice || isMergedDeletion || isDataApply || isDataReview) && prompt.relatedForwardRuleLabels.length"
         tone="warning"
         :title="t('plugins.sshSync.relatedForwardRulesTitle')"
       >
@@ -435,6 +449,80 @@ onBeforeUnmount(() => {
         </p>
       </section>
       <section
+        v-else-if="isDataReview"
+        class="secure-sync__differences"
+      >
+        <p v-if="!selectedReview">
+          {{ t("plugins.sshSync.dataReviewSelectHint") }}
+        </p>
+        <template v-else>
+          <p>{{ t(selectedReview.uploadRequired ? "plugins.sshSync.dataReviewUploadHint" : "plugins.sshSync.dataReviewDownloadHint") }}</p>
+          <section
+            v-for="side in reviewSides"
+            :key="side.name"
+            class="secure-sync__review-side"
+          >
+            <h2>{{ t(`plugins.sshSync.${side.name}`) }}</h2>
+            <div class="secure-sync__times">
+              <div>
+                <strong>{{ t("plugins.sshSync.beforeSync") }}</strong>
+                <p>{{ t("plugins.sshSync.sideCounts", { hosts: side.before.hostCount, credentials: side.before.credentialCount, desktops: side.before.desktopProfileCount }) }}</p>
+              </div>
+              <div>
+                <strong>{{ t("plugins.sshSync.afterSync") }}</strong>
+                <p>{{ t("plugins.sshSync.sideCounts", { hosts: side.after.hostCount, credentials: side.after.credentialCount, desktops: side.after.desktopProfileCount }) }}</p>
+                <span>{{ t("plugins.sshSync.pendingDeletions") }} · {{ side.after.deleteCount }}</span>
+              </div>
+            </div>
+            <div class="secure-sync__difference-heading">
+              <strong>{{ t("plugins.sshSync.differenceDetails", { count: side.after.differenceTotalCount }) }}</strong>
+            </div>
+            <p v-if="!side.after.differenceTotalCount">
+              {{ t("plugins.sshSync.dataReviewNoChanges") }}
+            </p>
+            <div class="secure-sync__difference-list">
+              <article
+                v-for="(difference, index) in side.after.differences"
+                :key="`${difference.kind}-${index}`"
+                class="secure-sync__difference-row"
+              >
+                <div>
+                  <strong>{{ difference.label || t(`plugins.sshSync.differenceKinds.${difference.kind}`) }}</strong>
+                  <span>{{ t(`plugins.sshSync.differenceKinds.${difference.kind}`) }}</span>
+                </div>
+                <span class="secure-sync__change">{{ t(`plugins.sshSync.applyDifferenceChanges.${difference.change}`) }}</span>
+                <div class="secure-sync__side-value">
+                  <span>{{ t("plugins.sshSync.beforeSync") }}</span>
+                  <strong>{{ differenceSummary(difference, "local") }}</strong>
+                </div>
+                <div class="secure-sync__side-value">
+                  <span>{{ t("plugins.sshSync.afterSync") }}</span>
+                  <strong>{{ differenceSummary(difference, "remote") }}</strong>
+                </div>
+              </article>
+            </div>
+            <p v-if="side.after.differenceOmittedCount">
+              {{ t("plugins.sshSync.moreDifferences", { count: side.after.differenceOmittedCount }) }}
+            </p>
+            <aside
+              v-if="side.after.relatedForwardRuleLabels.length"
+              class="secure-sync__related-rules"
+            >
+              <strong>{{ t("plugins.sshSync.relatedForwardRulesTitle") }}</strong>
+              <p>{{ t("plugins.sshSync.relatedForwardRulesDataApplyHint") }}</p>
+              <ul>
+                <li
+                  v-for="label in side.after.relatedForwardRuleLabels"
+                  :key="label"
+                >
+                  {{ label }}
+                </li>
+              </ul>
+            </aside>
+          </section>
+        </template>
+      </section>
+      <section
         v-else-if="prompt.kind === 'chooseSyncDirection' || prompt.kind === 'resolveConflicts' || prompt.kind === 'approveMergedDeletion' || prompt.kind === 'approveDataApply'"
         class="secure-sync__differences"
       >
@@ -513,7 +601,7 @@ onBeforeUnmount(() => {
         :disabled="pending"
       >
         <legend>
-          {{ t(prompt.kind === "resolveConflicts" ? "plugins.sshSync.conflictChoiceLabel" : "plugins.sshSync.directionChoiceLabel") }}
+          {{ t((isConflictChoice || isDataReview) ? "plugins.sshSync.conflictChoiceLabel" : "plugins.sshSync.directionChoiceLabel") }}
         </legend>
         <div class="secure-sync__direction-options">
           <label>
@@ -524,8 +612,8 @@ onBeforeUnmount(() => {
               value="keepLocal"
             >
             <span>
-              <strong>{{ t(prompt.kind === "resolveConflicts" ? "plugins.sshSync.keepLocal" : "plugins.sshSync.localOverRemote") }}</strong>
-              <small>{{ t(isConflictChoice ? "plugins.sshSync.keepLocalConflictHint" : "plugins.sshSync.keepLocalDirectionHint") }}</small>
+              <strong>{{ t((isConflictChoice || isDataReview) ? "plugins.sshSync.keepLocal" : "plugins.sshSync.localOverRemote") }}</strong>
+              <small>{{ t(isConflictChoice || isDataReview ? "plugins.sshSync.keepLocalConflictHint" : "plugins.sshSync.keepLocalDirectionHint") }}</small>
             </span>
           </label>
           <label>
@@ -536,8 +624,8 @@ onBeforeUnmount(() => {
               value="useRemote"
             >
             <span>
-              <strong>{{ t(prompt.kind === "resolveConflicts" ? "plugins.sshSync.useRemote" : "plugins.sshSync.remoteOverLocal") }}</strong>
-              <small>{{ t(isConflictChoice ? "plugins.sshSync.useRemoteConflictHint" : "plugins.sshSync.useRemoteDirectionHint") }}</small>
+              <strong>{{ t((isConflictChoice || isDataReview) ? "plugins.sshSync.useRemote" : "plugins.sshSync.remoteOverLocal") }}</strong>
+              <small>{{ t(isConflictChoice || isDataReview ? "plugins.sshSync.useRemoteConflictHint" : "plugins.sshSync.useRemoteDirectionHint") }}</small>
             </span>
           </label>
         </div>
@@ -553,12 +641,12 @@ onBeforeUnmount(() => {
       </NvxButton>
       <template v-if="prompt && !loading && !failed && !completed">
         <NvxButton
-          :variant="isRemoteReset || isDirectionChoice || isMergedDeletion || isDataApply ? 'danger' : 'primary'"
+          :variant="isRemoteReset || isDirectionChoice || isMergedDeletion || isDataApply || isDataReview ? 'danger' : 'primary'"
           :loading="pending"
-          :disabled="!passwordValid || (requiresDirectionChoice && !selectedDirection)"
+          :disabled="!passwordValid || (requiresDirectionChoice && !selectedDirection) || (isDataReview && !selectedReview)"
           @click="decide(isMergedDeletion ? 'applyMerged' : requiresDirectionChoice && selectedDirection ? selectedDirection : 'approve')"
         >
-          {{ t(isDataApply ? "plugins.sshSync.approveDataApply" : isMergedDeletion ? "plugins.sshSync.approveMergedDeletion" : "window.approveOnce") }}
+          {{ t(isDataReview ? "plugins.sshSync.confirmSync" : isDataApply ? "plugins.sshSync.approveDataApply" : isMergedDeletion ? "plugins.sshSync.approveMergedDeletion" : "window.approveOnce") }}
         </NvxButton>
       </template>
     </template>
@@ -602,6 +690,8 @@ onBeforeUnmount(() => {
 .secure-sync__credentials { display: grid; gap: var(--nvx-space-2); padding-inline-start: var(--nvx-space-4); }
 .secure-sync__differences { min-width: 0; }
 .secure-sync__forward-rules { margin: var(--nvx-space-1) 0 0; padding-inline-start: var(--nvx-space-4); overflow-wrap: anywhere; }
+.secure-sync__review-side { display: grid; gap: var(--nvx-space-2); }
+.secure-sync__review-side h2 { font-size: var(--nvx-font-size-md); margin: 0; }
 .secure-sync__times { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--nvx-space-2); }
 .secure-sync__times > div { display: grid; gap: var(--nvx-space-1); padding: var(--nvx-space-2); border: var(--nvx-border-width) solid var(--nvx-color-border); border-radius: var(--nvx-radius-md); background: var(--nvx-color-bg-surface); }
 .secure-sync__times span, .secure-sync__difference-heading span, .secure-sync__difference-row > div > span, .secure-sync__side-value > span, .secure-sync__differences > p { color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-sm); }

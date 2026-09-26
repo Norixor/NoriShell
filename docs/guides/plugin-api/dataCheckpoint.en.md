@@ -11,7 +11,7 @@ Use SDK `api_request(request_id, call_id, PluginApiOperation::DataCheckpoint { â
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `kind` | `"dataCheckpoint"` | Yes | Exact operation discriminator |
-| `request` | `PluginDataCheckpointRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-188) |
+| `request` | `PluginDataCheckpointRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-189) |
 
 
 ## Completed value
@@ -22,6 +22,8 @@ Use SDK `api_request(request_id, call_id, PluginApiOperation::DataCheckpoint { â
 | `syncedAtUnixMs` | typed value | Yes | Core-issued fact; see DTO types |
 
 For an upload, provide the base GET receipt and `exportHandle` as well as the authoritative PUT receipt. For a download, omit those two fields and provide the apply receipt. If a fresh local snapshot and authenticated GET200 inspection already have identical selected content, set `sourceHandle` and `expectedLocalSnapshotHandle` to that snapshot, provide `remoteInspectionHandle` and the GET receipt, and omit the export, base and apply handles. Core rechecks local state, exact GET resource, ciphertext digest and content equality before establishing the baseline. An unknown HTTP outcome cannot advance it.
+
+Content equality includes object update times and deletion state; matching `equalityTag` values alone do not permit the equal-snapshot path. Apply and checkpoint use the same business-content digest, excluding the bundle revision and source-device skip notices while preserving object content, references and update times.
 
 ## Authority and status
 

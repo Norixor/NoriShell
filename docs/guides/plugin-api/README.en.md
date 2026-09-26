@@ -50,7 +50,7 @@ Resources bind the current package, grants, caller owner, and instance generatio
 
 ## Category data
 
-Core API 1.88 declares category data methods. `dataCatalog`, the separately authorized `dataRead`, and protected exchange operations are wired in Core service; native and end-to-end acceptance remains open. The self-host sync plugin selects only hosts, credentials and desktopProfiles.
+Core API 1.89 declares category data methods. `dataCatalog`, the separately authorized `dataRead`, and protected exchange operations are wired in Core service; native and end-to-end acceptance remains open. The self-host sync plugin selects only hosts, credentials and desktopProfiles.
 
 | Method | Result kind |
 | --- | --- |
@@ -59,6 +59,7 @@ Core API 1.88 declares category data methods. `dataCatalog`, the separately auth
 | [dataSnapshot](./dataSnapshot.en.md) | `dataSnapshot` |
 | [dataInspect](./dataInspect.en.md) | `dataInspect` |
 | [dataCompose](./dataCompose.en.md) | `dataCompose` |
+| [dataReview](./dataReview.en.md) | `dataReview` |
 | [dataApply](./dataApply.en.md) | `dataApply` |
 | [dataExport](./dataExport.en.md) | `dataExport` |
 | [dataCheckpoint](./dataCheckpoint.en.md) | `dataCheckpoint` |

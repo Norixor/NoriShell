@@ -11,7 +11,7 @@ Use SDK `api_request(request_id, call_id, PluginApiOperation::DataApply { … })
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `kind` | `"dataApply"` | Yes | Exact operation discriminator |
-| `request` | `PluginDataApplyRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-188) |
+| `request` | `PluginDataApplyRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-189) |
 
 
 ## Completed value

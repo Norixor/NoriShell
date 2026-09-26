@@ -22,12 +22,13 @@ use std::{
 
 use hmac::{Hmac, Mac as _};
 use norishell_core_api::{
-    PluginApiErrorCode, PluginSshSyncAccountState, PluginSshSyncBrowserSnapshot,
-    PluginSshSyncConflictPolicy, PluginSshSyncCredentialProfile, PluginSshSyncDeleteTarget,
-    PluginSshSyncDifferenceState, PluginSshSyncDownloadSource, PluginSshSyncHttpMethod,
-    PluginSshSyncOperationState, PluginSshSyncRequest, PluginSshSyncScopeMode,
-    PluginSshSyncStableErrorCode, PluginSshSyncStatus, PluginSshSyncUploadTarget, PluginUiFieldId,
-    PluginUiFieldValue, SecretRefId, WireSequence,
+    PluginApiErrorCode, PluginDataLocalCounts, PluginDataObjectSource, PluginSshSyncAccountState,
+    PluginSshSyncBrowserSnapshot, PluginSshSyncConflictPolicy, PluginSshSyncCredentialProfile,
+    PluginSshSyncDeleteTarget, PluginSshSyncDifferenceState, PluginSshSyncDownloadSource,
+    PluginSshSyncHttpMethod, PluginSshSyncOperationState, PluginSshSyncRequest,
+    PluginSshSyncScopeMode, PluginSshSyncStableErrorCode, PluginSshSyncStatus,
+    PluginSshSyncUploadTarget, PluginUiFieldId, PluginUiFieldValue, SecretRefId,
+    SshSyncSecureDataReviewChoice, WireSequence,
 };
 use norishell_ssh_profile_sync::{
     BundleConflictResolution, BundleMergeOutcome, BundleSchema, PluginExchangeBinding,
@@ -207,6 +208,18 @@ pub(crate) struct SyncConflictReview {
     pub(crate) difference_omitted_count: u32,
 }
 
+pub(crate) struct SyncDataReviewChoice {
+    pub(crate) restore_handle: PendingRestoreHandle,
+    pub(crate) view: SshSyncSecureDataReviewChoice,
+}
+
+pub(crate) struct SyncDataReview {
+    pub(crate) local_before: PluginDataLocalCounts,
+    pub(crate) remote_before: PluginDataLocalCounts,
+    pub(crate) local_choice: SyncDataReviewChoice,
+    pub(crate) remote_choice: SyncDataReviewChoice,
+}
+
 pub(crate) trait SecureSshSyncUi: Send + Sync {
     fn create_vault(
         &self,
@@ -232,6 +245,11 @@ pub(crate) trait SecureSshSyncUi: Send + Sync {
         review: SyncDirectionReview,
         uploaded: bool,
     ) -> BoxFuture<'_, Result<SecureApplyApproval, SecureSelectionError>>;
+    fn review_data_choices(
+        &self,
+        context: SecureActionContext,
+        review: SyncDataReview,
+    ) -> BoxFuture<'_, Result<(PluginDataObjectSource, SecureApplyApproval), SecureSelectionError>>;
     fn choose_conflict_side(
         &self,
         context: SecureActionContext,
@@ -450,6 +468,14 @@ pub(crate) struct ApplyResult {
 pub(crate) trait PortableSshProfileStore: Send + Sync {
     /// Release uncommitted staged plaintext on cancellation, upload selection, or validation failure.
     fn discard_staged_restore(&self, handle: &PendingRestoreHandle);
+    fn validate_staged_restore(
+        &self,
+        plugin_id: String,
+        signer_fingerprint_sha256: String,
+        profile_id: String,
+        handle: PendingRestoreHandle,
+        approval: SecureApplyApproval,
+    ) -> BoxFuture<'_, Result<(), PortableStoreError>>;
     /// Drops every short-lived selection, approval and decrypted restore owned by a plugin.
     /// Lifecycle callers invoke this only after they have serialized against in-flight broker
     /// operations, so an old generation cannot recreate state after the clear completes.
@@ -704,6 +730,7 @@ pub(crate) enum BrokerError {
     NetworkUnavailable,
     StateConflict,
     LocalStateChanged,
+    LocalStateChangedAt(&'static str),
     RetryLocalSnapshot,
     OwnerConflict,
     KeyBindingConflict,
@@ -5893,9 +5920,9 @@ fn failed_status(profile_id: String, error: BrokerError) -> PluginSshSyncStatus 
         BrokerError::RecoveryActionExpired => PluginSshSyncStableErrorCode::RecoveryActionExpired,
         BrokerError::OperationRejected(_) => PluginSshSyncStableErrorCode::OperationRejected,
         BrokerError::LocalDataInvalid(_, _) => PluginSshSyncStableErrorCode::LocalDataInvalid,
-        BrokerError::LocalStateChanged | BrokerError::RetryLocalSnapshot => {
-            PluginSshSyncStableErrorCode::LocalStateChanged
-        }
+        BrokerError::LocalStateChanged
+        | BrokerError::LocalStateChangedAt(_)
+        | BrokerError::RetryLocalSnapshot => PluginSshSyncStableErrorCode::LocalStateChanged,
         BrokerError::LocalKeyUnavailable => PluginSshSyncStableErrorCode::LocalKeyUnavailable,
         BrokerError::OperationBusy => PluginSshSyncStableErrorCode::OperationBusy,
         BrokerError::Internal(_) | BrokerError::Persistence(..) => {
@@ -5916,6 +5943,7 @@ fn failed_status(profile_id: String, error: BrokerError) -> PluginSshSyncStatus 
         diagnostic_code: match error {
             BrokerError::OperationRejected(code)
             | BrokerError::Internal(code)
+            | BrokerError::LocalStateChangedAt(code)
             | BrokerError::MergeInvalid(code) => Some(code.to_owned()),
             BrokerError::LocalDataInvalid(stage, reason) => Some(format!("{stage}: {reason}")),
             BrokerError::Persistence(stage, kind, code) => Some(match code {
@@ -6322,6 +6350,23 @@ mod tests {
         assert_eq!(
             status.difference_state,
             Some(PluginSshSyncDifferenceState::Unavailable)
+        );
+    }
+
+    #[test]
+    fn local_state_failure_retains_its_non_secret_check_identifier() {
+        let status = failed_status(
+            "primary".into(),
+            BrokerError::LocalStateChangedAt("data_apply.applied_content"),
+        );
+        assert_eq!(status.operation_state, PluginSshSyncOperationState::Failed);
+        assert_eq!(
+            status.stable_error_code,
+            Some(PluginSshSyncStableErrorCode::LocalStateChanged)
+        );
+        assert_eq!(
+            status.diagnostic_code.as_deref(),
+            Some("data_apply.applied_content")
         );
     }
 

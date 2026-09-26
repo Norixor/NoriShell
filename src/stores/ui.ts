@@ -99,7 +99,7 @@ export const useUiStore = defineStore("ui", () => {
     themePreference.value,
     window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
   ));
-  const uiZoom = ref<UiZoom>(isUiZoom(stored.uiZoom) ? stored.uiZoom : 100);
+  const uiZoom = ref<UiZoom>(isUiZoom(stored.uiZoom) ? stored.uiZoom : 90);
   const appliedUiZoom = ref<UiZoom>(100);
   const uiZoomBusy = ref(false);
   const localePreference = ref<LocalePreference>(visualFixture

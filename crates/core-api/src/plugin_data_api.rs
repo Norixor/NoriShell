@@ -149,6 +149,20 @@ pub struct PluginDataComposeRequest {
     pub decisions: Vec<PluginDataObjectDecision>,
 }
 
+/// Both composed candidates and their provenance are verified by Core before
+/// it presents a single protected choice. Every handle is owner scoped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginDataReviewRequest {
+    pub profile_id: String,
+    pub categories: Vec<PluginDataCategory>,
+    pub local_snapshot_handle: String,
+    pub remote_inspection_handle: String,
+    pub base_receipt_handle: String,
+    pub local_composed_handle: String,
+    pub remote_composed_handle: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginDataApplyRequest {
@@ -258,6 +272,26 @@ impl PluginDataComposeRequest {
                         .bytes()
                         .all(|byte| byte.is_ascii_hexdigit())
             })
+        {
+            return Err(crate::PluginApiErrorCode::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
+impl PluginDataReviewRequest {
+    pub fn validate(&self) -> Result<(), crate::PluginApiErrorCode> {
+        validate_exchange_scope(&self.profile_id, &self.categories)?;
+        if [
+            &self.local_snapshot_handle,
+            &self.remote_inspection_handle,
+            &self.base_receipt_handle,
+            &self.local_composed_handle,
+            &self.remote_composed_handle,
+        ]
+        .iter()
+        .any(|handle| !valid_handle(handle))
+            || self.local_composed_handle == self.remote_composed_handle
         {
             return Err(crate::PluginApiErrorCode::InvalidRequest);
         }
@@ -388,6 +422,31 @@ impl PluginDataReadRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_requires_distinct_valid_candidates_and_one_scope() {
+        let mut request = PluginDataReviewRequest {
+            profile_id: "primary".into(),
+            categories: vec![PluginDataCategory::Hosts],
+            local_snapshot_handle: uuid::Uuid::new_v4().to_string(),
+            remote_inspection_handle: uuid::Uuid::new_v4().to_string(),
+            base_receipt_handle: uuid::Uuid::new_v4().to_string(),
+            local_composed_handle: uuid::Uuid::new_v4().to_string(),
+            remote_composed_handle: uuid::Uuid::new_v4().to_string(),
+        };
+        assert_eq!(request.validate(), Ok(()));
+        request.remote_composed_handle = request.local_composed_handle.clone();
+        assert_eq!(
+            request.validate(),
+            Err(crate::PluginApiErrorCode::InvalidRequest)
+        );
+        request.remote_composed_handle = uuid::Uuid::new_v4().to_string();
+        request.base_receipt_handle = "guest-supplied-path".into();
+        assert_eq!(
+            request.validate(),
+            Err(crate::PluginApiErrorCode::InvalidRequest)
+        );
+    }
 
     #[test]
     fn release_requires_distinct_bounded_handles() {

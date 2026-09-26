@@ -11,7 +11,7 @@ Use SDK `api_request(request_id, call_id, PluginApiOperation::DataInspect { … 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `kind` | `"dataInspect"` | Yes | Exact operation discriminator |
-| `request` | `PluginDataInspectRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-188) |
+| `request` | `PluginDataInspectRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-189) |
 
 
 ## Completed value

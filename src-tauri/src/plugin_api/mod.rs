@@ -70,6 +70,7 @@ impl PluginApi {
             | PluginApiOperation::DataSnapshot { .. }
             | PluginApiOperation::DataInspect { .. }
             | PluginApiOperation::DataCompose { .. }
+            | PluginApiOperation::DataReview { .. }
             | PluginApiOperation::DataApply { .. }
             | PluginApiOperation::DataExport { .. }
             | PluginApiOperation::DataCheckpoint { .. }
@@ -187,6 +188,7 @@ pub(crate) fn validate_call(call: &PluginApiCall) -> Result<(), PluginApiErrorCo
         PluginApiOperation::DataSnapshot { request } => request.validate()?,
         PluginApiOperation::DataInspect { request } => request.validate()?,
         PluginApiOperation::DataCompose { request } => request.validate()?,
+        PluginApiOperation::DataReview { request } => request.validate()?,
         PluginApiOperation::DataApply { request } => request.validate()?,
         PluginApiOperation::DataExport { request } => request.validate()?,
         PluginApiOperation::DataCheckpoint { request } => request.validate()?,

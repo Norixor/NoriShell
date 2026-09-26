@@ -1173,6 +1173,20 @@ describe("SftpView production boundaries", () => {
     wrapper.unmount();
   });
 
+  it("refreshes cached Host labels on activation without reopening SFTP", async () => {
+    const { wrapper, router } = await mountView(readySnapshot(), undefined, "release.bin", { keepAlive: true });
+    expect(wrapper.get('[aria-label="SFTP Host for this Pane"]').text()).toContain("Files");
+    await router.push("/terminal");
+    await flushPromises();
+    client.listHosts.mockResolvedValue([{ ...host, label: "Synced files" }]);
+    await router.push("/sftp");
+    await flushPromises();
+    expect(wrapper.get('[aria-label="SFTP Host for this Pane"]').text()).toContain("Synced files");
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    expect(client.disconnectSftpSession).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("reconnects the same SFTP resource and fences an explicit recovery safety check to the new generation", async () => {
     const sessionId = readySnapshot().sessions[0]!.sessionId;
     const paused = {

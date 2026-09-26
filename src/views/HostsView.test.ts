@@ -10,7 +10,12 @@ import { i18n } from "../locales";
 import { useTipsStore } from "../stores/tips";
 
 const nativeWindows = vi.hoisted(() => ({ open: vi.fn(), listen: vi.fn(), vault: vi.fn() }));
+const savedConnections = vi.hoisted(() => ({ changed: undefined as (() => void) | undefined }));
 vi.mock("../tool-windows", () => ({ openToolWindow: nativeWindows.open, onToolWindowChanged: nativeWindows.listen }));
+vi.mock("../saved-connections", () => ({ onSavedConnectionsChanged: vi.fn(async (callback: () => void) => {
+  savedConnections.changed = callback;
+  return () => { savedConnections.changed = undefined; };
+}) }));
 vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: nativeWindows.vault }));
 
 const client = vi.hoisted(() => ({
@@ -234,6 +239,7 @@ const body = () => new DOMWrapper(document.body);
 describe("HostsView single-Host management contract", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    savedConnections.changed = undefined;
     nativeWindows.vault.mockResolvedValue(true);
     i18n.global.locale.value = "en";
     client.listHostCatalog.mockResolvedValue([catalogEntry]);
@@ -1191,6 +1197,39 @@ describe("HostsView single-Host management contract", () => {
       "hosts-list__favorite-icon--filled",
     );
 
+    wrapper.unmount();
+  });
+
+  it("refreshes saved Host names, additions, and removals after a sync commit", async () => {
+    const { wrapper } = await mountView();
+    expect(wrapper.text()).toContain("Production");
+    const renamed = { ...catalogEntry, host: { ...host, label: "Renamed" } };
+    const added = { ...catalogEntry, host: { ...host, hostId: "019d0000-0000-7000-8000-000000000109", label: "Added" } };
+    client.listHostCatalog.mockResolvedValue([renamed, added]);
+    savedConnections.changed?.();
+    await flushPromises();
+    expect(wrapper.text()).toContain("Renamed");
+    expect(wrapper.text()).toContain("Added");
+    expect(wrapper.text()).not.toContain("Production");
+    client.listHostCatalog.mockResolvedValue([added]);
+    savedConnections.changed?.();
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("Renamed");
+    wrapper.unmount();
+  });
+
+  it("does not let an older Host catalog response overwrite a later sync result", async () => {
+    const { wrapper } = await mountView();
+    let finishOld!: (entries: typeof catalogEntry[]) => void;
+    client.listHostCatalog.mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; }));
+    savedConnections.changed?.();
+    client.listHostCatalog.mockResolvedValueOnce([{ ...catalogEntry, host: { ...host, label: "Latest" } }]);
+    savedConnections.changed?.();
+    await flushPromises();
+    finishOld([{ ...catalogEntry, host: { ...host, label: "Stale" } }]);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Latest");
+    expect(wrapper.text()).not.toContain("Stale");
     wrapper.unmount();
   });
 

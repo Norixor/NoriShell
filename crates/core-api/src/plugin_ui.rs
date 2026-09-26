@@ -908,6 +908,7 @@ pub enum SshSyncSecurePromptKind {
     ApproveRestore,
     ResolveConflicts,
     ChooseSyncDirection,
+    ReviewDataChoices,
     ApproveDataApply,
     ApproveMergedDeletion,
     ResetRemote,
@@ -948,6 +949,30 @@ pub struct SshSyncSecureDifference {
     pub label: String,
     pub local_summary: Option<String>,
     pub remote_summary: Option<String>,
+}
+
+/// Projected candidate after applying one complete source choice. The Core
+/// protected window receives only bounded, non-secret review facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SshSyncSecureDataReviewProjection {
+    pub host_count: u32,
+    pub credential_count: u32,
+    pub desktop_profile_count: u32,
+    pub delete_count: u32,
+    pub differences: Vec<SshSyncSecureDifference>,
+    pub difference_total_count: u32,
+    pub difference_omitted_count: u32,
+    pub related_forward_rule_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SshSyncSecureDataReviewChoice {
+    pub source: crate::PluginDataObjectSource,
+    pub upload_required: bool,
+    pub local: SshSyncSecureDataReviewProjection,
+    pub remote: SshSyncSecureDataReviewProjection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1029,6 +1054,8 @@ pub struct SshSyncSecurePrompt {
     pub remote_updated_at_unix_ms: Option<i64>,
     #[serde(default)]
     pub differences: Vec<SshSyncSecureDifference>,
+    #[serde(default)]
+    pub data_review_choices: Vec<SshSyncSecureDataReviewChoice>,
     #[serde(default)]
     pub difference_total_count: u32,
     #[serde(default)]

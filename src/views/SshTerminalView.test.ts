@@ -1937,6 +1937,23 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
+  it("refreshes the cached launcher after a sync commit without changing terminal sessions", async () => {
+    const { wrapper } = await mountShell();
+    expect(document.body.textContent).toContain(host.label);
+    const sessionReads = client.fetchSshSessionSnapshot.mock.calls.length;
+    client.listHostCatalog.mockResolvedValue([{
+      host: { ...host, label: "Synced SSH" },
+      group: null,
+      tags: [],
+      recentConnection: null,
+    }]);
+    nativeEvents.get("saved-connections-changed")?.({ payload: null });
+    await flushPromises();
+    expect(document.body.textContent).toContain("Synced SSH");
+    expect(client.fetchSshSessionSnapshot).toHaveBeenCalledTimes(sessionReads);
+    wrapper.unmount();
+  });
+
   it("preserves a recent Host target when using a transient credential", async () => {
     client.listHostCatalog.mockResolvedValue([{
       host,

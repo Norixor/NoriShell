@@ -1,6 +1,6 @@
 # dataCompose
 
-Compose a candidate from Core-verified objects. The plugin decides conflict direction; Core checks dependencies and rejects invalid combinations.
+Compose a candidate from Core-verified objects. The plugin builds a complete candidate for the same scope; Core checks dependencies and rejects invalid combinations. For conflicts requiring a human choice, build both local and remote candidates, then pass them to the single protected [dataReview](./dataReview.en.md) window.
 
 Use SDK `api_request(request_id, call_id, PluginApiOperation::DataCompose { … })`; match `PluginApiReply.outcome` and `value.kind="dataCompose"`. [Broker calls](../developers/development/calling-api.en.md).
 
@@ -11,7 +11,7 @@ Use SDK `api_request(request_id, call_id, PluginApiOperation::DataCompose { … 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `kind` | `"dataCompose"` | Yes | Exact operation discriminator |
-| `request` | `PluginDataComposeRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-188) |
+| `request` | `PluginDataComposeRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-189) |
 
 
 ## Completed value

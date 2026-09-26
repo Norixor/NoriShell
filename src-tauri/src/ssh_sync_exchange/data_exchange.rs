@@ -6,11 +6,14 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use crate::plugin_api::blobs::{ExchangeBlob, NetworkReceipt};
-use norishell_core_api::{PluginDataCategory, WireSequence};
+use norishell_core_api::{
+    PluginDataCategory, PluginDataLocalCounts, PluginDataObjectSource,
+    SshSyncSecureDataReviewChoice, SshSyncSecureDataReviewProjection, WireSequence,
+};
 use norishell_ssh_profile_sync::{
     BundleSchema, LoginAutomationStep, PluginExchangeBinding, PortableBundleV1,
     PortableCredentialMaterial, PortableDataCategory, PortableObjectId, PortableObjectKind,
@@ -22,8 +25,9 @@ use serde::Serialize;
 use zeroize::Zeroizing;
 
 use super::{
-    ActionFence, BrokerError, DownloadedExchange, PortableProfileState, PortableRemoteBaseline,
-    PortableSnapshot, RestorePreview, SshSyncExchangeBroker, StagedRestoreCleanup,
+    ActionFence, BrokerError, DownloadedExchange, PendingRestoreHandle, PortableProfileState,
+    PortableRemoteBaseline, PortableSnapshot, RestorePreview, SecureApplyApproval,
+    SshSyncExchangeBroker, StagedRestoreCleanup, SyncDataReview, SyncDataReviewChoice,
     SyncDirectionReview, portable_content_sha256, sha256_hex,
 };
 
@@ -67,6 +71,32 @@ pub(crate) struct DataComposedSnapshot {
     pub(crate) bundle: PortableBundleV1,
     pub(crate) local: Arc<DataLocalSnapshot>,
     pub(crate) remote: Arc<DataExchangeInspection>,
+    pub(crate) reviewed: Option<Arc<ReviewedDataPlan>>,
+}
+
+pub(crate) struct ReviewedDataPlan {
+    pub(crate) base_receipt: NetworkReceipt,
+    restore_handle: PendingRestoreHandle,
+    approval: Mutex<Option<SecureApplyApproval>>,
+    _cleanup: StagedRestoreCleanup,
+}
+
+impl ReviewedDataPlan {
+    fn approval(&self) -> Result<SecureApplyApproval, BrokerError> {
+        self.approval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or(BrokerError::StateConflict)
+    }
+
+    fn consume_approval(&self) -> Result<SecureApplyApproval, BrokerError> {
+        self.approval
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .ok_or(BrokerError::StateConflict)
+    }
 }
 
 pub(crate) enum DataObjectDisplay {
@@ -330,6 +360,7 @@ pub(crate) fn compose_selected_objects(
             bundle: remote_bundle.clone(),
             local,
             remote,
+            reviewed: None,
         });
     }
     let mut bundle = remote_bundle.clone();
@@ -405,6 +436,7 @@ pub(crate) fn compose_selected_objects(
         bundle,
         local,
         remote,
+        reviewed: None,
     })
 }
 
@@ -430,6 +462,7 @@ pub(crate) struct DataExchangeInspection {
     pub(crate) bundle: PortableBundleV1,
     pub(crate) categories: Vec<PluginDataCategory>,
     pub(crate) source_categories: Option<Vec<PortableDataCategory>>,
+    source_receipt: Option<NetworkReceipt>,
     pub(crate) remote_origin: String,
     pub(crate) remote_resource_url: String,
     key: SyncKey,
@@ -891,6 +924,7 @@ pub(crate) fn inspect_three_category_blob(
         bundle,
         categories: categories.to_vec(),
         source_categories,
+        source_receipt: None,
         remote_origin: String::new(),
         remote_resource_url: String::new(),
         key: key.clone(),
@@ -1012,6 +1046,184 @@ impl SshSyncExchangeBroker {
             &composed.remote.key,
             &composed.local.categories,
         )
+    }
+
+    /// Presents both fully staged outcomes in one Core-owned protected review.
+    /// The chosen restore and approval remain private to the returned handle.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the two candidate identities and authenticated GET explicit"
+    )]
+    pub(crate) async fn data_review_choices(
+        &self,
+        plugin_id: &str,
+        data_owner_sha256: &str,
+        profile_id: &str,
+        local: Arc<DataLocalSnapshot>,
+        remote: Arc<DataExchangeInspection>,
+        base_receipt: &NetworkReceipt,
+        local_choice: Arc<DataComposedSnapshot>,
+        remote_choice: Arc<DataComposedSnapshot>,
+        categories: &[PluginDataCategory],
+        fence: &ActionFence,
+    ) -> Result<(DataComposedSnapshot, PluginDataObjectSource), BrokerError> {
+        validate_categories(categories)?;
+        if local.plugin_id != plugin_id
+            || local.data_owner_sha256 != data_owner_sha256
+            || local.profile_id != profile_id
+            || remote.binding.plugin_id != plugin_id
+            || remote.binding.signer_fingerprint_sha256 != data_owner_sha256
+            || remote.binding.profile_id != profile_id
+            || local.categories != categories
+            || remote.categories != categories
+            || !Arc::ptr_eq(&local, &local_choice.local)
+            || !Arc::ptr_eq(&local, &remote_choice.local)
+            || !Arc::ptr_eq(&remote, &local_choice.remote)
+            || !Arc::ptr_eq(&remote, &remote_choice.remote)
+            || local_choice.reviewed.is_some()
+            || remote_choice.reviewed.is_some()
+        {
+            return Err(BrokerError::OwnerConflict);
+        }
+        if !valid_review_base(&remote, base_receipt) {
+            return Err(BrokerError::RemoteDataInvalid);
+        }
+        if !self.vault.is_unlocked() || !fence() {
+            return Err(BrokerError::StateConflict);
+        }
+        self.check_local_snapshot(plugin_id, data_owner_sha256, profile_id, &local)
+            .await
+            .map_err(|error| local_state_error_at(error, "data_review.before_stage"))?;
+        let local_bundle = with_selected_tombstones_for_missing(
+            &local_choice.bundle,
+            &local.snapshot.bundle,
+            categories,
+        )?;
+        let remote_bundle = with_selected_tombstones_for_missing(
+            &remote_choice.bundle,
+            &local.snapshot.bundle,
+            categories,
+        )?;
+        let local_restore = self
+            .profiles
+            .stage_restore(
+                plugin_id.to_owned(),
+                data_owner_sha256.to_owned(),
+                profile_id.to_owned(),
+                local_bundle,
+                remote.key.clone(),
+            )
+            .await
+            .map_err(|error| {
+                local_state_error_at(super::map_store_error(error), "data_review.stage_local")
+            })?;
+        let mut local_cleanup = Some(StagedRestoreCleanup {
+            profiles: self.profiles.clone(),
+            handle: local_restore.handle.clone(),
+        });
+        if local_restore.conflict_count != 0 {
+            return Err(BrokerError::RestoreConflict);
+        }
+        let remote_restore = self
+            .profiles
+            .stage_restore(
+                plugin_id.to_owned(),
+                data_owner_sha256.to_owned(),
+                profile_id.to_owned(),
+                remote_bundle,
+                remote.key.clone(),
+            )
+            .await
+            .map_err(|error| {
+                local_state_error_at(super::map_store_error(error), "data_review.stage_remote")
+            })?;
+        let mut remote_cleanup = Some(StagedRestoreCleanup {
+            profiles: self.profiles.clone(),
+            handle: remote_restore.handle.clone(),
+        });
+        if remote_restore.conflict_count != 0 {
+            return Err(BrokerError::RestoreConflict);
+        }
+        let review = SyncDataReview {
+            local_before: data_counts(&local.selected_bundle),
+            remote_before: data_counts(&remote.bundle),
+            local_choice: SyncDataReviewChoice {
+                restore_handle: local_restore.handle.clone(),
+                view: data_review_choice(
+                    PluginDataObjectSource::Local,
+                    &local,
+                    &remote,
+                    &local_choice.bundle,
+                )?,
+            },
+            remote_choice: SyncDataReviewChoice {
+                restore_handle: remote_restore.handle.clone(),
+                view: data_review_choice(
+                    PluginDataObjectSource::Remote,
+                    &local,
+                    &remote,
+                    &remote_choice.bundle,
+                )?,
+            },
+        };
+        let (source, approval) = self
+            .secure_ui
+            .review_data_choices(
+                self.secure_context(
+                    plugin_id,
+                    data_owner_sha256,
+                    profile_id,
+                    Some(remote.remote_origin.clone()),
+                    fence,
+                ),
+                review,
+            )
+            .await
+            .map_err(super::map_selection_error)?;
+        if !fence() {
+            return Err(BrokerError::StateConflict);
+        }
+        self.check_local_snapshot(plugin_id, data_owner_sha256, profile_id, &local)
+            .await
+            .map_err(|error| local_state_error_at(error, "data_review.after_approval"))?;
+        let (chosen, restore_handle, cleanup) = match source {
+            PluginDataObjectSource::Local => (
+                &local_choice,
+                local_restore.handle,
+                local_cleanup.take().ok_or(BrokerError::StateConflict)?,
+            ),
+            PluginDataObjectSource::Remote => (
+                &remote_choice,
+                remote_restore.handle,
+                remote_cleanup.take().ok_or(BrokerError::StateConflict)?,
+            ),
+        };
+        self.profiles
+            .validate_staged_restore(
+                plugin_id.to_owned(),
+                data_owner_sha256.to_owned(),
+                profile_id.to_owned(),
+                restore_handle.clone(),
+                approval.clone(),
+            )
+            .await
+            .map_err(|error| {
+                local_state_error_at(super::map_store_error(error), "data_review.plan_expired")
+            })?;
+        Ok((
+            DataComposedSnapshot {
+                bundle: chosen.bundle.clone(),
+                local,
+                remote,
+                reviewed: Some(Arc::new(ReviewedDataPlan {
+                    base_receipt: base_receipt.clone(),
+                    restore_handle,
+                    approval: Mutex::new(Some(approval)),
+                    _cleanup: cleanup,
+                })),
+            },
+            source,
+        ))
     }
 
     /// Captures Core data with stable portable IDs. The returned plaintext is
@@ -1229,6 +1441,7 @@ impl SshSyncExchangeBroker {
         )?;
         inspected.remote_origin = remote.remote_origin;
         inspected.remote_resource_url = receipt.resource_url.clone();
+        inspected.source_receipt = Some(receipt.clone());
         Ok(inspected)
     }
 
@@ -1378,7 +1591,29 @@ impl SshSyncExchangeBroker {
             return Err(BrokerError::StateConflict);
         }
         self.check_local_snapshot(plugin_id, data_owner_sha256, profile_id, local)
-            .await?;
+            .await
+            .map_err(|error| local_state_error_at(error, "data_export.local_snapshot"))?;
+        if let Some(reviewed) = &composed.reviewed {
+            if &reviewed.base_receipt != base_receipt {
+                return Err(BrokerError::StateConflict);
+            }
+            let approval = reviewed.approval()?;
+            self.profiles
+                .validate_staged_restore(
+                    plugin_id.to_owned(),
+                    data_owner_sha256.to_owned(),
+                    profile_id.to_owned(),
+                    reviewed.restore_handle.clone(),
+                    approval,
+                )
+                .await
+                .map_err(|error| {
+                    local_state_error_at(
+                        super::map_store_error(error),
+                        "data_export.review_expired",
+                    )
+                })?;
+        }
         let mut bundle = composed.bundle.clone();
         bundle.revision = binding.revision;
         let key = local.key.as_ref().ok_or(BrokerError::LocalKeyUnavailable)?;
@@ -1404,6 +1639,19 @@ impl SshSyncExchangeBroker {
     ) -> Result<DataApplyReceipt, BrokerError> {
         let mut selected = (*composed.remote).clone();
         selected.bundle = composed.bundle.clone();
+        if let Some(reviewed) = &composed.reviewed {
+            return self
+                .data_apply_reviewed(
+                    plugin_id,
+                    data_owner_sha256,
+                    profile_id,
+                    &composed.local,
+                    &selected,
+                    reviewed,
+                    fence,
+                )
+                .await;
+        }
         self.data_apply_inspected(
             plugin_id,
             data_owner_sha256,
@@ -1451,7 +1699,8 @@ impl SshSyncExchangeBroker {
             return Err(BrokerError::StateConflict);
         }
         self.check_local_snapshot(plugin_id, data_owner_sha256, profile_id, expected_local)
-            .await?;
+            .await
+            .map_err(|error| local_state_error_at(error, "data_apply.before_stage"))?;
         let staged_bundle = with_selected_tombstones_for_missing(
             &inspected.bundle,
             &expected_local.snapshot.bundle,
@@ -1467,7 +1716,9 @@ impl SshSyncExchangeBroker {
                 inspected.key.clone(),
             )
             .await
-            .map_err(super::map_store_error)?;
+            .map_err(|error| {
+                local_state_error_at(super::map_store_error(error), "data_apply.stage_restore")
+            })?;
         let _cleanup = StagedRestoreCleanup {
             profiles: self.profiles.clone(),
             handle: restore.handle.clone(),
@@ -1494,7 +1745,8 @@ impl SshSyncExchangeBroker {
             return Err(BrokerError::StateConflict);
         }
         self.check_local_snapshot(plugin_id, data_owner_sha256, profile_id, expected_local)
-            .await?;
+            .await
+            .map_err(|error| local_state_error_at(error, "data_apply.after_approval"))?;
         self.profiles
             .apply_staged_restore(
                 plugin_id.to_owned(),
@@ -1504,7 +1756,99 @@ impl SshSyncExchangeBroker {
                 Some(approval),
             )
             .await
-            .map_err(super::map_store_error)?;
+            .map_err(|error| {
+                local_state_error_at(super::map_store_error(error), "data_apply.commit_restore")
+            })?;
+        self.finish_data_apply(
+            plugin_id,
+            data_owner_sha256,
+            profile_id,
+            inspected,
+            categories,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the approved owner and staged plan identity explicit"
+    )]
+    async fn data_apply_reviewed(
+        &self,
+        plugin_id: &str,
+        data_owner_sha256: &str,
+        profile_id: &str,
+        expected_local: &DataLocalSnapshot,
+        inspected: &DataExchangeInspection,
+        reviewed: &ReviewedDataPlan,
+        fence: &ActionFence,
+    ) -> Result<DataApplyReceipt, BrokerError> {
+        if expected_local.plugin_id != plugin_id
+            || expected_local.data_owner_sha256 != data_owner_sha256
+            || expected_local.profile_id != profile_id
+            || inspected.binding.plugin_id != plugin_id
+            || inspected.binding.signer_fingerprint_sha256 != data_owner_sha256
+            || inspected.binding.profile_id != profile_id
+            || expected_local.categories != inspected.categories
+        {
+            return Err(BrokerError::OwnerConflict);
+        }
+        if !valid_review_base(inspected, &reviewed.base_receipt) {
+            return Err(BrokerError::StateConflict);
+        }
+        if !self.vault.is_unlocked() || !fence() {
+            return Err(BrokerError::StateConflict);
+        }
+        self.check_local_snapshot(plugin_id, data_owner_sha256, profile_id, expected_local)
+            .await
+            .map_err(|error| local_state_error_at(error, "data_apply.reviewed_snapshot"))?;
+        let approval = reviewed.approval()?;
+        self.profiles
+            .validate_staged_restore(
+                plugin_id.to_owned(),
+                data_owner_sha256.to_owned(),
+                profile_id.to_owned(),
+                reviewed.restore_handle.clone(),
+                approval,
+            )
+            .await
+            .map_err(|error| {
+                local_state_error_at(super::map_store_error(error), "data_apply.review_expired")
+            })?;
+        if !fence() {
+            return Err(BrokerError::StateConflict);
+        }
+        let approval = reviewed.consume_approval()?;
+        self.profiles
+            .apply_staged_restore(
+                plugin_id.to_owned(),
+                data_owner_sha256.to_owned(),
+                profile_id.to_owned(),
+                reviewed.restore_handle.clone(),
+                Some(approval),
+            )
+            .await
+            .map_err(|error| {
+                local_state_error_at(super::map_store_error(error), "data_apply.commit_restore")
+            })?;
+        self.finish_data_apply(
+            plugin_id,
+            data_owner_sha256,
+            profile_id,
+            inspected,
+            &expected_local.categories,
+        )
+        .await
+    }
+
+    async fn finish_data_apply(
+        &self,
+        plugin_id: &str,
+        data_owner_sha256: &str,
+        profile_id: &str,
+        inspected: &DataExchangeInspection,
+        categories: &[PluginDataCategory],
+    ) -> Result<DataApplyReceipt, BrokerError> {
         let mut current = self
             .profiles
             .snapshot_current(
@@ -1529,7 +1873,9 @@ impl SshSyncExchangeBroker {
             .map_err(super::map_store_error)?;
         let keyed_content_sha256 = portable_content_sha256(&current.bundle, &inspected.key)?;
         if keyed_content_sha256 != portable_content_sha256(&inspected.bundle, &inspected.key)? {
-            return Err(BrokerError::LocalStateChanged);
+            return Err(BrokerError::LocalStateChangedAt(
+                "data_apply.applied_content",
+            ));
         }
         let profile = self
             .profiles
@@ -1735,10 +2081,13 @@ impl SshSyncExchangeBroker {
             )
             .await
             .map_err(super::map_store_error)?;
-        if canonical_bundle_bytes(&selected_current).map_err(|_| BrokerError::LocalStateChanged)?
-            != canonical_bundle_bytes(&bundle).map_err(|_| BrokerError::RemoteDataInvalid)?
-        {
-            return Err(BrokerError::LocalStateChanged);
+        // Apply and checkpoint compare the same portable business content.
+        // Machine-bound skip notices describe the exporting device, not data
+        // that a receiving device can restore.
+        if portable_content_sha256(&selected_current, &key)? != exported.keyed_content_sha256 {
+            return Err(BrokerError::LocalStateChangedAt(
+                "data_checkpoint.upload_content",
+            ));
         }
         let exchange_sha256 = self
             .persist_baseline_exchange(plugin_id, data_owner_sha256, profile_id, &exported.bytes)
@@ -1951,12 +2300,15 @@ impl SshSyncExchangeBroker {
             return Err(BrokerError::StateConflict);
         }
         self.check_local_snapshot(plugin_id, data_owner_sha256, profile_id, local)
-            .await?;
+            .await
+            .map_err(|error| local_state_error_at(error, "data_checkpoint.local_snapshot"))?;
         let key = local.key.as_ref().ok_or(BrokerError::LocalKeyUnavailable)?;
         let local_content = portable_content_sha256(&local.selected_bundle, key)?;
         let remote_content = portable_content_sha256(&inspected.bundle, key)?;
         if local_content != remote_content {
-            return Err(BrokerError::LocalStateChanged);
+            return Err(BrokerError::LocalStateChangedAt(
+                "data_checkpoint.equal_content",
+            ));
         }
         let exchange_sha256 = self
             .persist_baseline_exchange(
@@ -2173,6 +2525,97 @@ fn data_apply_review(
     }
 }
 
+fn data_counts(bundle: &PortableBundleV1) -> PluginDataLocalCounts {
+    PluginDataLocalCounts {
+        host_count: bundle.objects.hosts.len().try_into().unwrap_or(u32::MAX),
+        credential_count: bundle
+            .objects
+            .credentials
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        desktop_profile_count: bundle
+            .objects
+            .desktop_profiles
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        tombstone_count: bundle.tombstones.len().try_into().unwrap_or(u32::MAX),
+    }
+}
+
+fn data_review_projection(
+    before: &PortableBundleV1,
+    after: &PortableBundleV1,
+) -> SshSyncSecureDataReviewProjection {
+    let report = super::difference::compare_bundles(before, after);
+    let removed = super::difference::object_keys(before)
+        .difference(&super::difference::object_keys(after))
+        .count();
+    SshSyncSecureDataReviewProjection {
+        host_count: after.objects.hosts.len().try_into().unwrap_or(u32::MAX),
+        credential_count: after
+            .objects
+            .credentials
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        desktop_profile_count: after
+            .objects
+            .desktop_profiles
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        delete_count: removed.try_into().unwrap_or(u32::MAX),
+        differences: report.differences,
+        difference_total_count: report.total_count,
+        difference_omitted_count: report.omitted_count,
+        related_forward_rule_labels: Vec::new(),
+    }
+}
+
+fn data_review_choice(
+    source: PluginDataObjectSource,
+    local: &DataLocalSnapshot,
+    remote: &DataExchangeInspection,
+    choice: &PortableBundleV1,
+) -> Result<SshSyncSecureDataReviewChoice, BrokerError> {
+    Ok(SshSyncSecureDataReviewChoice {
+        source,
+        upload_required: remote.migration_required
+            || canonical_bundle_bytes(choice).map_err(|_| BrokerError::RemoteDataInvalid)?
+                != canonical_bundle_bytes(&remote.bundle)
+                    .map_err(|_| BrokerError::RemoteDataInvalid)?,
+        local: data_review_projection(&local.selected_bundle, choice),
+        remote: data_review_projection(&remote.bundle, choice),
+    })
+}
+
+fn valid_review_base(remote: &DataExchangeInspection, receipt: &NetworkReceipt) -> bool {
+    remote.source_receipt.as_ref() == Some(receipt)
+        && receipt.method == "GET"
+        && receipt.status == 200
+        && receipt
+            .etag
+            .as_deref()
+            .is_some_and(super::valid_strong_etag)
+        && receipt.endpoint_origin == remote.remote_origin
+        && receipt.resource_url == remote.remote_resource_url
+        && receipt.response_body_sha256.as_deref() == Some(remote.exchange_sha256.as_str())
+        && receipt.response_revision == Some(remote.binding.revision)
+        && receipt.response_blob_handle.is_some()
+        && reqwest::Url::parse(&receipt.resource_url)
+            .ok()
+            .is_some_and(|url| url.origin().ascii_serialization() == receipt.endpoint_origin)
+}
+
+fn local_state_error_at(error: BrokerError, diagnostic: &'static str) -> BrokerError {
+    match error {
+        BrokerError::LocalStateChanged => BrokerError::LocalStateChangedAt(diagnostic),
+        error => error,
+    }
+}
+
 fn validate_export_base(
     binding: &PluginExchangeBinding,
     receipt: &NetworkReceipt,
@@ -2216,6 +2659,40 @@ fn validate_export_base(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_business_digest_ignores_device_skip_notices_but_preserves_clocks() {
+        let key = SyncKey::from_bytes([19; 32]);
+        let mut remote = super::super::empty_portable_bundle(2);
+        let id = PortableObjectId::new();
+        remote.tombstones.push(PortableTombstone {
+            kind: PortableObjectKind::Host,
+            id,
+        });
+        remote
+            .update_times
+            .push(norishell_ssh_profile_sync::PortableItemUpdateTime {
+                kind: PortableObjectKind::Host,
+                id,
+                update_time_unix_ms: 100,
+            });
+        remote
+            .skipped_machine_bound
+            .push(norishell_ssh_profile_sync::SkippedMachineBoundObject {
+                id: PortableObjectId::new(),
+                kind: norishell_ssh_profile_sync::MachineBoundKind::SshAgent,
+                reason: norishell_ssh_profile_sync::MachineBoundSkipReason::MachineBound,
+            });
+        let mut restored = remote.clone();
+        restored.skipped_machine_bound.clear();
+        let expected = portable_content_sha256(&remote, &key).unwrap();
+        assert_eq!(portable_content_sha256(&restored, &key).unwrap(), expected);
+        restored.update_times[0].update_time_unix_ms += 1;
+        assert_ne!(portable_content_sha256(&restored, &key).unwrap(), expected);
+        restored.update_times.clear();
+        restored.tombstones.clear();
+        assert_ne!(portable_content_sha256(&restored, &key).unwrap(), expected);
+    }
 
     #[test]
     fn credential_only_projection_omits_unselected_deletions() {
@@ -2271,6 +2748,10 @@ mod tests {
                 rdp_resolution_mode: Default::default(),
             });
         current.validate().unwrap();
+        let projected_choice =
+            data_review_projection(&current, &super::super::empty_portable_bundle(1));
+        assert_eq!(projected_choice.delete_count, 1);
+        assert_eq!(projected_choice.desktop_profile_count, 0);
         let staged = with_selected_tombstones_for_missing(
             &target,
             &current,
@@ -2319,6 +2800,21 @@ mod tests {
             },
         );
         remote_bundle.validate().unwrap();
+        let source_receipt = NetworkReceipt {
+            endpoint_origin: "https://example.test".to_owned(),
+            resource_url: "https://example.test/exchange".to_owned(),
+            method: "GET".to_owned(),
+            status: 200,
+            etag: Some("\"current\"".to_owned()),
+            response_revision: Some(2),
+            response_body_sha256: Some("b".repeat(64)),
+            response_blob_handle: Some("blob-handle".to_owned()),
+            request_if_match: None,
+            request_expected_next_revision: None,
+            request_idempotency_key: None,
+            response_next_revision: None,
+            request_body_sha256: None,
+        };
         let remote = Arc::new(DataExchangeInspection {
             migration_required: false,
             excluded_categories: Vec::new(),
@@ -2334,10 +2830,15 @@ mod tests {
             bundle: remote_bundle.clone(),
             categories,
             source_categories: None,
+            source_receipt: Some(source_receipt.clone()),
             remote_origin: "https://example.test".to_owned(),
             remote_resource_url: "https://example.test/exchange".to_owned(),
             key,
         });
+        assert!(valid_review_base(&remote, &source_receipt));
+        let mut different_get = source_receipt.clone();
+        different_get.etag = Some("\"other\"".to_owned());
+        assert!(!valid_review_base(&remote, &different_get));
         let composed = compose_selected_objects(local, remote, &[]).unwrap();
         assert_eq!(composed.bundle, remote_bundle);
     }

@@ -38,6 +38,7 @@ const authorizePrompt: SshSyncSecurePrompt = {
   deleteCount: 0,
   relatedForwardRuleLabels: [],
   dataApplyUploaded: false,
+  dataReviewChoices: [],
   remoteHostCount: 0,
   remoteCredentialCount: 0,
   localComparedAtUnixMs: null,
@@ -228,6 +229,51 @@ describe("SecureSshSync", () => {
     await wrapper.find(".nvx-secure-window__actions button:last-child").trigger("click");
     await flushPromises();
     expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({ decision: "applyMerged" }));
+    wrapper.unmount();
+  });
+
+  it("reviews each conflict choice in one prompt and submits only the selected source", async () => {
+    const unchanged = { hostCount: 2, credentialCount: 1, desktopProfileCount: 0, deleteCount: 0,
+      differences: [], differenceTotalCount: 0, differenceOmittedCount: 0, relatedForwardRuleLabels: [] };
+    const changed = { ...unchanged, hostCount: 1, deleteCount: 1,
+      differences: [{ kind: "host" as const, change: "localOnly" as const, label: "retired-host", localSummary: "old.example:22", remoteSummary: null }],
+      differenceTotalCount: 1, relatedForwardRuleLabels: ["Database tunnel"] };
+    client.getSshSyncSecurePrompt.mockResolvedValue({ ...authorizePrompt, kind: "reviewDataChoices", oauth: null,
+      hostCount: 2, remoteHostCount: 2, credentialCount: 1, remoteCredentialCount: 1,
+      dataReviewChoices: [
+        { source: "local", uploadRequired: true, local: unchanged, remote: changed },
+        { source: "remote", uploadRequired: false, local: changed, remote: unchanged },
+      ],
+    } satisfies SshSyncSecurePrompt);
+    client.decideSshSyncSecurePrompt.mockResolvedValue({ accepted: true });
+    const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
+    await flushPromises();
+    const confirm = wrapper.find(".nvx-secure-window__actions button:last-child");
+    expect(confirm.text()).toBe("确认并同步");
+    expect(confirm.attributes("disabled")).toBeDefined();
+    expect(wrapper.findAll(".secure-sync__review-side")).toHaveLength(0);
+    await wrapper.find('input[value="keepLocal"]').setValue();
+    expect(wrapper.text()).toContain("先更新云端");
+    expect(wrapper.findAll(".secure-sync__review-side")[0]?.text()).toContain("此端没有数据变化");
+    await wrapper.find('input[value="useRemote"]').setValue();
+    expect(wrapper.text()).toContain("云端数据保持不变");
+    expect(wrapper.findAll(".secure-sync__review-side")[0]?.text()).toContain("Database tunnel");
+    expect(wrapper.findAll(".secure-sync__review-side")[1]?.text()).toContain("此端没有数据变化");
+    await confirm.trigger("click");
+    await flushPromises();
+    expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledTimes(1);
+    expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({ decision: "useRemote" }));
+    wrapper.unmount();
+  });
+
+  it("cancels the combined review before choosing a source", async () => {
+    client.getSshSyncSecurePrompt.mockResolvedValue({ ...authorizePrompt, kind: "reviewDataChoices", oauth: null });
+    client.decideSshSyncSecurePrompt.mockResolvedValue({ accepted: true });
+    const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
+    await flushPromises();
+    await wrapper.find(".nvx-secure-window__actions button:first-child").trigger("click");
+    await flushPromises();
+    expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({ decision: "cancel" }));
     wrapper.unmount();
   });
 

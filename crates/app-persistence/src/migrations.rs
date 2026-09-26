@@ -812,6 +812,76 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
     }
     if current == 46 {
         migrate_v46_to_v47(connection)?;
+        current = 47;
+    }
+    if current == 47 {
+        migrate_v47_to_v48(connection)?;
+    }
+    Ok(())
+}
+
+fn migrate_v47_to_v48(connection: &Connection) -> Result<()> {
+    // These tables hold portable SSH/desktop data, its ownership and replay
+    // state, or references affected by a restore. Operational tables are
+    // intentionally absent so background verification cannot stale a restore.
+    const FENCED_TABLES: &[&str] = &[
+        "hosts",
+        "identities",
+        "credential_refs",
+        "credential_password_details",
+        "credential_private_key_details",
+        "credential_keyboard_interactive_details",
+        "credential_ssh_agent_details",
+        "credential_secret_slots",
+        "desktop_profiles",
+        "host_route_plans",
+        "host_route_jump_hops",
+        "host_authentication_plans",
+        "host_authentication_credentials",
+        "host_algorithm_policies",
+        "host_algorithm_exceptions",
+        "host_heartbeat_policies",
+        "host_monitoring_policies",
+        "host_monitoring_selections",
+        "host_login_automations",
+        "host_login_automation_steps",
+        "host_groups",
+        "host_tags",
+        "host_tag_assignments",
+        "forward_rules",
+        "ssh_sync_profile_states",
+        "ssh_sync_object_mappings",
+        "ssh_sync_scope_memberships",
+        "ssh_sync_local_item_times",
+        "ssh_sync_restore_sagas",
+        "offline_import_sagas",
+    ];
+    let mut sql = String::from(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE ssh_sync_business_generation (
+           singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+           generation INTEGER NOT NULL CHECK(generation >= 0)
+         ) STRICT;
+         INSERT INTO ssh_sync_business_generation (singleton, generation) VALUES (1, 0);",
+    );
+    for table in FENCED_TABLES {
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            sql.push_str(&format!(
+                "CREATE TRIGGER ssh_sync_business_generation_{table}_{operation}
+                 AFTER {operation} ON {table} BEGIN
+                   UPDATE ssh_sync_business_generation
+                   SET generation = generation + 1
+                   WHERE singleton = 1 AND generation < 9223372036854775807;
+                   SELECT CASE WHEN changes() != 1
+                     THEN RAISE(ABORT, 'ssh sync business generation unavailable') END;
+                 END;"
+            ));
+        }
+    }
+    sql.push_str("PRAGMA user_version = 48; COMMIT;");
+    if let Err(error) = connection.execute_batch(&sql) {
+        let _ = connection.execute_batch("ROLLBACK;");
+        return Err(error.into());
     }
     Ok(())
 }
