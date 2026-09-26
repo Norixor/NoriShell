@@ -1,6 +1,6 @@
 # 自建同步示例
 
-完整源码位于 [`example/self-host-sync`](../../../../example/self-host-sync/readme.md)：`plugin/` 是声明式 Wasm 插件，`server/` 是单用户 Go 服务端，`build-release.py` 生成可附在 NoriShell Release 的伴生 ZIP。新版插件使用 `uiNavigation`、`uiPage`、高风险 `sshSync`，并要求最低 Core API 1.88；登录表单由宿主安全流程读取，插件只声明同源 HTTP/HTTPS endpoint 与同步动作，不接收 Vault 明文、同步密钥、密码、令牌或 exchange body。HTTP 会暴露传输中的密码、令牌与请求元数据。
+完整源码位于 [`example/self-host-sync`](../../../../example/self-host-sync/readme.md)：`plugin/` 是声明式 Wasm 插件，`server/` 是单用户 Go 服务端，`build-release.py` 生成可附在 NoriShell Release 的伴生 ZIP。新版插件使用 `uiNavigation`、`uiPage`、高风险 `sshSync`，并要求最低 Core API 1.89；登录表单由宿主安全流程读取，插件只声明同源 HTTP/HTTPS endpoint 与同步动作，不接收 Vault 明文、同步密钥、密码、令牌或 exchange body。HTTP 会暴露传输中的密码、令牌与请求元数据。
 
 从仓库根目录执行 `PATH=<go-bin>:$PATH python3 example/self-host-sync/build-release.py`，需 Go 1.23+、项目锁定的 Rust 1.97.1 及 `wasm32-unknown-unknown` target。打包脚本交叉编译六种服务端二进制，运行真实 Wasm Plugin Host 验证器和 SDK 的 `pack`/`check`，再生成服务端与插件两个独立 ZIP。未经本地导入、授权和原生验收，构建成功不等于已安装或已发布。
 

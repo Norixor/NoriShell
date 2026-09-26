@@ -9,6 +9,7 @@ Every row is a `PluginApiOperation` variant inside [`PluginApiCall`](types.en.md
 | [`dataSnapshot`](./dataSnapshot.en.md) | category-scoped request | `dataSnapshot` |
 | [`dataInspect`](./dataInspect.en.md) | category-scoped request | `dataInspect` |
 | [`dataCompose`](./dataCompose.en.md) | category-scoped request | `dataCompose` |
+| [`dataReview`](./dataReview.en.md) | category-scoped request | `dataReview` |
 | [`dataApply`](./dataApply.en.md) | category-scoped request | `dataApply` |
 | [`dataExport`](./dataExport.en.md) | category-scoped request | `dataExport` |
 | [`dataCheckpoint`](./dataCheckpoint.en.md) | category-scoped request | `dataCheckpoint` |

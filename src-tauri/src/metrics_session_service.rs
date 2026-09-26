@@ -1008,17 +1008,9 @@ impl Actor {
         );
         match observation {
             Ok(KnownHostObservation::Trusted(_)) => {
-                let result = self.hosts.record_known_host_verified(
-                    endpoint.normalized_address(),
-                    endpoint.port(),
-                    &observed.algorithm,
-                    &observed.public_key_blob,
-                );
-                let _ = reply.send(if result.is_ok() {
-                    Ok(HostKeyDecision::Trusted)
-                } else {
-                    Err(TransportError::HostKeyVerificationFailed)
-                });
+                // Each probe checks current trust; sampling does not need a
+                // persistent last-verified timestamp or a metadata write.
+                let _ = reply.send(Ok(HostKeyDecision::Trusted));
             }
             Ok(KnownHostObservation::Unknown(_)) => {
                 let route_stage = record
@@ -1974,7 +1966,7 @@ fn not_found_error(request_id: RequestId) -> Box<CoreApiError> {
 mod tests {
     use std::time::Duration;
 
-    use norishell_app_persistence::AppRepository;
+    use norishell_app_persistence::{AppRepository, KnownHostObservation};
     use norishell_core_api::{
         CpuMetric, DiskResourceId, HostId, MetricByteCount, MetricFieldState, MetricSnapshot,
         MetricsKeyboardInteractiveAnswerPrepareRequest, MetricsKeyboardInteractiveAnswerRefId,
@@ -2353,6 +2345,70 @@ mod tests {
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.stale)
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_probes_check_current_trust_without_updating_known_hosts() {
+        let (_directory, mut actor) = actor();
+        let host_id = HostId::new();
+        install_active_record(&mut actor, host_id.clone());
+        let trusted = actor
+            .hosts
+            .trust_known_host("metrics.example", 22, "ssh-ed25519", &[1, 2, 3])
+            .expect("trust key");
+        for _ in 0..3 {
+            let (decision, response) = oneshot::channel();
+            actor.host_key_observed(
+                host_id.as_str(),
+                1,
+                Endpoint::parse("metrics.example", 22).expect("endpoint"),
+                ObservedHostKey {
+                    algorithm: "ssh-ed25519".to_owned(),
+                    public_key_blob: vec![1, 2, 3],
+                    fingerprint_sha256: "SHA256:test".to_owned(),
+                },
+                decision,
+            );
+            assert!(matches!(
+                response.await.expect("decision"),
+                Ok(HostKeyDecision::Trusted)
+            ));
+        }
+        let KnownHostObservation::Trusted(after) = actor
+            .hosts
+            .observe_known_host("metrics.example", 22, "ssh-ed25519", &[1, 2, 3])
+            .expect("read current trust")
+        else {
+            panic!("key remains trusted")
+        };
+        assert_eq!(after.state_version, trusted.state_version);
+        assert_eq!(
+            after.last_verified_at_unix_ms,
+            trusted.last_verified_at_unix_ms
+        );
+
+        actor
+            .hosts
+            .with_ssh_sync_repository(|repository| {
+                repository.delete_known_host(&trusted.known_host_id, trusted.state_version)
+            })
+            .expect("revoke trust");
+        let (decision, response) = oneshot::channel();
+        actor.host_key_observed(
+            host_id.as_str(),
+            1,
+            Endpoint::parse("metrics.example", 22).expect("endpoint"),
+            ObservedHostKey {
+                algorithm: "ssh-ed25519".to_owned(),
+                public_key_blob: vec![1, 2, 3],
+                fingerprint_sha256: "SHA256:test".to_owned(),
+            },
+            decision,
+        );
+        assert!(matches!(
+            response.await.expect("decision"),
+            Ok(HostKeyDecision::Rejected)
+        ));
     }
 
     #[tokio::test]

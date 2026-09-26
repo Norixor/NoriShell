@@ -11,7 +11,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `kind` | `"dataSnapshot"` | 是 | 精确 operation 判别标签 |
-| `request` | `PluginDataSnapshotRequest` | 是 | 见上文字段约束与[DTO 类型](./types.zh-CN.md#分类数据-dtocore-api-188) |
+| `request` | `PluginDataSnapshotRequest` | 是 | 见上文字段约束与[DTO 类型](./types.zh-CN.md#分类数据-dtocore-api-189) |
 
 
 ## 成功返回
@@ -23,6 +23,8 @@
 | `keyPending` | typed value | 是 | Core 签发的事实；见 DTO 类型 |
 | `localCounts` | `PluginDataLocalCounts` | 是 | 本机主机、凭据、远程桌面与删除记录数量 |
 | `objects` | typed value | 是 | Core 签发的事实；见 DTO 类型 |
+
+对象描述的 `equalityTag` 不包含更新时间。判断完整快照是否相等时，还须比较对象标识、`deleted` 与 `updateTimeUnixMs`；相同内容但不同时间仍须经过合成流程对齐。
 
 ## 授权与状态
 

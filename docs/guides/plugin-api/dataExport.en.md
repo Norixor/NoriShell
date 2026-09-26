@@ -11,7 +11,7 @@ Use SDK `api_request(request_id, call_id, PluginApiOperation::DataExport { … }
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `kind` | `"dataExport"` | Yes | Exact operation discriminator |
-| `request` | `PluginDataExportRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-188) |
+| `request` | `PluginDataExportRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-189) |
 
 
 ## Completed value

@@ -10,6 +10,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { useRouteReveal } from "../routeReveal";
+import { onSavedConnectionsChanged } from "../saved-connections";
 
 import { sftpEntryIcon } from "../components/sftp/fileIcons";
 import NvxSftpPaneActionsMenu from "../components/sftp/NvxSftpPaneActionsMenu.vue";
@@ -2477,6 +2478,14 @@ watch([() => router.currentRoute.value.query.focusOperation, loading], async ([o
 }, { immediate: true });
 
 let removeToolListener: (() => void) | undefined;
+let removeSavedConnectionsListener: (() => void) | undefined;
+let hostsSequence = 0;
+async function refreshSavedHosts() {
+  const sequence = ++hostsSequence;
+  const nextHosts = await listHosts();
+  if (sftpViewMounted && sequence === hostsSequence) hosts.value = nextHosts;
+  return nextHosts;
+}
 let pageObserversActive = false;
 let pageObserverEpoch = 0;
 function startPageObservers() {
@@ -2504,18 +2513,27 @@ function stopPageObservers() {
   refreshTimer = null;
 }
 onMounted(async () => {
-  if (canUseDesktopCore()) {
-    try { removeToolListener = await onToolWindowChanged((kind) => { if (kind === "sftpFile") for (const pane of Object.values(paneStates)) refreshPane(pane); }); } catch { showOperationFailed(); }
-  }
   sftpViewMounted = true;
+  if (canUseDesktopCore()) {
+    try {
+      const stop = await onToolWindowChanged((kind) => { if (kind === "sftpFile") for (const pane of Object.values(paneStates)) refreshPane(pane); });
+      if (sftpViewMounted) removeToolListener = stop; else stop();
+    } catch { if (sftpViewMounted) showOperationFailed(); }
+    if (!sftpViewMounted) return;
+    try {
+      const stop = await onSavedConnectionsChanged(() => { void refreshSavedHosts().catch(() => undefined); });
+      if (sftpViewMounted) removeSavedConnectionsListener = stop; else stop();
+    } catch { /* Activation still refreshes saved Hosts. */ }
+  }
+  if (!sftpViewMounted) return;
   startPageObservers();
   try {
-    const [hostList] = await Promise.all([
-      listHosts(),
+    await Promise.all([
+      refreshSavedHosts(),
       refreshSnapshot(),
       initializeDefaultLocalPaneSafely(paneStates[localPaneId]!),
     ]);
-    hosts.value = hostList;
+    const hostList = hosts.value;
     const pane = paneStates[remotePaneId];
     if (pane?.endpoint.kind === "remote" && !pane.endpoint.hostId && hostList[0] && !pendingSftpPluginNavigations.value.length) {
       const existingSession = unclaimedSftpSessionForHost(hostList[0].hostId, true);
@@ -2535,6 +2553,7 @@ onMounted(async () => {
 onActivated(() => {
   if (!sftpViewMounted) return;
   startPageObservers();
+  void refreshSavedHosts().catch(() => undefined);
   if (navigationReady) {
     revealRoute();
     void refreshSnapshot().catch(() => undefined);
@@ -2560,6 +2579,7 @@ onDeactivated(() => {
 });
 onBeforeUnmount(() => {
   removeToolListener?.();
+  removeSavedConnectionsListener?.();
   sftpViewMounted = false;
   navigationReady = false;
   stopPageObservers();

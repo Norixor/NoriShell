@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NvxDesktopDisplaySettings from "../components/desktop/NvxDesktopDisplaySettings.vue";
 import DesktopView from "./DesktopView.vue";
 import { desktopEn } from "../locales/desktop";
-import type { DesktopSessionSummary } from "../core-api/generated/core-api";
+import type { DesktopProfile, DesktopSessionSummary } from "../core-api/generated/core-api";
 import type { DesktopHeaderController } from "../stores/workspaceTabs";
 
 const mocks = vi.hoisted(() => ({
@@ -14,7 +14,12 @@ const mocks = vi.hoisted(() => ({
   close: vi.fn(), disconnect: vi.fn(), invalidate: vi.fn(), remoteKey: vi.fn(),
   register: vi.fn(), sync: vi.fn(), tips: vi.fn(), windowAction: vi.fn(),
 }));
+const savedConnections = vi.hoisted(() => ({ changed: undefined as (() => void) | undefined }));
 vi.mock("../core-api/desktop-client", () => ({ desktopClient: mocks }));
+vi.mock("../saved-connections", () => ({ onSavedConnectionsChanged: vi.fn(async (callback: () => void) => {
+  savedConnections.changed = callback;
+  return () => { savedConnections.changed = undefined; };
+}) }));
 vi.mock("../stores/workspaceTabs", () => ({ useWorkspaceTabsStore: () => ({ registerDesktopController: mocks.register, syncDesktopState: mocks.sync }) }));
 vi.mock("../stores/tips", () => ({ useTipsStore: () => ({ show: mocks.tips }) }));
 vi.mock("../platform-window", () => ({ performWindowAction: mocks.windowAction }));
@@ -60,6 +65,7 @@ function mockEntry(wrapper: Awaited<ReturnType<typeof fixture>>) {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
+  savedConnections.changed = undefined;
   fullscreenElement = null;
   mocks.save.mockImplementation(async profile => ({ ...profile, revision: "2" }));
   mocks.disconnect.mockResolvedValue(undefined);
@@ -81,6 +87,37 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe("desktop workspace layout", () => {
+  it("refreshes saved profile names without remounting or reconnecting the active desktop", async () => {
+    const wrapper = await fixture();
+    const originalCanvas = wrapper.get("canvas").element;
+    const renamed = { ...session().profile, label: "Synced desktop" };
+    mocks.profiles.mockResolvedValue([renamed, { ...session("two").profile, label: "Added desktop" }]);
+    savedConnections.changed?.();
+    await flushPromises();
+    expect(wrapper.get("#desktop-profiles").text()).toContain("Synced desktop");
+    expect(wrapper.get("#desktop-profiles").text()).toContain("Added desktop");
+    expect(wrapper.get("canvas").element).toBe(originalCanvas);
+    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.disconnect).not.toHaveBeenCalled();
+    mocks.profiles.mockResolvedValue([]);
+    savedConnections.changed?.();
+    await flushPromises();
+    expect(wrapper.get("#desktop-profiles").text()).not.toContain("Synced desktop");
+  });
+
+  it("keeps the latest desktop profile read when an older one finishes late", async () => {
+    const wrapper = await fixture();
+    let finishOld!: (profiles: DesktopProfile[]) => void;
+    mocks.profiles.mockReturnValueOnce(new Promise((resolve) => { finishOld = resolve; }));
+    savedConnections.changed?.();
+    mocks.profiles.mockResolvedValueOnce([{ ...session().profile, label: "Latest" }]);
+    savedConnections.changed?.();
+    await flushPromises();
+    finishOld([{ ...session().profile, label: "Stale" }]);
+    await flushPromises();
+    expect(wrapper.get("#desktop-profiles").text()).toContain("Latest");
+    expect(wrapper.get("#desktop-profiles").text()).not.toContain("Stale");
+  });
   it("collapses and restores the saved desktops without replacing the display or changing the session", async () => {
     const wrapper = await fixture();
     const originalCanvas = wrapper.get("canvas").element;

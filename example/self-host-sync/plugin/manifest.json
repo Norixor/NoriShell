@@ -9,5 +9,5 @@
   "architectures": ["universal"],
   "capabilities": ["uiNavigation", "uiPage", "sshSync", "networkDomain", "storagePlugin"],
   "minimumAppVersion": "0.1.0",
-  "minimumCoreApiVersion": {"major": 1, "minor": 88}
+  "minimumCoreApiVersion": {"major": 1, "minor": 89}
 }

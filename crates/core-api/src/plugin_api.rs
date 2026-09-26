@@ -39,6 +39,9 @@ pub enum PluginApiOperation {
     DataCompose {
         request: crate::PluginDataComposeRequest,
     },
+    DataReview {
+        request: crate::PluginDataReviewRequest,
+    },
     DataApply {
         request: crate::PluginDataApplyRequest,
     },
@@ -226,6 +229,11 @@ pub enum PluginApiValue {
     },
     DataCompose {
         composed_handle: String,
+        objects: Vec<crate::PluginDataObjectDescriptor>,
+    },
+    DataReview {
+        composed_handle: String,
+        source: crate::PluginDataObjectSource,
         objects: Vec<crate::PluginDataObjectDescriptor>,
     },
     DataApply {

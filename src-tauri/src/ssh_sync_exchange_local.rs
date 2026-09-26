@@ -53,7 +53,9 @@ use norishell_ssh_profile_sync::{
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq as _;
-use tauri::{AppHandle, Manager as _, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter as _, Manager as _, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -67,7 +69,7 @@ use crate::{
         PortableUploadAttempt, PortableUploadAttemptState, PortableUploadCompletionProof,
         RestorePreview, SecureActionContext, SecureApplyApproval, SecureBackupSelection,
         SecureSelectionError, SecureSshSyncUi, SecureSyncDirection, SshSyncActionRevision,
-        SyncConflictReview, SyncDirectionReview, VerifiedAutomaticMergeApproval,
+        SyncConflictReview, SyncDataReview, SyncDirectionReview, VerifiedAutomaticMergeApproval,
     },
     vault_service::{VaultSecretInsert, VaultService},
 };
@@ -128,6 +130,7 @@ struct SecurePromptContent {
     difference_omitted_count: u32,
     related_forward_rule_labels: Vec<String>,
     data_apply_uploaded: bool,
+    data_review_choices: Vec<norishell_core_api::SshSyncSecureDataReviewChoice>,
 }
 
 struct PendingPrompt {
@@ -381,6 +384,7 @@ impl NoriShellSshSyncLocalAdapter {
             kind,
             SshSyncSecurePromptKind::ChooseSyncDirection
                 | SshSyncSecurePromptKind::ApproveDataApply
+                | SshSyncSecurePromptKind::ReviewDataChoices
                 | SshSyncSecurePromptKind::ResolveConflicts
                 | SshSyncSecurePromptKind::ApproveMergedDeletion
         );
@@ -410,6 +414,7 @@ impl NoriShellSshSyncLocalAdapter {
             difference_omitted_count: content.difference_omitted_count,
             related_forward_rule_labels: content.related_forward_rule_labels,
             data_apply_uploaded: content.data_apply_uploaded,
+            data_review_choices: content.data_review_choices,
         };
         let (sender, receiver) = oneshot::channel();
         self.state
@@ -1830,7 +1835,7 @@ impl NoriShellSshSyncLocalAdapter {
         let mut objects = PortableObjects::default();
         let mut secrets = Vec::new();
         let mut skipped_machine_bound = Vec::new();
-        let mut identity_credentials = BTreeMap::<String, Vec<PortableObjectId>>::new();
+        let mut identity_credentials = BTreeMap::<String, Vec<(u32, PortableObjectId)>>::new();
         let mut portable_credential_ids = BTreeMap::<String, PortableObjectId>::new();
         let mut credential_facts = BTreeMap::<String, CredentialRecord>::new();
         let mut identity_facts = BTreeMap::new();
@@ -1945,7 +1950,7 @@ impl NoriShellSshSyncLocalAdapter {
             identity_credentials
                 .entry(credential.identity_id.as_str().to_owned())
                 .or_default()
-                .push(portable.id);
+                .push((credential.priority, portable.id));
             objects.credentials.push(portable);
         }
 
@@ -1961,6 +1966,10 @@ impl NoriShellSshSyncLocalAdapter {
                 username: identity.username,
                 credential_ids: identity_credentials
                     .remove(&identity_key)
+                    .map(|mut credentials| {
+                        credentials.sort_unstable();
+                        credentials.into_iter().map(|(_, id)| id).collect()
+                    })
                     .unwrap_or_default(),
             });
         }
@@ -3379,6 +3388,18 @@ impl NoriShellSshSyncLocalAdapter {
         self.reconcile_restore_sagas_for_plugin(None)
     }
 
+    fn notify_saved_connections_changed(&self) {
+        // Invalidate projections after the metadata commit, even if a later sync
+        // checkpoint fails. A renderer notification cannot roll back committed data.
+        if let Some(app) = &self.app
+            && app
+                .emit_to("main", "saved-connections-changed", ())
+                .is_err()
+        {
+            eprintln!("SSH sync committed: saved connection notification unavailable");
+        }
+    }
+
     fn apply_restore_plan(
         &self,
         bundle: &PortableBundleV1,
@@ -3453,13 +3474,16 @@ impl NoriShellSshSyncLocalAdapter {
             repository.commit_ssh_sync_restore_plan_with_item_times(&plan, &item_times)
         });
         match committed {
-            Ok(_) => Ok(ApplyResult {
-                desktop_profile_count: bounded_len(bundle.objects.desktop_profiles.len())?,
-                host_count: u32::try_from(bundle.objects.hosts.len()).unwrap_or(u32::MAX),
-                credential_count: u32::try_from(bundle.objects.credentials.len())
-                    .unwrap_or(u32::MAX),
-                conflict_count: 0,
-            }),
+            Ok(_) => {
+                self.notify_saved_connections_changed();
+                Ok(ApplyResult {
+                    desktop_profile_count: bounded_len(bundle.objects.desktop_profiles.len())?,
+                    host_count: u32::try_from(bundle.objects.hosts.len()).unwrap_or(u32::MAX),
+                    credential_count: u32::try_from(bundle.objects.credentials.len())
+                        .unwrap_or(u32::MAX),
+                    conflict_count: 0,
+                })
+            }
             Err(AppPersistenceError::RestoreCommitUnknown) => Err(PortableStoreError::Internal(
                 "local.apply_restore_plan.internal02",
             )),
@@ -3480,6 +3504,15 @@ impl NoriShellSshSyncLocalAdapter {
         action_fence: &ActionFence,
     ) -> Result<ApplyResult, PortableStoreError> {
         self.reconcile_restore_sagas()?;
+        if let Ok(current) = self
+            .hosts
+            .with_ssh_sync_repository(|repository| repository.ssh_sync_change_fence())
+        {
+            eprintln!(
+                "SSH sync restore after saga reconciliation: expected generation={}, current generation={}",
+                change_fence.business_generation, current.business_generation,
+            );
+        }
         let create = delta.creates.as_ref().ok_or(PortableStoreError::Internal(
             "local.apply_owned_reconcile.internal01",
         ))?;
@@ -3519,8 +3552,27 @@ impl NoriShellSshSyncLocalAdapter {
                     change_fence,
                 )
             })
-            .map_err(|error| map_store_error_at("local.restore.begin", error))?;
+            .map_err(|error| {
+                let (kind, _) = error.safe_diagnostic();
+                let current = self
+                    .hosts
+                    .with_ssh_sync_repository(|repository| repository.ssh_sync_change_fence());
+                match current {
+                    Ok(current) => eprintln!(
+                        "SSH sync restore begin rejected ({kind}): expected generation={}, current generation={}",
+                        change_fence.business_generation,
+                        current.business_generation,
+                    ),
+                    Err(_) => eprintln!("SSH sync restore begin rejected ({kind}): fence read unavailable"),
+                }
+                map_store_error_at("local.restore.begin", error)
+            })?;
+        eprintln!(
+            "SSH sync restore saga begun: generation={}",
+            begun.change_fence.business_generation,
+        );
         if !action_fence() {
+            eprintln!("SSH sync restore rejected: action fence after saga begin");
             self.reconcile_restore_sagas()?;
             return Err(PortableStoreError::Stale);
         }
@@ -3540,6 +3592,7 @@ impl NoriShellSshSyncLocalAdapter {
         }
         let owner = delta.owner.clone();
         if !action_fence() {
+            eprintln!("SSH sync restore rejected: action fence before metadata commit");
             self.reconcile_restore_sagas()?;
             return Err(PortableStoreError::Stale);
         }
@@ -3553,6 +3606,7 @@ impl NoriShellSshSyncLocalAdapter {
         });
         match committed {
             Ok(_) => {
+                self.notify_saved_connections_changed();
                 let _ = self.reconcile_vault_gc(&owner);
                 Ok(ApplyResult {
                     desktop_profile_count: bounded_len(bundle.objects.desktop_profiles.len())?,
@@ -3562,6 +3616,19 @@ impl NoriShellSshSyncLocalAdapter {
                 })
             }
             Err(error) => {
+                let (kind, _) = error.safe_diagnostic();
+                match self
+                    .hosts
+                    .with_ssh_sync_repository(|repository| repository.ssh_sync_change_fence())
+                {
+                    Ok(current) => eprintln!(
+                        "SSH sync restore metadata commit rejected ({kind}): expected generation={}, current generation={}",
+                        begun.change_fence.business_generation, current.business_generation,
+                    ),
+                    Err(_) => eprintln!(
+                        "SSH sync restore metadata commit rejected ({kind}): fence read unavailable"
+                    ),
+                }
                 self.reconcile_restore_sagas()?;
                 Err(map_store_error_at("local.restore.commit", error))
             }
@@ -3726,8 +3793,16 @@ impl NoriShellSshSyncLocalAdapter {
             .with_ssh_sync_repository(|repository| repository.ssh_sync_change_fence())
             .map_err(|error| map_store_error_at("local.stage_restore_bundle", error))?;
         if current_fence != change_fence {
+            eprintln!(
+                "SSH sync restore staging changed: expected generation={}, current generation={}",
+                change_fence.business_generation, current_fence.business_generation,
+            );
             return Err(PortableStoreError::Stale);
         }
+        eprintln!(
+            "SSH sync restore staged: generation={}",
+            change_fence.business_generation,
+        );
         let mut state = self
             .state
             .lock()
@@ -3767,6 +3842,7 @@ impl NoriShellSshSyncLocalAdapter {
         fence: ActionFence,
     ) -> Result<ApplyResult, PortableStoreError> {
         if !fence() {
+            eprintln!("SSH sync restore rejected: action fence before apply");
             return Err(PortableStoreError::Stale);
         }
         if pending.bundle.preferences.is_some()
@@ -3776,14 +3852,18 @@ impl NoriShellSshSyncLocalAdapter {
                 "local.apply_pending_restore.01",
             ));
         }
-        let item_times =
-            self.local_item_time_overrides_for_bundle(&pending.bundle, &pending.owner, &[])?;
+        let item_times = self
+            .local_item_time_overrides_for_bundle(&pending.bundle, &pending.owner, &[])
+            .inspect_err(|_| {
+                eprintln!("SSH sync restore rejected: item time preparation");
+            })?;
         (|| {
             if pending.reconcile_noop {
-                let change_fence = pending
-                    .change_fence
-                    .as_ref()
-                    .ok_or(PortableStoreError::Stale)?;
+                eprintln!("SSH sync restore apply path: no content changes");
+                let change_fence = pending.change_fence.as_ref().ok_or_else(|| {
+                    eprintln!("SSH sync restore rejected: no-op change fence missing");
+                    PortableStoreError::Stale
+                })?;
                 if let Some(memberships) = pending.scope_memberships.as_deref() {
                     let key = Self::profile_key(
                         &pending.owner.plugin_id,
@@ -3796,8 +3876,12 @@ impl NoriShellSshSyncLocalAdapter {
                             repository.get_ssh_sync_profile_state(&key)
                         })
                         .map_err(|error| map_store_error_at("local.apply_pending_restore", error))?
-                        .ok_or(PortableStoreError::Stale)?;
+                        .ok_or_else(|| {
+                            eprintln!("SSH sync restore rejected: no-op profile missing");
+                            PortableStoreError::Stale
+                        })?;
                     if !fence() {
+                        eprintln!("SSH sync restore rejected: no-op action fence before scope");
                         return Err(PortableStoreError::Stale);
                     }
                     self.hosts
@@ -3811,6 +3895,19 @@ impl NoriShellSshSyncLocalAdapter {
                             )
                         })
                         .map_err(|error| {
+                            let (kind, _) = error.safe_diagnostic();
+                            match self.hosts.with_ssh_sync_repository(|repository| {
+                                repository.ssh_sync_change_fence()
+                            }) {
+                                Ok(current) => eprintln!(
+                                    "SSH sync restore no-op scope rejected ({kind}): expected generation={}, current generation={}",
+                                    change_fence.business_generation,
+                                    current.business_generation,
+                                ),
+                                Err(_) => eprintln!(
+                                    "SSH sync restore no-op scope rejected ({kind}): fence read unavailable"
+                                ),
+                            }
                             map_store_error_at("local.apply_pending_restore", error)
                         })?;
                 } else {
@@ -3820,6 +3917,9 @@ impl NoriShellSshSyncLocalAdapter {
                         &pending.owner.profile_id,
                     )?;
                     if !fence() {
+                        eprintln!(
+                            "SSH sync restore rejected: no-op action fence before item times"
+                        );
                         return Err(PortableStoreError::Stale);
                     }
                     self.hosts
@@ -3831,6 +3931,19 @@ impl NoriShellSshSyncLocalAdapter {
                             )
                         })
                         .map_err(|error| {
+                            let (kind, _) = error.safe_diagnostic();
+                            match self.hosts.with_ssh_sync_repository(|repository| {
+                                repository.ssh_sync_change_fence()
+                            }) {
+                                Ok(current) => eprintln!(
+                                    "SSH sync restore no-op item times rejected ({kind}): expected generation={}, current generation={}",
+                                    change_fence.business_generation,
+                                    current.business_generation,
+                                ),
+                                Err(_) => eprintln!(
+                                    "SSH sync restore no-op item times rejected ({kind}): fence read unavailable"
+                                ),
+                            }
                             map_store_error_at("local.apply_pending_restore", error)
                         })?;
                 }
@@ -4103,6 +4216,80 @@ impl SecureSshSyncUi for NoriShellSshSyncLocalAdapter {
                 return Err(SecureSelectionError::Unavailable);
             }
             self.issue_apply_approval(owner, fence, Some(review.restore_handle))
+        })
+    }
+
+    fn review_data_choices(
+        &self,
+        context: SecureActionContext,
+        mut review: SyncDataReview,
+    ) -> LocalFuture<
+        '_,
+        Result<
+            (
+                norishell_core_api::PluginDataObjectSource,
+                SecureApplyApproval,
+            ),
+            SecureSelectionError,
+        >,
+    > {
+        Box::pin(async move {
+            use norishell_core_api::PluginDataObjectSource;
+            let owner = sync_owner(&context);
+            let fence = context.fence.clone();
+            if review.local_choice.view.source != PluginDataObjectSource::Local
+                || review.remote_choice.view.source != PluginDataObjectSource::Remote
+            {
+                return Err(SecureSelectionError::Unavailable);
+            }
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.prune_expired();
+                for choice in [&mut review.local_choice, &mut review.remote_choice] {
+                    let pending = state
+                        .pending_restores
+                        .get(choice.restore_handle.token())
+                        .filter(|pending| pending.owner == owner)
+                        .ok_or(SecureSelectionError::Unavailable)?;
+                    choice.view.local.related_forward_rule_labels =
+                        pending.related_forward_rule_labels.clone();
+                }
+            }
+            let decision = self
+                .prompt(
+                    context,
+                    SshSyncSecurePromptKind::ReviewDataChoices,
+                    SecurePromptContent {
+                        host_count: review.local_before.host_count,
+                        credential_count: review.local_before.credential_count,
+                        desktop_profile_count: review.local_before.desktop_profile_count,
+                        remote_host_count: review.remote_before.host_count,
+                        remote_credential_count: review.remote_before.credential_count,
+                        remote_desktop_profile_count: review.remote_before.desktop_profile_count,
+                        data_review_choices: vec![
+                            review.local_choice.view,
+                            review.remote_choice.view,
+                        ],
+                        ..SecurePromptContent::default()
+                    },
+                )
+                .await?;
+            let (source, handle) = match decision.decision {
+                SshSyncSecureDecision::KeepLocal => (
+                    PluginDataObjectSource::Local,
+                    review.local_choice.restore_handle,
+                ),
+                SshSyncSecureDecision::UseRemote => (
+                    PluginDataObjectSource::Remote,
+                    review.remote_choice.restore_handle,
+                ),
+                _ => return Err(SecureSelectionError::Unavailable),
+            };
+            self.issue_apply_approval(owner, fence, Some(handle))
+                .map(|approval| (source, approval))
         })
     }
 
@@ -5031,6 +5218,62 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
         })
     }
 
+    fn validate_staged_restore(
+        &self,
+        plugin_id: String,
+        signer_fingerprint_sha256: String,
+        profile_id: String,
+        handle: PendingRestoreHandle,
+        approval: SecureApplyApproval,
+    ) -> LocalFuture<'_, Result<(), PortableStoreError>> {
+        Box::pin(async move {
+            let owner = SyncOwner {
+                plugin_id,
+                signer_fingerprint_sha256,
+                profile_id,
+            };
+            let (change_fence, action_fence) = {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let pending = state
+                    .pending_restores
+                    .get(handle.token())
+                    .ok_or(PortableStoreError::Stale)?;
+                let approved = state
+                    .apply_approvals
+                    .get(approval.token())
+                    .ok_or(PortableStoreError::Stale)?;
+                let now = Instant::now();
+                if pending.handle != handle
+                    || pending.owner != owner
+                    || pending.expires_at <= now
+                    || approved.owner != owner
+                    || approved.restore_handle.as_ref() != Some(&handle)
+                    || approved.expires_at <= now
+                {
+                    return Err(PortableStoreError::Stale);
+                }
+                (
+                    pending.change_fence.ok_or(PortableStoreError::Stale)?,
+                    approved.fence.clone(),
+                )
+            };
+            if !action_fence() {
+                return Err(PortableStoreError::Stale);
+            }
+            let current_fence = self
+                .hosts
+                .with_ssh_sync_repository(|repository| repository.ssh_sync_change_fence())
+                .map_err(|error| map_store_error_at("local.validate_staged_restore", error))?;
+            if current_fence != change_fence || !action_fence() {
+                return Err(PortableStoreError::Stale);
+            }
+            Ok(())
+        })
+    }
+
     fn apply_staged_restore(
         &self,
         plugin_id: String,
@@ -5055,7 +5298,10 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
                 let pending = state
                     .pending_restores
                     .remove(handle.token())
-                    .ok_or(PortableStoreError::Stale)?;
+                    .ok_or_else(|| {
+                        eprintln!("SSH sync restore rejected: staged lease missing or expired");
+                        PortableStoreError::Stale
+                    })?;
                 state.pending_restore_plaintext_bytes = state
                     .pending_restore_plaintext_bytes
                     .saturating_sub(pending.plaintext_bytes);
@@ -5071,13 +5317,18 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
                     && !pending.reconcile_noop
                     && portable_bundle_sha256(&pending.bundle)? != pending.bundle_sha256
             {
+                eprintln!("SSH sync restore rejected: staged lease identity or bundle");
                 return Err(PortableStoreError::Stale);
             }
-            let approved = approved.ok_or(PortableStoreError::Stale)?;
+            let approved = approved.ok_or_else(|| {
+                eprintln!("SSH sync restore rejected: approval lease missing or expired");
+                PortableStoreError::Stale
+            })?;
             if approved.owner != owner
                 || !(approved.fence)()
                 || approved.restore_handle.as_ref() != Some(&handle)
             {
+                eprintln!("SSH sync restore rejected: approval identity, action, or handle");
                 return Err(PortableStoreError::Stale);
             }
             self.apply_pending_restore(pending, approved.fence).await
@@ -6495,6 +6746,23 @@ fn validate_decision(
         return Err(Uuid::new_v4().to_string());
     }
     let decision_allowed = match prompt.kind {
+        SshSyncSecurePromptKind::ReviewDataChoices => {
+            let source = match request.decision {
+                SshSyncSecureDecision::KeepLocal => {
+                    Some(norishell_core_api::PluginDataObjectSource::Local)
+                }
+                SshSyncSecureDecision::UseRemote => {
+                    Some(norishell_core_api::PluginDataObjectSource::Remote)
+                }
+                _ => None,
+            };
+            source.is_some_and(|source| {
+                prompt
+                    .data_review_choices
+                    .iter()
+                    .any(|choice| choice.source == source)
+            })
+        }
         SshSyncSecurePromptKind::ResolveConflicts
         | SshSyncSecurePromptKind::ChooseSyncDirection => matches!(
             request.decision,
@@ -7324,6 +7592,250 @@ mod tests {
     }
 
     #[test]
+    fn restored_multi_identity_password_order_preserves_portable_content() {
+        const VAULT_PASSWORD: &[u8] = b"portable-order-vault-password";
+        const PLUGIN_ID: &str = "org.example.credential-order";
+        const SIGNER: &str = "a3b1c5d7e9f1023456789abcdef0123456789abcdef0123456789abcdef01234";
+
+        let source_directory = tempfile::tempdir().expect("source directory");
+        let source_hosts = HostService::start(source_directory.path()).expect("source hosts");
+        let source_vault = VaultService::start(source_directory.path());
+        source_vault.create(VAULT_PASSWORD).expect("source vault");
+        let mut host_ids = BTreeSet::new();
+        let mut credential_ids = BTreeSet::new();
+        for (identity_index, priorities) in [(0, [0, 1]), (1, [1, 0])] {
+            let identity = source_hosts
+                .with_ssh_sync_repository(|r| {
+                    r.create_identity(&format!("Identity {identity_index}"), Some("deploy"))
+                })
+                .expect("source identity");
+            for (credential_index, priority) in priorities.into_iter().enumerate() {
+                let operation = OperationId::new();
+                let credential = source_hosts
+                    .with_ssh_sync_repository(|r| {
+                        r.begin_credential_import(
+                            &operation,
+                            &format!("password-{identity_index}-{credential_index}"),
+                            &identity.identity_id,
+                            CredentialKind::Password,
+                            priority,
+                            &format!("Password {identity_index}-{credential_index}"),
+                            false,
+                        )
+                    })
+                    .expect("begin password import");
+                let CredentialRecordDetails::Password { secret_ref_id } = &credential.details
+                else {
+                    panic!("expected password credential");
+                };
+                source_vault
+                    .insert_secrets(&[VaultSecretInsert {
+                        secret_ref_id: secret_ref_id.clone(),
+                        kind: SecretKind::Password,
+                        value: Zeroizing::new(
+                            format!("secret-{identity_index}-{credential_index}").into_bytes(),
+                        ),
+                    }])
+                    .expect("store password");
+                source_hosts
+                    .with_ssh_sync_repository(|r| {
+                        r.mark_credential_import_ready(
+                            &credential.credential_ref_id,
+                            &operation,
+                            credential.state_version,
+                            None,
+                            None,
+                        )
+                    })
+                    .expect("publish password");
+                credential_ids.insert(credential.credential_ref_id.as_str().to_owned());
+            }
+            let host = source_hosts
+                .with_ssh_sync_repository(|r| {
+                    r.create_host(
+                        &format!("Host {identity_index}"),
+                        &format!("host-{identity_index}.example"),
+                        22,
+                        Some("deploy"),
+                        Some(&identity.identity_id),
+                        false,
+                    )
+                })
+                .expect("source host");
+            host_ids.insert(host.host_id.as_str().to_owned());
+        }
+        let source_adapter =
+            NoriShellSshSyncLocalAdapter::new_for_store_test(source_hosts, source_vault);
+        let source = source_adapter
+            .build_snapshot_with_ids(
+                BackupSelection {
+                    desktop_profile_ids: BTreeSet::new(),
+                    host_ids,
+                    credential_ids,
+                },
+                1,
+                None,
+            )
+            .expect("source snapshot");
+        assert_eq!(source.bundle.objects.identities.len(), 2);
+        assert_eq!(source.bundle.objects.credentials.len(), 4);
+        let first_identity = source
+            .bundle
+            .objects
+            .identities
+            .iter()
+            .find(|identity| identity.label == "Identity 0")
+            .expect("first identity");
+        let [first, second] = first_identity.credential_ids.as_slice() else {
+            panic!("expected two credentials");
+        };
+        let profile_id = (0..128)
+            .map(|index| format!("profile-{index}"))
+            .find(|profile_id| {
+                let namespace = format!("{PLUGIN_ID}\0{SIGNER}\0{profile_id}");
+                let first_id = super::deterministic_credential_ref_id(&namespace, *first).unwrap();
+                let second_id =
+                    super::deterministic_credential_ref_id(&namespace, *second).unwrap();
+                first_id.as_str() > second_id.as_str()
+            })
+            .expect("find a target with the reverse local credential ID order");
+        let target_directory = tempfile::tempdir().expect("target directory");
+        let target_hosts = HostService::start(target_directory.path()).expect("target hosts");
+        let target_vault = VaultService::start(target_directory.path());
+        target_vault.create(VAULT_PASSWORD).expect("target vault");
+        let target_adapter =
+            NoriShellSshSyncLocalAdapter::new_for_store_test(target_hosts.clone(), target_vault);
+        let before = tauri::async_runtime::block_on(target_adapter.snapshot_current(
+            PLUGIN_ID.to_owned(),
+            SIGNER.to_owned(),
+            profile_id.clone(),
+            1,
+        ))
+        .expect("initialize target profile");
+        assert_eq!(before.credential_count, 0);
+        let mut expected = source.bundle;
+        expected.schema = BundleSchema::V6;
+        expected.preferences = None;
+        expected.preference_update_times.clear();
+        let sync_key = SyncKey::from_bytes([7; 32]);
+        let staged = tauri::async_runtime::block_on(target_adapter.stage_restore(
+            PLUGIN_ID.to_owned(),
+            SIGNER.to_owned(),
+            profile_id.clone(),
+            expected.clone(),
+            sync_key.clone(),
+        ))
+        .expect("stage restored bundle");
+        let fence_hosts = target_hosts.clone();
+        let fence: crate::ssh_sync_exchange::ActionFence = Arc::new(move || {
+            fence_hosts
+                .with_ssh_sync_repository(|r| r.ssh_sync_change_fence())
+                .is_ok()
+        });
+        let approval = target_adapter
+            .issue_apply_approval(
+                SyncOwner {
+                    plugin_id: PLUGIN_ID.to_owned(),
+                    signer_fingerprint_sha256: SIGNER.to_owned(),
+                    profile_id: profile_id.clone(),
+                },
+                fence,
+                Some(staged.handle.clone()),
+            )
+            .expect("approve restore");
+        let saved_handle = staged.handle.clone();
+        let saved_approval = approval.clone();
+        for _ in 0..2 {
+            tauri::async_runtime::block_on(target_adapter.validate_staged_restore(
+                PLUGIN_ID.to_owned(),
+                SIGNER.to_owned(),
+                profile_id.clone(),
+                saved_handle.clone(),
+                saved_approval.clone(),
+            ))
+            .expect("validation does not consume staged restore or approval");
+        }
+        assert!(matches!(
+            tauri::async_runtime::block_on(target_adapter.validate_staged_restore(
+                PLUGIN_ID.to_owned(),
+                SIGNER.to_owned(),
+                "another-profile".to_owned(),
+                saved_handle.clone(),
+                saved_approval.clone(),
+            )),
+            Err(crate::ssh_sync_exchange::PortableStoreError::Stale)
+        ));
+        let applied = tauri::async_runtime::block_on(target_adapter.apply_staged_restore(
+            PLUGIN_ID.to_owned(),
+            SIGNER.to_owned(),
+            profile_id.clone(),
+            staged.handle,
+            Some(approval),
+        ))
+        .expect("apply restored bundle");
+        assert!(matches!(
+            tauri::async_runtime::block_on(target_adapter.validate_staged_restore(
+                PLUGIN_ID.to_owned(),
+                SIGNER.to_owned(),
+                profile_id.clone(),
+                saved_handle,
+                saved_approval,
+            )),
+            Err(crate::ssh_sync_exchange::PortableStoreError::Stale)
+        ));
+        assert_eq!(applied.host_count, 2);
+        assert_eq!(applied.credential_count, 4);
+        let current = tauri::async_runtime::block_on(target_adapter.snapshot_current(
+            PLUGIN_ID.to_owned(),
+            SIGNER.to_owned(),
+            profile_id.clone(),
+            expected.revision,
+        ))
+        .expect("snapshot restored target");
+        let merged = tauri::async_runtime::block_on(target_adapter.prepare_local_merge(
+            PLUGIN_ID.to_owned(),
+            SIGNER.to_owned(),
+            profile_id,
+            expected.clone(),
+            current.bundle,
+        ))
+        .expect("merge restored snapshot");
+        let mut normalized_merged = merged;
+        let mut normalized_expected = expected;
+        normalized_merged.revision = 1;
+        normalized_expected.revision = 1;
+        normalized_merged.skipped_machine_bound.clear();
+        normalized_expected.skipped_machine_bound.clear();
+        assert!(
+            super::canonical_bundle_bytes(&normalized_merged).unwrap()
+                == super::canonical_bundle_bytes(&normalized_expected).unwrap(),
+            "restoring two identities and four passwords must preserve portable content"
+        );
+        let credentials_by_id = normalized_expected
+            .objects
+            .credentials
+            .iter()
+            .map(|credential| (credential.id, credential.label.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        for identity in &normalized_expected.objects.identities {
+            let labels = identity
+                .credential_ids
+                .iter()
+                .map(|id| credentials_by_id[id])
+                .collect::<Vec<_>>();
+            let expected = if identity.label == "Identity 0" {
+                vec!["Password 0-0", "Password 0-1"]
+            } else {
+                vec!["Password 1-1", "Password 1-0"]
+            };
+            assert_eq!(
+                labels, expected,
+                "portable order follows credential priority"
+            );
+        }
+    }
+
+    #[test]
     fn two_independent_stores_restore_password_metadata_with_the_same_vault_password() {
         const VAULT_PASSWORD: &[u8] = b"two-independent-vault-password";
         const WRONG_PASSWORD: &[u8] = b"different-vault-password";
@@ -7653,6 +8165,70 @@ mod tests {
                     == expected_applied_bundle.preference_update_times,
                 applied_snapshot.bundle.secrets == expected_applied_bundle.secrets,
             );
+
+            let no_op_bundle = tauri::async_runtime::block_on(target_adapter.snapshot_current(
+                PLUGIN_ID.to_owned(),
+                SIGNER.to_owned(),
+                PROFILE_ID.to_owned(),
+                1,
+            ))
+            .expect("snapshot an already restored target")
+            .bundle;
+            let no_op_restore = tauri::async_runtime::block_on(target_adapter.stage_restore(
+                PLUGIN_ID.to_owned(),
+                SIGNER.to_owned(),
+                PROFILE_ID.to_owned(),
+                no_op_bundle,
+                target_sync_key.clone(),
+            ))
+            .expect("stage equal portable content");
+            assert!(
+                target_adapter
+                    .state
+                    .lock()
+                    .expect("restore state")
+                    .pending_restores
+                    .get(no_op_restore.handle.token())
+                    .expect("staged no-op restore")
+                    .reconcile_noop,
+                "equal restored content should take the no-op apply path"
+            );
+            let no_op_approval = target_adapter
+                .issue_apply_approval(
+                    SyncOwner {
+                        plugin_id: PLUGIN_ID.to_owned(),
+                        signer_fingerprint_sha256: SIGNER.to_owned(),
+                        profile_id: PROFILE_ID.to_owned(),
+                    },
+                    Arc::new(|| true),
+                    Some(no_op_restore.handle.clone()),
+                )
+                .expect("approve equal content");
+            for _ in 0..2 {
+                tauri::async_runtime::block_on(target_adapter.profile_state(
+                    PLUGIN_ID.to_owned(),
+                    SIGNER.to_owned(),
+                    PROFILE_ID.to_owned(),
+                ))
+                .expect("recheck profile after approval");
+                tauri::async_runtime::block_on(target_adapter.snapshot_current(
+                    PLUGIN_ID.to_owned(),
+                    SIGNER.to_owned(),
+                    PROFILE_ID.to_owned(),
+                    1,
+                ))
+                .expect("recheck portable snapshot after approval");
+            }
+            let no_op_applied =
+                tauri::async_runtime::block_on(target_adapter.apply_staged_restore(
+                    PLUGIN_ID.to_owned(),
+                    SIGNER.to_owned(),
+                    PROFILE_ID.to_owned(),
+                    no_op_restore.handle,
+                    Some(no_op_approval),
+                ))
+                .expect("equal content remains eligible after repeated snapshot checks");
+            assert_eq!(no_op_applied.desktop_profile_count, 1);
 
             let target_snapshots = target_hosts
                 .list_ssh_sync_snapshots()
@@ -8077,6 +8653,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validate_staged_restore_rejects_changed_repository_without_consuming_leases() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let hosts = HostService::start(directory.path()).expect("hosts");
+        let vault = VaultService::start(directory.path());
+        vault.create(b"restore-validation-password").expect("vault");
+        let adapter = NoriShellSshSyncLocalAdapter::new_for_store_test(hosts.clone(), vault);
+        let owner = SyncOwner {
+            plugin_id: "org.example.sync".to_owned(),
+            signer_fingerprint_sha256: "a".repeat(64),
+            profile_id: "primary".to_owned(),
+        };
+        let current = adapter
+            .snapshot_current(
+                owner.plugin_id.clone(),
+                owner.signer_fingerprint_sha256.clone(),
+                owner.profile_id.clone(),
+                1,
+            )
+            .await
+            .expect("snapshot");
+        let staged = adapter
+            .stage_restore(
+                owner.plugin_id.clone(),
+                owner.signer_fingerprint_sha256.clone(),
+                owner.profile_id.clone(),
+                current.bundle,
+                SyncKey::from_bytes([7; 32]),
+            )
+            .await
+            .expect("stage");
+        let approval = adapter
+            .issue_apply_approval(
+                owner.clone(),
+                Arc::new(|| true),
+                Some(staged.handle.clone()),
+            )
+            .expect("approval");
+        adapter
+            .validate_staged_restore(
+                owner.plugin_id.clone(),
+                owner.signer_fingerprint_sha256.clone(),
+                owner.profile_id.clone(),
+                staged.handle.clone(),
+                approval.clone(),
+            )
+            .await
+            .expect("unchanged repository");
+        hosts
+            .with_ssh_sync_repository(|repository| {
+                repository.create_host("Later host", "later.example", 22, None, None, false)
+            })
+            .expect("concurrent local edit");
+        assert!(matches!(
+            adapter
+                .validate_staged_restore(
+                    owner.plugin_id.clone(),
+                    owner.signer_fingerprint_sha256.clone(),
+                    owner.profile_id.clone(),
+                    staged.handle.clone(),
+                    approval.clone(),
+                )
+                .await,
+            Err(crate::ssh_sync_exchange::PortableStoreError::Stale)
+        ));
+        {
+            let state = adapter.state.lock().expect("state");
+            assert!(state.pending_restores.contains_key(staged.handle.token()));
+            assert!(state.apply_approvals.contains_key(approval.token()));
+        }
+        assert!(matches!(
+            adapter
+                .apply_staged_restore(
+                    owner.plugin_id,
+                    owner.signer_fingerprint_sha256,
+                    owner.profile_id,
+                    staged.handle.clone(),
+                    Some(approval.clone()),
+                )
+                .await,
+            Err(crate::ssh_sync_exchange::PortableStoreError::Stale)
+        ));
+    }
+
+    async fn known_host_verification_preserves_staged_restore(separate_connection: bool) {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let hosts = HostService::start(directory.path()).expect("hosts");
+        let vault = VaultService::start(directory.path());
+        vault
+            .create(b"known-host-verification-password")
+            .expect("vault");
+        hosts
+            .with_ssh_sync_repository(|repository| {
+                repository.trust_known_host("verified.example", 22, "ssh-ed25519", b"key-a")
+            })
+            .expect("trust host key before staging");
+        let adapter = NoriShellSshSyncLocalAdapter::new_for_store_test(hosts.clone(), vault);
+        let owner = SyncOwner {
+            plugin_id: "org.example.sync".to_owned(),
+            signer_fingerprint_sha256: "a".repeat(64),
+            profile_id: "primary".to_owned(),
+        };
+        let before = adapter
+            .snapshot_current(
+                owner.plugin_id.clone(),
+                owner.signer_fingerprint_sha256.clone(),
+                owner.profile_id.clone(),
+                1,
+            )
+            .await
+            .expect("snapshot before verification");
+        let staged = adapter
+            .stage_restore(
+                owner.plugin_id.clone(),
+                owner.signer_fingerprint_sha256.clone(),
+                owner.profile_id.clone(),
+                before.bundle.clone(),
+                SyncKey::from_bytes([7; 32]),
+            )
+            .await
+            .expect("stage unchanged portable content");
+        assert!(
+            adapter
+                .state
+                .lock()
+                .expect("restore state")
+                .pending_restores
+                .get(staged.handle.token())
+                .expect("staged restore")
+                .reconcile_noop
+        );
+        let approval = adapter
+            .issue_apply_approval(
+                owner.clone(),
+                Arc::new(|| true),
+                Some(staged.handle.clone()),
+            )
+            .expect("approval");
+        let staged_fence = hosts
+            .with_ssh_sync_repository(|repository| repository.ssh_sync_change_fence())
+            .expect("staged fence");
+        let verifier = if separate_connection {
+            HostService::start(directory.path()).expect("second repository connection")
+        } else {
+            hosts.clone()
+        };
+        verifier
+            .with_ssh_sync_repository(|repository| {
+                repository.record_known_host_verified(
+                    "verified.example",
+                    22,
+                    "ssh-ed25519",
+                    b"key-a",
+                )
+            })
+            .expect("background host key verification");
+        let changed_fence = hosts
+            .with_ssh_sync_repository(|repository| repository.ssh_sync_change_fence())
+            .expect("fence after verification");
+        assert_eq!(staged_fence, changed_fence);
+        let after = adapter
+            .snapshot_current(
+                owner.plugin_id.clone(),
+                owner.signer_fingerprint_sha256.clone(),
+                owner.profile_id.clone(),
+                1,
+            )
+            .await
+            .expect("snapshot after verification");
+        assert_eq!(
+            super::canonical_bundle_bytes(&before.bundle).expect("before bytes"),
+            super::canonical_bundle_bytes(&after.bundle).expect("after bytes"),
+            "host key verification must not change portable SSH sync content"
+        );
+        adapter
+            .apply_staged_restore(
+                owner.plugin_id,
+                owner.signer_fingerprint_sha256,
+                owner.profile_id,
+                staged.handle,
+                Some(approval),
+            )
+            .await
+            .expect("unrelated host key verification must not stale restore");
+    }
+
+    #[tokio::test]
+    async fn known_host_verification_does_not_stale_restore_on_either_connection() {
+        for separate_connection in [false, true] {
+            known_host_verification_preserves_staged_restore(separate_connection).await;
+        }
+    }
+
+    #[tokio::test]
     async fn no_op_restore_accepts_action_fence_that_reads_repository() {
         let directory = tempfile::tempdir().expect("tempdir");
         let hosts = HostService::start(directory.path()).expect("hosts");
@@ -8292,6 +9061,7 @@ mod tests {
             difference_omitted_count: 0,
             related_forward_rule_labels: Vec::new(),
             data_apply_uploaded: false,
+            data_review_choices: Vec::new(),
         };
         let valid = SshSyncSecureDecisionRequest {
             selected_desktop_profile_ids: Vec::new(),
@@ -8449,6 +9219,48 @@ mod tests {
                 .is_err()
             );
         }
+
+        let projection = norishell_core_api::SshSyncSecureDataReviewProjection {
+            host_count: 0,
+            credential_count: 0,
+            desktop_profile_count: 0,
+            delete_count: 0,
+            differences: Vec::new(),
+            difference_total_count: 0,
+            difference_omitted_count: 0,
+            related_forward_rule_labels: Vec::new(),
+        };
+        let review = SshSyncSecurePrompt {
+            kind: SshSyncSecurePromptKind::ReviewDataChoices,
+            data_review_choices: vec![norishell_core_api::SshSyncSecureDataReviewChoice {
+                source: norishell_core_api::PluginDataObjectSource::Remote,
+                upload_required: false,
+                local: projection.clone(),
+                remote: projection,
+            }],
+            ..conflict.clone()
+        };
+        assert!(validate_decision(&review, &apply_request).is_err());
+        assert!(
+            validate_decision(
+                &review,
+                &SshSyncSecureDecisionRequest {
+                    decision: SshSyncSecureDecision::UseRemote,
+                    ..apply_request.clone()
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_decision(
+                &review,
+                &SshSyncSecureDecisionRequest {
+                    decision: SshSyncSecureDecision::KeepLocal,
+                    ..apply_request.clone()
+                }
+            )
+            .is_err()
+        );
 
         let reset = SshSyncSecurePrompt {
             desktop_profiles: Vec::new(),

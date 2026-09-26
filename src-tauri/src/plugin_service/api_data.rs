@@ -50,6 +50,7 @@ impl PluginService {
                 operation,
                 PluginApiOperation::DataSnapshot { .. }
                     | PluginApiOperation::DataInspect { .. }
+                    | PluginApiOperation::DataReview { .. }
                     | PluginApiOperation::DataApply { .. }
                     | PluginApiOperation::DataExport { .. }
             )
@@ -234,6 +235,70 @@ impl PluginService {
                     objects,
                 })
             }
+            PluginApiOperation::DataReview { request } => {
+                let local = states.get_snapshot(
+                    owner,
+                    &request.profile_id,
+                    &request.local_snapshot_handle,
+                    current,
+                )?;
+                let remote = states.get_inspection(
+                    owner,
+                    &request.profile_id,
+                    &request.remote_inspection_handle,
+                    current,
+                )?;
+                let base = blobs.get_receipt(
+                    owner,
+                    &request.profile_id,
+                    &request.base_receipt_handle,
+                    current,
+                )?;
+                let local_choice = states.get_composed(
+                    owner,
+                    &request.profile_id,
+                    &request.local_composed_handle,
+                    current,
+                )?;
+                let remote_choice = states.get_composed(
+                    owner,
+                    &request.profile_id,
+                    &request.remote_composed_handle,
+                    current,
+                )?;
+                if local.categories != request.categories || remote.categories != request.categories
+                {
+                    return Err(PluginApiErrorCode::InvalidRequest);
+                }
+                let data_owner_sha256 = local.data_owner_sha256.clone();
+                let (chosen, source) = broker
+                    .data_review_choices(
+                        plugin_id,
+                        &data_owner_sha256,
+                        &request.profile_id,
+                        local,
+                        remote,
+                        &base,
+                        local_choice,
+                        remote_choice,
+                        &request.categories,
+                        current,
+                    )
+                    .await
+                    .map_err(map_data_error)?;
+                let chosen = Arc::new(chosen);
+                let objects = describe(
+                    broker
+                        .data_describe_composed(&chosen)
+                        .map_err(map_data_error)?,
+                );
+                let handle = states.insert_composed(owner, &request.profile_id, chosen, current)?;
+                Ok(PluginApiValue::DataReview {
+                    composed_handle: handle,
+                    source,
+                    objects,
+                })
+            }
             PluginApiOperation::DataApply { request } => {
                 let expected = states.get_snapshot(
                     owner,
@@ -267,6 +332,14 @@ impl PluginService {
                         &exported.base_receipt_handle,
                         current,
                     )?;
+                    verify_reviewed_apply_source(
+                        composed
+                            .reviewed
+                            .as_ref()
+                            .map(|reviewed| &reviewed.base_receipt),
+                        Some(&base),
+                        &authoritative,
+                    )?;
                     if exported.source_handle != request.composed_handle
                         || exported.blob.source_remote_exchange_sha256.as_deref()
                             != Some(composed.remote.exchange_sha256.as_str())
@@ -274,19 +347,29 @@ impl PluginService {
                         return Err(PluginApiErrorCode::Revoked);
                     }
                     verify_upload_receipt(&base, &authoritative, &exported.blob)?;
-                } else if authoritative.method != "GET"
-                    || authoritative.status != 200
-                    || authoritative.endpoint_origin != composed.remote.remote_origin
-                    || authoritative.resource_url != composed.remote.remote_resource_url
-                    || authoritative.response_body_sha256.as_deref()
-                        != Some(composed.remote.exchange_sha256.as_str())
-                    || authoritative.response_revision != Some(composed.remote.binding.revision)
-                    || canonical_bundle_bytes(&composed.bundle)
-                        .map_err(|_| PluginApiErrorCode::RemoteDataInvalid)?
-                        != canonical_bundle_bytes(&composed.remote.bundle)
+                } else {
+                    if authoritative.method != "GET"
+                        || authoritative.status != 200
+                        || authoritative.endpoint_origin != composed.remote.remote_origin
+                        || authoritative.resource_url != composed.remote.remote_resource_url
+                        || authoritative.response_body_sha256.as_deref()
+                            != Some(composed.remote.exchange_sha256.as_str())
+                        || authoritative.response_revision != Some(composed.remote.binding.revision)
+                        || canonical_bundle_bytes(&composed.bundle)
                             .map_err(|_| PluginApiErrorCode::RemoteDataInvalid)?
-                {
-                    return Err(PluginApiErrorCode::RemoteDataInvalid);
+                            != canonical_bundle_bytes(&composed.remote.bundle)
+                                .map_err(|_| PluginApiErrorCode::RemoteDataInvalid)?
+                    {
+                        return Err(PluginApiErrorCode::RemoteDataInvalid);
+                    }
+                    verify_reviewed_apply_source(
+                        composed
+                            .reviewed
+                            .as_ref()
+                            .map(|reviewed| &reviewed.base_receipt),
+                        None,
+                        &authoritative,
+                    )?;
                 }
                 let receipt = Arc::new(
                     broker
@@ -614,6 +697,17 @@ fn verify_upload_receipt(
     }
 }
 
+fn verify_reviewed_apply_source(
+    reviewed_base: Option<&NetworkReceipt>,
+    upload_base: Option<&NetworkReceipt>,
+    authoritative: &NetworkReceipt,
+) -> Result<(), PluginApiErrorCode> {
+    if reviewed_base.is_some_and(|reviewed| reviewed != upload_base.unwrap_or(authoritative)) {
+        return Err(PluginApiErrorCode::Revoked);
+    }
+    Ok(())
+}
+
 fn describe_ref(items: &[DataObjectDescriptor]) -> Vec<PluginDataObjectDescriptor> {
     items
         .iter()
@@ -685,6 +779,10 @@ fn map_data_error(error: BrokerError) -> PluginApiErrorCode {
             PluginApiErrorCode::Conflict
         }
         BrokerError::LocalStateChanged => PluginApiErrorCode::LocalStateChanged,
+        BrokerError::LocalStateChangedAt(code) => {
+            eprintln!("plugin data operation rejected with Core diagnostic {code}");
+            PluginApiErrorCode::LocalStateChanged
+        }
         BrokerError::OwnerConflict => PluginApiErrorCode::OwnerConflict,
         BrokerError::KeyBindingConflict => PluginApiErrorCode::KeyBindingConflict,
         BrokerError::RevisionExhausted => PluginApiErrorCode::RevisionExhausted,
@@ -766,6 +864,18 @@ mod tests {
             response_blob_handle: None,
         };
         assert_eq!(verify_upload_receipt(&base, &upload, &exported), Ok(()));
+        assert_eq!(
+            verify_reviewed_apply_source(Some(&base), Some(&base), &upload),
+            Ok(())
+        );
+        assert_eq!(
+            verify_reviewed_apply_source(Some(&base), None, &base),
+            Ok(())
+        );
+        assert_eq!(
+            verify_reviewed_apply_source(Some(&base), None, &upload),
+            Err(PluginApiErrorCode::Revoked)
+        );
         upload.resource_url = "https://sync.example/other?profile=primary".to_owned();
         assert_eq!(
             verify_upload_receipt(&base, &upload, &exported),

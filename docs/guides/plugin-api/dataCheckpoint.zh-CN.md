@@ -11,7 +11,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `kind` | `"dataCheckpoint"` | 是 | 精确 operation 判别标签 |
-| `request` | `PluginDataCheckpointRequest` | 是 | 见上文字段约束与[DTO 类型](./types.zh-CN.md#分类数据-dtocore-api-188) |
+| `request` | `PluginDataCheckpointRequest` | 是 | 见上文字段约束与[DTO 类型](./types.zh-CN.md#分类数据-dtocore-api-189) |
 
 
 ## 成功返回
@@ -22,6 +22,8 @@
 | `syncedAtUnixMs` | typed value | 是 | Core 签发的事实；见 DTO 类型 |
 
 上传路径还应提交基线 GET 收据与 `exportHandle`，并提供权威 PUT 收据。下载路径省略这两项，提供本机应用收据。若新读取的本机快照与已认证的 GET200 检查结果在选定范围内一致，`sourceHandle` 与 `expectedLocalSnapshotHandle` 均指向该快照，同时提交 `remoteInspectionHandle` 和 GET 收据，省略导出、基线和应用句柄。Core 再次检查本机状态、精确 GET 资源、密文摘要和内容一致性后建立基线。HTTP 结果不确定时不得推进基线。
+
+内容一致性包含对象更新时间与删除状态；仅 `equalityTag` 相等不足以进入相等快照路径。应用与检查点使用同一业务内容摘要，排除包 revision 和仅描述源设备的跳过提示，仍校验对象内容、引用关系与更新时间。
 
 ## 授权与状态
 

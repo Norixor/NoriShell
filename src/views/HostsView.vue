@@ -13,6 +13,7 @@ import type { HostCatalogEntry, HostGroupSummary, HostSummary, HostTagSummary, I
 import { useTipsStore } from "../stores/tips";
 import { openToolWindow, onToolWindowChanged } from "../tool-windows";
 import { useRouteReveal } from "../routeReveal";
+import { onSavedConnectionsChanged } from "../saved-connections";
 
 const { t } = useI18n();
 
@@ -156,21 +157,25 @@ const identityOptions = computed(() => [
   })),
 ]);
 
+let refreshSequence = 0;
 async function refresh() {
   if (!canUseDesktopCore()) return;
+  const sequence = ++refreshSequence;
   loading.value = true;
   loadFailed.value = false;
   try {
-    [catalog.value, groups.value, tags.value, identities.value] = await Promise.all([
+    const [nextCatalog, nextGroups, nextTags, nextIdentities] = await Promise.all([
       listHostCatalog("favoriteThenLabel"),
       listHostGroups(),
       listHostTags(),
       listIdentities(),
     ]);
+    if (viewDisposed || sequence !== refreshSequence) return;
+    [catalog.value, groups.value, tags.value, identities.value] = [nextCatalog, nextGroups, nextTags, nextIdentities];
   } catch {
-    loadFailed.value = true;
+    if (sequence === refreshSequence && !viewDisposed) loadFailed.value = true;
   } finally {
-    loading.value = false;
+    if (sequence === refreshSequence && !viewDisposed) loading.value = false;
   }
 }
 
@@ -640,6 +645,10 @@ onMounted(async () => {
       const stop = await onToolWindowChanged(kind => { if (kind === "hostEditor") void refresh(); });
       if (viewDisposed) stop(); else stopToolWindowListener = stop;
     } catch { /* Native events are unavailable in browser-only previews. */ }
+    try {
+      const stop = await onSavedConnectionsChanged(() => { void refresh(); });
+      if (viewDisposed) stop(); else stopSavedConnectionsListener = stop;
+    } catch { /* Native events are unavailable in browser-only previews. */ }
     if (viewDisposed) return;
     await refresh();
     if (route.query.create === "1") openCreate();
@@ -652,8 +661,9 @@ onMounted(async () => {
 
 let viewDisposed = false;
 let stopToolWindowListener: (() => void) | undefined;
+let stopSavedConnectionsListener: (() => void) | undefined;
 
-onBeforeUnmount(() => { viewDisposed = true; stopToolWindowListener?.(); });
+onBeforeUnmount(() => { viewDisposed = true; stopToolWindowListener?.(); stopSavedConnectionsListener?.(); });
 
 async function launchHostEditor(host: HostSummary | null, initialSection: "connection" | "connectionRoute" | "loginAutomation" = "connection") {
  try { await openToolWindow({ kind: "hostEditor", initialSection, hostId: host?.hostId ?? null, title: t(host ? "sshHosts.editDialogTitle" : "sshHosts.dialogTitle") }); } catch { tips.show({ scope: "hosts-operation", tone: "error", title: t("sshHosts.saveFailed") }); }

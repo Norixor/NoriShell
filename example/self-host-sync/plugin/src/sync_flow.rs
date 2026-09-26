@@ -19,6 +19,7 @@ pub enum Phase {
     Download,
     Inspect,
     Compose,
+    Review,
     Export,
     Upload,
     Apply,
@@ -39,7 +40,9 @@ pub struct Flow {
     pub url: String,
     pub conflict_policy: Policy,
     pub deletion_policy: Policy,
-    pub choice: Option<Source>,
+    candidate_source: Option<Source>,
+    local_candidate: Value,
+    remote_candidate: Value,
     state_handles: Vec<String>,
     blob_handles: Vec<String>,
     receipt_handles: Vec<String>,
@@ -58,13 +61,7 @@ pub enum Transition {
 }
 
 impl Flow {
-    pub fn new(
-        intent: Intent,
-        url: String,
-        conflict: &str,
-        deletion: &str,
-        choice: Option<Source>,
-    ) -> Self {
+    pub fn new(intent: Intent, url: String, conflict: &str, deletion: &str) -> Self {
         Self {
             intent,
             phase: Phase::Snapshot,
@@ -79,7 +76,9 @@ impl Flow {
             url,
             conflict_policy: Policy::parse(conflict),
             deletion_policy: Policy::parse(deletion),
-            choice,
+            candidate_source: None,
+            local_candidate: Value::Null,
+            remote_candidate: Value::Null,
             state_handles: Vec::new(),
             blob_handles: Vec::new(),
             receipt_handles: Vec::new(),
@@ -208,7 +207,7 @@ impl Flow {
         let Ok(remote) = items(&self.remote) else {
             return invalid_response();
         };
-        let Ok(mut selection) = sync_policy::select(
+        let Ok(selection) = sync_policy::select(
             &local,
             &remote,
             &[],
@@ -217,12 +216,21 @@ impl Flow {
         ) else {
             return invalid_response();
         };
+        self.candidate_source = (!selection.conflicts.is_empty()).then_some(Source::Local);
+        self.compose_selection(selection, Source::Local)
+    }
+
+    fn compose_selection(
+        &mut self,
+        mut selection: sync_policy::Selection,
+        source: Source,
+    ) -> Transition {
         if !selection.conflicts.is_empty() {
-            let Some(source) = self.choice else {
-                return Transition::Finished {
-                    difference: "conflict",
-                    review: true,
-                };
+            let Ok(local) = items(&self.local) else {
+                return invalid_response();
+            };
+            let Ok(remote) = items(&self.remote) else {
+                return invalid_response();
             };
             for id in &selection.conflicts {
                 let selected = match source {
@@ -231,10 +239,7 @@ impl Flow {
                 }
                 .find(|item| &item.id == id);
                 let Some(item) = selected else {
-                    return Transition::Finished {
-                        difference: "conflict",
-                        review: true,
-                    };
+                    return invalid_response();
                 };
                 let chosen = sync_policy::Chosen {
                     source,
@@ -264,12 +269,79 @@ impl Flow {
             Phase::Download => self.receive_download(&value),
             Phase::Inspect => self.receive_inspection(value),
             Phase::Compose => {
-                if value["kind"] != "dataCompose" || value["composedHandle"].as_str().is_none() {
+                if value["kind"] != "dataCompose"
+                    || value["composedHandle"].as_str().is_none()
+                    || items(&value).is_err()
+                {
                     return invalid_response();
                 }
                 self.record_state(&value, "composedHandle");
+                if self.candidate_source == Some(Source::Local) {
+                    self.local_candidate = value;
+                    self.candidate_source = Some(Source::Remote);
+                    let (Ok(local), Ok(remote)) = (items(&self.local), items(&self.remote)) else {
+                        return invalid_response();
+                    };
+                    let Ok(selection) = sync_policy::select(
+                        &local,
+                        &remote,
+                        &[],
+                        self.conflict_policy,
+                        self.deletion_policy,
+                    ) else {
+                        return invalid_response();
+                    };
+                    return self.compose_selection(selection, Source::Remote);
+                }
+                if self.candidate_source == Some(Source::Remote) {
+                    self.remote_candidate = value;
+                    let (Some(local), Some(remote), Some(base)) = (
+                        self.local_candidate["composedHandle"].as_str(),
+                        self.remote_candidate["composedHandle"].as_str(),
+                        self.download
+                            .as_ref()
+                            .map(|receipt| receipt.handle.as_str()),
+                    ) else {
+                        return invalid_response();
+                    };
+                    self.phase = Phase::Review;
+                    return Transition::Call(json!({"kind":"dataReview","request":{
+                        "profileId":"primary","categories":sync_policy::CATEGORIES,
+                        "localSnapshotHandle":self.local["snapshotHandle"],
+                        "remoteInspectionHandle":self.remote["inspectionHandle"],
+                        "baseReceiptHandle":base,
+                        "localComposedHandle":local,
+                        "remoteComposedHandle":remote
+                    }}));
+                }
                 self.composed = value;
-                self.export()
+                self.continue_composed()
+            }
+            Phase::Review => {
+                if value["kind"] != "dataReview" || value["composedHandle"].as_str().is_none() {
+                    return invalid_response();
+                }
+                if value["composedHandle"] == self.local_candidate["composedHandle"]
+                    || value["composedHandle"] == self.remote_candidate["composedHandle"]
+                {
+                    return invalid_response();
+                }
+                self.record_state(&value, "composedHandle");
+                if !matches!(value["source"].as_str(), Some("local" | "remote"))
+                    || items(&value).is_err()
+                {
+                    return invalid_response();
+                }
+                let selected = if value["source"] == "local" {
+                    &self.local_candidate
+                } else {
+                    &self.remote_candidate
+                };
+                if value["objects"] != selected["objects"] {
+                    return invalid_response();
+                }
+                self.composed = value;
+                self.continue_composed()
             }
             Phase::Export => {
                 if value["kind"] != "dataExport"
@@ -370,6 +442,27 @@ impl Flow {
         }
     }
 
+    fn continue_composed(&mut self) -> Transition {
+        if self.remote["migrationRequired"] != true {
+            let (Ok(composed), Ok(remote), Some(download)) = (
+                items(&self.composed),
+                items(&self.remote),
+                self.download.as_ref(),
+            ) else {
+                return invalid_response();
+            };
+            if same_content(&composed, &remote) {
+                self.phase = Phase::Apply;
+                return Transition::Call(json!({"kind":"dataApply","request":{
+                    "profileId":"primary","categories":sync_policy::CATEGORIES,
+                    "expectedLocalSnapshotHandle":self.local["snapshotHandle"],
+                    "composedHandle":self.composed["composedHandle"],
+                    "authoritativeReceiptHandle":download.handle}}));
+            }
+        }
+        self.export()
+    }
+
     fn record_state(&mut self, value: &Value, key: &str) {
         if let Some(handle) = value[key].as_str() {
             self.state_handles.push(handle.to_owned());
@@ -386,10 +479,20 @@ impl Flow {
     }
 
     fn checkpoint(&mut self) -> Transition {
+        self.phase = Phase::Checkpoint;
+        if self.upload.is_none() && !self.composed.is_null() {
+            let Some(download) = &self.download else {
+                return invalid_response();
+            };
+            return Transition::Call(json!({"kind":"dataCheckpoint","request":{
+                "profileId":"primary","categories":sync_policy::CATEGORIES,
+                "sourceHandle":self.composed["composedHandle"],
+                "authoritativeReceiptHandle":download.handle,
+                "applyReceiptHandle":self.applied["applyReceiptHandle"]}}));
+        }
         let Some(upload) = &self.upload else {
             return invalid_response();
         };
-        self.phase = Phase::Checkpoint;
         Transition::Call(
             json!({"kind":"dataCheckpoint","request":{"profileId":"primary",
                 "categories":sync_policy::CATEGORIES,"sourceHandle":self.source_handle(),
@@ -449,6 +552,7 @@ pub fn same_content(local: &[Item], remote: &[Item]) -> bool {
                 left.id == right.id
                     && left.equality_tag == right.equality_tag
                     && left.deleted == right.deleted
+                    && left.updated_at == right.updated_at
             })
         })
 }
@@ -499,7 +603,6 @@ mod tests {
             "https://example.org/exchange".into(),
             "newest",
             "newest",
-            None,
         );
         assert!(
             matches!(flow.receive(json!({"kind":"dataSnapshot","snapshotHandle":"initial","keyPending":true,"objects":[]})), Transition::Call(call) if call["kind"]=="networkStart")
@@ -539,7 +642,6 @@ mod tests {
             "https://example.org/exchange".into(),
             "newest",
             "newest",
-            None,
         );
         assert!(matches!(
             flow.receive_snapshot(
@@ -560,7 +662,6 @@ mod tests {
             "https://example.org/exchange".into(),
             "newest",
             "newest",
-            None,
         );
         flow.local = json!({"snapshotHandle":"local","objects":[object("same",10)]});
         flow.remote = json!({"inspectionHandle":"remote","objects":[object("same",10)],"migrationRequired":false});
@@ -580,24 +681,236 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_clocks_stop_before_export() {
+    fn matching_objects_with_different_clocks_do_not_take_equal_checkpoint() {
         let mut flow = Flow::new(
             Intent::Sync,
             "https://example.org/exchange".into(),
             "newest",
             "newest",
-            None,
+        );
+        flow.local = json!({"snapshotHandle":"local","objects":[object("same",10)]});
+        flow.remote = json!({"inspectionHandle":"remote","objects":[object("same",20)],"migrationRequired":false});
+        flow.download = Some(Receipt {
+            handle: "get-receipt".into(),
+            status: 200,
+            blob: Some("get-blob".into()),
+            etag: Some("\"v1\"".into()),
+        });
+        assert!(matches!(flow.decide(), Transition::Call(call) if call["kind"] == "dataCompose"));
+    }
+
+    #[test]
+    fn remote_only_selection_applies_authenticated_get_without_upload() {
+        let mut flow = Flow::new(
+            Intent::Sync,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
+        );
+        flow.local = json!({"snapshotHandle":"local","objects":[object("local",10)]});
+        flow.remote = json!({"inspectionHandle":"remote","objects":[object("remote",20)],"migrationRequired":false});
+        flow.download = Some(Receipt {
+            handle: "get-receipt".into(),
+            status: 200,
+            blob: Some("get-blob".into()),
+            etag: Some("\"v1\"".into()),
+        });
+        assert!(
+            matches!(flow.decide(), Transition::Call(call) if call["kind"] == "dataCompose" && call["request"]["decisions"][0]["source"] == "remote")
+        );
+        let Transition::Call(apply) = flow.receive(json!({"kind":"dataCompose","composedHandle":"composed","objects":[object("remote",20)]})) else {
+            panic!("the authenticated download should be applied locally");
+        };
+        assert_eq!(apply["kind"], "dataApply");
+        assert_eq!(
+            apply["request"]["authoritativeReceiptHandle"],
+            "get-receipt"
+        );
+        assert!(apply["request"].get("exportHandle").is_none());
+        let Transition::Call(checkpoint) =
+            flow.receive(json!({"kind":"dataApply","applyReceiptHandle":"applied"}))
+        else {
+            panic!("the local apply must be checkpointed");
+        };
+        assert_eq!(checkpoint["kind"], "dataCheckpoint");
+        assert_eq!(checkpoint["request"]["sourceHandle"], "composed");
+        assert_eq!(
+            checkpoint["request"]["authoritativeReceiptHandle"],
+            "get-receipt"
+        );
+        assert_eq!(checkpoint["request"]["applyReceiptHandle"], "applied");
+        assert!(checkpoint["request"].get("exportHandle").is_none());
+        assert!(flow.upload.is_none());
+    }
+
+    #[test]
+    fn remote_conflict_and_equal_local_selection_apply_get_without_upload() {
+        let mut equal = object("shared", 30);
+        equal["stableId"] = json!("two");
+        equal["objectHandle"] = json!("equal-identity");
+        let mut flow = Flow::new(
+            Intent::Sync,
+            "https://example.org/exchange".into(),
+            "prompt",
+            "prompt",
+        );
+        flow.local = json!({"snapshotHandle":"local","objects":[object("local",10),equal.clone()]});
+        flow.remote = json!({"inspectionHandle":"remote","objects":[object("remote",20),equal.clone()],"migrationRequired":false});
+        flow.download = Some(Receipt {
+            handle: "get-receipt".into(),
+            status: 200,
+            blob: Some("get-blob".into()),
+            etag: Some("\"v1\"".into()),
+        });
+        let Transition::Call(compose) = flow.decide() else {
+            panic!("the conflicting host must be reviewed");
+        };
+        assert_eq!(compose["kind"], "dataCompose");
+        assert_eq!(
+            compose["request"]["decisions"],
+            json!([
+                {"objectHandle":"equal-identity","source":"local"},
+                {"objectHandle":"same-identity","source":"local"}
+            ])
+        );
+        let Transition::Call(second) = flow.receive(json!({"kind":"dataCompose","composedHandle":"local-composed","objects":[object("local",10),equal.clone()]})) else { panic!("second candidate required") };
+        assert_eq!(second["kind"], "dataCompose");
+        assert_eq!(second["request"]["decisions"][1]["source"], "remote");
+        let Transition::Call(review) = flow.receive(json!({"kind":"dataCompose","composedHandle":"remote-composed","objects":[object("remote",20),equal.clone()]})) else { panic!("protected review required") };
+        assert_eq!(review["kind"], "dataReview");
+        assert_eq!(review["request"]["localComposedHandle"], "local-composed");
+        assert_eq!(review["request"]["remoteComposedHandle"], "remote-composed");
+        assert!(flow.exported.is_null());
+        let Transition::Call(apply) = flow.receive(json!({"kind":"dataReview","source":"remote","composedHandle":"reviewed-remote","objects":[object("remote",20),equal]})) else {
+            panic!("the complete composed result equals the authenticated download");
+        };
+        assert_eq!(apply["kind"], "dataApply");
+        assert_eq!(apply["request"]["composedHandle"], "reviewed-remote");
+        assert_eq!(
+            apply["request"]["authoritativeReceiptHandle"],
+            "get-receipt"
+        );
+        assert!(apply["request"].get("exportHandle").is_none());
+        assert_eq!(
+            flow.release_request()["request"]["stateHandles"],
+            json!(["local-composed", "remote-composed", "reviewed-remote"])
+        );
+    }
+
+    #[test]
+    fn mixed_selection_still_exports_for_conditional_upload() {
+        let mut local_only = object("local-only", 30);
+        local_only["stableId"] = json!("two");
+        let mut flow = Flow::new(
+            Intent::Sync,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
+        );
+        flow.local =
+            json!({"snapshotHandle":"local","objects":[object("local",10),local_only.clone()]});
+        flow.remote = json!({"inspectionHandle":"remote","objects":[object("remote",20)],"migrationRequired":false});
+        flow.download = Some(Receipt {
+            handle: "get-receipt".into(),
+            status: 200,
+            blob: Some("get-blob".into()),
+            etag: Some("\"v1\"".into()),
+        });
+        assert!(matches!(flow.decide(), Transition::Call(call) if call["kind"] == "dataCompose"));
+        let Transition::Call(export) = flow.receive(json!({"kind":"dataCompose","composedHandle":"composed","objects":[object("remote",20),local_only]})) else {
+            panic!("mixed selections must be uploaded under CAS");
+        };
+        assert_eq!(export["kind"], "dataExport");
+    }
+
+    #[test]
+    fn composed_timestamp_mismatch_uses_conditional_upload() {
+        let mut flow = Flow::new(
+            Intent::Sync,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
+        );
+        flow.local = json!({"snapshotHandle":"local","objects":[object("local",10)]});
+        flow.remote = json!({"inspectionHandle":"remote","objects":[object("remote",20)],"migrationRequired":false});
+        flow.download = Some(Receipt {
+            handle: "get-receipt".into(),
+            status: 200,
+            blob: Some("get-blob".into()),
+            etag: Some("\"v1\"".into()),
+        });
+        assert!(matches!(flow.decide(), Transition::Call(call) if call["kind"] == "dataCompose"));
+        assert!(matches!(
+            flow.receive(json!({"kind":"dataCompose","composedHandle":"composed","objects":[object("remote",21)]})),
+            Transition::Call(call) if call["kind"] == "dataExport"
+        ));
+        assert!(flow.exported.is_null());
+        assert!(flow.applied.is_null());
+    }
+
+    #[test]
+    fn ambiguous_clocks_review_both_complete_candidates_before_export() {
+        let mut flow = Flow::new(
+            Intent::Sync,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
         );
         flow.local = json!({"snapshotHandle":"local","objects":[object("local",10)]});
         flow.remote = json!({"inspectionHandle":"remote","objects":[object("remote",10)]});
-        assert!(matches!(
-            flow.decide(),
-            Transition::Finished { review: true, .. }
-        ));
-        assert!(flow.exported.is_null());
-        flow.choice = Some(Source::Remote);
+        flow.download = Some(Receipt {
+            handle: "get-receipt".into(),
+            status: 200,
+            blob: Some("get-blob".into()),
+            etag: Some("\"v1\"".into()),
+        });
         assert!(
-            matches!(flow.decide(),Transition::Call(call) if call["request"]["decisions"][0]["source"]=="remote")
+            matches!(flow.decide(), Transition::Call(call) if call["kind"] == "dataCompose" && call["request"]["decisions"][0]["source"] == "local")
+        );
+        assert!(flow.exported.is_null());
+        assert!(
+            matches!(flow.receive(json!({"kind":"dataCompose","composedHandle":"local-choice","objects":[object("local",10)]})), Transition::Call(call) if call["kind"] == "dataCompose" && call["request"]["decisions"][0]["source"] == "remote")
+        );
+        assert!(
+            matches!(flow.receive(json!({"kind":"dataCompose","composedHandle":"remote-choice","objects":[object("remote",10)]})), Transition::Call(call) if call["kind"] == "dataReview")
+        );
+        assert_eq!(
+            flow.release_request()["request"]["stateHandles"],
+            json!(["local-choice", "remote-choice"])
+        );
+        let Transition::Call(export) = flow.receive(json!({"kind":"dataReview","source":"local","composedHandle":"reviewed-local","objects":[object("local",10)]})) else {
+            panic!("approved local choice must be exported");
+        };
+        assert_eq!(export["kind"], "dataExport");
+        assert_eq!(export["request"]["sourceHandle"], "reviewed-local");
+        assert_eq!(
+            flow.release_request()["request"]["stateHandles"],
+            json!(["local-choice", "remote-choice", "reviewed-local"])
+        );
+        assert!(flow.upload.is_none());
+    }
+
+    #[test]
+    fn invalid_review_objects_still_release_new_handle() {
+        let mut flow = Flow::new(
+            Intent::Sync,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
+        );
+        flow.phase = Phase::Review;
+        flow.local_candidate =
+            json!({"composedHandle":"local-choice","objects":[object("local",10)]});
+        flow.remote_candidate =
+            json!({"composedHandle":"remote-choice","objects":[object("remote",10)]});
+        flow.state_handles = vec!["local-choice".into(), "remote-choice".into()];
+        assert!(matches!(
+            flow.receive(json!({"kind":"dataReview","source":"remote","composedHandle":"reviewed-remote","objects":[object("unexpected",10)]})),
+            Transition::Failed { code, .. } if code == "invalidResponse"
+        ));
+        assert_eq!(
+            flow.release_request()["request"]["stateHandles"],
+            json!(["local-choice", "remote-choice", "reviewed-remote"])
         );
     }
 
@@ -608,7 +921,6 @@ mod tests {
             "https://example.org/exchange".into(),
             "newest",
             "newest",
-            None,
         );
         flow.local = json!({"snapshotHandle":"local","objects":[object("local",10)]});
         flow.composed = json!({"composedHandle":"composed","objects":[object("remote",20)]});

@@ -1,6 +1,6 @@
 # dataCompose
 
-以 Core 已验证对象组合候选。插件决定冲突方向；Core 检查依赖关系并拒绝无效组合。
+以 Core 已验证对象组合候选。插件为同一范围生成完整候选；Core 检查依赖关系并拒绝无效组合。发生需要人工选择的冲突时，分别生成本机与云端候选，再交给 [dataReview](./dataReview.zh-CN.md) 的受保护窗口一次选择。
 
 通过 SDK `api_request(request_id, call_id, PluginApiOperation::DataCompose { … })` 调用；核对 `PluginApiReply.outcome` 和 `value.kind="dataCompose"`。[Broker 调用说明](../developers/development/calling-api.zh-CN.md)。
 
@@ -11,7 +11,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `kind` | `"dataCompose"` | 是 | 精确 operation 判别标签 |
-| `request` | `PluginDataComposeRequest` | 是 | 见上文字段约束与[DTO 类型](./types.zh-CN.md#分类数据-dtocore-api-188) |
+| `request` | `PluginDataComposeRequest` | 是 | 见上文字段约束与[DTO 类型](./types.zh-CN.md#分类数据-dtocore-api-189) |
 
 
 ## 成功返回

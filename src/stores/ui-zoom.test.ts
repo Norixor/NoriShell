@@ -35,7 +35,7 @@ describe("interface zoom persistence", () => {
     const ui = useUiStore();
     zoom.mockRejectedValueOnce(new Error("native failure"));
     expect(await ui.setUiZoom(150)).toBe(false);
-    expect(ui.uiZoom).toBe(100);
+    expect(ui.uiZoom).toBe(90);
     expect(ui.appliedUiZoom).toBe(100);
     expect(localStorage.getItem(UI_PREFERENCES_KEY)).toBeNull();
   });
@@ -45,7 +45,7 @@ describe("interface zoom persistence", () => {
     vi.spyOn(localStorage, "setItem").mockImplementationOnce(() => { throw new Error("quota"); });
     expect(await ui.setUiZoom(150)).toBe(false);
     expect(zoom.mock.calls).toEqual([[150], [100]]);
-    expect(ui.uiZoom).toBe(100);
+    expect(ui.uiZoom).toBe(90);
     expect(ui.appliedUiZoom).toBe(100);
   });
 

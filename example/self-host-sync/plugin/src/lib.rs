@@ -23,9 +23,6 @@ struct SelfHostSync {
     invalid_server: bool,
     locale: String,
     last: Option<Summary>,
-    auto_sync_enabled: bool,
-    auto_sync_interval_minutes: String,
-    check_on_startup: bool,
     conflict_policy: String,
     deletion_policy: String,
     browser: browser_cache::BrowserCache,
@@ -41,6 +38,7 @@ struct Summary {
     operation: String,
     difference: String,
     review_pending: bool,
+    attention_required: bool,
     local_hosts: u64,
     remote_hosts: Option<u64>,
     local_desktops: u64,
@@ -51,6 +49,7 @@ struct Summary {
     error: Option<String>,
     diagnostic: Option<String>,
     http_status: Option<u16>,
+    remote_updated: bool,
 }
 
 impl Plugin for SelfHostSync {
@@ -130,19 +129,6 @@ impl SelfHostSync {
             }
             self.invalid_server = !raw.trim().is_empty() && next.is_none();
             self.origin = next;
-            self.auto_sync_enabled = values
-                .get("autoSyncEnabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            self.auto_sync_interval_minutes = values
-                .get("autoSyncIntervalMinutes")
-                .and_then(Value::as_str)
-                .unwrap_or("15")
-                .to_owned();
-            self.check_on_startup = values
-                .get("checkOnStartup")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
             self.conflict_policy = match values.get("conflictPolicy").and_then(Value::as_str) {
                 Some("prompt") => "prompt",
                 _ => "newest",
@@ -175,10 +161,7 @@ impl SelfHostSync {
                 &json!({"action":"status", "profileId":PROFILE, "auth":self.auth()?}),
             )?]);
         }
-        if matches!(
-            action,
-            "sync.refresh" | "sync.run" | "sync.useLocal" | "sync.useRemote"
-        ) {
+        if matches!(action, "sync.refresh" | "sync.run") {
             if self.flow.is_some() {
                 return self.document_output(request_id);
             }
@@ -192,11 +175,6 @@ impl SelfHostSync {
                 self.endpoint("exchange")?,
                 &self.conflict_policy,
                 &self.deletion_policy,
-                match action {
-                    "sync.useLocal" => Some(sync_policy::Source::Local),
-                    "sync.useRemote" => Some(sync_policy::Source::Remote),
-                    _ => None,
-                },
             ));
             return self
                 .api
@@ -306,6 +284,7 @@ impl SelfHostSync {
                 self.document_output(request_id)
             }
             sync_flow::Transition::Failed { code, http_status } => {
+                let remote_updated = self.flow.as_ref().is_some_and(|flow| flow.upload.is_some());
                 let authenticated = self
                     .flow
                     .as_ref()
@@ -325,7 +304,9 @@ impl SelfHostSync {
                 }
                 .to_owned();
                 self.record_result(&json!({"actionId":body["actionId"],"result":{"accountState":account,
-                    "operationState":"failed","differenceState":"unavailable","stableErrorCode":code,"httpStatus":http_status}}));
+                    "operationState":if remote_updated {"partial"} else {"failed"},
+                    "remoteUpdated":remote_updated,
+                    "differenceState":"unavailable","stableErrorCode":code,"httpStatus":http_status}}));
                 self.document_output(request_id)
             }
             sync_flow::Transition::Call(_) => Err(PluginError::InvalidRequest),
@@ -407,6 +388,7 @@ impl SelfHostSync {
                 .unwrap_or("unavailable")
                 .to_owned(),
             review_pending: result["operationState"].as_str() == Some("needsReview"),
+            attention_required: false,
             local_hosts: result["localHostCount"].as_u64().unwrap_or(0),
             remote_hosts: result["remoteHostCount"].as_u64(),
             local_desktops: result["localDesktopProfileCount"].as_u64().unwrap_or(0),
@@ -419,6 +401,7 @@ impl SelfHostSync {
             http_status: result["httpStatus"]
                 .as_u64()
                 .and_then(|value| u16::try_from(value).ok()),
+            remote_updated: result["remoteUpdated"].as_bool().unwrap_or(false),
         };
         if next.error.is_some()
             && body["actionId"].as_str() != Some("sync.logout")
@@ -427,6 +410,11 @@ impl SelfHostSync {
             // A failed retry does not remove the work that Core asked the user
             // to review. The next explicit click will re-fetch before applying.
             next.review_pending = previous.review_pending;
+            next.attention_required = previous.attention_required;
+            if previous.remote_updated {
+                next.remote_updated = true;
+                next.operation = "partial".into();
+            }
             if next.remote_hosts.is_none() {
                 next.remote_hosts = previous.remote_hosts;
                 next.remote_desktops = previous.remote_desktops;
@@ -434,6 +422,18 @@ impl SelfHostSync {
                 next.remote_counts_stale = next.remote_hosts.is_some()
                     || next.remote_desktops.is_some()
                     || next.remote_credentials.is_some();
+            }
+        }
+        if body["actionId"] == "sync.refresh"
+            && let Some(previous) = &self.last
+            && previous.remote_updated
+        {
+            next.remote_updated = true;
+            next.operation = "partial".into();
+            if next.error.is_none() {
+                next.error = previous.error.clone();
+                next.diagnostic = previous.diagnostic.clone();
+                next.http_status = previous.http_status;
             }
         }
         if body["actionId"].as_str() != Some("sync.logout") && next.remote_hosts.is_none() {
@@ -452,10 +452,18 @@ impl SelfHostSync {
             .as_str()
             .unwrap_or("disconnected")
             .to_owned();
+        if summary.remote_updated && body["actionId"] != "sync.logout" {
+            // Account status does not settle a successful PUT followed by an
+            // incomplete local commit.
+            return;
+        }
         summary.operation = result["operationState"]
             .as_str()
             .unwrap_or("idle")
             .to_owned();
+        // Legacy account status can request attention, but its review is not
+        // a resumable decision in the category-scoped data flow.
+        summary.attention_required = summary.operation == "needsReview";
         summary.error = result["stableErrorCode"].as_str().map(str::to_owned);
         summary.diagnostic = result["diagnosticCode"].as_str().map(str::to_owned);
         summary.http_status = result["httpStatus"]
@@ -467,6 +475,8 @@ impl SelfHostSync {
             summary.remote_desktops = None;
             summary.difference = "unavailable".into();
             summary.review_pending = false;
+            summary.attention_required = false;
+            summary.remote_updated = false;
         }
     }
 
@@ -545,7 +555,7 @@ impl SelfHostSync {
             json!({"kind":"text","nodeId":"server","text":self.server_label(),"style":"secondary","tone":"neutral"}),
             json!({"kind":"stack","nodeId":"actionButtons","direction":"horizontal","align":"center","gap":12,"children":["refresh","run"]}),
             json!({"kind":"button","nodeId":"refresh","actionId":"sync.refresh","label":self.t("刷新远端状态","Refresh remote status"),"icon":"refresh","variant":"secondary","disabled":!ready}),
-            json!({"kind":"button","nodeId":"run","actionId":"sync.run","label":if self.last.as_ref().is_some_and(|last| last.review_pending) { self.t("审阅并同步","Review and sync") } else { self.t("立即同步","Sync now") },"icon":"refresh","variant":"primary","disabled":!ready}),
+            json!({"kind":"button","nodeId":"run","actionId":"sync.run","label":if self.last.as_ref().is_some_and(|last| last.review_pending || last.attention_required) { self.t("审阅并同步","Review and sync") } else { self.t("立即同步","Sync now") },"icon":"refresh","variant":"primary","disabled":!ready}),
             json!({"kind":"stack","nodeId":"scopeRow","direction":"horizontal","align":"center","gap":8,"children":["scopeText"]}),
             json!({"kind":"text","nodeId":"scopeText","text":self.t("范围：主机 · 凭据 · 远程桌面","Scope: hosts · credentials · remote desktops"),"style":"secondary","tone":"neutral"}),
             json!({"kind":"stack","nodeId":"policyRow","direction":"horizontal","align":"center","gap":8,"children":["policyText","policyButton"]}),
@@ -584,20 +594,6 @@ impl SelfHostSync {
                 self.t("尚无已验证的项目", "No verified items yet"),
             ),
         ];
-        if self.last.as_ref().is_some_and(|last| last.review_pending) {
-            if let Some(browser) = nodes.iter_mut().find(|node| node["nodeId"] == "browser") {
-                browser["children"]
-                    .as_array_mut()
-                    .expect("browser children")
-                    .insert(0, json!("review"));
-            }
-            nodes.extend([
-                json!({"kind":"section","nodeId":"review","title":self.t("选择冲突项目的来源", "Choose the source for conflicting items"),"children":["reviewText","reviewLocal","reviewRemote"]}),
-                json!({"kind":"text","nodeId":"reviewText","text":self.t("无法按时间确定的修改和需要确认的删除将采用你选择的一侧。操作会重新读取两侧数据并由 Core 校验。", "Unresolved edits and deletions requiring confirmation will use the selected side. Both sides are read again and Core validates the changes."),"style":"body","tone":"warning"}),
-                json!({"kind":"button","nodeId":"reviewLocal","actionId":"sync.useLocal","label":self.t("冲突采用本机", "Use local for conflicts"),"icon":null,"variant":"secondary","disabled":!ready}),
-                json!({"kind":"button","nodeId":"reviewRemote","actionId":"sync.useRemote","label":self.t("冲突采用云端", "Use cloud for conflicts"),"icon":null,"variant":"secondary","disabled":!ready})
-            ]);
-        }
         if insecure_http {
             nodes.push(json!({"kind":"status","nodeId":"httpWarning","label":self.t("当前使用 HTTP，建议改用 HTTPS。","Using HTTP. HTTPS is recommended."),"tone":"warning"}));
         }
@@ -614,7 +610,22 @@ impl SelfHostSync {
             nodes.push(json!({"kind":"button","nodeId":"setupSettings","actionId":"norishell.openSettings:serverUrl","label":self.t("填写服务器地址","Enter server address"),"icon":"settings","variant":"primary","disabled":false}));
         }
         if let Some(error) = self.last.as_ref().and_then(|last| last.error.as_ref()) {
-            nodes.push(json!({"kind":"status","nodeId":"errorNotice","label":self.error_message(error),"tone":if self.last.as_ref().is_some_and(|last| last.operation == "failed") { "danger" } else { "warning" }}));
+            let remote_updated = self.last.as_ref().is_some_and(|last| last.remote_updated);
+            let label = if remote_updated {
+                format!(
+                    "{}：{}",
+                    self.t(
+                        "云端已更新，本机尚未完成",
+                        "Cloud updated; local completion pending"
+                    ),
+                    self.error_message(error)
+                )
+            } else {
+                self.error_message(error)
+            };
+            nodes.push(
+                json!({"kind":"status","nodeId":"errorNotice","label":label,"tone":"danger"}),
+            );
         }
         json!({"schemaVersion":1,"rootNodeId":"root","nodes":nodes})
     }
@@ -644,12 +655,19 @@ impl SelfHostSync {
             return self.t("远端状态需刷新", "Refresh remote status");
         };
         if last.error.is_some() {
-            return self.t("操作未完成", "Action incomplete");
+            return if last.remote_updated {
+                self.t(
+                    "云端已更新，本机尚未完成",
+                    "Cloud updated; local completion pending",
+                )
+            } else {
+                self.t("操作未完成", "Action incomplete")
+            };
         }
         if last.operation == "running" {
             return self.t("正在同步", "Sync in progress");
         }
-        if last.review_pending {
+        if last.review_pending || last.attention_required {
             return self.t("需要确认", "Confirmation required");
         }
         match last.difference.as_str() {
@@ -674,13 +692,19 @@ impl SelfHostSync {
         };
         if last.operation == "idle" && last.difference.is_empty() {
             return if self.locale == "en" {
-                format!("Account: {} · Select Refresh remote status to compare current data.", self.account_label(&last.account))
+                format!(
+                    "Account: {} · Select Refresh remote status to compare current data.",
+                    self.account_label(&last.account)
+                )
             } else {
-                format!("账户：{} · 点击“刷新远端状态”比较当前数据。", self.account_label(&last.account))
+                format!(
+                    "账户：{} · 点击“刷新远端状态”比较当前数据。",
+                    self.account_label(&last.account)
+                )
             };
         }
         let remote = |value: Option<u64>| value.map_or_else(|| "—".to_owned(), |v| v.to_string());
-        let review = if last.review_pending {
+        let review = if last.review_pending || last.attention_required {
             self.t(
                 " · 点击「审阅并同步」继续审阅。",
                 " · Select Review and sync to continue the review.",
@@ -756,6 +780,7 @@ impl SelfHostSync {
             "needsReview" => self.t("需要审查", "Review required"),
             "succeeded" => self.t("已完成", "Completed"),
             "failed" => self.t("失败", "Failed"),
+            "partial" => self.t("云端已更新，本机未完成", "Cloud updated; local incomplete"),
             _ => self.t("状态未知", "Unknown state"),
         }
     }
@@ -980,15 +1005,16 @@ mod tests {
 
     #[test]
     fn failed_exchange_releases_its_handles_before_showing_the_error() {
-        let mut plugin = SelfHostSync::default();
-        plugin.origin = Some("https://example.org".into());
-        plugin.flow = Some(sync_flow::Flow::new(
-            sync_flow::Intent::Sync,
-            "https://example.org/exchange".into(),
-            "newest",
-            "newest",
-            None,
-        ));
+        let mut plugin = SelfHostSync {
+            origin: Some("https://example.org".into()),
+            flow: Some(sync_flow::Flow::new(
+                sync_flow::Intent::Sync,
+                "https://example.org/exchange".into(),
+                "newest",
+                "newest",
+            )),
+            ..Default::default()
+        };
         plugin
             .api
             .request("request", sync_flow::Flow::snapshot_request())
@@ -1015,8 +1041,10 @@ mod tests {
 
     #[test]
     fn current_core_failures_keep_specific_user_guidance() {
-        let mut plugin = SelfHostSync::default();
-        plugin.locale = "zh-CN".into();
+        let mut plugin = SelfHostSync {
+            locale: "zh-CN".into(),
+            ..Default::default()
+        };
         for (code, expected) in [
             ("vaultRequiresReload", "重新解锁"),
             ("permissionDenied", "插件授权"),
@@ -1094,8 +1122,10 @@ mod tests {
 
     #[test]
     fn account_status_does_not_claim_unread_local_counts() {
-        let mut plugin = SelfHostSync::default();
-        plugin.locale = "en".into();
+        let mut plugin = SelfHostSync {
+            locale: "en".into(),
+            ..Default::default()
+        };
         plugin.record_account_result(&json!({"actionId":"sync.pageOpened","result":{
             "accountState":"connected","operationState":"idle"
         }}));
@@ -1107,9 +1137,11 @@ mod tests {
 
     #[test]
     fn failed_review_retry_keeps_the_explicit_review_action() {
-        let mut plugin = SelfHostSync::default();
-        plugin.locale = "en".to_owned();
-        plugin.origin = Some("https://example.org".to_owned());
+        let mut plugin = SelfHostSync {
+            locale: "en".to_owned(),
+            origin: Some("https://example.org".to_owned()),
+            ..Default::default()
+        };
         plugin.record_result(&json!({"actionId":"sync.refresh","result":{
             "accountState":"connected","operationState":"needsReview","differenceState":"conflict",
             "remoteHostCount":1,"remoteCredentialCount":1,"remoteDesktopProfileCount":1
@@ -1141,6 +1173,92 @@ mod tests {
             .find(|node| node["nodeId"] == "run")
             .expect("run action");
         assert_eq!(run["label"], "Sync now");
+    }
+
+    #[test]
+    fn uploaded_remote_failure_preserves_partial_fact_and_original_error() {
+        let mut plugin = SelfHostSync {
+            origin: Some("https://example.org".into()),
+            locale: "en".into(),
+            ..Default::default()
+        };
+        let mut flow = sync_flow::Flow::new(
+            sync_flow::Intent::Sync,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
+        );
+        flow.upload = Some(super::network_flow::Receipt {
+            handle: "put-receipt".into(),
+            status: 200,
+            blob: None,
+            etag: Some("\"v2\"".into()),
+        });
+        plugin.flow = Some(flow);
+        plugin
+            .finish_flow(
+                "request",
+                &json!({"actionId":"sync.run"}),
+                sync_flow::Transition::Failed {
+                    code: "stateConflict".into(),
+                    http_status: None,
+                },
+            )
+            .expect("partial result");
+        let summary = plugin.last.as_ref().expect("summary");
+        assert_eq!(summary.operation, "partial");
+        assert_eq!(summary.error.as_deref(), Some("stateConflict"));
+        assert!(summary.remote_updated);
+        plugin.record_account_result(&json!({"actionId":"sync.status","result":{
+            "accountState":"connected","operationState":"idle"
+        }}));
+        assert!(plugin.last.as_ref().unwrap().remote_updated);
+        assert_eq!(plugin.last.as_ref().unwrap().operation, "partial");
+        let document = plugin.document();
+        let notice = document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["nodeId"] == "errorNotice")
+            .unwrap();
+        assert!(
+            notice["label"]
+                .as_str()
+                .unwrap()
+                .contains("Cloud updated; local completion pending")
+        );
+    }
+
+    #[test]
+    fn legacy_status_attention_starts_a_new_category_data_flow() {
+        let mut plugin = SelfHostSync {
+            locale: "en".to_owned(),
+            origin: Some("https://example.org".to_owned()),
+            ..Default::default()
+        };
+        plugin.record_account_result(&json!({"actionId":"sync.pageOpened","result":{
+            "accountState":"connected","operationState":"needsReview",
+            "differenceState":"conflict","stableErrorCode":"vaultLocked"
+        }}));
+
+        let document = plugin.document();
+        let nodes = document["nodes"].as_array().expect("nodes");
+        let run = nodes
+            .iter()
+            .find(|node| node["nodeId"] == "run")
+            .expect("run action");
+        assert_eq!(run["label"], "Review and sync");
+        assert!(nodes.iter().all(|node| node["nodeId"] != "reviewRemote"));
+        assert!(!plugin.last.as_ref().expect("status").review_pending);
+
+        let outputs = plugin
+            .action("request", &json!({"actionId":"sync.run"}))
+            .unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert!(matches!(
+            plugin.flow.as_ref().expect("new flow").phase,
+            sync_flow::Phase::Snapshot
+        ));
     }
 
     #[test]

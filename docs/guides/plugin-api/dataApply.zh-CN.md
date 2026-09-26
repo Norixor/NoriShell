@@ -11,7 +11,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `kind` | `"dataApply"` | 是 | 精确 operation 判别标签 |
-| `request` | `PluginDataApplyRequest` | 是 | 见上文字段约束与[DTO 类型](./types.zh-CN.md#分类数据-dtocore-api-188) |
+| `request` | `PluginDataApplyRequest` | 是 | 见上文字段约束与[DTO 类型](./types.zh-CN.md#分类数据-dtocore-api-189) |
 
 
 ## 成功返回

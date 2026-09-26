@@ -64,6 +64,7 @@ import { resolveLocale, type LocalePreference } from "../locales";
 import { useTipsStore } from "../stores/tips";
 import { applicationPreferenceFailure } from "../core-api/application-preferences";
 import { useRouteReveal } from "../routeReveal";
+import { onSavedConnectionsChanged } from "../saved-connections";
 import {
   useUiStore,
   type NewTerminalBehavior,
@@ -122,10 +123,17 @@ const enhancementSections = [
 const highlightHosts = ref<{ hostId: string; label: string }[]>([]);
 const highlightHostsFailed = ref(false);
 let initialHighlightLoad: Promise<void> | null = null;
+let highlightHostsSequence = 0;
+let stopSavedConnectionsListener: (() => void) | undefined;
+let settingsDisposed = false;
 async function loadHighlightHosts() {
+  const sequence = ++highlightHostsSequence;
   highlightHostsFailed.value = false;
-  try { highlightHosts.value = (await listHostCatalog()).map(({ host }) => ({ hostId: host.hostId, label: host.label || host.address })); }
-  catch { highlightHostsFailed.value = true; }
+  try {
+    const nextHosts = (await listHostCatalog()).map(({ host }) => ({ hostId: host.hostId, label: host.label || host.address }));
+    if (!settingsDisposed && sequence === highlightHostsSequence) highlightHosts.value = nextHosts;
+  }
+  catch { if (!settingsDisposed && sequence === highlightHostsSequence) highlightHostsFailed.value = true; }
 }
 watch(activeSection, (section) => { if (section === "highlights") initialHighlightLoad = loadHighlightHosts(); });
 watch(() => route.query.section, (section) => {
@@ -422,6 +430,12 @@ async function refreshVaultAfterNativeChange() {
 }
 onMounted(() => window.addEventListener("norishell:vault-changed", refreshVaultAfterNativeChange));
 onBeforeUnmount(() => window.removeEventListener("norishell:vault-changed", refreshVaultAfterNativeChange));
+onMounted(() => {
+  void onSavedConnectionsChanged(() => { if (activeSection.value === "highlights") void loadHighlightHosts(); }).then((stop) => {
+    if (settingsDisposed) stop(); else stopSavedConnectionsListener = stop;
+  }).catch(() => undefined);
+});
+onBeforeUnmount(() => { settingsDisposed = true; stopSavedConnectionsListener?.(); });
 
 onMounted(async () => {
   try {

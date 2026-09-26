@@ -91,6 +91,7 @@ impl PluginService {
                     | norishell_core_api::PluginApiOperation::DataSnapshot { .. }
                     | norishell_core_api::PluginApiOperation::DataInspect { .. }
                     | norishell_core_api::PluginApiOperation::DataCompose { .. }
+                    | norishell_core_api::PluginApiOperation::DataReview { .. }
                     | norishell_core_api::PluginApiOperation::DataApply { .. }
                     | norishell_core_api::PluginApiOperation::DataExport { .. }
                     | norishell_core_api::PluginApiOperation::DataCheckpoint { .. }
@@ -283,6 +284,7 @@ impl PluginService {
             norishell_core_api::PluginApiOperation::DataSnapshot { .. }
             | norishell_core_api::PluginApiOperation::DataInspect { .. }
             | norishell_core_api::PluginApiOperation::DataCompose { .. }
+            | norishell_core_api::PluginApiOperation::DataReview { .. }
             | norishell_core_api::PluginApiOperation::DataApply { .. }
             | norishell_core_api::PluginApiOperation::DataExport { .. }
             | norishell_core_api::PluginApiOperation::DataCheckpoint { .. }

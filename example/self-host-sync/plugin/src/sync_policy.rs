@@ -158,9 +158,9 @@ mod tests {
         let local = item("local", "old", None, false);
         let remote = item("remote", "new", None, false);
         let result = select(
-            &[local.clone()],
+            std::slice::from_ref(&local),
             &[remote],
-            &[local],
+            std::slice::from_ref(&local),
             Policy::Prompt,
             Policy::Prompt,
         )
@@ -179,9 +179,9 @@ mod tests {
     fn missing_remote_does_not_delete_local() {
         let local = item("local", "old", Some(1), false);
         let result = select(
-            &[local.clone()],
+            std::slice::from_ref(&local),
             &[],
-            &[local],
+            std::slice::from_ref(&local),
             Policy::Newest,
             Policy::Newest,
         )

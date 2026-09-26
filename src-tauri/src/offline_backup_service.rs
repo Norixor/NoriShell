@@ -1493,8 +1493,7 @@ mod tests {
     fn export_snapshot_fence_rejects_database_or_vault_changes() {
         let before = ExportSnapshotFence {
             database: SshSyncChangeFence {
-                connection_total_changes: 10,
-                database_data_version: 20,
+                business_generation: 10,
             },
             vault_id: Some("vault-a".to_owned()),
             vault_revision: Some(WireSequence::new(7)),
@@ -1502,7 +1501,7 @@ mod tests {
         assert!(export_snapshot_is_current(&before, &before));
 
         let mut changed_database = before.clone();
-        changed_database.database.connection_total_changes += 1;
+        changed_database.database.business_generation += 1;
         assert!(!export_snapshot_is_current(&before, &changed_database));
 
         let mut changed_vault = before.clone();

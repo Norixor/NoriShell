@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { listHostCatalog } from "../../core-api/client";
@@ -9,6 +9,7 @@ import { validateInteractionPreferences, type DoubleClickSelection, type Interac
 import { validateTerminalKeyboardPreferences, type HostKeyboardMode, type TerminalKeyboardPreferences } from "../../terminal/keyboard-compatibility";
 import { useTipsStore } from "../../stores/tips";
 import { NvxButton, NvxCheckbox, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
+import { onSavedConnectionsChanged } from "../../saved-connections";
 
 interface InteractionDraft {
   scrollback: string;
@@ -173,19 +174,34 @@ function saveHostKeyboard() {
 }
 
 watch(keyboardScope, resetHostKeyboard, { immediate: true });
-onMounted(async () => {
+let hostCatalogSequence = 0;
+let stopSavedConnectionsListener: (() => void) | undefined;
+let disposed = false;
+async function refreshHostOptions() {
+  const sequence = ++hostCatalogSequence;
   try {
     // Keep only the HostId and display label; never give full Host or credential objects to local preference state.
-    hostOptions.value = (await listHostCatalog()).map(({ host }) => ({
+    const nextOptions = (await listHostCatalog()).map(({ host }) => ({
       hostId: host.hostId,
       label: host.label || host.address,
     }));
+    if (!disposed && sequence === hostCatalogSequence) {
+      hostOptions.value = nextOptions;
+      hostCatalogFailed.value = false;
+    }
   } catch {
-    hostCatalogFailed.value = true;
+    if (!disposed && sequence === hostCatalogSequence) hostCatalogFailed.value = true;
   } finally {
-    hostCatalogLoading.value = false;
+    if (!disposed && sequence === hostCatalogSequence) hostCatalogLoading.value = false;
   }
+}
+onMounted(() => {
+  void onSavedConnectionsChanged(() => { void refreshHostOptions(); }).then((stop) => {
+    if (disposed) stop(); else stopSavedConnectionsListener = stop;
+  }).catch(() => undefined);
+  void refreshHostOptions();
 });
+onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
 </script>
 
 <template>

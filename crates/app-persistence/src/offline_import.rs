@@ -282,6 +282,9 @@ fn require_fresh_database(connection: &Connection) -> Result<()> {
         match table.as_str() {
             // These settings have no user-data or Vault references.
             "desktop_preferences" => continue,
+            "ssh_sync_business_generation" => {
+                current_ssh_sync_change_fence(connection)?;
+            }
             "terminal_workspace_layout" => {
                 let json: String = connection.query_row(
                     "SELECT layout_json FROM terminal_workspace_layout WHERE singleton = 1",

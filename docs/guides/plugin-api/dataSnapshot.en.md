@@ -11,7 +11,7 @@ Use SDK `api_request(request_id, call_id, PluginApiOperation::DataSnapshot { …
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `kind` | `"dataSnapshot"` | Yes | Exact operation discriminator |
-| `request` | `PluginDataSnapshotRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-188) |
+| `request` | `PluginDataSnapshotRequest` | Yes | See field contract above and [DTO types](./types.en.md#category-data-dtos-core-api-189) |
 
 
 ## Completed value
@@ -23,6 +23,8 @@ Use SDK `api_request(request_id, call_id, PluginApiOperation::DataSnapshot { …
 | `keyPending` | typed value | Yes | Core-issued fact; see DTO types |
 | `localCounts` | `PluginDataLocalCounts` | Yes | Local hosts, credentials, desktop profiles and tombstones |
 | `objects` | typed value | Yes | Core-issued fact; see DTO types |
+
+An object's `equalityTag` does not include its update time. Full snapshot equality also requires matching object identifiers, `deleted` and `updateTimeUnixMs`; identical content with different times still requires composition to reconcile the snapshots.
 
 ## Authority and status
 
