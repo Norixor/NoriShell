@@ -352,10 +352,10 @@ mod tests {
     use norishell_core_api::{
         PluginApprovalDecision, PluginApprovalOperation, PluginCapability, PluginCapabilityGrant,
         PluginHostMessageKind, PluginInstallState, PluginLocalInstallRequest,
-        PluginNetworkEndpointRequest, PluginNetworkOperation, PluginNetworkStartRequest,
-        PluginProtocolResource, PluginSettingValue, PluginSpecialPermissionDecisionRequest,
-        PluginSpecialPermissionOpenRequest, PluginSpecialPermissionOutcome,
-        PluginSpecialPermissionTarget, RequestId, RequestMeta, WireSequence,
+        PluginNetworkEndpointRequest, PluginProtocolResource, PluginSettingValue,
+        PluginSpecialPermissionDecisionRequest, PluginSpecialPermissionOpenRequest,
+        PluginSpecialPermissionOutcome, PluginSpecialPermissionTarget, RequestId, RequestMeta,
+        WireSequence,
     };
     use sha2::{Digest as _, Sha256};
     use tokio::{
@@ -755,11 +755,6 @@ mod tests {
                     process: Arc::new(Mutex::new(Some(process))),
                 },
             );
-        let request = PluginNetworkStartRequest {
-            timeout_ms: 5_000,
-            credential: None,
-            operation: PluginNetworkOperation::Tcp {},
-        };
         let frozen = crate::plugin_api::network::prepare_endpoint(&PluginNetworkEndpointRequest {
             endpoint: endpoint.to_owned(),
         })
@@ -772,11 +767,11 @@ mod tests {
                 PluginCapability::NetworkDomain,
                 current_plugin_permission_binding(&installed.package_sha256),
                 PluginApprovalOperation::NetworkRequest,
-                "protocol:framedTcp",
-                &format!("{}:{}", frozen.host, frozen.port),
+                crate::plugin_service::api_network::NETWORK_TARGET_POLICY_IDENTITY,
+                &format!("tcp://{}:{}", frozen.host, frozen.port),
                 &(
-                    "protocol:framedTcp",
-                    serde_json::json!({ "endpoint": frozen, "request": request, "credential": null }),
+                    crate::plugin_service::api_network::NETWORK_TARGET_POLICY_IDENTITY,
+                    crate::plugin_service::api_network::network_target_scope(&frozen),
                 ),
             )
             .expect("prepare exact remembered loopback network decision");

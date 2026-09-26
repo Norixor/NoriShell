@@ -37,6 +37,7 @@ const authorizePrompt: SshSyncSecurePrompt = {
   updateCount: 0,
   deleteCount: 0,
   relatedForwardRuleLabels: [],
+  dataApplyUploaded: false,
   remoteHostCount: 0,
   remoteCredentialCount: 0,
   localComparedAtUnixMs: null,
@@ -227,6 +228,81 @@ describe("SecureSshSync", () => {
     await wrapper.find(".nvx-secure-window__actions button:last-child").trigger("click");
     await flushPromises();
     expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({ decision: "applyMerged" }));
+    wrapper.unmount();
+  });
+
+  it("approves only applying the uploaded result to this device and names local deletions", async () => {
+    client.getSshSyncSecurePrompt.mockResolvedValue({
+      ...authorizePrompt,
+      kind: "approveDataApply",
+      oauth: null,
+      dataApplyUploaded: true,
+      hostCount: 2,
+      remoteHostCount: 1,
+      deleteCount: 1,
+      relatedForwardRuleLabels: ["Database tunnel"],
+      differences: [{
+        kind: "host",
+        change: "localOnly",
+        label: "retired-host",
+        localSummary: "deploy@old.example:22",
+        remoteSummary: null,
+      }],
+      differenceTotalCount: 1,
+    } satisfies SshSyncSecurePrompt);
+    client.decideSshSyncSecurePrompt.mockResolvedValue({ accepted: true });
+    const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("云端写入已完成");
+    expect(wrapper.text()).toContain("取消只会停止本机应用，不会撤销已完成的云端写入");
+    expect(wrapper.text()).toContain("应用前本机");
+    expect(wrapper.text()).toContain("应用后本机");
+    expect(wrapper.text()).toContain("仅应用前存在");
+    expect(wrapper.text()).toContain("Database tunnel");
+    expect(wrapper.text()).not.toContain("本机覆盖云端");
+    expect(wrapper.find('input[type="radio"]').exists()).toBe(false);
+    expect(wrapper.findAll(".nvx-secure-window__actions button").map((button) => button.text()))
+      .toEqual(["取消", "将同步结果应用到本机"]);
+    await wrapper.find(".nvx-secure-window__actions button:last-child").trigger("click");
+    await flushPromises();
+    expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({ decision: "approve" }));
+    wrapper.unmount();
+  });
+
+  it("describes DataApply cancellation as local only", async () => {
+    client.getSshSyncSecurePrompt.mockResolvedValue({
+      ...authorizePrompt,
+      kind: "approveDataApply",
+      oauth: null,
+      dataApplyUploaded: true,
+    } satisfies SshSyncSecurePrompt);
+    client.decideSshSyncSecurePrompt.mockResolvedValue({ accepted: true });
+    const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
+    await flushPromises();
+    await wrapper.find(".nvx-secure-window__actions button:first-child").trigger("click");
+    await flushPromises();
+    expect(client.decideSshSyncSecurePrompt).toHaveBeenCalledWith(expect.objectContaining({ decision: "cancel" }));
+    expect(wrapper.text()).toContain("本机应用已取消；已完成的云端写入未撤销");
+    wrapper.unmount();
+  });
+
+  it("describes a GET-only DataApply without claiming a cloud write", async () => {
+    client.getSshSyncSecurePrompt.mockResolvedValue({
+      ...authorizePrompt,
+      kind: "approveDataApply",
+      oauth: null,
+      dataApplyUploaded: false,
+    } satisfies SshSyncSecurePrompt);
+    client.decideSshSyncSecurePrompt.mockResolvedValue({ accepted: true });
+    const wrapper = mount(SecureSshSync, { global: { plugins: [i18n] } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("已核验远端数据");
+    expect(wrapper.text()).not.toContain("云端写入已完成");
+    await wrapper.find(".nvx-secure-window__actions button:first-child").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("本机应用已取消");
+    expect(wrapper.text()).not.toContain("云端写入");
     wrapper.unmount();
   });
 

@@ -2,6 +2,8 @@
 
 The public document schema is versioned and host-rendered. Use `stack`, `grid`, `section`, `divider`, `dialog` where permitted; presentation nodes such as text/code/status/progress; and bounded controls such as button/copy button/text field/select/checkbox/switch/table/menu/disclosure. Core rejects unknown node kinds, cross-document fields, unapproved targets, and stale revisions.
 
+`tone` accepts only `neutral`, `info`, `success`, `warning`, or `danger`; Core rejects a document containing another value. Sync result code `accountNotConnected` means this plugin identity has no sign-in session and should offer sign-in. It is distinct from a temporary `networkUnavailable` failure.
+
 Targets come only from `ExtensionTargetRegistry`. A target has a stable id, surface kind, allowed node set, typed contextual projection, size budget, and risk level. The target location grants no terminal, Host, filesystem, or network access. `ui.page` and controlled plugin navigation remain in the plugin area. A plugin cannot insert primary navigation, arbitrary header controls, host routes, or DOM.
 
 The navigation rail displays `ui.navigation.label`, so provide a short label in the application locale. The package name remains the identity shown in installed plugin management.

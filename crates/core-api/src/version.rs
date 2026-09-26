@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub const CORE_API_MAJOR: u16 = 1;
-pub const CORE_API_MINOR: u16 = 85;
+pub const CORE_API_MINOR: u16 = 88;
 pub const PLUGIN_PROTOCOL_MAJOR: u16 = 1;
 pub const PLUGIN_TEMPLATE_ON_OPEN_PROTOCOL_MINOR: u16 = 11;
 pub const PLUGIN_SETTINGS_PROTOCOL_MINOR: u16 = 12;
@@ -57,9 +57,8 @@ pub const fn plugin_capability_min_protocol_minor(capability: crate::PluginCapab
         | TerminalMetadata | TerminalObserve | TerminalAnnotation | TerminalProposeInput
         | TerminalRequestInput | HostMetadataRead | HostMutationPropose | HostSessionRequest
         | RemoteInspect | RemoteExecRequest | NetworkDomain | LocalFiles | LocalProcess
-        | StoragePlugin | CredentialsPlugin | SftpRead | SftpWrite | MetricsRead | SshSync => {
-            PLUGIN_PROTOCOL_MIN_MINOR
-        }
+        | StoragePlugin | CredentialsPlugin | SftpRead | SftpWrite | MetricsRead | SshSync
+        | AppPreferencesRead | TerminalHistoryRead => PLUGIN_PROTOCOL_MIN_MINOR,
     }
 }
 
@@ -121,8 +120,8 @@ mod tests {
     #[test]
     fn current_version_exposes_install_permission_target_minor() {
         assert_eq!(CORE_API_MAJOR, 1);
-        assert_eq!(CORE_API_MINOR, 85);
-        assert_eq!(CoreApiVersion::current().minor, 85);
+        assert_eq!(CORE_API_MINOR, 88);
+        assert_eq!(CoreApiVersion::current().minor, 88);
         assert_eq!(PLUGIN_TEMPLATE_ON_OPEN_PROTOCOL_MINOR, 11);
         assert_eq!(PLUGIN_SETTINGS_PROTOCOL_MINOR, 12);
         assert_eq!(PLUGIN_API_PROTOCOL_MINOR, 13);

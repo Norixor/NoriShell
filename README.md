@@ -26,6 +26,7 @@
 - [About](#about)
 - [Installation and quick start](#installation-and-quick-start)
 - [Key features](#key-features)
+- [Future](#future)
 - [Preview](#preview)
 - [Core and security](#core-and-security)
 - [Documentation](#documentation)
@@ -75,6 +76,11 @@ Open **Settings → About** and click “Check for updates”. The macOS and Win
 - **Plugins and themes.** Import or upgrade WebAssembly plugins from local ZIP files and approve their permissions. Theme plugins are supported.
 
 For sync across devices, follow the [self-hosted sync guide](docs/guides/users/self-host-sync.en.md) to deploy the server and import the plugin. Upload from the first device, then select “Sync now” on the others. Restoring existing encrypted data requires that first device's Vault password.
+
+## Future
+
+- **Linux desktop.** Bring the NoriShell desktop workspace to Linux.
+- **Android and iOS.** Connect to your hosts from a phone or tablet with standalone mobile clients.
 
 ## Preview
 

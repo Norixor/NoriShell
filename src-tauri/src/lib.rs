@@ -1,4 +1,5 @@
 mod algorithm_policy;
+mod application_preferences;
 mod connection_profile;
 mod connection_test_service;
 mod core_api_error;
@@ -45,6 +46,7 @@ mod ssh_connection_orchestrator;
 mod ssh_operation_ledger;
 mod ssh_session_service;
 mod ssh_sync_browser_cache;
+mod ssh_sync_browser_store;
 mod ssh_sync_exchange;
 mod ssh_sync_exchange_local;
 mod ssh_sync_preferences;
@@ -218,6 +220,8 @@ macro_rules! production_invoke_handler {
             tray_service::panel::tray_panel_hide,
             desktop_preferences::desktop_preferences_get,
             desktop_preferences::desktop_preferences_replace,
+            application_preferences::application_preferences_get,
+            application_preferences::application_preferences_replace,
             release_check::release_check,
             release_check::release_update_readiness,
             lifecycle::release_update_prepare_install,
@@ -308,6 +312,7 @@ impl ProductionInvokeRuntime for tauri::Wry {
             desktop_service::desktop_frame_get,
             desktop_service::desktop_focus_change,
             desktop_service::desktop_input,
+            desktop_service::desktop_resolution_set,
             desktop_service::desktop_clipboard_get,
             desktop_service::desktop_audio_mute,
             desktop_service::desktop_prompt_get,
@@ -334,10 +339,6 @@ impl ProductionInvokeRuntime for tauri::Wry {
             plugin_service::isolated::plugin_isolated_bridge,
             ssh_sync_exchange_local::ssh_sync_secure_prompt_get,
             ssh_sync_exchange_local::ssh_sync_secure_prompt_decide,
-            ssh_sync_preferences::ssh_sync_preferences_publish,
-            ssh_sync_preferences::ssh_sync_preferences_pending_get,
-            ssh_sync_preferences::ssh_sync_preferences_apply_ack,
-            ssh_sync_preferences::ssh_sync_preferences_retry_pending,
             host_service::private_key_file_import,
             window_request_close,
             application_request_exit,
@@ -474,14 +475,12 @@ pub fn run() {
                     ssh_agent_service.clone(),
                     native_terminal_service.clone(),
                 );
-            let ssh_sync_preferences =
-                ssh_sync_preferences::SshSyncPreferencesService::new(&app_data_directory)
-                    .map_err(std::io::Error::other)?;
+            ssh_sync_preferences::SshSyncPreferencesService::new(&app_data_directory)
+                .map_err(std::io::Error::other)?;
             let ssh_sync_local = ssh_sync_exchange_local::NoriShellSshSyncLocalAdapter::new(
                 app.handle().clone(),
                 host_service.clone(),
                 vault_service.clone(),
-                ssh_sync_preferences.clone(),
             );
             let ssh_sync_broker = ssh_sync_exchange::SshSyncExchangeBroker::new(
                 &app_data_directory,
@@ -571,7 +570,6 @@ pub fn run() {
             );
             app.manage(native_terminal_service);
             app.manage(ssh_sync_local);
-            app.manage(ssh_sync_preferences);
             app.manage(transient_credential_service);
             app.manage(ssh_agent_service);
             app.manage(openssh_import_service::OpenSshImportService::default());
@@ -627,7 +625,6 @@ pub fn run() {
                     }
                 });
             }
-            plugin_service.start_auto_sync();
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -670,6 +667,8 @@ pub fn run() {
 
     app.run(|app, event| match event {
         tauri::RunEvent::Exit => {
+            #[cfg(windows)]
+            eprintln!("NoriShell event loop exited");
             #[cfg(target_os = "macos")]
             window_frame::cleanup_macos_header_bridge();
             if let Some(service) = app.try_state::<tray_service::NativeTrayService>() {
@@ -683,6 +682,11 @@ pub fn run() {
         }
         tauri::RunEvent::ExitRequested { api, .. } => {
             let lifecycle = app.state::<LifecycleState>();
+            #[cfg(windows)]
+            eprintln!(
+                "NoriShell exit requested; authorized={}",
+                lifecycle.is_exit_authorized()
+            );
             if !lifecycle.is_exit_authorized() {
                 api.prevent_exit();
                 lifecycle::request_application_exit(app);

@@ -9,6 +9,7 @@ import { Activity, Archive, ArrowUp, Download, Eye, FileArchive, FilePlus2, Fold
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
+import { useRouteReveal } from "../routeReveal";
 
 import { sftpEntryIcon } from "../components/sftp/fileIcons";
 import NvxSftpPaneActionsMenu from "../components/sftp/NvxSftpPaneActionsMenu.vue";
@@ -153,6 +154,7 @@ const sessions = ref<SftpSessionSummary[]>([]);
 const legacyTransfers = ref<SftpTransferSummary[]>([]);
 const intentTransfers = ref<SftpTransferIntentSummary[]>([]);
 const loading = ref(true);
+const revealRoute = useRouteReveal();
 const operationPending = ref(false);
 const parentSessionLabels = reactive<Record<string, string>>({});
 let navigationReady = false;
@@ -2528,12 +2530,13 @@ onMounted(async () => {
         generation: null,
       }, "/", [47]);
     }
-  } catch { showOperationFailed(); } finally { navigationReady = true; loading.value = false }
+  } catch { showOperationFailed(); } finally { navigationReady = true; loading.value = false; revealRoute(); }
 });
 onActivated(() => {
   if (!sftpViewMounted) return;
   startPageObservers();
   if (navigationReady) {
+    revealRoute();
     void refreshSnapshot().catch(() => undefined);
     void consumePluginNavigation();
   }

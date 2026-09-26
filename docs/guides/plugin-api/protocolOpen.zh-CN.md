@@ -24,7 +24,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`terminalProvider`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`terminalProvider`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 providerId 必须是包中声明的 Provider；configuration 符合其设置 schema，只传允许的 boolean/number/string。示例采用 Protocol Demo 的 framedTcp 与 endpoint 配置，仅在声明该 Provider 的包中有意义。launchId 仅表示启动记录已创建，不表示终端已连接。
 

@@ -206,6 +206,9 @@ pub(crate) fn with_tombstones_for_missing(
 ) -> norishell_ssh_profile_sync::Result<PortableBundleV1> {
     let mut result = target.clone();
     result.schema = match target.schema {
+        norishell_ssh_profile_sync::BundleSchema::V6 => {
+            norishell_ssh_profile_sync::BundleSchema::V6
+        }
         norishell_ssh_profile_sync::BundleSchema::V5 => {
             norishell_ssh_profile_sync::BundleSchema::V5
         }
@@ -612,6 +615,7 @@ mod tests {
     fn bundle(hosts: Vec<PortableHost>) -> PortableBundleV1 {
         PortableBundleV1 {
             schema: BundleSchema::V2,
+            selected_categories: None,
             revision: 1,
             objects: PortableObjects {
                 hosts,

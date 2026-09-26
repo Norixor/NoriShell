@@ -11,8 +11,8 @@ use std::{
 
 use norishell_app_persistence::{
     AppPersistenceError, CredentialRecord, CredentialRecordDetails, HostConnectionSnapshot,
-    OfflineImportPlan, SshSyncChangeFence, SshSyncHttpMethod, SshSyncHttpUploadAttemptInput,
-    SshSyncHttpUploadAttemptState, SshSyncHttpUploadCompletionFence,
+    OfflineImportPlan, SshSyncChangeFence, SshSyncHttpMethod, SshSyncHttpUploadAbandonProof,
+    SshSyncHttpUploadAttemptInput, SshSyncHttpUploadAttemptState, SshSyncHttpUploadCompletionFence,
     SshSyncHttpUploadCompletionProof, SshSyncLocalItemKind, SshSyncLocalItemTimeOverride,
     SshSyncLocalObjectId, SshSyncLoginAutomation, SshSyncLoginAutomationStep, SshSyncObjectKind,
     SshSyncObjectMappingInput, SshSyncOwnedCreateBatch, SshSyncOwnedCredentialDelete,
@@ -43,10 +43,10 @@ use norishell_ssh_profile_sync::{
     LoginAutomationStep as PortableLoginAutomationStep, MachineBoundKind, MachineBoundSkipReason,
     MonitoringResource, PortableAlgorithmCategory, PortableAlgorithmCompatibilityException,
     PortableAlgorithmPolicy, PortableAuthenticationPlan, PortableBundleV1, PortableCredential,
-    PortableCredentialMaterial, PortableDesktopProfile, PortableDesktopProtocol,
-    PortableHeartbeatPolicy, PortableHost, PortableIdentity, PortableItemUpdateTime,
-    PortableLoginAutomation, PortableMonitoringPolicy, PortableObjectId, PortableObjectKind,
-    PortableObjects, PortablePreferencesV1, PortableRoute, PortableSecret, PortableSecretKind,
+    PortableCredentialMaterial, PortableDataCategory, PortableDesktopProfile,
+    PortableDesktopProtocol, PortableHeartbeatPolicy, PortableHost, PortableIdentity,
+    PortableItemUpdateTime, PortableLoginAutomation, PortableMonitoringPolicy, PortableObjectId,
+    PortableObjectKind, PortableObjects, PortableRoute, PortableSecret, PortableSecretKind,
     PortableShellHeartbeatLineEnding, PortableTombstone, PublicKeyAlgorithm,
     RouteIngress as PortableIngress, SecretBytes, SkippedMachineBoundObject, SyncKey,
     canonical_bundle_bytes,
@@ -63,13 +63,12 @@ use crate::{
     ssh_sync_exchange::{
         ActionFence, ApplyResult, DurableUploadFence, PendingRestoreHandle,
         PortableProfileKeyBinding, PortableProfileState, PortableRemoteBaseline, PortableSnapshot,
-        PortableSshProfileStore, PortableStoreError, PortableUploadAttempt,
-        PortableUploadAttemptState, PortableUploadCompletionProof, RestorePreview,
-        SecureActionContext, SecureApplyApproval, SecureBackupSelection, SecureSelectionError,
-        SecureSshSyncUi, SecureSyncDirection, SshSyncActionRevision, SyncConflictReview,
-        SyncDirectionReview, VerifiedAutomaticMergeApproval,
+        PortableSshProfileStore, PortableStoreError, PortableUploadAbandonProof,
+        PortableUploadAttempt, PortableUploadAttemptState, PortableUploadCompletionProof,
+        RestorePreview, SecureActionContext, SecureApplyApproval, SecureBackupSelection,
+        SecureSelectionError, SecureSshSyncUi, SecureSyncDirection, SshSyncActionRevision,
+        SyncConflictReview, SyncDirectionReview, VerifiedAutomaticMergeApproval,
     },
-    ssh_sync_preferences::SshSyncPreferencesService,
     vault_service::{VaultSecretInsert, VaultService},
 };
 
@@ -128,6 +127,7 @@ struct SecurePromptContent {
     difference_total_count: u32,
     difference_omitted_count: u32,
     related_forward_rule_labels: Vec<String>,
+    data_apply_uploaded: bool,
 }
 
 struct PendingPrompt {
@@ -138,7 +138,6 @@ struct PendingPrompt {
 struct PendingRestore {
     handle: PendingRestoreHandle,
     bundle: PortableBundleV1,
-    expected_preferences: Option<PortablePreferencesV1>,
     owner: SyncOwner,
     bundle_sha256: String,
     plaintext_bytes: usize,
@@ -296,23 +295,16 @@ pub(crate) struct NoriShellSshSyncLocalAdapter {
     app: Option<AppHandle>,
     hosts: HostService,
     vault: VaultService,
-    preferences: Option<SshSyncPreferencesService>,
     state: Arc<Mutex<LocalState>>,
     restore_commit: Arc<AsyncMutex<()>>,
 }
 
 impl NoriShellSshSyncLocalAdapter {
-    pub(crate) fn new(
-        app: AppHandle,
-        hosts: HostService,
-        vault: VaultService,
-        preferences: SshSyncPreferencesService,
-    ) -> Self {
+    pub(crate) fn new(app: AppHandle, hosts: HostService, vault: VaultService) -> Self {
         let adapter = Self {
             app: Some(app),
             hosts,
             vault,
-            preferences: Some(preferences),
             state: Arc::new(Mutex::new(LocalState::default())),
             restore_commit: Arc::new(AsyncMutex::new(())),
         };
@@ -353,7 +345,6 @@ impl NoriShellSshSyncLocalAdapter {
             app: None,
             hosts,
             vault,
-            preferences: None,
             state: Arc::new(Mutex::new(LocalState::default())),
             restore_commit: Arc::new(AsyncMutex::new(())),
         }
@@ -389,6 +380,7 @@ impl NoriShellSshSyncLocalAdapter {
         let comparison_prompt = matches!(
             kind,
             SshSyncSecurePromptKind::ChooseSyncDirection
+                | SshSyncSecurePromptKind::ApproveDataApply
                 | SshSyncSecurePromptKind::ResolveConflicts
                 | SshSyncSecurePromptKind::ApproveMergedDeletion
         );
@@ -417,6 +409,7 @@ impl NoriShellSshSyncLocalAdapter {
             difference_total_count: content.difference_total_count,
             difference_omitted_count: content.difference_omitted_count,
             related_forward_rule_labels: content.related_forward_rule_labels,
+            data_apply_uploaded: content.data_apply_uploaded,
         };
         let (sender, receiver) = oneshot::channel();
         self.state
@@ -1393,8 +1386,38 @@ impl NoriShellSshSyncLocalAdapter {
             .iter()
             .map(|value| (value.kind, value.id))
             .collect::<BTreeSet<_>>();
+        if let Some(selected) = &bundle.selected_categories {
+            let existing = self
+                .hosts
+                .with_ssh_sync_repository(|repository| {
+                    repository.list_ssh_sync_scope_memberships(owner)
+                })
+                .map_err(|error| map_store_error_at("local.scope_memberships_for_bundle", error))?;
+            for record in existing {
+                let membership = record.membership;
+                if selected.contains(&PortableDataCategory::for_kind(portable_object_kind(
+                    membership.object_kind,
+                ))) {
+                    continue;
+                }
+                let id = PortableObjectId::from_uuid(
+                    Uuid::parse_str(&membership.portable_object_id).map_err(|_| {
+                        PortableStoreError::Rejected("local.scope_memberships_for_bundle.01")
+                    })?,
+                )
+                .map_err(|_| {
+                    PortableStoreError::Rejected("local.scope_memberships_for_bundle.02")
+                })?;
+                memberships.insert((membership.object_kind, id), membership);
+            }
+        }
         for ((kind, portable_id), _) in self.local_ids_for_owner(owner)? {
             let portable_kind = portable_object_kind(kind);
+            if bundle.selected_categories.as_ref().is_some_and(|selected| {
+                !selected.contains(&PortableDataCategory::for_kind(portable_kind))
+            }) {
+                continue;
+            }
             if !memberships.contains_key(&(kind, portable_id))
                 && !tombstones.contains(&(portable_kind, portable_id))
             {
@@ -2131,6 +2154,39 @@ impl NoriShellSshSyncLocalAdapter {
                 height: profile.height,
                 clipboard_enabled: profile.clipboard_enabled,
                 audio_playback_enabled: profile.audio_playback_enabled,
+                rdp_transport_mode: match profile.rdp_transport_mode {
+                    norishell_core_api::RdpTransportMode::Auto => {
+                        norishell_ssh_profile_sync::PortableRdpTransportMode::Auto
+                    }
+                    norishell_core_api::RdpTransportMode::TcpOnly => {
+                        norishell_ssh_profile_sync::PortableRdpTransportMode::TcpOnly
+                    }
+                    norishell_core_api::RdpTransportMode::UdpRequired => {
+                        norishell_ssh_profile_sync::PortableRdpTransportMode::UdpRequired
+                    }
+                },
+                rdp_graphics_mode: match profile.rdp_graphics_mode {
+                    norishell_core_api::RdpGraphicsMode::Auto => {
+                        norishell_ssh_profile_sync::PortableRdpGraphicsMode::Auto
+                    }
+                    norishell_core_api::RdpGraphicsMode::RemoteFx => {
+                        norishell_ssh_profile_sync::PortableRdpGraphicsMode::RemoteFx
+                    }
+                    norishell_core_api::RdpGraphicsMode::Avc420 => {
+                        norishell_ssh_profile_sync::PortableRdpGraphicsMode::Avc420
+                    }
+                    norishell_core_api::RdpGraphicsMode::Bitmap => {
+                        norishell_ssh_profile_sync::PortableRdpGraphicsMode::Bitmap
+                    }
+                },
+                rdp_resolution_mode: match profile.rdp_resolution_mode {
+                    norishell_core_api::RdpResolutionMode::Fixed => {
+                        norishell_ssh_profile_sync::PortableRdpResolutionMode::Fixed
+                    }
+                    norishell_core_api::RdpResolutionMode::Adaptive => {
+                        norishell_ssh_profile_sync::PortableRdpResolutionMode::Adaptive
+                    }
+                },
                 vnc_protocol_version: match profile.vnc_protocol_version {
                     norishell_core_api::VncProtocolVersion::Auto => {
                         norishell_ssh_profile_sync::PortableVncProtocolVersion::Auto
@@ -2145,13 +2201,25 @@ impl NoriShellSshSyncLocalAdapter {
                         norishell_ssh_profile_sync::PortableVncProtocolVersion::Rfb38
                     }
                 },
+                vnc_resolution_mode: match profile.vnc_resolution_mode {
+                    norishell_core_api::VncResolutionMode::Server => {
+                        norishell_ssh_profile_sync::PortableVncResolutionMode::Server
+                    }
+                    norishell_core_api::VncResolutionMode::Fixed => {
+                        norishell_ssh_profile_sync::PortableVncResolutionMode::Fixed
+                    }
+                    norishell_core_api::VncResolutionMode::Adaptive => {
+                        norishell_ssh_profile_sync::PortableVncResolutionMode::Adaptive
+                    }
+                },
             });
         }
         secrets.sort_by_key(|secret| secret.id);
         secrets.dedup_by_key(|secret| secret.id);
-        let bundle = PortableBundleV1 {
+        let mut bundle = PortableBundleV1 {
             schema: BundleSchema::V3,
             revision,
+            selected_categories: None,
             objects,
             preferences: None,
             secrets,
@@ -2164,6 +2232,9 @@ impl NoriShellSshSyncLocalAdapter {
             update_times: Vec::new(),
             preference_update_times: Default::default(),
         };
+        if bundle.requires_desktop_mode_schema() {
+            bundle.schema = BundleSchema::V6;
+        }
         bundle
             .validate()
             .map_err(|error| map_bundle_error("snapshot.objects", error))?;
@@ -2728,6 +2799,39 @@ impl NoriShellSshSyncLocalAdapter {
                         height: target.height,
                         clipboard_enabled: target.clipboard_enabled,
                         audio_playback_enabled: target.audio_playback_enabled,
+                        rdp_transport_mode: match target.rdp_transport_mode {
+                            norishell_ssh_profile_sync::PortableRdpTransportMode::Auto => {
+                                norishell_core_api::RdpTransportMode::Auto
+                            }
+                            norishell_ssh_profile_sync::PortableRdpTransportMode::TcpOnly => {
+                                norishell_core_api::RdpTransportMode::TcpOnly
+                            }
+                            norishell_ssh_profile_sync::PortableRdpTransportMode::UdpRequired => {
+                                norishell_core_api::RdpTransportMode::UdpRequired
+                            }
+                        },
+                        rdp_graphics_mode: match target.rdp_graphics_mode {
+                            norishell_ssh_profile_sync::PortableRdpGraphicsMode::Auto => {
+                                norishell_core_api::RdpGraphicsMode::Auto
+                            }
+                            norishell_ssh_profile_sync::PortableRdpGraphicsMode::RemoteFx => {
+                                norishell_core_api::RdpGraphicsMode::RemoteFx
+                            }
+                            norishell_ssh_profile_sync::PortableRdpGraphicsMode::Avc420 => {
+                                norishell_core_api::RdpGraphicsMode::Avc420
+                            }
+                            norishell_ssh_profile_sync::PortableRdpGraphicsMode::Bitmap => {
+                                norishell_core_api::RdpGraphicsMode::Bitmap
+                            }
+                        },
+                        rdp_resolution_mode: match target.rdp_resolution_mode {
+                            norishell_ssh_profile_sync::PortableRdpResolutionMode::Fixed => {
+                                norishell_core_api::RdpResolutionMode::Fixed
+                            }
+                            norishell_ssh_profile_sync::PortableRdpResolutionMode::Adaptive => {
+                                norishell_core_api::RdpResolutionMode::Adaptive
+                            }
+                        },
                         vnc_protocol_version: match target.vnc_protocol_version {
                             norishell_ssh_profile_sync::PortableVncProtocolVersion::Auto => {
                                 norishell_core_api::VncProtocolVersion::Auto
@@ -2740,6 +2844,17 @@ impl NoriShellSshSyncLocalAdapter {
                             }
                             norishell_ssh_profile_sync::PortableVncProtocolVersion::Rfb38 => {
                                 norishell_core_api::VncProtocolVersion::Rfb38
+                            }
+                        },
+                        vnc_resolution_mode: match target.vnc_resolution_mode {
+                            norishell_ssh_profile_sync::PortableVncResolutionMode::Server => {
+                                norishell_core_api::VncResolutionMode::Server
+                            }
+                            norishell_ssh_profile_sync::PortableVncResolutionMode::Fixed => {
+                                norishell_core_api::VncResolutionMode::Fixed
+                            }
+                            norishell_ssh_profile_sync::PortableVncResolutionMode::Adaptive => {
+                                norishell_core_api::VncResolutionMode::Adaptive
                             }
                         },
                         revision: WireSequence::new(0),
@@ -3513,13 +3628,17 @@ impl NoriShellSshSyncLocalAdapter {
     fn stage_restore_bundle(
         &self,
         bundle: PortableBundleV1,
-        expected_preferences: Option<PortablePreferencesV1>,
         owner: SyncOwner,
         key: &SyncKey,
     ) -> Result<RestorePreview, PortableStoreError> {
         bundle
             .validate()
             .map_err(|_| PortableStoreError::Rejected("local.stage_restore_bundle.01"))?;
+        if bundle.preferences.is_some() || !bundle.preference_update_times.is_empty() {
+            return Err(PortableStoreError::Rejected(
+                "local.stage_restore_bundle.01",
+            ));
+        }
         let change_fence = self
             .hosts
             .with_ssh_sync_repository(|repository| repository.ssh_sync_change_fence())
@@ -3628,7 +3747,6 @@ impl NoriShellSshSyncLocalAdapter {
             PendingRestore {
                 handle,
                 bundle,
-                expected_preferences,
                 owner,
                 bundle_sha256,
                 plaintext_bytes,
@@ -3651,22 +3769,16 @@ impl NoriShellSshSyncLocalAdapter {
         if !fence() {
             return Err(PortableStoreError::Stale);
         }
+        if pending.bundle.preferences.is_some()
+            || !pending.bundle.preference_update_times.is_empty()
+        {
+            return Err(PortableStoreError::Rejected(
+                "local.apply_pending_restore.01",
+            ));
+        }
         let item_times =
             self.local_item_time_overrides_for_bundle(&pending.bundle, &pending.owner, &[])?;
-        let pending_preferences = pending.bundle.preferences.clone();
-        let expected_preferences = pending.expected_preferences.clone();
-        let prepared_preferences =
-            match (expected_preferences, pending_preferences, &self.preferences) {
-                (Some(expected), Some(desired), Some(preferences)) => preferences
-                    .prepare_remote(
-                        expected,
-                        desired,
-                        pending.bundle.preference_update_times.clone(),
-                    )
-                    .map_err(|_| PortableStoreError::Stale)?,
-                _ => None,
-            };
-        let apply_result = (|| {
+        (|| {
             if pending.reconcile_noop {
                 let change_fence = pending
                     .change_fence
@@ -3745,29 +3857,7 @@ impl NoriShellSshSyncLocalAdapter {
             } else {
                 self.apply_restore_plan(&pending.bundle, &pending.owner, &pending.bundle_sha256)
             }
-        })();
-        let applied = match apply_result {
-            Ok(value) => value,
-            Err(error) => {
-                if prepared_preferences.is_some()
-                    && let (Some(app), Some(preferences)) = (&self.app, &self.preferences)
-                {
-                    preferences.notify_pending(app);
-                }
-                return Err(error);
-            }
-        };
-        if let (Some(id), Some(app), Some(preferences)) = (
-            prepared_preferences.as_deref(),
-            &self.app,
-            &self.preferences,
-        ) {
-            preferences
-                .activate_prepared(app, id)
-                .await
-                .map_err(PortableStoreError::Rejected)?;
-        }
-        Ok(applied)
+        })()
     }
 }
 
@@ -3961,6 +4051,58 @@ impl SecureSshSyncUi for NoriShellSshSyncLocalAdapter {
                 }
                 _ => Err(SecureSelectionError::Unavailable),
             }
+        })
+    }
+
+    fn approve_data_apply(
+        &self,
+        context: SecureActionContext,
+        review: SyncDirectionReview,
+        uploaded: bool,
+    ) -> LocalFuture<'_, Result<SecureApplyApproval, SecureSelectionError>> {
+        Box::pin(async move {
+            let owner = sync_owner(&context);
+            let fence = context.fence.clone();
+            let related_forward_rule_labels = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.prune_expired();
+                let pending = state
+                    .pending_restores
+                    .get(review.restore_handle.token())
+                    .filter(|pending| pending.owner == owner)
+                    .ok_or(SecureSelectionError::Unavailable)?;
+                pending.related_forward_rule_labels.clone()
+            };
+            let decision = self
+                .prompt(
+                    context,
+                    SshSyncSecurePromptKind::ApproveDataApply,
+                    SecurePromptContent {
+                        desktop_profile_count: review.local_desktop_profile_count,
+                        remote_desktop_profile_count: review.remote_desktop_profile_count,
+                        host_count: review.local_host_count,
+                        credential_count: review.local_credential_count,
+                        conflict_count: review.conflict_count,
+                        delete_count: review.delete_count,
+                        related_forward_rule_labels,
+                        data_apply_uploaded: uploaded,
+                        remote_host_count: review.remote_host_count,
+                        remote_credential_count: review.remote_credential_count,
+                        local_compared_at_unix_ms: Some(review.local_compared_at_unix_ms),
+                        differences: review.differences,
+                        difference_total_count: review.difference_total_count,
+                        difference_omitted_count: review.difference_omitted_count,
+                        ..SecurePromptContent::default()
+                    },
+                )
+                .await?;
+            if decision.decision != SshSyncSecureDecision::Approve {
+                return Err(SecureSelectionError::Unavailable);
+            }
+            self.issue_apply_approval(owner, fence, Some(review.restore_handle))
         })
     }
 
@@ -4200,15 +4342,6 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
         })
     }
 
-    fn has_pending_preferences(&self) -> LocalFuture<'_, Result<bool, PortableStoreError>> {
-        Box::pin(async move {
-            Ok(self
-                .preferences
-                .as_ref()
-                .is_some_and(SshSyncPreferencesService::has_pending_preferences))
-        })
-    }
-
     fn snapshot_current(
         &self,
         plugin_id: String,
@@ -4217,13 +4350,6 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
         revision: u64,
     ) -> LocalFuture<'_, Result<PortableSnapshot, PortableStoreError>> {
         Box::pin(async move {
-            if self
-                .preferences
-                .as_ref()
-                .is_some_and(SshSyncPreferencesService::has_pending_preferences)
-            {
-                return Err(PortableStoreError::Stale);
-            }
             let state =
                 self.ensure_profile_state(&plugin_id, &signer_fingerprint_sha256, &profile_id)?;
             let selection = self.apply_scope_membership_exclusions(
@@ -4233,27 +4359,12 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
             let portable_ids = self.portable_ids_for_selection(&state.key, &selection)?;
             let mut snapshot =
                 self.build_snapshot_with_ids(selection, revision, Some(&portable_ids))?;
-            if let (Some(app), Some(preferences)) = (&self.app, &self.preferences) {
-                let current = preferences
-                    .request_current_snapshot(app)
-                    .await
-                    .map_err(|_| PortableStoreError::PreferencesUnavailable)?;
-                snapshot.bundle.schema = BundleSchema::V5;
-                snapshot.bundle.preferences = Some(current);
-                snapshot.bundle.preference_update_times = preferences.current_update_times();
-                self.attach_item_update_times(&mut snapshot.bundle, &portable_ids)?;
-                snapshot
-                    .bundle
-                    .validate()
-                    .map_err(|error| map_bundle_error("snapshot.preferences", error))?;
-            }
-            if self
-                .preferences
-                .as_ref()
-                .is_some_and(SshSyncPreferencesService::has_pending_preferences)
-            {
-                return Err(PortableStoreError::Stale);
-            }
+            snapshot.bundle.schema = BundleSchema::V6;
+            self.attach_item_update_times(&mut snapshot.bundle, &portable_ids)?;
+            snapshot
+                .bundle
+                .validate()
+                .map_err(|error| map_bundle_error("snapshot.objects", error))?;
             Ok(snapshot)
         })
     }
@@ -4272,6 +4383,9 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
             current
                 .validate()
                 .map_err(|_| PortableStoreError::Rejected("local.prepare_local_merge.02"))?;
+            if current.schema != BundleSchema::V6 {
+                return Err(PortableStoreError::Rejected("local.prepare_local_merge.02"));
+            }
             let inherited_tombstones = base
                 .tombstones
                 .iter()
@@ -4430,11 +4544,9 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
                     });
                 }
             }
-            current.schema = if current.preferences.is_some() {
-                BundleSchema::V5
-            } else {
-                BundleSchema::V3
-            };
+            current.schema = BundleSchema::V6;
+            current.preferences = None;
+            current.preference_update_times.clear();
             current
                 .tombstones
                 .sort_by_key(|value| (value.kind, value.id));
@@ -4458,13 +4570,6 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
         selection: SecureBackupSelection,
     ) -> LocalFuture<'_, Result<PortableSnapshot, PortableStoreError>> {
         Box::pin(async move {
-            if self
-                .preferences
-                .as_ref()
-                .is_some_and(SshSyncPreferencesService::has_pending_preferences)
-            {
-                return Err(PortableStoreError::Stale);
-            }
             let (plugin_id, selection_signer, profile_id) = selection.owner();
             let owner = SyncOwner {
                 plugin_id: plugin_id.to_owned(),
@@ -4496,27 +4601,12 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
             let portable_ids = self.portable_ids_for_selection(&current.key, &lease.selection)?;
             let mut snapshot =
                 self.build_snapshot_with_ids(lease.selection.clone(), 1, Some(&portable_ids))?;
-            if let (Some(app), Some(preferences)) = (&self.app, &self.preferences) {
-                let current = preferences
-                    .request_current_snapshot(app)
-                    .await
-                    .map_err(|_| PortableStoreError::PreferencesUnavailable)?;
-                snapshot.bundle.schema = BundleSchema::V5;
-                snapshot.bundle.preferences = Some(current);
-                snapshot.bundle.preference_update_times = preferences.current_update_times();
-                self.attach_item_update_times(&mut snapshot.bundle, &portable_ids)?;
-                snapshot
-                    .bundle
-                    .validate()
-                    .map_err(|_| PortableStoreError::Rejected("local.configure_scope.02"))?;
-            }
-            if self
-                .preferences
-                .as_ref()
-                .is_some_and(SshSyncPreferencesService::has_pending_preferences)
-            {
-                return Err(PortableStoreError::Stale);
-            }
+            snapshot.bundle.schema = BundleSchema::V6;
+            self.attach_item_update_times(&mut snapshot.bundle, &portable_ids)?;
+            snapshot
+                .bundle
+                .validate()
+                .map_err(|_| PortableStoreError::Rejected("local.configure_scope.02"))?;
             let all = self.selection_for_scope(&SshSyncProfileScope {
                 mode: SshSyncProfileScopeMode::AllEligible,
                 custom_host_ids: Vec::new(),
@@ -4868,6 +4958,58 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
         })
     }
 
+    fn abandon_legacy_upload_attempt(
+        &self,
+        plugin_id: String,
+        signer_fingerprint_sha256: String,
+        profile_id: String,
+        idempotency_key: String,
+        body_sha256: String,
+        expected_state_version: WireSequence,
+        expected_fence: DurableUploadFence,
+        proof: PortableUploadAbandonProof,
+    ) -> LocalFuture<'_, Result<(), PortableStoreError>> {
+        Box::pin(async move {
+            let owner = Self::profile_key(&plugin_id, &signer_fingerprint_sha256, &profile_id)?;
+            let proof = match proof {
+                PortableUploadAbandonProof::PreparedNotSent => {
+                    SshSyncHttpUploadAbandonProof::PreparedNotSent
+                }
+                PortableUploadAbandonProof::AuthenticatedRemoteAtBase {
+                    remote_revision,
+                    remote_etag,
+                    remote_body_sha256,
+                } => SshSyncHttpUploadAbandonProof::AuthenticatedRemoteAtBase {
+                    remote_revision,
+                    remote_etag,
+                    remote_body_sha256,
+                },
+            };
+            self.hosts
+                .with_ssh_sync_repository(|repository| {
+                    repository.abandon_ssh_sync_http_upload_attempt(
+                        &owner,
+                        &idempotency_key,
+                        &body_sha256,
+                        expected_state_version,
+                        &SshSyncHttpUploadCompletionFence {
+                            canonical_url: expected_fence.canonical_url,
+                            http_method: match expected_fence.method {
+                                PluginSshSyncHttpMethod::Put => SshSyncHttpMethod::Put,
+                                PluginSshSyncHttpMethod::Post => SshSyncHttpMethod::Post,
+                            },
+                            use_oauth: expected_fence.use_oauth,
+                            authorization_revision: expected_fence.action_revision.authorization,
+                            configuration_revision: expected_fence.action_revision.configuration,
+                        },
+                        &proof,
+                    )
+                })
+                .map(|_| ())
+                .map_err(|error| map_store_error_at("local.abandon_legacy_upload_attempt", error))
+        })
+    }
+
     fn stage_restore(
         &self,
         plugin_id: String,
@@ -4877,29 +5019,8 @@ impl PortableSshProfileStore for NoriShellSshSyncLocalAdapter {
         key: SyncKey,
     ) -> LocalFuture<'_, Result<RestorePreview, PortableStoreError>> {
         Box::pin(async move {
-            let expected_preferences = if bundle.preferences.is_some() {
-                match (&self.app, &self.preferences) {
-                    (Some(app), Some(preferences)) => {
-                        if preferences.has_pending_preferences() {
-                            return Err(PortableStoreError::Stale);
-                        }
-                        Some(
-                            preferences
-                                .request_current_snapshot(app)
-                                .await
-                                .map_err(|_| {
-                                    PortableStoreError::Rejected("local.stage_restore.01")
-                                })?,
-                        )
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
             self.stage_restore_bundle(
                 bundle,
-                expected_preferences,
                 SyncOwner {
                     plugin_id,
                     signer_fingerprint_sha256: signer_fingerprint_sha256.to_owned(),
@@ -6382,6 +6503,9 @@ fn validate_decision(
         SshSyncSecurePromptKind::ApproveMergedDeletion => {
             request.decision == SshSyncSecureDecision::ApplyMerged
         }
+        SshSyncSecurePromptKind::ApproveDataApply => {
+            request.decision == SshSyncSecureDecision::Approve
+        }
         _ => request.decision == SshSyncSecureDecision::Approve,
     };
     if !decision_allowed {
@@ -6546,7 +6670,7 @@ fn map_store_error_at(stage: &'static str, error: AppPersistenceError) -> Portab
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -6565,7 +6689,8 @@ mod tests {
         MAX_SECRET_BATCH_ENTRIES, MAX_SECRET_BATCH_VALUE_BYTES, SecretKind,
     };
     use norishell_ssh_profile_sync::{
-        BundleSchema, PluginExchangeBinding, PortableBundleV1, PortableObjectId, PortableObjects,
+        BundleSchema, PluginExchangeBinding, PortableBundleV1, PortableObjectId,
+        PortableObjectKind, PortableObjects, PortablePreferencesV1, PortableTombstone,
         RouteIngress as PortableIngress, SyncKey, create_plugin_exchange_with_key,
         open_plugin_exchange_with_key,
     };
@@ -6630,6 +6755,56 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn data_owner_lookup_prefers_unique_bound_profile_over_provisional_profile() {
+        use crate::ssh_sync_exchange::{PortableRemoteBaseline, SshSyncExchangeBroker};
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let vault = VaultService::start(directory.path());
+        let hosts = HostService::start(directory.path()).expect("hosts");
+        let adapter = Arc::new(NoriShellSshSyncLocalAdapter::new_for_store_test(
+            hosts,
+            vault.clone(),
+        ));
+        let broker =
+            SshSyncExchangeBroker::new(directory.path(), vault, adapter.clone(), adapter.clone());
+        let plugin = "org.example.sync".to_owned();
+        let profile = "primary".to_owned();
+        let provisional = "a".repeat(64);
+        let bound = "b".repeat(64);
+        adapter
+            .profile_state(plugin.clone(), provisional, profile.clone())
+            .await
+            .expect("provisional profile");
+        let state = adapter
+            .profile_state(plugin.clone(), bound.clone(), profile.clone())
+            .await
+            .expect("bound profile");
+        adapter
+            .update_remote_baseline(
+                plugin.clone(),
+                bound.clone(),
+                profile.clone(),
+                state.state_version,
+                PortableRemoteBaseline {
+                    revision: 100,
+                    etag: "\"revision-100\"".to_owned(),
+                    content_sha256: "c".repeat(64),
+                    exchange_sha256: "d".repeat(64),
+                },
+            )
+            .await
+            .expect("remote baseline");
+
+        assert_eq!(
+            broker
+                .data_resolve_local_owner(&plugin, &"e".repeat(64), &profile)
+                .await
+                .expect("unique bound owner"),
+            bound
         );
     }
 
@@ -7016,6 +7191,10 @@ mod tests {
             clipboard_enabled: true,
             audio_playback_enabled: false,
             vnc_protocol_version: norishell_core_api::VncProtocolVersion::Auto,
+            vnc_resolution_mode: norishell_core_api::VncResolutionMode::Server,
+            rdp_transport_mode: norishell_core_api::RdpTransportMode::Auto,
+            rdp_graphics_mode: norishell_core_api::RdpGraphicsMode::Auto,
+            rdp_resolution_mode: norishell_core_api::RdpResolutionMode::Fixed,
             revision: WireSequence::new(0),
         };
         hosts
@@ -7229,6 +7408,10 @@ mod tests {
                 clipboard_enabled: false,
                 audio_playback_enabled: false,
                 vnc_protocol_version: norishell_core_api::VncProtocolVersion::Auto,
+                vnc_resolution_mode: norishell_core_api::VncResolutionMode::Server,
+                rdp_transport_mode: norishell_core_api::RdpTransportMode::Auto,
+                rdp_graphics_mode: norishell_core_api::RdpGraphicsMode::Auto,
+                rdp_resolution_mode: norishell_core_api::RdpResolutionMode::Fixed,
                 revision: WireSequence::new(0),
             };
             source_hosts
@@ -7350,9 +7533,14 @@ mod tests {
                     "source password recovers sync key into a differently protected local Vault",
                 );
             let target_sync_key = SyncKey::from_bytes(*target_key_material.key_bytes());
-            let restored_bundle =
+            let mut restored_bundle =
                 open_plugin_exchange_with_key(&exchange, &target_sync_key, &binding)
                     .expect("decrypt source bundle on target");
+            // The current plugin authenticates the historical wire first, then
+            // applies its three-category V6 projection.
+            restored_bundle.schema = BundleSchema::V6;
+            restored_bundle.preferences = None;
+            restored_bundle.preference_update_times.clear();
             let target_adapter = NoriShellSshSyncLocalAdapter::new_for_store_test(
                 target_hosts.clone(),
                 target_vault.clone(),
@@ -7372,12 +7560,37 @@ mod tests {
                 .expect("create the current protocol-7 target profile state");
             assert_eq!(target_before_restore.host_count, 0);
             assert_eq!(target_before_restore.credential_count, 0);
+            assert_eq!(target_before_restore.bundle.schema, BundleSchema::V6);
+            assert!(target_before_restore.bundle.preferences.is_none());
+            assert!(
+                target_before_restore
+                    .bundle
+                    .preference_update_times
+                    .is_empty()
+            );
+            let deleted_id = PortableObjectId::new();
+            let mut base = target_before_restore.bundle.clone();
+            base.tombstones.push(PortableTombstone {
+                kind: PortableObjectKind::Host,
+                id: deleted_id,
+            });
+            let prepared = tauri::async_runtime::block_on(target_adapter.prepare_local_merge(
+                PLUGIN_ID.to_owned(),
+                SIGNER.to_owned(),
+                PROFILE_ID.to_owned(),
+                base,
+                target_before_restore.bundle.clone(),
+            ))
+            .expect("prepare v6 merge with inherited deletion");
+            assert_eq!(prepared.schema, BundleSchema::V6);
+            assert!(prepared.tombstones.iter().any(|item| item.id == deleted_id));
+            let expected_applied_bundle = restored_bundle.clone();
             let staged = tauri::async_runtime::block_on(target_adapter.stage_restore(
                 PLUGIN_ID.to_owned(),
                 SIGNER.to_owned(),
                 PROFILE_ID.to_owned(),
                 restored_bundle,
-                target_sync_key,
+                target_sync_key.clone(),
             ))
             .expect("stage target restore through the current sync path");
             let fence_hosts = target_hosts.clone();
@@ -7400,6 +7613,46 @@ mod tests {
             assert_eq!(applied.host_count, u32::from(linked));
             assert_eq!(applied.desktop_profile_count, 1);
             assert_eq!(applied.credential_count, 1);
+
+            let mut applied_snapshot =
+                tauri::async_runtime::block_on(target_adapter.snapshot_current(
+                    PLUGIN_ID.to_owned(),
+                    SIGNER.to_owned(),
+                    PROFILE_ID.to_owned(),
+                    expected_applied_bundle.revision,
+                ))
+                .expect("read restored portable state");
+            applied_snapshot.bundle =
+                tauri::async_runtime::block_on(target_adapter.prepare_local_merge(
+                    PLUGIN_ID.to_owned(),
+                    SIGNER.to_owned(),
+                    PROFILE_ID.to_owned(),
+                    expected_applied_bundle.clone(),
+                    applied_snapshot.bundle,
+                ))
+                .expect("merge restored portable state");
+            let content_digest = |bundle: &PortableBundleV1| {
+                let mut normalized = bundle.clone();
+                normalized.revision = 1;
+                normalized.skipped_machine_bound.clear();
+                target_sync_key
+                    .baseline_digest(&super::canonical_bundle_bytes(&normalized).unwrap())
+            };
+            assert!(
+                content_digest(&applied_snapshot.bundle)
+                    == content_digest(&expected_applied_bundle),
+                "restoring authenticated data must reproduce its portable content: schema={}, scope={}, objects={}, preferences={}, tombstones={}, times={}, preference_times={}, secrets={}",
+                applied_snapshot.bundle.schema == expected_applied_bundle.schema,
+                applied_snapshot.bundle.selected_categories
+                    == expected_applied_bundle.selected_categories,
+                applied_snapshot.bundle.objects == expected_applied_bundle.objects,
+                applied_snapshot.bundle.preferences == expected_applied_bundle.preferences,
+                applied_snapshot.bundle.tombstones == expected_applied_bundle.tombstones,
+                applied_snapshot.bundle.update_times == expected_applied_bundle.update_times,
+                applied_snapshot.bundle.preference_update_times
+                    == expected_applied_bundle.preference_update_times,
+                applied_snapshot.bundle.secrets == expected_applied_bundle.secrets,
+            );
 
             let target_snapshots = target_hosts
                 .list_ssh_sync_snapshots()
@@ -7452,11 +7705,13 @@ mod tests {
 
             // Exercise a later cloud overwrite against existing local rows, not only an empty store.
             let mut updated = snapshot.bundle.clone();
+            updated.schema = BundleSchema::V6;
             updated.objects.identities[0].label = "Updated cloud identity".into();
             updated.objects.desktop_profiles[0].label = "Updated cloud desktop".into();
             updated.secrets[0].payload =
                 norishell_ssh_profile_sync::SecretBytes::new(b"updated-cloud-password".to_vec())
                     .unwrap();
+            let expected_updated = updated.clone();
             let staged = tauri::async_runtime::block_on(target_adapter.stage_restore(
                 PLUGIN_ID.to_owned(),
                 SIGNER.to_owned(),
@@ -7484,6 +7739,28 @@ mod tests {
                 Some(approval),
             ))
             .expect("apply cloud overwrite of existing rows");
+            let mut after_overwrite =
+                tauri::async_runtime::block_on(target_adapter.snapshot_current(
+                    PLUGIN_ID.into(),
+                    SIGNER.into(),
+                    PROFILE_ID.into(),
+                    expected_updated.revision,
+                ))
+                .expect("snapshot cloud overwrite");
+            after_overwrite.bundle =
+                tauri::async_runtime::block_on(target_adapter.prepare_local_merge(
+                    PLUGIN_ID.into(),
+                    SIGNER.into(),
+                    PROFILE_ID.into(),
+                    expected_updated.clone(),
+                    after_overwrite.bundle,
+                ))
+                .expect("merge cloud overwrite");
+            assert_eq!(
+                content_digest(&after_overwrite.bundle),
+                content_digest(&expected_updated),
+                "cloud overwrite must retain the exact portable state"
+            );
             let desktops = target_adapter.desktop_profiles().unwrap();
             assert_eq!(desktops[0].label, "Updated cloud desktop");
             let credential = target_adapter
@@ -7498,6 +7775,86 @@ mod tests {
                     .unwrap()
                     .expose(),
                 b"updated-cloud-password"
+            );
+
+            // Choosing cloud for a local-only profile sends an untimed deletion
+            // tombstone. A physical SQLite deletion clock must not change the
+            // authenticated portable result after restore.
+            let mut extra = desktops[0].clone();
+            extra.id = Uuid::new_v4().to_string();
+            extra.label = "Local-only desktop".into();
+            extra.credential_ref_id = None;
+            extra.revision = WireSequence::new(0);
+            target_hosts
+                .with_ssh_sync_repository(|repository| repository.save_desktop_profile(&extra))
+                .expect("add local-only desktop");
+            let before_delete = tauri::async_runtime::block_on(target_adapter.snapshot_current(
+                PLUGIN_ID.into(),
+                SIGNER.into(),
+                PROFILE_ID.into(),
+                expected_updated.revision,
+            ))
+            .expect("snapshot local-only desktop");
+            let extra_portable_id = before_delete
+                .bundle
+                .objects
+                .desktop_profiles
+                .iter()
+                .find(|profile| profile.label == extra.label)
+                .expect("portable local-only desktop")
+                .id;
+            let mut remote_delete = expected_updated.clone();
+            remote_delete.tombstones.push(PortableTombstone {
+                kind: PortableObjectKind::DesktopProfile,
+                id: extra_portable_id,
+            });
+            let staged = tauri::async_runtime::block_on(target_adapter.stage_restore(
+                PLUGIN_ID.into(),
+                SIGNER.into(),
+                PROFILE_ID.into(),
+                remote_delete.clone(),
+                target_sync_key.clone(),
+            ))
+            .expect("stage deletion chosen from cloud");
+            let approval = target_adapter
+                .issue_apply_approval(
+                    SyncOwner {
+                        plugin_id: PLUGIN_ID.into(),
+                        signer_fingerprint_sha256: SIGNER.into(),
+                        profile_id: PROFILE_ID.into(),
+                    },
+                    Arc::new(|| true),
+                    Some(staged.handle.clone()),
+                )
+                .expect("approve cloud deletion");
+            tauri::async_runtime::block_on(target_adapter.apply_staged_restore(
+                PLUGIN_ID.into(),
+                SIGNER.into(),
+                PROFILE_ID.into(),
+                staged.handle,
+                Some(approval),
+            ))
+            .expect("apply cloud deletion");
+            let mut after_delete = tauri::async_runtime::block_on(target_adapter.snapshot_current(
+                PLUGIN_ID.into(),
+                SIGNER.into(),
+                PROFILE_ID.into(),
+                remote_delete.revision,
+            ))
+            .expect("snapshot cloud deletion");
+            after_delete.bundle =
+                tauri::async_runtime::block_on(target_adapter.prepare_local_merge(
+                    PLUGIN_ID.into(),
+                    SIGNER.into(),
+                    PROFILE_ID.into(),
+                    remote_delete.clone(),
+                    after_delete.bundle,
+                ))
+                .expect("merge cloud deletion");
+            assert_eq!(
+                content_digest(&after_delete.bundle),
+                content_digest(&remote_delete),
+                "cloud deletion of a local-only desktop must match its portable result"
             );
         }
     }
@@ -7656,6 +8013,7 @@ mod tests {
             PortableBundleV1 {
                 schema: BundleSchema::V1,
                 revision,
+                selected_categories: None,
                 objects: PortableObjects::default(),
                 preferences: None,
                 secrets: Vec::new(),
@@ -7686,7 +8044,6 @@ mod tests {
                 PendingRestore {
                     handle: PendingRestoreHandle::new(token),
                     bundle: bundle(bytes as u64),
-                    expected_preferences: None,
                     owner: SyncOwner {
                         plugin_id: plugin_id.to_owned(),
                         signer_fingerprint_sha256: "a".repeat(64),
@@ -7751,6 +8108,7 @@ mod tests {
             bundle: PortableBundleV1 {
                 schema: BundleSchema::V1,
                 revision: 1,
+                selected_categories: None,
                 objects: PortableObjects::default(),
                 preferences: None,
                 secrets: Vec::new(),
@@ -7759,7 +8117,6 @@ mod tests {
                 update_times: Vec::new(),
                 preference_update_times: Default::default(),
             },
-            expected_preferences: None,
             owner,
             bundle_sha256: "b".repeat(64),
             plaintext_bytes: 0,
@@ -7776,6 +8133,55 @@ mod tests {
             .await
             .expect("no-op restore");
         assert_eq!(result.host_count, 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_preference_payload_cannot_enter_restore_apply() {
+        let directory = tempfile::tempdir().unwrap();
+        let hosts = HostService::start(directory.path()).unwrap();
+        let vault = VaultService::start(directory.path());
+        let adapter = NoriShellSshSyncLocalAdapter::new_for_store_test(hosts, vault);
+        let pending = PendingRestore {
+            handle: PendingRestoreHandle::new(Uuid::new_v4().to_string()),
+            bundle: PortableBundleV1 {
+                schema: BundleSchema::V5,
+                revision: 1,
+                selected_categories: None,
+                objects: PortableObjects::default(),
+                preferences: Some(PortablePreferencesV1 {
+                    product: "NoriShell".into(),
+                    version: 1,
+                    groups: BTreeMap::new(),
+                }),
+                secrets: Vec::new(),
+                skipped_machine_bound: Vec::new(),
+                tombstones: Vec::new(),
+                update_times: Vec::new(),
+                preference_update_times: Default::default(),
+            },
+            owner: SyncOwner {
+                plugin_id: "org.example.sync".into(),
+                signer_fingerprint_sha256: "a".repeat(64),
+                profile_id: "primary".into(),
+            },
+            bundle_sha256: "b".repeat(64),
+            plaintext_bytes: 0,
+            owned_delta: None,
+            vault_inserts: Vec::new(),
+            scope_memberships: None,
+            reconcile_noop: true,
+            related_forward_rule_labels: Vec::new(),
+            change_fence: None,
+            expires_at: Instant::now() + SELECTION_LEASE_TIMEOUT,
+        };
+        assert!(matches!(
+            adapter
+                .apply_pending_restore(pending, Arc::new(|| true))
+                .await,
+            Err(super::PortableStoreError::Rejected(
+                "local.apply_pending_restore.01"
+            ))
+        ));
     }
 
     #[test]
@@ -7885,6 +8291,7 @@ mod tests {
             difference_total_count: 0,
             difference_omitted_count: 0,
             related_forward_rule_labels: Vec::new(),
+            data_apply_uploaded: false,
         };
         let valid = SshSyncSecureDecisionRequest {
             selected_desktop_profile_ids: Vec::new(),
@@ -8010,6 +8417,38 @@ mod tests {
             )
             .is_err()
         );
+
+        let data_apply = SshSyncSecurePrompt {
+            kind: SshSyncSecurePromptKind::ApproveDataApply,
+            ..conflict.clone()
+        };
+        let apply_request = SshSyncSecureDecisionRequest {
+            selected_desktop_profile_ids: Vec::new(),
+            meta: request_meta(),
+            prompt_id: data_apply.prompt_id.clone(),
+            decision: SshSyncSecureDecision::Approve,
+            selected_host_ids: Vec::new(),
+            selected_credential_ref_ids: Vec::new(),
+            vault_password: None,
+            vault_password_confirmation: None,
+        };
+        assert!(validate_decision(&data_apply, &apply_request).is_ok());
+        for decision in [
+            SshSyncSecureDecision::KeepLocal,
+            SshSyncSecureDecision::UseRemote,
+            SshSyncSecureDecision::ApplyMerged,
+        ] {
+            assert!(
+                validate_decision(
+                    &data_apply,
+                    &SshSyncSecureDecisionRequest {
+                        decision,
+                        ..apply_request.clone()
+                    }
+                )
+                .is_err()
+            );
+        }
 
         let reset = SshSyncSecurePrompt {
             desktop_profiles: Vec::new(),

@@ -4,10 +4,12 @@ import { computed, onBeforeUnmount, ref, useTemplateRef } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { createPreferenceAdapters } from "../../preference-adapters";
+import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { exportJsonFile } from "../../platform-file-export";
 import {
   applyPreferencePreview, exportPreferenceTransfer, MAX_PREFERENCE_TRANSFER_BYTES,
   parsePreferenceTransfer, PREFERENCE_GROUP_IDS, previewPreferenceTransfer,
+  PreferenceTransferError,
   type PreferenceGroupId, type PreferencePreviewGroup, type PreferenceTransferFile,
 } from "../../preferences-transfer";
 import { NvxButton, NvxCheckbox, NvxInlineNotice, NvxStatusLabel } from "../ui";
@@ -30,7 +32,7 @@ function toggle(id: PreferenceGroupId, checked: boolean) {
   selected.value = checked ? [...new Set([...selected.value, id])] : selected.value.filter((key) => key !== id);
 }
 function fail(caught: unknown) {
-  const code = caught instanceof Error ? caught.message : "failed";
+  const code = caught instanceof PreferenceTransferError ? caught.code : "failed";
   error.value = ["tooLarge", "emptySelection", "invalidFile", "invalidGroup", "unavailableGroup"].includes(code) ? code : "failed";
 }
 async function perform(operation: () => Promise<void>) {
@@ -182,6 +184,9 @@ onBeforeUnmount(() => {
             {{ t(`preferenceTransfer.results.${group.result}`) }}
           </NvxStatusLabel>
         </div>
+        <p v-if="group.failureCode">
+          {{ t(`applicationPreferenceErrors.${applicationPreferenceFailure({ code: group.failureCode, messageKey: 'applicationPreferences' })}`) }}
+        </p>
         <p v-if="group.before === group.after">
           {{ t('preferenceTransfer.noChanges') }}
         </p>

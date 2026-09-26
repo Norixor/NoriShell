@@ -126,10 +126,10 @@ describe("terminal appearance", () => {
     });
   });
 
-  it("selects and persists a fixed preset independently from the app theme", () => {
+  it("selects and persists a fixed preset independently from the app theme", async () => {
     const store = useUiStore();
-    store.setTerminalThemeMode("nord");
-    store.setTheme("light");
+    await store.setTerminalThemeMode("nord");
+    await store.setTheme("light");
 
     expect(store.terminalThemeMode).toBe("nord");
     expect(store.resolvedTerminalPalette).toEqual(
@@ -144,7 +144,7 @@ describe("terminal appearance", () => {
     });
   });
 
-  it("normalizes, applies, and persists bounded terminal typography", () => {
+  it("normalizes, applies, and persists bounded terminal typography", async () => {
     expect(parseTerminalFontSize(10)).toBe(10);
     expect(parseTerminalFontSize("28")).toBe(28);
     expect(parseTerminalFontSize(9)).toBe(DEFAULT_TERMINAL_FONT_SIZE);
@@ -166,14 +166,14 @@ describe("terminal appearance", () => {
 
     const store = useUiStore();
     expect(store.terminalFontFamily).toBe("Menlo");
-    store.setTerminalFontFamily("JetBrains Mono");
-    store.setTerminalFontSize(17);
-    store.setTerminalFontWeight(500);
-    store.setTerminalBoldFontWeight(800);
-    store.setTerminalLineHeight(1.4);
-    store.setTerminalLetterSpacing(1);
-    store.setTerminalCursorStyle("underline");
-    store.setTerminalCursorBlink(false);
+    await store.setTerminalFontFamily("JetBrains Mono");
+    await store.setTerminalFontSize(17);
+    await store.setTerminalFontWeight(500);
+    await store.setTerminalBoldFontWeight(800);
+    await store.setTerminalLineHeight(1.4);
+    await store.setTerminalLetterSpacing(1);
+    await store.setTerminalCursorStyle("underline");
+    await store.setTerminalCursorBlink(false);
 
     expect(store.terminalFontFamily).toBe("JetBrains Mono");
     expect(store.terminalFontSize).toBe(17);
@@ -192,11 +192,11 @@ describe("terminal appearance", () => {
     });
   });
 
-  it("applies and persists a custom ANSI palette as a non-secret UI preference", () => {
+  it("applies and persists a custom ANSI palette as a non-secret UI preference", async () => {
     const store = useUiStore();
-    store.setTerminalThemeMode("custom");
-    store.setCustomTerminalColor("background", "#112233");
-    store.setCustomTerminalColor("brightCyan", "#44aacc");
+    await store.setTerminalThemeMode("custom");
+    await store.setCustomTerminalColor("background", "#112233");
+    await store.setCustomTerminalColor("brightCyan", "#44aacc");
 
     expect(store.resolvedTerminalPalette.background).toBe("#112233");
     expect(document.documentElement.style.getPropertyValue(
@@ -216,11 +216,11 @@ describe("terminal appearance", () => {
     );
   });
 
-  it("saves one named custom scheme atomically and selects it", () => {
+  it("saves one named custom scheme atomically and selects it", async () => {
     const store = useUiStore();
     const custom = { ...LIGHT_TERMINAL_PALETTE, background: "#f0f0f0" };
 
-    expect(store.saveCustomTerminalPalette("  Operations  ", custom)).toBe(true);
+    expect(await store.saveCustomTerminalPalette("  Operations  ", custom)).toBe(true);
     expect(store.terminalThemeMode).toBe("custom");
     expect(store.customTerminalPaletteName).toBe("Operations");
     expect(store.hasCustomTerminalPalette).toBe(true);

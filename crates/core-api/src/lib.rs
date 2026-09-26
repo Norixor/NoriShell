@@ -2,6 +2,7 @@
 //!
 //! This crate deliberately contains no Tauri, database or platform execution code.
 
+mod application_preferences;
 mod command;
 mod desktop;
 mod desktop_preferences;
@@ -19,6 +20,7 @@ mod plugin_api;
 mod plugin_app_integration;
 mod plugin_approval_policy;
 mod plugin_credential_api;
+mod plugin_data_api;
 mod plugin_device_api;
 mod plugin_dom;
 mod plugin_file_api;
@@ -50,6 +52,7 @@ mod terminal_workspace;
 mod vault;
 mod version;
 
+pub use application_preferences::*;
 pub use command::*;
 pub use desktop::*;
 pub use desktop_preferences::*;
@@ -65,6 +68,7 @@ pub use plugin_api::*;
 pub use plugin_app_integration::*;
 pub use plugin_approval_policy::*;
 pub use plugin_credential_api::*;
+pub use plugin_data_api::*;
 pub use plugin_device_api::*;
 pub use plugin_dom::*;
 pub use plugin_file_api::*;
@@ -250,6 +254,8 @@ pub const COMMAND_NATIVE_TERMINAL_HISTORY_CLEAR: &str = "native_terminal_history
 pub const COMMAND_NATIVE_TERMINAL_HISTORY_PAUSE: &str = "native_terminal_history_pause";
 pub const COMMAND_DESKTOP_PREFERENCES_GET: &str = "desktop_preferences_get";
 pub const COMMAND_DESKTOP_PREFERENCES_REPLACE: &str = "desktop_preferences_replace";
+pub const COMMAND_APPLICATION_PREFERENCES_GET: &str = "application_preferences_get";
+pub const COMMAND_APPLICATION_PREFERENCES_REPLACE: &str = "application_preferences_replace";
 pub const COMMAND_TELNET_TERMINAL_OPEN: &str = "telnet_terminal_open";
 pub const COMMAND_TELNET_TERMINAL_SNAPSHOT: &str = "telnet_terminal_snapshot";
 pub const COMMAND_TELNET_TERMINAL_ATTACH: &str = "telnet_terminal_attach";

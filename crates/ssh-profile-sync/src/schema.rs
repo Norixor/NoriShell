@@ -17,6 +17,7 @@ pub const BUNDLE_SCHEMA_V2: &str = "norishell-ssh-profile-bundle-v2";
 pub const BUNDLE_SCHEMA_V3: &str = "norishell-ssh-profile-bundle-v3";
 pub const BUNDLE_SCHEMA_V4: &str = "norishell-ssh-profile-bundle-v4";
 pub const BUNDLE_SCHEMA_V5: &str = "norishell-ssh-profile-bundle-v5";
+pub const BUNDLE_SCHEMA_V6: &str = "norishell-ssh-profile-bundle-v6";
 const MAX_OBJECTS_PER_KIND: usize = 10_000;
 const MAX_SMALL_TEXT_BYTES: usize = 1_024;
 const MAX_LARGE_TEXT_BYTES: usize = 64 * 1024;
@@ -34,6 +35,36 @@ pub enum BundleSchema {
     V4,
     #[serde(rename = "norishell-ssh-profile-bundle-v5")]
     V5,
+    #[serde(rename = "norishell-ssh-profile-bundle-v6")]
+    V6,
+}
+
+/// Authenticated scope of a V6 exchange. Omission denotes the legacy complete
+/// three-category exchange; a new subset must be explicit in the ciphertext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PortableDataCategory {
+    Hosts,
+    Credentials,
+    DesktopProfiles,
+}
+
+impl PortableDataCategory {
+    pub fn for_kind(kind: PortableObjectKind) -> Self {
+        match kind {
+            PortableObjectKind::Host
+            | PortableObjectKind::Route
+            | PortableObjectKind::AuthenticationPlan
+            | PortableObjectKind::AlgorithmPolicy
+            | PortableObjectKind::HeartbeatPolicy
+            | PortableObjectKind::MonitoringPolicy
+            | PortableObjectKind::LoginAutomation => Self::Hosts,
+            PortableObjectKind::Identity
+            | PortableObjectKind::Credential
+            | PortableObjectKind::Secret => Self::Credentials,
+            PortableObjectKind::DesktopProfile => Self::DesktopProfiles,
+        }
+    }
 }
 
 impl fmt::Debug for BundleSchema {
@@ -44,6 +75,7 @@ impl fmt::Debug for BundleSchema {
             Self::V3 => BUNDLE_SCHEMA_V3,
             Self::V4 => BUNDLE_SCHEMA_V4,
             Self::V5 => BUNDLE_SCHEMA_V5,
+            Self::V6 => BUNDLE_SCHEMA_V6,
         })
     }
 }
@@ -89,6 +121,8 @@ impl fmt::Debug for PortableObjectId {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PortableBundleV1 {
     pub schema: BundleSchema,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_categories: Option<Vec<PortableDataCategory>>,
     pub revision: u64,
     pub objects: PortableObjects,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,6 +336,74 @@ pub struct PortableDesktopProfile {
     pub audio_playback_enabled: bool,
     #[serde(default, skip_serializing_if = "PortableVncProtocolVersion::is_auto")]
     pub vnc_protocol_version: PortableVncProtocolVersion,
+    #[serde(default, skip_serializing_if = "PortableVncResolutionMode::is_server")]
+    pub vnc_resolution_mode: PortableVncResolutionMode,
+    #[serde(default, skip_serializing_if = "PortableRdpTransportMode::is_auto")]
+    pub rdp_transport_mode: PortableRdpTransportMode,
+    #[serde(default, skip_serializing_if = "PortableRdpGraphicsMode::is_auto")]
+    pub rdp_graphics_mode: PortableRdpGraphicsMode,
+    #[serde(default, skip_serializing_if = "PortableRdpResolutionMode::is_fixed")]
+    pub rdp_resolution_mode: PortableRdpResolutionMode,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PortableVncResolutionMode {
+    #[default]
+    Server,
+    Fixed,
+    Adaptive,
+}
+
+impl PortableVncResolutionMode {
+    fn is_server(&self) -> bool {
+        *self == Self::Server
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PortableRdpResolutionMode {
+    #[default]
+    Fixed,
+    Adaptive,
+}
+
+impl PortableRdpResolutionMode {
+    fn is_fixed(&self) -> bool {
+        *self == Self::Fixed
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PortableRdpTransportMode {
+    #[default]
+    Auto,
+    TcpOnly,
+    UdpRequired,
+}
+
+impl PortableRdpTransportMode {
+    fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PortableRdpGraphicsMode {
+    #[default]
+    Auto,
+    RemoteFx,
+    Avc420,
+    Bitmap,
+}
+
+impl PortableRdpGraphicsMode {
+    fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -625,7 +727,61 @@ pub struct SkippedMachineBoundObject {
 }
 
 impl PortableBundleV1 {
+    #[must_use]
+    pub fn requires_desktop_mode_schema(&self) -> bool {
+        self.objects.desktop_profiles.iter().any(|desktop| {
+            desktop.rdp_transport_mode != PortableRdpTransportMode::Auto
+                || desktop.rdp_graphics_mode != PortableRdpGraphicsMode::Auto
+                || desktop.rdp_resolution_mode != PortableRdpResolutionMode::Fixed
+                || desktop.vnc_resolution_mode != PortableVncResolutionMode::Server
+        })
+    }
+
+    pub fn validate_current_business_exchange(&self) -> Result<()> {
+        self.validate()?;
+        if self.schema != BundleSchema::V6
+            || self.preferences.is_some()
+            || !self.preference_update_times.is_empty()
+        {
+            return Err(SyncCodecError::InvalidBundle(
+                "current exchange must contain only business data",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if let Some(selected) = &self.selected_categories {
+            if self.schema != BundleSchema::V6
+                || selected.is_empty()
+                || selected.len() > 3
+                || selected.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(SyncCodecError::InvalidBundle("invalid selected categories"));
+            }
+            if self
+                .objects
+                .all_nodes()
+                .chain(
+                    self.secrets
+                        .iter()
+                        .map(|item| (PortableObjectKind::Secret, item.id)),
+                )
+                .chain(self.tombstones.iter().map(|item| (item.kind, item.id)))
+                .any(|(kind, _)| !selected.contains(&PortableDataCategory::for_kind(kind)))
+            {
+                return Err(SyncCodecError::InvalidBundle(
+                    "exchange contains an unselected category",
+                ));
+            }
+            if !selected.contains(&PortableDataCategory::Credentials)
+                && !self.skipped_machine_bound.is_empty()
+            {
+                return Err(SyncCodecError::InvalidBundle(
+                    "exchange contains an unselected category",
+                ));
+            }
+        }
         if self.revision == 0 {
             return Err(SyncCodecError::InvalidBundle("revision must be positive"));
         }
@@ -637,9 +793,14 @@ impl PortableBundleV1 {
                 "bundle v1 cannot contain tombstones",
             ));
         }
+        if self.schema != BundleSchema::V6 && self.requires_desktop_mode_schema() {
+            return Err(SyncCodecError::InvalidBundle(
+                "desktop display modes require bundle v6",
+            ));
+        }
         if !matches!(
             self.schema,
-            BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5
+            BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5 | BundleSchema::V6
         ) && !self.objects.desktop_profiles.is_empty()
         {
             return Err(SyncCodecError::InvalidBundle(
@@ -648,7 +809,7 @@ impl PortableBundleV1 {
         }
         if !matches!(
             self.schema,
-            BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5
+            BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5 | BundleSchema::V6
         ) && self
             .tombstones
             .iter()
@@ -659,7 +820,9 @@ impl PortableBundleV1 {
             ));
         }
         match (self.schema, &self.preferences) {
-            (BundleSchema::V4 | BundleSchema::V5, Some(preferences)) => preferences.validate()?,
+            (BundleSchema::V4 | BundleSchema::V5 | BundleSchema::V6, Some(preferences)) => {
+                preferences.validate()?
+            }
             (BundleSchema::V4 | BundleSchema::V5, None) => {
                 return Err(SyncCodecError::InvalidBundle(
                     "bundle v4/v5 requires preferences",
@@ -674,7 +837,7 @@ impl PortableBundleV1 {
         }
         self.objects.validate()?;
 
-        if self.schema != BundleSchema::V5
+        if !matches!(self.schema, BundleSchema::V5 | BundleSchema::V6)
             && (!self.update_times.is_empty() || !self.preference_update_times.is_empty())
         {
             return Err(SyncCodecError::InvalidBundle(
@@ -959,10 +1122,20 @@ impl PortableObjects {
                 ));
             }
             if desktop.protocol == PortableDesktopProtocol::Rdp
-                && desktop.vnc_protocol_version != PortableVncProtocolVersion::Auto
+                && (desktop.vnc_protocol_version != PortableVncProtocolVersion::Auto
+                    || desktop.vnc_resolution_mode != PortableVncResolutionMode::Server)
             {
                 return Err(SyncCodecError::InvalidBundle(
-                    "RDP cannot select a VNC protocol version",
+                    "RDP cannot select VNC options",
+                ));
+            }
+            if desktop.protocol == PortableDesktopProtocol::Vnc
+                && (desktop.rdp_transport_mode != PortableRdpTransportMode::Auto
+                    || desktop.rdp_graphics_mode != PortableRdpGraphicsMode::Auto
+                    || desktop.rdp_resolution_mode != PortableRdpResolutionMode::Fixed)
+            {
+                return Err(SyncCodecError::InvalidBundle(
+                    "VNC cannot select RDP transport, graphics or resolution modes",
                 ));
             }
             if desktop.width == 0

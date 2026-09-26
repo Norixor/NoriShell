@@ -784,6 +784,8 @@ fn workflow_step_state_from_db(value: &str) -> rusqlite::Result<PluginWorkflowSt
 
 fn workflow_method_to_db(value: PluginWorkflowApiMethod) -> &'static str {
     match value {
+        PluginWorkflowApiMethod::DataCatalog => "data_catalog",
+        PluginWorkflowApiMethod::DataRead => "data_read",
         PluginWorkflowApiMethod::SerialDevices => "serial_devices",
         PluginWorkflowApiMethod::SerialOpen => "serial_open",
         PluginWorkflowApiMethod::SerialSend => "serial_send",
@@ -816,6 +818,8 @@ fn workflow_method_to_db(value: PluginWorkflowApiMethod) -> &'static str {
 
 fn workflow_method_from_db(value: &str) -> rusqlite::Result<PluginWorkflowApiMethod> {
     match value {
+        "data_catalog" => Ok(PluginWorkflowApiMethod::DataCatalog),
+        "data_read" => Ok(PluginWorkflowApiMethod::DataRead),
         "serial_devices" => Ok(PluginWorkflowApiMethod::SerialDevices),
         "serial_open" => Ok(PluginWorkflowApiMethod::SerialOpen),
         "serial_send" => Ok(PluginWorkflowApiMethod::SerialSend),

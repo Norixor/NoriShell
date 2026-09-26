@@ -14,6 +14,7 @@ import {
 } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
+import { useRouteReveal } from "../routeReveal";
 
 import {
   NvxLocalTerminalPane,
@@ -107,6 +108,7 @@ import { useUiStore } from "../stores/ui";
 import type { NativeTerminalSessionScope } from "../core-api/generated/core-api";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { useTipsStore } from "../stores/tips";
+import { applicationPreferenceFailure } from "../core-api/application-preferences";
 import type { ShortcutCommandId } from "../shortcuts";
 import NvxPluginToolPanel from "../components/plugins/NvxPluginToolPanel.vue";
 import NvxPluginFloatingControls from "../components/plugins/NvxPluginFloatingControls.vue";
@@ -241,6 +243,7 @@ const closeCandidate = ref<CloseCandidate | null>(null);
 const closeConfirmationVisible = ref(false);
 const skipFutureSinglePaneTabClosePrompt = ref(false);
 const closingTab = ref(false);
+const closePreferenceSaving = ref(false);
 const closeTabErrorVisible = ref(false);
 const workspacePersistenceErrorVisible = ref(false);
 const pluginLaunchErrorVisible = ref(false);
@@ -742,9 +745,20 @@ function closeOperationForPane(paneId: string) {
 
 async function confirmCloseTab() {
   const candidate = closeCandidate.value;
-  if (!candidate || closingTab.value) return;
+  if (!candidate || closingTab.value || closePreferenceSaving.value) return;
   if (closeCandidateCanDisablePrompt.value && skipFutureSinglePaneTabClosePrompt.value) {
-    ui.setSinglePaneTabCloseBehavior("closeDirectly");
+    closePreferenceSaving.value = true;
+    try {
+      if (!await ui.setSinglePaneTabCloseBehavior("closeDirectly")) {
+        tips.show({ scope: "terminal-close-preference", tone: "error", title: t("sshTerminal.doNotAskAgainSaveFailed") });
+      }
+    } catch (error) {
+      tips.show({ scope: "terminal-close-preference", tone: "error", title: t("sshTerminal.doNotAskAgainSaveFailed"),
+        message: t(`applicationPreferenceErrors.${applicationPreferenceFailure(error)}`) });
+    } finally {
+      closePreferenceSaving.value = false;
+    }
+    if (closeCandidate.value !== candidate) return;
   }
   let closeOperations: Array<() => Promise<void>>;
   try {
@@ -2284,12 +2298,15 @@ watch(
 // KeepAlive pauses the route view while Hosts is active. Re-consume the
 // explicit Host intent after activation so navigation can never become a
 // silent route-only change.
+const revealRoute = useRouteReveal();
+let initialRouteReady = false;
 onActivated(() => {
   void reconcilePluginProtocolLaunches();
   void refreshSavedHosts();
   void consumeRequestedHostRoute();
   void consumeRequestedSessionFocus();
   reconcileTerminalAfterForeground();
+  if (initialRouteReady) revealRoute();
 });
 
 onBeforeUnmount(() => {
@@ -2314,22 +2331,27 @@ onMounted(async () => {
   window.addEventListener("focus", reconcileTerminalAfterForeground);
   document.addEventListener("visibilitychange", handleTerminalVisibilityChange);
   unregisterWorkspaceFlush = registerTerminalWorkspaceFlush(flushTerminalWorkspaceLayout);
-  await Promise.all([ensureTerminalWorkspaceInitialized(), refreshSavedHosts()]);
-  unregisterTerminalHeaderController = workspaceTabs.registerTerminalController({
-    activate: activateTab,
-    close: requestCloseTab,
-    closeMany: requestCloseTabs,
-    create: createNewTerminalTab,
-    createLocal: createLocalFromHeader,
-    quickConnect: quickConnectFromHeader,
-    deactivate: deactivateTerminalWorkspace,
-    toggleQuickCommands: () => { quickCommandsOpen.value = !quickCommandsOpen.value; },
-    runShortcut: runTerminalShortcut,
-    focusNativeSession,
-    focusSshSession,
-    focusLocalSession,
-    focusTelnetSession,
-  });
+  try {
+    await Promise.all([ensureTerminalWorkspaceInitialized(), refreshSavedHosts()]);
+    unregisterTerminalHeaderController = workspaceTabs.registerTerminalController({
+      activate: activateTab,
+      close: requestCloseTab,
+      closeMany: requestCloseTabs,
+      create: createNewTerminalTab,
+      createLocal: createLocalFromHeader,
+      quickConnect: quickConnectFromHeader,
+      deactivate: deactivateTerminalWorkspace,
+      toggleQuickCommands: () => { quickCommandsOpen.value = !quickCommandsOpen.value; },
+      runShortcut: runTerminalShortcut,
+      focusNativeSession,
+      focusSshSession,
+      focusLocalSession,
+      focusTelnetSession,
+    });
+  } finally {
+    initialRouteReady = true;
+    revealRoute();
+  }
   if (canUseDesktopCore()) {
     unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => { void reconcilePluginProtocolLaunches(); });
     await reconcilePluginProtocolLaunches();
@@ -2594,7 +2616,7 @@ onMounted(async () => {
           })
           : t('sshTerminal.closeActiveTabBody', { count: closeCandidateSessionCount })"
       :close-label="t('sshTerminal.cancel')"
-      :dismissible="!closingTab"
+      :dismissible="!closingTab && !closePreferenceSaving"
       @update:model-value="(open) => { if (!open) cancelCloseTab(); }"
     >
       <NvxInlineNotice
@@ -2605,7 +2627,7 @@ onMounted(async () => {
       <NvxCheckbox
         v-if="closeCandidateCanDisablePrompt"
         v-model="skipFutureSinglePaneTabClosePrompt"
-        :disabled="closingTab"
+        :disabled="closingTab || closePreferenceSaving"
       >
         {{ t("sshTerminal.doNotAskAgainForSinglePaneTab") }}
         <template #hint>
@@ -2615,13 +2637,13 @@ onMounted(async () => {
       <template #actions>
         <NvxButton
           variant="ghost"
-          :disabled="closingTab"
+          :disabled="closingTab || closePreferenceSaving"
           @click="cancelCloseTab"
         >
           {{ t("sshTerminal.cancel") }}
         </NvxButton>
         <NvxButton
-          :loading="closingTab"
+          :loading="closingTab || closePreferenceSaving"
           @click="confirmCloseTab"
         >
           {{ closeCandidate?.mode === "pane"

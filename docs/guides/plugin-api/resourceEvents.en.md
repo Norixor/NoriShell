@@ -56,3 +56,5 @@ Read the stable failure `code`: correct fields, formats, or bounds for `invalidR
 ## Related methods
 
 [describe](./describe.en.md) · [resourcesList](./resourcesList.en.md) · [resourceClose](./resourceClose.en.md)
+
+For `httpExchange`, `network.httpExchangeCompleted` carries an opaque receipt and optional response blob handle; pass them to dataInspect or dataCheckpoint after checking status. The event never contains exchange bytes.

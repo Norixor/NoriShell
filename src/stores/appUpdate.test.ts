@@ -40,6 +40,34 @@ describe("app update", () => {
     expect(api.download).not.toHaveBeenCalled();
   });
 
+  it("preserves the release-check failure reason", async () => {
+    api.invoke.mockRejectedValueOnce({ code: "responseTooLarge" });
+    const updates = useAppUpdateStore();
+    await updates.checkForUpdates();
+    expect(updates.status).toBe("failed");
+    expect(updates.checkFailureCode).toBe("responseTooLarge");
+  });
+
+  it("shows a diagnostic ID for an unclassified release-check failure", async () => {
+    api.invoke.mockRejectedValueOnce(new Error("unexpected"));
+    const updates = useAppUpdateStore();
+    await updates.checkForUpdates();
+    expect(updates.checkFailureCode).toBe("internal");
+    expect(updates.checkDiagnosticId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("distinguishes a changed package from a download failure", async () => {
+    const updates = useAppUpdateStore();
+    await updates.checkForUpdates();
+    api.check.mockResolvedValueOnce({ version: "0.1.4", close: api.close });
+    await updates.installUpdate();
+    expect(updates.installFailureCode).toBe("versionChanged");
+    api.download.mockRejectedValueOnce(new Error("network"));
+    await updates.installUpdate();
+    expect(updates.installFailureCode).toBe("downloadFailed");
+    expect(updates.installDiagnosticId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
   it("stops before installation when a connection is still active", async () => {
     api.invoke.mockImplementation(async (command: string) => command === "release_check"
       ? { currentVersion: "0.1.2", status: "updateAvailable", latestVersion: "0.1.3", supportsAutoInstall: true }

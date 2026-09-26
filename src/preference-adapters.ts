@@ -99,7 +99,7 @@ export function createPreferenceAdapters(): PreferenceGroupAdapter[] {
     {
       id: "shortcuts", validate: validateShortcuts, read: async () => JSON.parse(shortcuts.exportProfile()),
       defaults: () => ({ version: 1, bindings: { macos: createDefaultShortcutBindings("macos"), windows: createDefaultShortcutBindings("windows") } }),
-      apply: async (value, expected) => preferenceValuesEqual(shortcuts.profile, expected) && shortcuts.importProfile(JSON.stringify(value)).ok,
+      apply: async (value, expected) => preferenceValuesEqual(shortcuts.profile, expected) && (await shortcuts.importProfile(JSON.stringify(value))).ok,
     },
     {
       id: "files", validate: validateFiles, read: async () => files.generalPreferences(),

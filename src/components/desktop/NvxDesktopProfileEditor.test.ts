@@ -7,14 +7,14 @@ import NvxDesktopProfileEditor from "./NvxDesktopProfileEditor.vue";
 import { desktopEn } from "../../locales/desktop";
 
 const desktop = vi.hoisted(() => ({ profiles: vi.fn(), save: vi.fn() }));
-const core = vi.hoisted(() => ({ listHosts: vi.fn(), listIdentities: vi.fn(), listCredentialRefs: vi.fn() }));
+const core = vi.hoisted(() => ({ listHosts: vi.fn(), listIdentities: vi.fn(), listCredentialRefs: vi.fn(), parseCoreApiError: vi.fn() }));
 vi.mock("../../core-api/desktop-client", () => ({ desktopClient: desktop }));
 vi.mock("../../core-api/client", () => core);
 
 const profile = () => ({
   id: "desktop-fixture", label: " Existing desktop ", protocol: "rdp" as const, address: " desktop.example ", port: 3389,
   username: "user", domain: "DOMAIN", hostId: null, gatewayHostId: null, credentialRefId: null,
-  width: 1280, height: 800, clipboardEnabled: false, audioPlaybackEnabled: true, vncProtocolVersion: "auto" as const, revision: "4",
+  width: 1280, height: 800, rdpTransportMode: "auto", rdpGraphicsMode: "auto", rdpResolutionMode: "fixed", vncResolutionMode: "server", clipboardEnabled: false, audioPlaybackEnabled: true, vncProtocolVersion: "auto" as const, revision: "4",
 });
 
 const PasswordFields = defineComponent({
@@ -56,9 +56,61 @@ beforeEach(() => {
   core.listHosts.mockResolvedValue([{ hostId: "gateway", label: "Gateway" }]);
   core.listIdentities.mockResolvedValue([{ identityId: "identity" }]);
   core.listCredentialRefs.mockResolvedValue([]);
+  core.parseCoreApiError.mockReturnValue(null);
 });
 
 describe("NvxDesktopProfileEditor", () => {
+  it("shows a specific stale-profile conflict instead of a generic save failure", async () => {
+    desktop.save.mockRejectedValue(new Error("conflict"));
+    core.parseCoreApiError.mockReturnValue({ code: "desktop.profileConflict", messageKey: "desktop.errors.profileConflict", params: {} });
+    const wrapper = mountEditor("desktop-fixture");
+    await flushPromises();
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+    expect(wrapper.text()).toContain("This desktop profile changed elsewhere");
+    expect(wrapper.text()).toContain("desktop.profileConflict");
+    wrapper.unmount();
+  });
+
+  it("saves explicit transport and codec selections with a resolution preset", async () => {
+    const wrapper = mountEditor("desktop-fixture");
+    await flushPromises();
+    await wrapper.get('select[aria-label="Resolution mode"]').setValue("adaptive");
+    await wrapper.get('select[aria-label="RDP transport"]').setValue("tcpOnly");
+    await wrapper.get('select[aria-label="Graphics codec"]').setValue("avc420");
+    await wrapper.get('select[aria-label="Remote resolution"]').setValue("1920x1080");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+    expect(desktop.save).toHaveBeenCalledWith(expect.objectContaining({ rdpTransportMode: "tcpOnly", rdpGraphicsMode: "avc420", rdpResolutionMode: "adaptive", width: 1920, height: 1080 }), null);
+    wrapper.unmount();
+  });
+
+  it("preserves custom dimensions until the user selects a preset", async () => {
+    desktop.profiles.mockResolvedValue([{ ...profile(), width: 1440, height: 900 }]);
+    const wrapper = mountEditor("desktop-fixture");
+    await flushPromises();
+    expect(wrapper.get('select[aria-label="Remote resolution"]').element).toHaveProperty("value", "custom");
+    await wrapper.get("#desktop-width").setValue("1500");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+    expect(desktop.save).toHaveBeenCalledWith(expect.objectContaining({ width: 1500, height: 900 }), null);
+    wrapper.unmount();
+  });
+
+  it("offers VNC server, fixed and adaptive sizes alongside RFB version", async () => {
+    desktop.profiles.mockResolvedValue([{ ...profile(), protocol: "vnc", port: 5900, vncResolutionMode: "server" }]);
+    const wrapper = mountEditor("desktop-fixture");
+    await flushPromises();
+    expect(wrapper.find('select[aria-label="VNC protocol version"]').exists()).toBe(true);
+    expect(wrapper.get('select[aria-label="Remote resolution"]').attributes("disabled")).toBeDefined();
+    await wrapper.get('select[aria-label="VNC resolution"]').setValue("fixed");
+    await wrapper.get('select[aria-label="Remote resolution"]').setValue("1600x900");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+    expect(desktop.save).toHaveBeenCalledWith(expect.objectContaining({ protocol: "vnc", vncResolutionMode: "fixed", width: 1600, height: 900 }), null);
+    wrapper.unmount();
+  });
+
   it("loads its profile, host and credential choices independently, then validates and saves the normalized draft", async () => {
     const wrapper = mountEditor("desktop-fixture");
     await flushPromises();
@@ -76,7 +128,7 @@ describe("NvxDesktopProfileEditor", () => {
     await flushPromises();
 
     expect(desktop.save).toHaveBeenCalledWith(expect.objectContaining({
-      id: "desktop-fixture", label: "Existing desktop", address: "desktop.example", protocol: "vnc", port: 5900, username: "", domain: "", audioPlaybackEnabled: false, vncProtocolVersion: "rfb33",
+      id: "desktop-fixture", label: "Existing desktop", address: "desktop.example", protocol: "vnc", rdpTransportMode: "auto", rdpGraphicsMode: "auto", rdpResolutionMode: "fixed", vncResolutionMode: "server", port: 5900, username: "", domain: "", audioPlaybackEnabled: false, vncProtocolVersion: "rfb33",
     }), null);
     expect(wrapper.emitted("saved")?.[0]).toEqual([expect.objectContaining({ revision: "5" })]);
   });

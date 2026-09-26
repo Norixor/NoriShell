@@ -10,6 +10,16 @@
 
 完整 method 清单见[Broker 方法](broker.zh-CN.md)。tagged operation enum 的嵌套 payload 包含 `PluginAppRegistration`、`PluginAppNotification`、`PluginAppNavigation`、`PluginWorkflowTaskId`、`PluginSerialSettings`、`PluginProtocolOpen`、`PluginNetworkEndpointRequest`、`PluginNetworkStartRequest`、`PluginRemoteExecStartRequest`、`PluginProcessSendRequest`、`PluginSftpOperation`、`PluginFileAccessRequest`、`PluginFileOperation`、`PluginCredentialOperation` 和 `PluginStorageOperation`。
 
+## 分类数据 DTO（Core API 1.88）
+
+`PluginDataCategory`：`hosts`、`credentials`、`desktopProfiles`、`appPreferences`、`terminalHistory`。`PluginDataCatalog.categories[]` 报告 `requiredCapability`、`canRead`、`canExport`、`canRestore` 以及可用/不可用偏好组；目录列出类别不等于授权。`PluginDataReadRequest {category, offset, limit}` 只用于 appPreferences 和 terminalHistory；`PluginDataReadResult` 按 `appPreferences {groups, migrationRequired}` 或 `terminalHistory {entries, nextOffset, total}` 区分。每个偏好组含 `group`、`revision`、`value`；未迁移组没有快照，列在 `migrationRequired`。历史条目可能包含命令文本，必须取得独立的高风险权限。
+
+受保护 exchange 请求使用 `profileId` 和经过排序、去重的 hosts/credentials/desktopProfiles `categories[]`。`PluginDataSnapshotRequest` 只有这两项；`PluginDataInspectRequest` 增加 `receiptHandle`、`bodyBlobHandle`；`PluginDataComposeRequest` 增加 `localSnapshotHandle`、`remoteInspectionHandle`、`decisions[]`；`PluginDataApplyRequest` 使用 `expectedLocalSnapshotHandle`、`composedHandle`、可选 `exportHandle`、`authoritativeReceiptHandle`；`PluginDataExportRequest` 使用 `sourceHandle`、`baseReceiptHandle`；`PluginDataCheckpointRequest` 使用 `sourceHandle`、`authoritativeReceiptHandle` 和可选 `baseReceiptHandle`、`exportHandle`、`applyReceiptHandle`、`expectedLocalSnapshotHandle`、`remoteInspectionHandle`。最后两项用于 GET200 内容已一致、无需写入的基线路径。`PluginDataReleaseRequest` 列出待释放的精确临时状态、Blob 和收据句柄。`PluginApiValue.dataSnapshot.localCounts` 为 `PluginDataLocalCounts {hostCount, credentialCount, desktopProfileCount, tombstoneCount}`。`PluginDataObjectDecision` 按 Core 签发的 `objectHandle` 选择 `source: local | remote`。对象描述包含类别、种类、稳定 ID、句柄、Core keyed 相等标签、可选更新时间、删除/依赖标志和有界非秘密展示；句柄绑定插件、profile 和 generation。
+
+`PluginApiValue` 包含 `dataCatalog`、`dataRead`、`dataSnapshot`、`dataInspect`、`dataCompose`、`dataApply`、`dataExport`、`dataCheckpoint`、`dataRelease`。交换操作已在 Core service 接线；原生和端到端操作尚未验收。仅有 DTO 或方法条目不构成验收。导出返回 Core 内的 `exportHandle` 和 `blobHandle`、修订、幂等键和内容类型；Checkpoint 仅在远端、本机或内容已一致的事实得到验证后返回 `syncedAtUnixMs`。
+
+`PluginNetworkStartRequest` 另有可选 `oauthProfileId`（与 `credential` 互斥）。`PluginNetworkOperation.httpExchange` 含 method、headers、profileId、可选 bodyBlobHandle 与 maxResponseBytes。`PluginNetworkEvent.httpExchangeCompleted` 返回 receiptHandle、status、可选 ETag/bodyBlobHandle 与字节数，不返回密文字节。
+
 ## PluginApiAvailability
 
 允许的字符串值：`available`, `notImplemented`, `unsupportedPlatform`.
@@ -428,7 +438,7 @@
 
 ## PluginCapability
 
-允许的字符串值：`uiPanel`, `uiNavigation`, `uiPage`, `uiWebviewIsolated`, `uiHostDomObserve`, `uiHostDomMutate`, `uiHostCss`, `clipboardWrite`, `terminalProvider`, `deviceSerial`, `terminalMetadata`, `terminalObserve`, `terminalAnnotation`, `terminalProposeInput`, `terminalRequestInput`, `hostMetadataRead`, `hostMutationPropose`, `hostSessionRequest`, `remoteInspect`, `remoteExecRequest`, `networkDomain`, `localFiles`, `localProcess`, `storagePlugin`, `credentialsPlugin`, `sftpRead`, `sftpWrite`, `metricsRead`, `sshSync`.
+允许的字符串值：`uiPanel`, `uiNavigation`, `uiPage`, `uiWebviewIsolated`, `uiHostDomObserve`, `uiHostDomMutate`, `uiHostCss`, `clipboardWrite`, `terminalProvider`, `deviceSerial`, `terminalMetadata`, `terminalObserve`, `terminalAnnotation`, `terminalProposeInput`, `terminalRequestInput`, `hostMetadataRead`, `hostMutationPropose`, `hostSessionRequest`, `remoteInspect`, `remoteExecRequest`, `networkDomain`, `localFiles`, `localProcess`, `storagePlugin`, `credentialsPlugin`, `sftpRead`, `sftpWrite`, `metricsRead`, `sshSync`, `appPreferencesRead`, `terminalHistoryRead`.
 
 ## PluginCapabilityGrant
 

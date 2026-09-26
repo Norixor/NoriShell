@@ -2,6 +2,7 @@ import { createApp, watch } from "vue";
 import { createPinia } from "pinia";
 
 import App from "./App.vue";
+import { initializeApplicationPreferences } from "./application-preferences-startup";
 import { i18n } from "./locales";
 import { router } from "./router";
 import { useAppThemeStore } from "./stores/appTheme";
@@ -13,7 +14,6 @@ import "./styles/base.css";
 
 const pinia = createPinia();
 disableDefaultWebviewContextMenu();
-createApp(App).use(pinia).use(i18n).use(router).mount("#app");
 
 async function revealMainWindow(): Promise<void> {
   const ui = useUiStore(pinia);
@@ -32,4 +32,25 @@ async function revealMainWindow(): Promise<void> {
   await revealWindowAfterMount();
 }
 
-void router.isReady().then(revealMainWindow, revealMainWindow);
+async function start() {
+  try {
+    await initializeApplicationPreferences(pinia);
+    createApp(App).use(pinia).use(i18n).use(router).mount("#app");
+    await router.isReady().then(revealMainWindow, revealMainWindow);
+  } catch {
+    const root = document.querySelector("#app");
+    if (root) {
+      const message = document.createElement("p");
+      message.textContent = navigator.language.startsWith("zh")
+        ? "应用偏好读取失败。请重试；本机设置没有被覆盖。"
+        : "Could not load application preferences. Retry; your local settings were not overwritten.";
+      const retry = document.createElement("button");
+      retry.textContent = navigator.language.startsWith("zh") ? "重试" : "Retry";
+      retry.addEventListener("click", () => window.location.reload());
+      root.replaceChildren(message, retry);
+    }
+    await revealWindowAfterMount();
+  }
+}
+
+void start();

@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { listHostCatalog } from "../../core-api/client";
+import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
 import { validateInteractionPreferences, type DoubleClickSelection, type InteractionPreferences, type RightClickBehavior, type TerminalBellMode, type TerminalBackspaceMode } from "../../terminal/interaction-preferences";
 import { validateTerminalKeyboardPreferences, type HostKeyboardMode, type TerminalKeyboardPreferences } from "../../terminal/keyboard-compatibility";
@@ -102,9 +103,10 @@ const hostKeyboardDirty = computed(() => keyboardScope.value !== "" && JSON.stri
 function report(saved: boolean) {
   tips.show({ scope: "terminal-interaction-settings", tone: saved ? "success" : "error", title: t(`terminalInteraction.${saved ? "saved" : "saveFailed"}`) });
 }
-function save() {
+async function save() {
   if (!valid.value) return;
-  report(preferences.setInteraction({ ...interaction.value }));
+  try { report(await preferences.setInteraction({ ...interaction.value })); }
+  catch (error) { tips.show({ scope: "terminal-interaction-settings", tone: "error", title: t(`applicationPreferenceErrors.${applicationPreferenceFailure(error)}`) }); }
 }
 function restore() { draft.value = createDraft(preferences.preferences.interaction); }
 function numberValue(key: "scrollback" | "scrollSensitivity", value: string) {

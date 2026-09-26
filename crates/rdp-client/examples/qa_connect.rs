@@ -5,7 +5,7 @@ use norishell_desktop_protocol::{
     AudioMuteState, AudioPlaybackState, DesktopInput, EngineCommand, EngineControl, EngineError,
     EngineEvent, EventSink,
 };
-use norishell_rdp_client::{CertificateApproval, RdpOptions, run};
+use norishell_rdp_client::{CertificateApproval, GraphicsMode, RdpOptions, TransportMode, run};
 use std::{env, error::Error, fs, path::Path, sync::Arc, time::Duration};
 use tokio::{
     net::TcpStream,
@@ -44,6 +44,9 @@ fn options(password: String, expected_fingerprint: String) -> RdpOptions {
         // This must remain the TLS identity in the certificate, never the
         // address of a future SSH tunnel.
         server_name: "127.0.0.1".into(),
+        udp_peer: None,
+        transport_mode: TransportMode::Auto,
+        graphics_mode: GraphicsMode::Auto,
         username: required("QA_USER"),
         domain: None,
         password: Zeroizing::new(password),
@@ -81,10 +84,10 @@ async fn observe_failed_authentication(
         EngineEvent::Ready => {
             let _ = observed_tx.send(Observation::Ready);
         }
-        EngineEvent::Frame(frame) => {
+        EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
             let _ = observed_tx.send(Observation::Frame(frame));
         }
-        EngineEvent::Clipboard(_) => {}
+        EngineEvent::Clipboard(_) | EngineEvent::RdpTransport(_) | EngineEvent::RdpGraphics(_) => {}
         EngineEvent::AudioState(state) => {
             let _ = observed_tx.send(Observation::Audio(state));
         }
@@ -162,7 +165,7 @@ async fn send_key(
                 keysym: u32::from(b'a'),
                 down,
             },
-            focus_epoch: 0,
+            focus_epoch: Some(0),
             completion,
         })
         .await?;
@@ -215,10 +218,10 @@ async fn successful_session(
         EngineEvent::Ready => {
             let _ = observed_tx.send(Observation::Ready);
         }
-        EngineEvent::Frame(frame) => {
+        EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
             let _ = observed_tx.send(Observation::Frame(frame));
         }
-        EngineEvent::Clipboard(_) => {}
+        EngineEvent::Clipboard(_) | EngineEvent::RdpTransport(_) | EngineEvent::RdpGraphics(_) => {}
         EngineEvent::AudioState(state) => {
             let _ = observed_tx.send(Observation::Audio(state));
         }
@@ -320,10 +323,10 @@ async fn audio_playback_session(
         EngineEvent::Ready => {
             let _ = observed_tx.send(Observation::Ready);
         }
-        EngineEvent::Frame(frame) => {
+        EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
             let _ = observed_tx.send(Observation::Frame(frame));
         }
-        EngineEvent::Clipboard(_) => {}
+        EngineEvent::Clipboard(_) | EngineEvent::RdpTransport(_) | EngineEvent::RdpGraphics(_) => {}
         EngineEvent::AudioState(state) => {
             let _ = observed_tx.send(Observation::Audio(state));
         }

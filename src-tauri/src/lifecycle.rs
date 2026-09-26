@@ -217,6 +217,12 @@ pub fn hide_window_on_close<R: Runtime>(window: &Window<R>, event: &WindowEvent)
         return;
     };
     let lifecycle = window.state::<LifecycleState>();
+    #[cfg(windows)]
+    eprintln!(
+        "NoriShell window close requested; label={}; exit_authorized={}",
+        window.label(),
+        lifecycle.is_exit_authorized()
+    );
     if window.label() != MAIN_WINDOW_LABEL || lifecycle.is_exit_authorized() {
         // Standalone secure windows must actually be destroyed to execute denial and cancellation cleanup.
         return;

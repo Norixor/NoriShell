@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { NvxButton, NvxCheckbox, NvxDialog, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
+import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { useTipsStore } from "../../stores/tips";
 import { DEFAULT_HIGHLIGHT_RULES, MAX_HIGHLIGHT_PATTERN, MAX_HIGHLIGHT_RULES, validateHighlightRule, type HighlightConfiguration, type HighlightMatch, type HighlightRule, type HostHighlightConfiguration } from "../../terminal/highlighting";
 
@@ -35,11 +36,15 @@ watch(scope, reset, { immediate: true });
 watch(() => props.hosts, hosts => {
   if (scope.value && !hosts.some(host => host.hostId === scope.value)) scope.value = "";
 }, { deep: true });
-function save() {
+async function save() {
   // Pass a plain object so structuredClone never receives a Vue Proxy from the persistence layer.
-  const saved = store.setHighlights(copy(draft.value), scope.value || undefined, mode.value);
-  tips.show({ scope: "highlight-settings", tone: saved ? "success" : "error", title: t(saved ? "highlighting.saved" : "highlighting.saveFailed") });
-  if (saved) reset();
+  try {
+    const saved = await store.setHighlights(copy(draft.value), scope.value || undefined, mode.value);
+    tips.show({ scope: "highlight-settings", tone: saved ? "success" : "error", title: t(saved ? "highlighting.saved" : "highlighting.saveFailed") });
+    if (saved) reset();
+  } catch (error) {
+    tips.show({ scope: "highlight-settings", tone: "error", title: t(`applicationPreferenceErrors.${applicationPreferenceFailure(error)}`) });
+  }
 }
 function restore() { draft.value.rules = DEFAULT_HIGHLIGHT_RULES.map(rule => ({ ...rule })); }
 function edit(rule?: HighlightRule) {

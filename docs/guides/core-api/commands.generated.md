@@ -1,6 +1,6 @@
 # Generated stable Core command directory
 
-Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **210 stable command symbols**. Registration and window ACL are separately listed in [the runtime handler directory](handlers.generated.md).
+Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **219 stable command symbols**. Registration and window ACL are separately listed in [the runtime handler directory](handlers.generated.md).
 
 | Symbol | Command |
 | --- | --- |
@@ -46,6 +46,7 @@ Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **2
 | `COMMAND_CREDENTIAL_TRANSIENT_PREPARE` | `credential_transient_prepare` |
 | `COMMAND_SSH_AGENT_KEY_LIST` | `ssh_agent_key_list` |
 | `COMMAND_SSH_AGENT_CREDENTIAL_CREATE` | `ssh_agent_credential_create` |
+| `COMMAND_KEYBOARD_INTERACTIVE_CREDENTIAL_CREATE` | `keyboard_interactive_credential_create` |
 | `COMMAND_OPENSSH_CONFIG_PREVIEW` | `openssh_config_preview` |
 | `COMMAND_OPENSSH_CONFIG_COMMIT` | `openssh_config_commit` |
 | `COMMAND_KNOWN_HOST_LIST` | `known_host_list` |
@@ -107,6 +108,8 @@ Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **2
 | `COMMAND_METRICS_RETRY` | `metrics_retry` |
 | `COMMAND_METRICS_STOP` | `metrics_stop` |
 | `COMMAND_METRICS_HOST_KEY_DECIDE` | `metrics_host_key_decide` |
+| `COMMAND_METRICS_KEYBOARD_INTERACTIVE_ANSWER_PREPARE` | `metrics_keyboard_interactive_answer_prepare` |
+| `COMMAND_METRICS_KEYBOARD_INTERACTIVE_RESPOND` | `metrics_keyboard_interactive_respond` |
 | `COMMAND_SSH_CONNECTION_TEST` | `ssh_connection_test` |
 | `COMMAND_SSH_TERMINAL_OPEN` | `ssh_terminal_open` |
 | `COMMAND_SSH_TERMINAL_SNAPSHOT` | `ssh_terminal_snapshot` |
@@ -115,6 +118,9 @@ Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **2
 | `COMMAND_SSH_TERMINAL_ATTACHMENT_HEARTBEAT` | `ssh_terminal_attachment_heartbeat` |
 | `COMMAND_SSH_TERMINAL_DETACH` | `ssh_terminal_detach` |
 | `COMMAND_SSH_TERMINAL_HOST_KEY_DECIDE` | `ssh_terminal_host_key_decide` |
+| `COMMAND_SSH_TERMINAL_KEYBOARD_INTERACTIVE_ANSWER_PREPARE` | `ssh_terminal_keyboard_interactive_answer_prepare` |
+| `COMMAND_SSH_TERMINAL_KEYBOARD_INTERACTIVE_RESPOND` | `ssh_terminal_keyboard_interactive_respond` |
+| `COMMAND_SSH_TERMINAL_LOGIN_AUTOMATION_TAKEOVER` | `ssh_terminal_login_automation_takeover` |
 | `COMMAND_SSH_TERMINAL_INPUT_FOCUS_SNAPSHOT` | `ssh_terminal_input_focus_snapshot` |
 | `COMMAND_SSH_TERMINAL_INPUT_FOCUS_CHANGE` | `ssh_terminal_input_focus_change` |
 | `COMMAND_SSH_TERMINAL_INPUT_LEASE_RENEW` | `ssh_terminal_input_lease_renew` |
@@ -136,17 +142,19 @@ Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **2
 | `COMMAND_LOCAL_TERMINAL_TERMINATE` | `local_terminal_terminate` |
 | `COMMAND_NATIVE_TERMINAL_SETTINGS_GET` | `native_terminal_settings_get` |
 | `COMMAND_NATIVE_TERMINAL_SETTINGS_REPLACE` | `native_terminal_settings_replace` |
-| `COMMAND_NATIVE_TERMINAL_ENABLE` | `native_terminal_enable` |
-| `COMMAND_NATIVE_TERMINAL_SNAPSHOT` | `native_terminal_snapshot` |
+| `COMMAND_NATIVE_TERMINAL_HISTORY_RECORD` | `native_terminal_history_record` |
 | `COMMAND_NATIVE_TERMINAL_HISTORY_LIST` | `native_terminal_history_list` |
 | `COMMAND_NATIVE_TERMINAL_HISTORY_DELETE` | `native_terminal_history_delete` |
 | `COMMAND_NATIVE_TERMINAL_HISTORY_CLEAR` | `native_terminal_history_clear` |
 | `COMMAND_NATIVE_TERMINAL_HISTORY_PAUSE` | `native_terminal_history_pause` |
 | `COMMAND_DESKTOP_PREFERENCES_GET` | `desktop_preferences_get` |
 | `COMMAND_DESKTOP_PREFERENCES_REPLACE` | `desktop_preferences_replace` |
+| `COMMAND_APPLICATION_PREFERENCES_GET` | `application_preferences_get` |
+| `COMMAND_APPLICATION_PREFERENCES_REPLACE` | `application_preferences_replace` |
 | `COMMAND_TELNET_TERMINAL_OPEN` | `telnet_terminal_open` |
 | `COMMAND_TELNET_TERMINAL_SNAPSHOT` | `telnet_terminal_snapshot` |
 | `COMMAND_TELNET_TERMINAL_ATTACH` | `telnet_terminal_attach` |
+| `COMMAND_TELNET_TERMINAL_ATTACHMENT_HEARTBEAT` | `telnet_terminal_attachment_heartbeat` |
 | `COMMAND_TELNET_TERMINAL_DETACH` | `telnet_terminal_detach` |
 | `COMMAND_TELNET_TERMINAL_INPUT_LEASE_RENEW` | `telnet_terminal_input_lease_renew` |
 | `COMMAND_TELNET_TERMINAL_INPUT` | `telnet_terminal_input` |
@@ -208,6 +216,7 @@ Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **2
 | `COMMAND_PLUGIN_TERMINAL_OPEN` | `plugin_terminal_open` |
 | `COMMAND_PLUGIN_TERMINAL_SNAPSHOT` | `plugin_terminal_snapshot` |
 | `COMMAND_PLUGIN_TERMINAL_ATTACH` | `plugin_terminal_attach` |
+| `COMMAND_PLUGIN_TERMINAL_ATTACHMENT_HEARTBEAT` | `plugin_terminal_attachment_heartbeat` |
 | `COMMAND_PLUGIN_TERMINAL_DETACH` | `plugin_terminal_detach` |
 | `COMMAND_PLUGIN_TERMINAL_INPUT_LEASE_RENEW` | `plugin_terminal_input_lease_renew` |
 | `COMMAND_PLUGIN_TERMINAL_INPUT` | `plugin_terminal_input` |

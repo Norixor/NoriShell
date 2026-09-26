@@ -27,6 +27,24 @@ pub enum EngineError {
     UnsupportedOperation,
     #[error("protocolError")]
     Protocol,
+    #[error("rdpUdpUnavailable")]
+    RdpUdpUnavailable,
+    #[error("rdpGraphicsUnavailable")]
+    RdpGraphicsUnavailable,
+    #[error("rdpResolutionUnavailable")]
+    RdpResolutionUnavailable,
+    #[error("rdpResolutionModeDisabled")]
+    RdpResolutionModeDisabled,
+    #[error("rdpResolutionNotApplied")]
+    RdpResolutionNotApplied,
+    #[error("vncResolutionUnavailable")]
+    VncResolutionUnavailable,
+    #[error("vncResolutionRejected")]
+    VncResolutionRejected,
+    #[error("vncResolutionNotApplied")]
+    VncResolutionNotApplied,
+    #[error("vncResolutionModeDisabled")]
+    VncResolutionModeDisabled,
     #[error("resourceLimit")]
     ResourceLimit,
     #[error("connectionLost")]
@@ -46,6 +64,38 @@ pub struct DesktopFrame {
     pub width: u16,
     pub height: u16,
     pub rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl DesktopRect {
+    pub fn fits(self, width: u16, height: u16) -> bool {
+        self.width != 0
+            && self.height != 0
+            && u32::from(self.x) + u32::from(self.width) <= u32::from(width)
+            && u32::from(self.y) + u32::from(self.height) <= u32::from(height)
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = (u32::from(self.x) + u32::from(self.width))
+            .max(u32::from(other.x) + u32::from(other.width));
+        let bottom = (u32::from(self.y) + u32::from(self.height))
+            .max(u32::from(other.y) + u32::from(other.height));
+        Self {
+            x,
+            y,
+            width: (right - u32::from(x)) as u16,
+            height: (bottom - u32::from(y)) as u16,
+        }
+    }
 }
 
 impl DesktopFrame {
@@ -181,7 +231,8 @@ impl DesktopInput {
 
 pub struct EngineCommand {
     pub input: DesktopInput,
-    pub focus_epoch: u64,
+    /// None is reserved for a session-fenced adaptive resize, which does not own keyboard focus.
+    pub focus_epoch: Option<u64>,
     /// Acknowledge only after the protocol writer completes; callers must not replay non-idempotent input automatically.
     pub completion: oneshot::Sender<Result<()>>,
 }
@@ -194,7 +245,11 @@ pub struct EngineControl {
 
 impl EngineControl {
     pub fn accepts(&self, command: &EngineCommand) -> bool {
-        !*self.stop.borrow() && command.focus_epoch == *self.focus_epoch.borrow()
+        !*self.stop.borrow()
+            && match command.focus_epoch {
+                Some(epoch) => epoch == *self.focus_epoch.borrow(),
+                None => matches!(&command.input, DesktopInput::Resize { .. }),
+            }
     }
 }
 
@@ -216,9 +271,26 @@ pub struct AudioMuteState {
 
 pub enum EngineEvent {
     Ready,
+    RdpTransport(RdpTransportActual),
+    RdpGraphics(RdpGraphicsActual),
     Frame(Arc<DesktopFrame>),
+    FrameDirty(Arc<DesktopFrame>, DesktopRect),
     Clipboard(String),
     AudioState(AudioPlaybackState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RdpTransportActual {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RdpGraphicsActual {
+    Bitmap,
+    RemoteFx,
+    RemoteFxProgressive,
+    Avc420,
 }
 
 /// Callbacks replace only the latest projection; they must not queue every frame or block the protocol worker.
@@ -227,6 +299,32 @@ pub type EventSink = Arc<dyn Fn(EngineEvent) + Send + Sync>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dirty_rect_union_covers_missed_updates() {
+        let first = DesktopRect {
+            x: 1,
+            y: 2,
+            width: 2,
+            height: 2,
+        };
+        let later = DesktopRect {
+            x: 6,
+            y: 5,
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(
+            first.union(later),
+            DesktopRect {
+                x: 1,
+                y: 2,
+                width: 6,
+                height: 4
+            }
+        );
+        assert!(first.union(later).fits(8, 8));
+        assert!(!first.union(later).fits(6, 8));
+    }
     #[test]
     fn rejects_server_dimensions_and_rectangles_before_writing() {
         assert!(DesktopFrame::new(u16::MAX, u16::MAX).is_err());

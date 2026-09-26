@@ -25,7 +25,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`deviceSerial`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`deviceSerial`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 candidateId 必须来自 serialDevices，baudRate 为 300–4000000；其余设置使用类型页中的枚举字符串。Core 保护确认后重新检查设备身份。通过 serial.opened/data/error/closed 事件观察实际状态。
 

@@ -24,7 +24,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`sftpRead`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`sftpRead`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 rootHandle 来自 sftpOpen；directoryHandle、entryHandle、precondition 来自 list/read。写操作还需 sftpWrite。每页最多 100 项，每块 16 KiB，暂存上传总量最多 64 MiB。只暴露常规文件与真实目录；不得构造远端路径或会话 ID。上传按 offset 顺序 chunk，再 commit，失败时 abort；关闭根资源也清理暂存。
 

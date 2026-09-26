@@ -9,8 +9,9 @@ use crate::{
     vault_service::{VaultService, VaultServiceError},
 };
 use norishell_core_api::{
-    HostId, RequestMeta, VaultAutoUnlockEnableRequest, VaultCreateRequest, VaultState, VaultStatus,
-    VaultUnlockPolicy, VaultUnlockRequest, WireSequence,
+    CoreApiError, ErrorCategory, HostId, RequestId, RequestMeta, RetryStrategy,
+    VaultAutoUnlockEnableRequest, VaultCreateRequest, VaultState, VaultStatus, VaultUnlockPolicy,
+    VaultUnlockRequest, WireSequence,
 };
 use norishell_secret_vault::VaultError;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,83 @@ pub struct SecureVaultPrompt {
     id: String,
     kind: SecureVaultKind,
     can_reset: bool,
+}
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct SecureVaultCommandError(Box<CoreApiError>);
+
+impl From<&str> for SecureVaultCommandError {
+    fn from(value: &str) -> Self {
+        let (category, retry, message_key) = match value {
+            "secureVaultDenied" => (
+                ErrorCategory::Permission,
+                RetryStrategy::Never,
+                "secureWindow.vault.denied",
+            ),
+            "secureVaultStateChanged" | "secureVaultResetChanged" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::RefreshSnapshot,
+                "secureWindow.vault.changed",
+            ),
+            "secureVaultRestartRequired" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::Never,
+                "secureWindow.vault.restartRequired",
+            ),
+            "secureVaultExpired" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::Never,
+                "secureWindow.vault.expired",
+            ),
+            "secureVaultUnavailable" => (
+                ErrorCategory::Unavailable,
+                RetryStrategy::RefreshSnapshot,
+                "secureWindow.vault.unavailable",
+            ),
+            "secureVaultResetUncertain" => (
+                ErrorCategory::Conflict,
+                RetryStrategy::Never,
+                "sshHosts.vault.reset.uncertain",
+            ),
+            "secureVaultFailed" => (
+                ErrorCategory::Internal,
+                RetryStrategy::Never,
+                "sshHosts.vault.failed",
+            ),
+            "secureVaultResetFailed" => (
+                ErrorCategory::Internal,
+                RetryStrategy::Never,
+                "sshHosts.vault.reset.failed",
+            ),
+            _ => {
+                let diagnostic_id = uuid::Uuid::new_v4().to_string();
+                eprintln!("secure Vault command failed: diagnostic_id={diagnostic_id}");
+                return Self(Box::new(CoreApiError::safe_internal(
+                    RequestId::new(),
+                    diagnostic_id,
+                )));
+            }
+        };
+        let mut error = crate::core_api_error::core_error(
+            RequestId::new(),
+            value,
+            category,
+            retry,
+            message_key,
+        );
+        if matches!(value, "secureVaultFailed" | "secureVaultResetFailed") {
+            let diagnostic_id = uuid::Uuid::new_v4().to_string();
+            eprintln!("secure Vault operation failed: diagnostic_id={diagnostic_id} code={value}");
+            error.diagnostic_id = Some(diagnostic_id);
+        }
+        Self(error)
+    }
+}
+
+impl From<String> for SecureVaultCommandError {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
 }
 struct PasswordAnswer {
     password: Zeroizing<String>,
@@ -137,7 +215,7 @@ pub async fn secure_vault_ensure_for_host(
     vault: State<'_, VaultService>,
     ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
     hosts: State<'_, HostService>,
-) -> Result<bool, String> {
+) -> Result<bool, SecureVaultCommandError> {
     if window.label() != "main" {
         return Err("secureVaultDenied".into());
     }
@@ -180,7 +258,7 @@ pub async fn secure_vault_open(
     service: State<'_, SecureVaultService>,
     vault: State<'_, VaultService>,
     ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
-) -> Result<bool, String> {
+) -> Result<bool, SecureVaultCommandError> {
     if !allowed_caller(&app, window.label()) {
         return Err("secureVaultDenied".into());
     }
@@ -364,7 +442,7 @@ pub fn secure_vault_get(
     id: String,
     window: WebviewWindow,
     service: State<'_, SecureVaultService>,
-) -> Result<SecureVaultPrompt, String> {
+) -> Result<SecureVaultPrompt, SecureVaultCommandError> {
     require_window(&window, &id)?;
     service
         .pending
@@ -382,7 +460,7 @@ pub fn secure_vault_submit(
     confirmed: bool,
     window: WebviewWindow,
     service: State<'_, SecureVaultService>,
-) -> Result<(), String> {
+) -> Result<(), SecureVaultCommandError> {
     let answer = PasswordAnswer {
         password: Zeroizing::new(password),
         confirmation: Zeroizing::new(password_confirmation),
@@ -415,7 +493,7 @@ pub fn secure_vault_reset(
     app: AppHandle,
     service: State<'_, SecureVaultService>,
     vault: State<'_, VaultService>,
-) -> Result<(), String> {
+) -> Result<(), SecureVaultCommandError> {
     require_window(&window, &id)?;
     if phrase != "RESET" || !confirmed {
         return Err("secureVaultDenied".into());
@@ -456,7 +534,7 @@ pub fn secure_vault_cancel(
     id: String,
     window: WebviewWindow,
     service: State<'_, SecureVaultService>,
-) -> Result<(), String> {
+) -> Result<(), SecureVaultCommandError> {
     require_window(&window, &id)?;
     service
         .pending
@@ -470,6 +548,15 @@ pub fn secure_vault_cancel(
 mod tests {
     use super::*;
     use norishell_core_api::VaultUnlockPolicy;
+
+    #[test]
+    fn reset_conflict_and_uncertain_commit_have_distinct_codes() {
+        let changed = SecureVaultCommandError::from("secureVaultResetChanged");
+        let uncertain = SecureVaultCommandError::from("secureVaultResetUncertain");
+        assert_eq!(changed.0.code, "secureVaultResetChanged");
+        assert_eq!(uncertain.0.code, "secureVaultResetUncertain");
+        assert_ne!(changed.0.message_key, uncertain.0.message_key);
+    }
 
     fn status(state: VaultState) -> VaultStatus {
         VaultStatus {

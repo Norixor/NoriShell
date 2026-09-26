@@ -1,4 +1,10 @@
-//! Declarative self-hosted sync page. Core owns credentials and all exchange bytes.
+//! Provider-owned synchronization over Core's protected data and network APIs.
+
+mod api_chain;
+mod browser_cache;
+mod network_flow;
+mod sync_flow;
+mod sync_policy;
 
 use norishell_plugin_sdk::{
     Plugin, PluginError, PluginHostMessageKind, PluginHostRequest, PluginRuntimeOutput, output,
@@ -22,6 +28,11 @@ struct SelfHostSync {
     check_on_startup: bool,
     conflict_policy: String,
     deletion_policy: String,
+    browser: browser_cache::BrowserCache,
+    api: api_chain::ApiChain,
+    flow: Option<sync_flow::Flow>,
+    pending_terminal: Option<sync_flow::Transition>,
+    cache_dirty: bool,
 }
 
 #[derive(Default)]
@@ -29,14 +40,17 @@ struct Summary {
     account: String,
     operation: String,
     difference: String,
+    review_pending: bool,
     local_hosts: u64,
     remote_hosts: Option<u64>,
     local_desktops: u64,
     remote_desktops: Option<u64>,
     local_credentials: u64,
     remote_credentials: Option<u64>,
+    remote_counts_stale: bool,
     error: Option<String>,
     diagnostic: Option<String>,
+    http_status: Option<u16>,
 }
 
 impl Plugin for SelfHostSync {
@@ -51,6 +65,8 @@ impl Plugin for SelfHostSync {
         match request.kind {
             PluginHostMessageKind::Initialize => {
                 self.read_settings(&body);
+                self.browser
+                    .restore(&body["storage"], self.origin.as_deref());
                 Ok(vec![
                     output(
                         &request.request_id,
@@ -76,9 +92,17 @@ impl Plugin for SelfHostSync {
                 self.action(&request.request_id, &body)
             }
             PluginHostMessageKind::SshSyncResult => {
-                self.record_result(&body);
+                if matches!(
+                    body["actionId"].as_str(),
+                    Some("sync.pageOpened" | "sync.status" | "sync.login" | "sync.logout")
+                ) {
+                    self.record_account_result(&body);
+                } else {
+                    self.record_result(&body);
+                }
                 self.document_output(&request.request_id)
             }
+            PluginHostMessageKind::BrokerResult => self.broker_result(&request.request_id, &body),
             _ => Err(PluginError::InvalidRequest),
         }
     }
@@ -102,6 +126,7 @@ impl SelfHostSync {
             };
             if self.origin != next {
                 self.last = None;
+                self.browser = browser_cache::BrowserCache::default();
             }
             self.invalid_server = !raw.trim().is_empty() && next.is_none();
             self.origin = next;
@@ -143,13 +168,43 @@ impl SelfHostSync {
         if action == "sync.pageOpened" && self.origin.is_none() {
             return self.document_output(request_id);
         }
+        if action == "sync.pageOpened" {
+            return Ok(vec![output(
+                request_id,
+                "ssh.sync.request",
+                &json!({"action":"status", "profileId":PROFILE, "auth":self.auth()?}),
+            )?]);
+        }
+        if matches!(
+            action,
+            "sync.refresh" | "sync.run" | "sync.useLocal" | "sync.useRemote"
+        ) {
+            if self.flow.is_some() {
+                return self.document_output(request_id);
+            }
+            self.api = api_chain::ApiChain::default();
+            self.flow = Some(sync_flow::Flow::new(
+                if action == "sync.refresh" {
+                    sync_flow::Intent::Refresh
+                } else {
+                    sync_flow::Intent::Sync
+                },
+                self.endpoint("exchange")?,
+                &self.conflict_policy,
+                &self.deletion_policy,
+                match action {
+                    "sync.useLocal" => Some(sync_policy::Source::Local),
+                    "sync.useRemote" => Some(sync_policy::Source::Remote),
+                    _ => None,
+                },
+            ));
+            return self
+                .api
+                .request(request_id, sync_flow::Flow::snapshot_request());
+        }
         let request = match action {
             "sync.status" => json!({
                 "action":"status", "profileId":PROFILE, "auth":self.auth()?
-            }),
-            "sync.pageOpened" | "sync.refresh" => json!({
-                "action":"refresh", "profileId":PROFILE, "auth":self.auth()?,
-                "source":{"url":self.endpoint("exchange")?, "useOauth":true}
             }),
             "sync.login" => json!({
                 "action":"login", "profileId":PROFILE, "auth":self.auth()?,
@@ -158,21 +213,159 @@ impl SelfHostSync {
             "sync.logout" => json!({
                 "action":"logout", "profileId":PROFILE, "auth":self.auth()?
             }),
-            "sync.run" => json!({
-                "action":"sync", "profileId":PROFILE, "auth":self.auth()?,
-                "source":{"url":self.endpoint("exchange")?, "useOauth":true},
-                "destination":{"url":self.endpoint("exchange")?, "method":"put", "useOauth":true, "ifMatch":null},
-                "conflictPolicy": if self.conflict_policy == "prompt" { "prompt" } else { "newest" },
-                "deletionPolicy": if self.deletion_policy == "prompt" { "prompt" } else { "newest" }
-            }),
-            "sync.scope" => json!({"action":"configureScope", "profileId":PROFILE}),
-            "sync.reset" => json!({
-                "action":"resetRemote", "profileId":PROFILE, "auth":self.auth()?,
-                "target":{"url":self.endpoint("exchange")?, "useOauth":true}
-            }),
             _ => return Err(PluginError::InvalidRequest),
         };
+        if matches!(action, "sync.login" | "sync.logout") {
+            self.browser = browser_cache::BrowserCache::default();
+            self.cache_dirty = true;
+        }
         Ok(vec![output(request_id, "ssh.sync.request", &request)?])
+    }
+
+    fn broker_result(
+        &mut self,
+        request_id: &str,
+        body: &Value,
+    ) -> Result<Vec<PluginRuntimeOutput>, PluginError> {
+        let reply = self.api.reply(body)?;
+        if let Some(terminal) = self.pending_terminal.take() {
+            let release_succeeded = matches!(reply, api_chain::Reply::Completed(ref value) if value["kind"] == "dataRelease");
+            let terminal =
+                if release_succeeded || matches!(&terminal, sync_flow::Transition::Failed { .. }) {
+                    terminal
+                } else {
+                    sync_flow::Transition::Failed {
+                        code: "cleanupIncomplete".into(),
+                        http_status: None,
+                    }
+                };
+            return self.finish_flow(request_id, body, terminal);
+        }
+        let flow = self.flow.as_mut().ok_or(PluginError::InvalidRequest)?;
+        let transition = match reply {
+            api_chain::Reply::Completed(value) => flow.receive(value),
+            api_chain::Reply::Failed(code) => sync_flow::Transition::Failed {
+                code,
+                http_status: None,
+            },
+        };
+        match transition {
+            sync_flow::Transition::Call(operation) => self.api.request(request_id, operation),
+            terminal => {
+                let release = flow.release_request();
+                self.pending_terminal = Some(terminal);
+                self.api.request(request_id, release)
+            }
+        }
+    }
+
+    fn finish_flow(
+        &mut self,
+        request_id: &str,
+        body: &Value,
+        terminal: sync_flow::Transition,
+    ) -> Result<Vec<PluginRuntimeOutput>, PluginError> {
+        match terminal {
+            sync_flow::Transition::Finished { difference, review } => {
+                let flow = self.flow.take().ok_or(PluginError::InvalidRequest)?;
+                let remote = if flow.upload.is_some() {
+                    &flow.exported
+                } else {
+                    &flow.remote
+                };
+                let remote_rows = sync_flow::display_rows(remote);
+                self.browser
+                    .replace(&remote_rows, body["nowUnixMs"].as_u64());
+                self.cache_dirty = true;
+                let local_rows = sync_flow::display_rows(if flow.upload.is_some() {
+                    &flow.exported
+                } else if flow.applied.is_null() {
+                    &flow.local
+                } else {
+                    &flow.composed
+                });
+                let count = |rows: &[Value], category: &str| {
+                    rows.iter()
+                        .filter(|row| row["category"] == category)
+                        .count()
+                };
+                let local_count = |category: &str, key: &str| {
+                    if flow.upload.is_none() && flow.local["keyPending"] == true {
+                        flow.local["localCounts"][key].as_u64().unwrap_or(0) as usize
+                    } else {
+                        count(&local_rows, category)
+                    }
+                };
+                self.record_result(&json!({"actionId":body["actionId"],"result":{
+                    "accountState":"connected","operationState":if review {"needsReview"} else {"succeeded"},
+                    "differenceState":difference,"localHostCount":local_count("hosts","hostCount"),
+                    "localCredentialCount":local_count("credentials","credentialCount"),"localDesktopProfileCount":local_count("desktopProfiles","desktopProfileCount"),
+                    "remoteHostCount":count(&remote_rows,"hosts"),"remoteCredentialCount":count(&remote_rows,"credentials"),
+                    "remoteDesktopProfileCount":count(&remote_rows,"desktopProfiles")
+                }}));
+                self.document_output(request_id)
+            }
+            sync_flow::Transition::Failed { code, http_status } => {
+                let authenticated = self
+                    .flow
+                    .as_ref()
+                    .is_some_and(|flow| flow.network.started() || flow.download.is_some());
+                self.flow = None;
+                self.browser.stale = true;
+                let account = if code == "accountNotConnected" {
+                    "disconnected"
+                } else if code == "authorizationExpired" {
+                    "expired"
+                } else if authenticated {
+                    "connected"
+                } else {
+                    self.last
+                        .as_ref()
+                        .map_or("disconnected", |last| last.account.as_str())
+                }
+                .to_owned();
+                self.record_result(&json!({"actionId":body["actionId"],"result":{"accountState":account,
+                    "operationState":"failed","differenceState":"unavailable","stableErrorCode":code,"httpStatus":http_status}}));
+                self.document_output(request_id)
+            }
+            sync_flow::Transition::Call(_) => Err(PluginError::InvalidRequest),
+        }
+    }
+
+    fn browser_hint(&self) -> String {
+        let status = if self.browser.stale {
+            self.t(
+                "显示上次验证的离线缓存；刷新后确认当前云端状态。",
+                "Showing the last verified offline cache. Refresh to confirm current cloud state.",
+            )
+        } else if self.browser.verified_at_unix_ms.is_some() {
+            self.t(
+                "显示上次验证的云端项目；点击刷新可检查最新状态。",
+                "Showing the last verified cloud items. Refresh to check the latest state.",
+            )
+        } else {
+            self.t(
+                "点击“刷新远端状态”获取云端项目。",
+                "Select Refresh remote status to load cloud items.",
+            )
+        };
+        let mut text = self.browser.verified_at_utc().map_or_else(
+            || status.to_owned(),
+            |time| {
+                format!(
+                    "{} {time} · {status}",
+                    self.t("上次获取：", "Last fetched:")
+                )
+            },
+        );
+        if self.browser.omitted > 0 {
+            text.push_str(&if self.locale == "en" {
+                format!(" {} additional items are not displayed; sync includes the complete selected data.", self.browser.omitted)
+            } else {
+                format!(" 另有 {} 项未在此显示；同步仍包含完整选定数据。", self.browser.omitted)
+            });
+        }
+        text
     }
 
     fn endpoint(&self, path: &str) -> Result<String, PluginError> {
@@ -200,7 +393,7 @@ impl SelfHostSync {
 
     fn record_result(&mut self, body: &Value) {
         let result = &body["result"];
-        self.last = Some(Summary {
+        let mut next = Summary {
             account: result["accountState"]
                 .as_str()
                 .unwrap_or("disconnected")
@@ -213,25 +406,92 @@ impl SelfHostSync {
                 .as_str()
                 .unwrap_or("unavailable")
                 .to_owned(),
+            review_pending: result["operationState"].as_str() == Some("needsReview"),
             local_hosts: result["localHostCount"].as_u64().unwrap_or(0),
             remote_hosts: result["remoteHostCount"].as_u64(),
             local_desktops: result["localDesktopProfileCount"].as_u64().unwrap_or(0),
             remote_desktops: result["remoteDesktopProfileCount"].as_u64(),
             local_credentials: result["localCredentialCount"].as_u64().unwrap_or(0),
             remote_credentials: result["remoteCredentialCount"].as_u64(),
+            remote_counts_stale: false,
             error: result["stableErrorCode"].as_str().map(str::to_owned),
             diagnostic: result["diagnosticCode"].as_str().map(str::to_owned),
-        });
+            http_status: result["httpStatus"]
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok()),
+        };
+        if next.error.is_some()
+            && body["actionId"].as_str() != Some("sync.logout")
+            && let Some(previous) = &self.last
+        {
+            // A failed retry does not remove the work that Core asked the user
+            // to review. The next explicit click will re-fetch before applying.
+            next.review_pending = previous.review_pending;
+            if next.remote_hosts.is_none() {
+                next.remote_hosts = previous.remote_hosts;
+                next.remote_desktops = previous.remote_desktops;
+                next.remote_credentials = previous.remote_credentials;
+                next.remote_counts_stale = next.remote_hosts.is_some()
+                    || next.remote_desktops.is_some()
+                    || next.remote_credentials.is_some();
+            }
+        }
+        if body["actionId"].as_str() != Some("sync.logout") && next.remote_hosts.is_none() {
+            next.remote_hosts = self.browser.category_count("hosts");
+            next.remote_credentials = self.browser.category_count("credentials");
+            next.remote_desktops = self.browser.category_count("desktopProfiles");
+            next.remote_counts_stale = next.remote_hosts.is_some();
+        }
+        self.last = Some(next);
     }
 
-    fn document_output(&self, request_id: &str) -> Result<Vec<PluginRuntimeOutput>, PluginError> {
-        Ok(vec![output(
+    fn record_account_result(&mut self, body: &Value) {
+        let result = &body["result"];
+        let summary = self.last.get_or_insert_with(Summary::default);
+        summary.account = result["accountState"]
+            .as_str()
+            .unwrap_or("disconnected")
+            .to_owned();
+        summary.operation = result["operationState"]
+            .as_str()
+            .unwrap_or("idle")
+            .to_owned();
+        summary.error = result["stableErrorCode"].as_str().map(str::to_owned);
+        summary.diagnostic = result["diagnosticCode"].as_str().map(str::to_owned);
+        summary.http_status = result["httpStatus"]
+            .as_u64()
+            .and_then(|status| u16::try_from(status).ok());
+        if body["actionId"] == "sync.logout" {
+            summary.remote_hosts = None;
+            summary.remote_credentials = None;
+            summary.remote_desktops = None;
+            summary.difference = "unavailable".into();
+            summary.review_pending = false;
+        }
+    }
+
+    fn document_output(
+        &mut self,
+        request_id: &str,
+    ) -> Result<Vec<PluginRuntimeOutput>, PluginError> {
+        let mut outputs = vec![output(
             request_id,
             "ui.document",
             &json!({
                 "targetId":"app.page", "document":self.document()
             }),
-        )?])
+        )?];
+        if self.cache_dirty
+            && let Some(origin) = &self.origin
+        {
+            outputs.push(output(
+                request_id,
+                "storage.write",
+                &json!({"writeToken":request_id,"valueJson":self.browser.stored(origin)}),
+            )?);
+            self.cache_dirty = false;
+        }
+        Ok(outputs)
     }
 
     fn document(&self) -> Value {
@@ -266,7 +526,7 @@ impl SelfHostSync {
             json!({"kind":"stack","nodeId":"root","direction":"vertical","align":"stretch","gap":20,"children":children}),
             json!({"kind":"stack","nodeId":"headingRow","direction":"horizontal","align":"center","gap":16,"children":["heading","settingsDialog"]}),
             json!({"kind":"text","nodeId":"heading","text":self.t("同步","Sync"),"style":"heading","tone":"neutral"}),
-            json!({"kind":"dialog","nodeId":"settingsDialog","title":self.t("同步设置","Sync settings"),"description":null,"triggerLabel":self.t("设置","Settings"),"closeLabel":self.t("关闭","Close"),"children":["serverSettings","scopeRow","automationRow","policyRow","remoteRow"]}),
+            json!({"kind":"dialog","nodeId":"settingsDialog","title":self.t("同步设置","Sync settings"),"description":null,"triggerLabel":self.t("设置","Settings"),"closeLabel":self.t("关闭","Close"),"children":["serverSettings","scopeRow","policyRow"]}),
             json!({"kind":"button","nodeId":"serverSettings","actionId":"norishell.openSettings:serverUrl","label":self.t("服务器地址与插件设置","Server and plugin settings"),"icon":"settings","variant":"secondary","disabled":false}),
             json!({"kind":"section","nodeId":"connectionBar","title":null,"children":["statusBar"]}),
             json!({"kind":"stack","nodeId":"statusBar","direction":"horizontal","align":"center","gap":24,"children":["accountGroup","syncState","serverInfo","actionButtons"]}),
@@ -285,33 +545,59 @@ impl SelfHostSync {
             json!({"kind":"text","nodeId":"server","text":self.server_label(),"style":"secondary","tone":"neutral"}),
             json!({"kind":"stack","nodeId":"actionButtons","direction":"horizontal","align":"center","gap":12,"children":["refresh","run"]}),
             json!({"kind":"button","nodeId":"refresh","actionId":"sync.refresh","label":self.t("刷新远端状态","Refresh remote status"),"icon":"refresh","variant":"secondary","disabled":!ready}),
-            json!({"kind":"button","nodeId":"run","actionId":"sync.run","label":self.t("立即同步","Sync now"),"icon":"refresh","variant":"primary","disabled":!ready}),
-            json!({"kind":"stack","nodeId":"scopeRow","direction":"horizontal","align":"center","gap":8,"children":["scopeText","scopeButton"]}),
-            json!({"kind":"text","nodeId":"scopeText","text":self.t("范围：主机 · 桌面 · 凭据 · 偏好","Scope: hosts · desktops · credentials · preferences"),"style":"secondary","tone":"neutral"}),
-            json!({"kind":"button","nodeId":"scopeButton","actionId":"sync.scope","label":self.t("管理","Manage"),"icon":null,"variant":"secondary","disabled":!ready}),
-            json!({"kind":"stack","nodeId":"automationRow","direction":"horizontal","align":"center","gap":8,"children":["automationText","automationButton"]}),
-            json!({"kind":"text","nodeId":"automationText","text":self.automation_text(),"style":"secondary","tone":"neutral"}),
-            json!({"kind":"button","nodeId":"automationButton","actionId":"norishell.openSettings:autoSyncEnabled","label":self.t("设置","Settings"),"icon":null,"variant":"secondary","disabled":false}),
+            json!({"kind":"button","nodeId":"run","actionId":"sync.run","label":if self.last.as_ref().is_some_and(|last| last.review_pending) { self.t("审阅并同步","Review and sync") } else { self.t("立即同步","Sync now") },"icon":"refresh","variant":"primary","disabled":!ready}),
+            json!({"kind":"stack","nodeId":"scopeRow","direction":"horizontal","align":"center","gap":8,"children":["scopeText"]}),
+            json!({"kind":"text","nodeId":"scopeText","text":self.t("范围：主机 · 凭据 · 远程桌面","Scope: hosts · credentials · remote desktops"),"style":"secondary","tone":"neutral"}),
             json!({"kind":"stack","nodeId":"policyRow","direction":"horizontal","align":"center","gap":8,"children":["policyText","policyButton"]}),
             json!({"kind":"text","nodeId":"policyText","text":self.policy_text(),"style":"secondary","tone":"neutral"}),
             json!({"kind":"button","nodeId":"policyButton","actionId":"norishell.openSettings:conflictPolicy","label":self.t("设置","Settings"),"icon":null,"variant":"secondary","disabled":false}),
-            json!({"kind":"stack","nodeId":"remoteRow","direction":"horizontal","align":"center","gap":8,"children":["remoteText","resetDialog"]}),
-            json!({"kind":"text","nodeId":"remoteText","text":self.t("远端数据：端到端加密","Remote data: end-to-end encrypted"),"style":"secondary","tone":"neutral"}),
-            json!({"kind":"dialog","nodeId":"resetDialog","title":self.t("重置远端数据","Reset remote data"),"description":self.t("此操作会永久删除当前配置的远端密文，不能恢复；本机数据保留。Core 会再次请求明确确认。","This permanently deletes the remote ciphertext for this profile and cannot be undone. Local data is retained. Core asks for confirmation again."),"triggerLabel":self.t("重置…","Reset…"),"closeLabel":self.t("取消","Cancel"),"children":["resetButton"]}),
-            json!({"kind":"button","nodeId":"resetButton","actionId":"sync.reset","label":self.t("继续到安全确认","Continue to secure confirmation"),"icon":null,"variant":"danger","disabled":!ready}),
-            // The protected browser alone receives cloud rows, search state and selection.
-            json!({"kind":"sshSyncBrowser","nodeId":"browser","profileId":PROFILE,"children":["overview"]}),
+            json!({"kind":"stack","nodeId":"browser","direction":"vertical","align":"stretch","gap":16,"children":["overview","datahosts","datacredentials","datadesktopProfiles"]}),
             json!({"kind":"stack","nodeId":"overview","direction":"vertical","align":"stretch","gap":16,"children":["overviewCounts","overviewSummary","browserHint"]}),
             json!({"kind":"grid","nodeId":"overviewCounts","columns":3,"gap":16,"children":["hostCountCard","credentialCountCard","desktopCountCard"]}),
             json!({"kind":"section","nodeId":"hostCountCard","title":self.t("云端主机","Cloud hosts"),"children":["hostCount"]}),
-            json!({"kind":"text","nodeId":"hostCount","text":self.remote_count(|last| last.remote_hosts),"style":"heading","tone":"neutral"}),
+            json!({"kind":"text","nodeId":"hostCount","text":self.remote_count("hosts", |last| last.remote_hosts),"style":"heading","tone":"neutral"}),
             json!({"kind":"section","nodeId":"credentialCountCard","title":self.t("云端凭据","Cloud credentials"),"children":["credentialCount"]}),
-            json!({"kind":"text","nodeId":"credentialCount","text":self.remote_count(|last| last.remote_credentials),"style":"heading","tone":"neutral"}),
+            json!({"kind":"text","nodeId":"credentialCount","text":self.remote_count("credentials", |last| last.remote_credentials),"style":"heading","tone":"neutral"}),
             json!({"kind":"section","nodeId":"desktopCountCard","title":self.t("云端远程桌面","Cloud remote desktops"),"children":["desktopCount"]}),
-            json!({"kind":"text","nodeId":"desktopCount","text":self.remote_count(|last| last.remote_desktops),"style":"heading","tone":"neutral"}),
+            json!({"kind":"text","nodeId":"desktopCount","text":self.remote_count("desktopProfiles", |last| last.remote_desktops),"style":"heading","tone":"neutral"}),
             json!({"kind":"text","nodeId":"overviewSummary","text":self.summary_text(),"style":"secondary","tone":"neutral"}),
-            json!({"kind":"text","nodeId":"browserHint","text":self.t("进入页面时自动加载云端项目，也可手动刷新。","Cloud items load when this page opens. You can also refresh manually."),"style":"secondary","tone":"neutral"}),
+            json!({"kind":"text","nodeId":"browserHint","text":self.browser_hint(),"style":"secondary","tone":"neutral"}),
+            self.browser.table(
+                "hosts",
+                self.t("主机", "Hosts"),
+                self.t("名称", "Name"),
+                self.t("地址", "Address"),
+                self.t("尚无已验证的项目", "No verified items yet"),
+            ),
+            self.browser.table(
+                "credentials",
+                self.t("凭据", "Credentials"),
+                self.t("名称", "Name"),
+                self.t("类型", "Type"),
+                self.t("尚无已验证的项目", "No verified items yet"),
+            ),
+            self.browser.table(
+                "desktopProfiles",
+                self.t("远程桌面", "Remote desktops"),
+                self.t("名称", "Name"),
+                self.t("地址", "Address"),
+                self.t("尚无已验证的项目", "No verified items yet"),
+            ),
         ];
+        if self.last.as_ref().is_some_and(|last| last.review_pending) {
+            if let Some(browser) = nodes.iter_mut().find(|node| node["nodeId"] == "browser") {
+                browser["children"]
+                    .as_array_mut()
+                    .expect("browser children")
+                    .insert(0, json!("review"));
+            }
+            nodes.extend([
+                json!({"kind":"section","nodeId":"review","title":self.t("选择冲突项目的来源", "Choose the source for conflicting items"),"children":["reviewText","reviewLocal","reviewRemote"]}),
+                json!({"kind":"text","nodeId":"reviewText","text":self.t("无法按时间确定的修改和需要确认的删除将采用你选择的一侧。操作会重新读取两侧数据并由 Core 校验。", "Unresolved edits and deletions requiring confirmation will use the selected side. Both sides are read again and Core validates the changes."),"style":"body","tone":"warning"}),
+                json!({"kind":"button","nodeId":"reviewLocal","actionId":"sync.useLocal","label":self.t("冲突采用本机", "Use local for conflicts"),"icon":null,"variant":"secondary","disabled":!ready}),
+                json!({"kind":"button","nodeId":"reviewRemote","actionId":"sync.useRemote","label":self.t("冲突采用云端", "Use cloud for conflicts"),"icon":null,"variant":"secondary","disabled":!ready})
+            ]);
+        }
         if insecure_http {
             nodes.push(json!({"kind":"status","nodeId":"httpWarning","label":self.t("当前使用 HTTP，建议改用 HTTPS。","Using HTTP. HTTPS is recommended."),"tone":"warning"}));
         }
@@ -321,23 +607,23 @@ impl SelfHostSync {
                 .iter_mut()
                 .find(|node| node["nodeId"] == "settingsDialog")
             {
-                settings["children"] =
-                    json!(["scopeRow", "automationRow", "policyRow", "remoteRow"]);
+                settings["children"] = json!(["scopeRow", "policyRow"]);
             }
             nodes.push(json!({"kind":"section","nodeId":"setupNotice","title":self.t("请先配置服务器","Set up your server"),"children":["setupStatus","setupSettings"]}));
             nodes.push(json!({"kind":"status","nodeId":"setupStatus","label":if self.invalid_server { self.t("服务器地址无效：请填写 HTTP/HTTPS 地址或 IP:端口。","Invalid server address. Enter an HTTP/HTTPS URL or IP:port.") } else { self.t("填写服务器地址后即可连接并同步。","Enter your server address to connect and sync.") },"tone":"warning"}));
             nodes.push(json!({"kind":"button","nodeId":"setupSettings","actionId":"norishell.openSettings:serverUrl","label":self.t("填写服务器地址","Enter server address"),"icon":"settings","variant":"primary","disabled":false}));
         }
         if let Some(error) = self.last.as_ref().and_then(|last| last.error.as_ref()) {
-            nodes.push(json!({"kind":"status","nodeId":"errorNotice","label":self.error_message(error),"tone":"warning"}));
+            nodes.push(json!({"kind":"status","nodeId":"errorNotice","label":self.error_message(error),"tone":if self.last.as_ref().is_some_and(|last| last.operation == "failed") { "danger" } else { "warning" }}));
         }
         json!({"schemaVersion":1,"rootNodeId":"root","nodes":nodes})
     }
 
-    fn remote_count(&self, count: impl FnOnce(&Summary) -> Option<u64>) -> String {
+    fn remote_count(&self, category: &str, count: impl FnOnce(&Summary) -> Option<u64>) -> String {
         self.last
             .as_ref()
             .and_then(count)
+            .or_else(|| self.browser.category_count(category))
             .map_or_else(|| "—".to_owned(), |value| value.to_string())
     }
 
@@ -363,7 +649,7 @@ impl SelfHostSync {
         if last.operation == "running" {
             return self.t("正在同步", "Sync in progress");
         }
-        if last.operation == "needsReview" {
+        if last.review_pending {
             return self.t("需要确认", "Confirmation required");
         }
         match last.difference.as_str() {
@@ -386,15 +672,33 @@ impl SelfHostSync {
         let Some(last) = &self.last else {
             return self.t("尚无同步结果。", "No sync result yet.").to_owned();
         };
+        if last.operation == "idle" && last.difference.is_empty() {
+            return if self.locale == "en" {
+                format!("Account: {} · Select Refresh remote status to compare current data.", self.account_label(&last.account))
+            } else {
+                format!("账户：{} · 点击“刷新远端状态”比较当前数据。", self.account_label(&last.account))
+            };
+        }
         let remote = |value: Option<u64>| value.map_or_else(|| "—".to_owned(), |v| v.to_string());
-        let review = if last.operation == "needsReview" && last.error.is_none() {
-            self.t(" · 点击「立即同步」继续审查；若主窗口出现偏好待办，先处理该待办。", " · Select Sync now to continue the review; resolve any pending preferences shown in the main window first.")
+        let review = if last.review_pending {
+            self.t(
+                " · 点击「审阅并同步」继续审阅。",
+                " · Select Review and sync to continue the review.",
+            )
+        } else {
+            ""
+        };
+        let stale = if last.remote_counts_stale {
+            self.t(
+                " · 云端数量来自上次成功读取",
+                " · Cloud counts are from the last successful read",
+            )
         } else {
             ""
         };
         if self.locale == "en" {
             format!(
-                "Account: {} · Operation: {} · Difference: {} · Hosts {} / {} · Desktops {} / {} · Credentials {} / {}{}{}",
+                "Account: {} · Operation: {} · Difference: {} · Hosts {} / {} · Desktops {} / {} · Credentials {} / {}{}{}{}",
                 self.account_label(&last.account),
                 self.operation_label(&last.operation),
                 self.difference_label(&last.difference),
@@ -408,11 +712,12 @@ impl SelfHostSync {
                     " · Error: {}",
                     self.error_message(e)
                 )),
-                review
+                review,
+                stale
             )
         } else {
             format!(
-                "账户：{} · 操作：{} · 差异：{} · 主机 {} / {} · 远程桌面 {} / {} · 凭据 {} / {}{}{}",
+                "账户：{} · 操作：{} · 差异：{} · 主机 {} / {} · 远程桌面 {} / {} · 凭据 {} / {}{}{}{}",
                 self.account_label(&last.account),
                 self.operation_label(&last.operation),
                 self.difference_label(&last.difference),
@@ -422,10 +727,12 @@ impl SelfHostSync {
                 remote(last.remote_desktops),
                 last.local_credentials,
                 remote(last.remote_credentials),
-                last.error
-                    .as_ref()
-                    .map_or_else(String::new, |e| format!(" · 错误：{}", self.error_message(e))),
-                review
+                last.error.as_ref().map_or_else(String::new, |e| format!(
+                    " · 错误：{}",
+                    self.error_message(e)
+                )),
+                review,
+                stale
             )
         }
     }
@@ -467,16 +774,28 @@ impl SelfHostSync {
 
     fn error_message(&self, code: &str) -> String {
         let message = self.error_label(code);
-        match self.last.as_ref().and_then(|last| last.diagnostic.as_deref()) {
-            Some(diagnostic) => format!("{message} [{diagnostic}]"),
-            None => message.to_owned(),
+        let mut result = message.to_owned();
+        if let Some(status) = self.last.as_ref().and_then(|last| last.http_status) {
+            result.push_str(&format!(" (HTTP {status})"));
         }
+        if let Some(diagnostic) = self
+            .last
+            .as_ref()
+            .and_then(|last| last.diagnostic.as_deref())
+        {
+            result.push_str(&format!(" [{diagnostic}]"));
+        }
+        result
     }
 
     fn error_label(&self, code: &str) -> &str {
         match code {
             "vaultMissing" => self.t("请先创建本机 Vault。", "Create a local Vault first."),
             "vaultLocked" => self.t("请先解锁 Vault。", "Unlock the Vault first."),
+            "vaultRequiresReload" => self.t(
+                "Vault 状态需要重新加载。请重新解锁后再同步。",
+                "The Vault needs to be reloaded. Unlock it again before syncing.",
+            ),
             "interactionRequired" => self.t(
                 "自动刷新需要你手动继续。请点击“刷新远端状态”；需要恢复密钥时才会打开密码窗口。",
                 "Automatic refresh needs a manual step. Select Refresh remote status; a password window opens only if key recovery is needed.",
@@ -488,9 +807,17 @@ impl SelfHostSync {
             "authorizationExpired" => {
                 self.t("登录已过期，请重新登录。", "Sign-in expired. Log in again.")
             }
+            "accountNotConnected" => self.t(
+                "此插件版本尚未登录。请先连接账户；已有 Vault 数据不会因这次检查被删除。",
+                "This plugin version is not signed in. Connect your account first; this check does not remove existing Vault data.",
+            ),
             "accessDenied" => self.t(
                 "此账号无权同步，请检查访问权限。",
                 "This account cannot sync. Check its access permissions.",
+            ),
+            "permissionDenied" => self.t(
+                "本次同步无权限，请检查插件授权与账号访问权限。",
+                "Sync permission was denied. Check the plugin grant and account access.",
             ),
             "quotaExceeded" => self.t(
                 "同步配额或数据大小超出限制。",
@@ -505,8 +832,37 @@ impl SelfHostSync {
                 "The server is unavailable. Try again later.",
             ),
             "stateConflict" => self.t(
-                "同步状态发生变化，请重试；若持续出现，请更新 NoriShell。",
-                "Sync state changed. Try again; if this persists, update NoriShell.",
+                "同步所依据的版本或操作状态发生变化。请重试；持续出现时保留错误编号。",
+                "The version or operation state used for sync changed. Retry and keep the diagnostic identifier if this continues.",
+            ),
+            "conflict" => self.t(
+                "同步状态已变化，请刷新远端状态后重试。",
+                "Sync state changed. Refresh remote status and retry.",
+            ),
+            "localStateChanged" => self.t("本机同步数据在操作期间发生变化。请重试同步。", "Local sync data changed during the operation. Retry sync."),
+            "ownerConflict" => self.t(
+                "本机同步数据的归属记录无效或存在歧义。已停止同步，请保留现有数据。",
+                "Local sync ownership records are invalid or ambiguous. Sync stopped; preserve the existing data.",
+            ),
+            "keyBindingConflict" => self.t(
+                "远端同步密钥绑定与本机记录不一致。已停止同步，不会覆盖任一端数据。",
+                "The remote sync key binding differs from the local record. Sync stopped without overwriting either side.",
+            ),
+            "revisionExhausted" => self.t(
+                "远端同步修订号已达上限，重试无法解决。",
+                "The remote sync revision reached its limit; retrying cannot resolve this.",
+            ),
+            "restoreConflict" => self.t(
+                "云端数据与本机同步对象发生恢复冲突，本次写入已停止；这里没有可继续的审阅窗口。",
+                "Cloud data conflicts with existing local sync objects. Restore stopped; there is no review window to continue this attempt.",
+            ),
+            "mergeInvalid" => self.t(
+                "Core 无法生成可验证的合并结果，本次同步已停止，数据未被覆盖。",
+                "Core could not produce a valid merged result. Sync stopped without overwriting data.",
+            ),
+            "remoteRequestRejected" => self.t(
+                "服务器拒绝了本次同步请求，请检查服务器地址及服务端状态。",
+                "The server rejected this sync request. Check the server address and service status.",
             ),
             "remoteDataInvalid" => self.t(
                 "远端数据无法验证，同步已停止。",
@@ -520,50 +876,55 @@ impl SelfHostSync {
                 "远端同步密钥解密校验失败。请核对最初上传远端数据时使用的 Vault 密码；若密码确认正确，远端密钥可能已损坏。",
                 "The remote sync key failed decryption verification. Check the Vault password used when the remote data was first uploaded. If it is correct, the remote key may be damaged.",
             ),
+            "recoveryAuthenticationFailed" => self.t(
+                "远端同步密钥的密码校验失败。请核对首次上传时使用的 Vault 密码。",
+                "The password did not authenticate the remote sync key. Check the Vault password used for the first upload.",
+            ),
             "recoveryActionExpired" => self.t(
                 "输入密码期间同步状态已变化。请重新点击刷新或同步。",
                 "Sync state changed while entering the password. Select refresh or sync again.",
             ),
             "localDataInvalid" => self.t("本机同步数据校验失败。下方显示失败阶段与具体原因。", "Local sync data failed validation. The failed stage and reason are shown below."),
-            "preferencesUnavailable" => self.t("无法从主窗口读取应用偏好，本次同步尚未执行。请保持主窗口打开；持续出现时重新启动应用。", "Application preferences could not be read from the main window. Sync has not run. Keep the main window open; restart the app if this persists."),
             "localKeyUnavailable" => self.t("本机 Vault 中的同步密钥无法读取或导出，尚未验证远端密码。", "The sync key could not be read or exported from the local Vault. The remote password has not been checked."),
             "operationBusy" => self.t("当前账户有另一项操作正在进行，请等待该操作结束。", "Another account operation is in progress. Wait for it to finish."),
+            "busy" => self.t(
+                "当前已有同步操作正在进行，请等待完成后重试。",
+                "A sync operation is already running. Wait for it to finish and retry.",
+            ),
             "operationRejected" => self.t(
                 "同步检查未通过，未继续执行。错误位置见下方编号。",
                 "A sync check failed and stopped the operation. The diagnostic identifier locates the failed check.",
             ),
-            "internal" => self.t(
-                "本机安全状态保存失败，操作未完成。",
-                "Local secure state could not be saved. Operation did not complete.",
+            "invalidRequest" => self.t(
+                "同步请求不符合 Core 接口要求，请更新插件或检查配置。",
+                "The sync request does not meet the Core API contract. Update the plugin or check its settings.",
             ),
+            "unavailable" => self.t(
+                "Core 当前无法完成同步，请稍后重试；持续出现时保留错误编号。",
+                "Core cannot complete sync right now. Retry later and keep the diagnostic identifier if this continues.",
+            ),
+            "cleanupIncomplete" => self.t(
+                "同步资源清理未完成。请关闭并重新打开插件后再试。",
+                "Sync resource cleanup did not finish. Close and reopen the plugin before retrying.",
+            ),
+            "internal" => self.t(
+                "Core 无法安全完成本次同步，请保留错误编号。",
+                "Core could not safely complete this sync. Keep the error ID.",
+            ),
+            "outcomeUnknown" => self.t(
+                "上传结果尚未确认。请刷新云端状态后再决定下一步；本次未标记同步完成。",
+                "The upload result is unconfirmed. Refresh cloud state before continuing; this operation was not marked complete.",
+            ),
+            "timedOut" => self.t("请求超时，请检查网络后重试。", "The request timed out. Check the network and retry."),
+            "httpFailed" | "connectFailed" | "resolveFailed" => self.t("无法连接服务器，请检查地址和网络。", "Cannot reach the server. Check its address and the network."),
+            "tlsFailed" => self.t("服务器 TLS 验证失败，请检查证书。", "Server TLS validation failed. Check its certificate."),
+            "invalidResponse" | "protocolFailed" => self.t("返回数据不符合接口契约，操作已停止。", "The response does not match the API contract. The operation stopped."),
+            "cancelled" => self.t("操作已取消。", "The operation was cancelled."),
+            "revoked" => self.t("操作授权已失效，请重新发起。", "Operation authorization expired. Start a new operation."),
             _ => self.t(
                 "操作未完成，请重试。",
                 "Operation did not complete. Try again.",
             ),
-        }
-    }
-
-    fn automation_text(&self) -> String {
-        let state = if self.auto_sync_enabled {
-            self.t("已开启", "On")
-        } else {
-            self.t("已关闭", "Off")
-        };
-        let startup = if self.check_on_startup {
-            self.t("开启", "On")
-        } else {
-            self.t("关闭", "Off")
-        };
-        if self.locale == "en" {
-            format!(
-                "Automatic: {state} · {} min · Startup: {startup}",
-                self.auto_sync_interval_minutes
-            )
-        } else {
-            format!(
-                "自动：{state} · {} 分钟 · 启动：{startup}",
-                self.auto_sync_interval_minutes
-            )
         }
     }
 
@@ -614,7 +975,173 @@ norishell_plugin_sdk::export_plugin!(SelfHostSync);
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_origin;
+    use super::{SelfHostSync, canonical_origin, sync_flow};
+    use serde_json::json;
+
+    #[test]
+    fn failed_exchange_releases_its_handles_before_showing_the_error() {
+        let mut plugin = SelfHostSync::default();
+        plugin.origin = Some("https://example.org".into());
+        plugin.flow = Some(sync_flow::Flow::new(
+            sync_flow::Intent::Sync,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
+            None,
+        ));
+        plugin
+            .api
+            .request("request", sync_flow::Flow::snapshot_request())
+            .unwrap();
+        plugin
+            .broker_result(
+                "request",
+                &json!({"actionId":"sync.run","result":{"kind":"api","reply":{
+                "callId":"self-host.1","outcome":{"kind":"failed","code":"vaultLocked"}}}}),
+            )
+            .unwrap();
+        assert!(plugin.pending_terminal.is_some());
+        assert!(plugin.last.is_none());
+        plugin
+            .broker_result("request", &json!({"actionId":"sync.run","result":{"kind":"api","reply":{
+                "callId":"self-host.2","outcome":{"kind":"completed","value":{"kind":"dataRelease"}}}}}))
+            .unwrap();
+        assert!(plugin.flow.is_none());
+        assert_eq!(
+            plugin.last.as_ref().and_then(|last| last.error.as_deref()),
+            Some("vaultLocked")
+        );
+    }
+
+    #[test]
+    fn current_core_failures_keep_specific_user_guidance() {
+        let mut plugin = SelfHostSync::default();
+        plugin.locale = "zh-CN".into();
+        for (code, expected) in [
+            ("vaultRequiresReload", "重新解锁"),
+            ("permissionDenied", "插件授权"),
+            ("conflict", "刷新远端状态"),
+            ("busy", "等待完成"),
+            ("recoveryAuthenticationFailed", "Vault 密码"),
+            ("invalidRequest", "Core 接口"),
+            ("unavailable", "Core 当前"),
+            ("cleanupIncomplete", "资源清理"),
+        ] {
+            assert!(plugin.error_label(code).contains(expected), "{code}");
+        }
+        plugin.locale = "en".into();
+        assert!(
+            plugin
+                .error_label("recoveryAuthenticationFailed")
+                .contains("password")
+        );
+        assert!(plugin.error_label("cleanupIncomplete").contains("cleanup"));
+    }
+
+    #[test]
+    fn failed_fetch_keeps_last_known_counts_but_successful_absence_replaces_them() {
+        let mut plugin = SelfHostSync::default();
+        plugin.record_result(&json!({"actionId":"sync.refresh","result":{
+            "accountState":"connected","operationState":"succeeded","differenceState":"remoteOnly",
+            "remoteHostCount":2,"remoteCredentialCount":1,"remoteDesktopProfileCount":3
+        }}));
+        plugin.record_result(&json!({"actionId":"sync.refresh","result":{
+            "accountState":"connected","operationState":"failed","differenceState":"unavailable",
+            "stableErrorCode":"networkUnavailable"
+        }}));
+        let stale = plugin.last.as_ref().expect("failed result");
+        assert_eq!(stale.remote_hosts, Some(2));
+        assert_eq!(stale.remote_credentials, Some(1));
+        assert_eq!(stale.remote_desktops, Some(3));
+        assert!(stale.remote_counts_stale);
+
+        plugin.record_result(&json!({"actionId":"sync.refresh","result":{
+            "accountState":"connected","operationState":"succeeded","differenceState":"localOnly",
+            "remoteHostCount":0,"remoteCredentialCount":0,"remoteDesktopProfileCount":0
+        }}));
+        let current = plugin.last.as_ref().expect("successful empty result");
+        assert_eq!(current.remote_hosts, Some(0));
+        assert!(!current.remote_counts_stale);
+    }
+
+    #[test]
+    fn restarted_offline_page_uses_verified_cached_counts() {
+        let mut plugin = SelfHostSync::default();
+        plugin.browser.replace(
+            &[
+                json!({"category":"hosts","label":"One"}),
+                json!({"category":"credentials","label":"Login"}),
+                json!({"category":"desktopProfiles","label":"Desktop"}),
+            ],
+            Some(1_790_429_340_000),
+        );
+        plugin.browser.stale = true;
+        plugin.record_result(&json!({"actionId":"sync.refresh","result":{
+            "accountState":"connected","operationState":"failed","differenceState":"unavailable",
+            "stableErrorCode":"networkUnavailable"
+        }}));
+        let last = plugin.last.as_ref().unwrap();
+        assert_eq!(
+            (
+                last.remote_hosts,
+                last.remote_credentials,
+                last.remote_desktops
+            ),
+            (Some(1), Some(1), Some(1))
+        );
+        assert!(last.remote_counts_stale);
+    }
+
+    #[test]
+    fn account_status_does_not_claim_unread_local_counts() {
+        let mut plugin = SelfHostSync::default();
+        plugin.locale = "en".into();
+        plugin.record_account_result(&json!({"actionId":"sync.pageOpened","result":{
+            "accountState":"connected","operationState":"idle"
+        }}));
+        let summary = plugin.summary_text();
+        assert!(summary.contains("Account: Connected"));
+        assert!(summary.contains("Refresh remote status"));
+        assert!(!summary.contains("Hosts 0 /"));
+    }
+
+    #[test]
+    fn failed_review_retry_keeps_the_explicit_review_action() {
+        let mut plugin = SelfHostSync::default();
+        plugin.locale = "en".to_owned();
+        plugin.origin = Some("https://example.org".to_owned());
+        plugin.record_result(&json!({"actionId":"sync.refresh","result":{
+            "accountState":"connected","operationState":"needsReview","differenceState":"conflict",
+            "remoteHostCount":1,"remoteCredentialCount":1,"remoteDesktopProfileCount":1
+        }}));
+        plugin.record_result(&json!({"actionId":"sync.run","result":{
+            "accountState":"connected","operationState":"failed","differenceState":"unavailable",
+            "stableErrorCode":"stateConflict"
+        }}));
+
+        let document = plugin.document();
+        let run = document["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["nodeId"] == "run")
+            .expect("run action");
+        assert_eq!(run["label"], "Review and sync");
+        assert!(plugin.last.as_ref().expect("result").review_pending);
+
+        plugin.record_result(&json!({"actionId":"sync.run","result":{
+            "accountState":"connected","operationState":"succeeded","differenceState":"equal",
+            "remoteHostCount":1,"remoteCredentialCount":1,"remoteDesktopProfileCount":1
+        }}));
+        let document = plugin.document();
+        let run = document["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|node| node["nodeId"] == "run")
+            .expect("run action");
+        assert_eq!(run["label"], "Sync now");
+    }
 
     #[test]
     fn accepts_http_https_and_ip_ports_and_rejects_ambiguous_bases() {

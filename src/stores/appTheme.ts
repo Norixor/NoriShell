@@ -19,7 +19,9 @@ import {
   type ThemeDefinition,
 } from "../app-theme";
 import { publishAppThemeProjection } from "../app-theme-projection";
+import { corePreferencesEnabled, currentApplicationPreferencesValue, saveApplicationPreferences } from "../core-api/application-preferences";
 import { listPluginThemes, type ThemePackageEntry } from "../core-api/app-theme";
+import { validateAppearancePreferences } from "../ui-transfer";
 
 export const APP_THEME_PREFERENCES_KEY = "norishell.app-theme.v1";
 
@@ -132,33 +134,40 @@ export const useAppThemeStore = defineStore("appTheme", () => {
     return resolved;
   }
 
-  function saveProfile(next: unknown, expectedProfile: AppThemeProfile | null = null): boolean {
+  function hydrateCorePreferences(next: AppThemeProfile) {
+    profile.value = normalizedProfile(next);
+    applyTheme(activeAppearance.value);
+  }
+
+  async function saveProfile(next: unknown, expectedProfile: AppThemeProfile | null = null): Promise<boolean> {
     if (!validateAppThemeProfile(next)
       || (expectedProfile !== null && JSON.stringify(profile.value) !== JSON.stringify(expectedProfile))) return false;
     const saved = cloneAppThemeProfile(next);
     if (!selectedDefinitionsAreSafe(saved)) return false;
-    try {
-      localStorage.setItem(APP_THEME_PREFERENCES_KEY, JSON.stringify(saved));
-    } catch {
-      return false;
+    if (corePreferencesEnabled()) {
+      const current = currentApplicationPreferencesValue("appearance");
+      if (!validateAppearancePreferences(current)) return false;
+      if (!await saveApplicationPreferences("appearance", { ...current, appTheme: saved }, current)) return false;
+    } else {
+      try { localStorage.setItem(APP_THEME_PREFERENCES_KEY, JSON.stringify(saved)); }
+      catch { return false; }
     }
-    profile.value = saved;
-    applyTheme(activeAppearance.value);
+    hydrateCorePreferences(saved);
     return true;
   }
 
   function appThemePreferences(): AppThemeProfile { return cloneAppThemeProfile(profile.value); }
-  function replaceAppThemePreferences(next: unknown, expected: AppThemeProfile): boolean {
+  function replaceAppThemePreferences(next: unknown, expected: AppThemeProfile): Promise<boolean> {
     return saveProfile(next, expected);
   }
 
   function exportProfile(): string { return JSON.stringify(appThemePreferences(), null, 2); }
-  function importProfile(text: string): { ok: boolean; error?: "invalidFile" | "tooLarge" | "persistFailed" } {
+  async function importProfile(text: string): Promise<{ ok: boolean; error?: "invalidFile" | "tooLarge" | "persistFailed" }> {
     if (new TextEncoder().encode(text).byteLength > 32 * 1024) return { ok: false, error: "tooLarge" };
     try {
       const parsed: unknown = JSON.parse(text);
       if (!validateAppThemeProfile(parsed)) return { ok: false, error: "invalidFile" };
-      return saveProfile(parsed) ? { ok: true } : { ok: false, error: "persistFailed" };
+      return await saveProfile(parsed) ? { ok: true } : { ok: false, error: "persistFailed" };
     } catch { return { ok: false, error: "invalidFile" }; }
   }
 
@@ -186,7 +195,7 @@ export const useAppThemeStore = defineStore("appTheme", () => {
 
   return {
     profile, themes, loading, loadError, resolvedTheme,
-    refreshThemes, resolveTheme, saveProfile, appThemePreferences, replaceAppThemePreferences,
+    refreshThemes, resolveTheme, saveProfile, hydrateCorePreferences, appThemePreferences, replaceAppThemePreferences,
     exportProfile, importProfile, applyTheme,
   };
 });

@@ -36,6 +36,7 @@ fn options(password: String) -> VncOptions {
         allow_unauthenticated: false,
         clipboard_enabled: false,
         version,
+        initial_resize: None,
     }
 }
 
@@ -73,7 +74,7 @@ async fn send_key(
                 keysym: u32::from(b'a'),
                 down,
             },
-            focus_epoch: 0,
+            focus_epoch: Some(0),
             completion,
         })
         .await?;
@@ -105,10 +106,13 @@ async fn successful_session(address: &str, password: String) -> Result<(), Box<d
         EngineEvent::Ready => {
             let _ = observed_tx.send(Observation::Ready);
         }
-        EngineEvent::Frame(frame) => {
+        EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
             let _ = observed_tx.send(Observation::Frame(frame));
         }
-        EngineEvent::Clipboard(_) | EngineEvent::AudioState(_) => {}
+        EngineEvent::Clipboard(_)
+        | EngineEvent::AudioState(_)
+        | EngineEvent::RdpTransport(_)
+        | EngineEvent::RdpGraphics(_) => {}
     });
     let task = tokio::spawn(run(
         Box::new(stream),

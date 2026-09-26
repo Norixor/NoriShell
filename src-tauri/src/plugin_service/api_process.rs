@@ -61,8 +61,11 @@ impl PluginService {
             return Err(PluginApiErrorCode::Revoked);
         }
         let details = self.process_approval_details(invocation, installed, owner, &prepared)?;
-        let exact_scope =
-            serde_json::to_value(&prepared).map_err(|_| PluginApiErrorCode::InvalidRequest)?;
+        let exact_scope = serde_json::json!({
+            "program": prepared.program,
+            "identity": prepared.identity,
+            "arguments": prepared.arguments,
+        });
         let target_label = process_target_label(&prepared);
         let resource_fence = self
             .authorize_api_access(
@@ -76,6 +79,7 @@ impl PluginService {
                     persisted_target_label: target_label,
                     details,
                     exact_scope,
+                    policy_identity: Some("local.execute.v1"),
                     target_fence: None,
                 },
             )

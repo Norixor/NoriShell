@@ -10,6 +10,16 @@ Only guest DTOs reachable from method requests, results, and resource events are
 
 The tagged operation enum has the complete method list in [broker methods](broker.en.md). Its nested payloads include `PluginAppRegistration`, `PluginAppNotification`, `PluginAppNavigation`, `PluginWorkflowTaskId`, `PluginSerialSettings`, `PluginProtocolOpen`, `PluginNetworkEndpointRequest`, `PluginNetworkStartRequest`, `PluginRemoteExecStartRequest`, `PluginProcessSendRequest`, `PluginSftpOperation`, `PluginFileAccessRequest`, `PluginFileOperation`, `PluginCredentialOperation`, and `PluginStorageOperation`.
 
+## Category data DTOs (Core API 1.88)
+
+`PluginDataCategory`: `hosts`, `credentials`, `desktopProfiles`, `appPreferences`, `terminalHistory`. `PluginDataCatalog.categories[]` reports `requiredCapability`, `canRead`, `canExport`, `canRestore`, and available/unavailable preference groups; a listed category is not authorization. `PluginDataReadRequest {category, offset, limit}` is limited to appPreferences and terminalHistory. `PluginDataReadResult` is tagged `appPreferences {groups, migrationRequired}` or `terminalHistory {entries, nextOffset, total}`. Each preference group has `group`, `revision`, and `value`; groups awaiting migration have no snapshot and appear in `migrationRequired`. History entries may include command text; request the separate high-risk permission.
+
+Protected exchange requests use `profileId` and an ordered, unique `categories[]` subset of hosts/credentials/desktopProfiles. `PluginDataSnapshotRequest` has those two fields. `PluginDataInspectRequest` adds `receiptHandle`, `bodyBlobHandle`; `PluginDataComposeRequest` adds `localSnapshotHandle`, `remoteInspectionHandle`, `decisions[]`; `PluginDataApplyRequest` has `expectedLocalSnapshotHandle`, `composedHandle`, optional `exportHandle`, `authoritativeReceiptHandle`; `PluginDataExportRequest` has `sourceHandle`, `baseReceiptHandle`; `PluginDataCheckpointRequest` has `sourceHandle`, `authoritativeReceiptHandle`, optional `baseReceiptHandle`, `exportHandle`, `applyReceiptHandle`, `expectedLocalSnapshotHandle`, `remoteInspectionHandle`. The last two bind the no-write, equal-content GET200 baseline path. `PluginDataReleaseRequest` lists exact temporary state, blob and receipt handles for cleanup. `PluginApiValue.dataSnapshot.localCounts` is `PluginDataLocalCounts {hostCount, credentialCount, desktopProfileCount, tombstoneCount}`. `PluginDataObjectDecision` selects `source: local | remote` for a Core-issued `objectHandle`. Object descriptors contain `category`, `kind`, `stableId`, `objectHandle`, `equalityTag`, optional update time, tombstone/dependency flags and a bounded non-secret display; equality tags are Core-keyed. Handles bind plugin, profile and generation.
+
+`PluginApiValue` has `dataCatalog`, `dataRead`, `dataSnapshot`, `dataInspect`, `dataCompose`, `dataApply`, `dataExport`, `dataCheckpoint`, and `dataRelease` variants. The exchange methods are wired in Core service; native and end-to-end operation remain unverified. A declared DTO or method entry alone is not proof of acceptance. Export returns Core-owned `exportHandle` and `blobHandle`, revision, idempotency key and content type. Checkpoint returns `syncedAtUnixMs` only after verified remote, local or equal-content facts.
+
+`PluginNetworkStartRequest` additionally has optional `oauthProfileId` (mutually exclusive with `credential`). `PluginNetworkOperation.httpExchange` has method, headers, profileId, optional bodyBlobHandle and maxResponseBytes. `PluginNetworkEvent.httpExchangeCompleted` returns receiptHandle, status, optional ETag/bodyBlobHandle and byte length, not ciphertext bytes.
+
 ## PluginApiAvailability
 
 Allowed string values: `available`, `notImplemented`, `unsupportedPlatform`.
@@ -428,7 +438,7 @@ Allowed string values: `remoteExecute`, `forwardStart`, `forwardStop`, `networkR
 
 ## PluginCapability
 
-Allowed string values: `uiPanel`, `uiNavigation`, `uiPage`, `uiWebviewIsolated`, `uiHostDomObserve`, `uiHostDomMutate`, `uiHostCss`, `clipboardWrite`, `terminalProvider`, `deviceSerial`, `terminalMetadata`, `terminalObserve`, `terminalAnnotation`, `terminalProposeInput`, `terminalRequestInput`, `hostMetadataRead`, `hostMutationPropose`, `hostSessionRequest`, `remoteInspect`, `remoteExecRequest`, `networkDomain`, `localFiles`, `localProcess`, `storagePlugin`, `credentialsPlugin`, `sftpRead`, `sftpWrite`, `metricsRead`, `sshSync`.
+Allowed string values: `uiPanel`, `uiNavigation`, `uiPage`, `uiWebviewIsolated`, `uiHostDomObserve`, `uiHostDomMutate`, `uiHostCss`, `clipboardWrite`, `terminalProvider`, `deviceSerial`, `terminalMetadata`, `terminalObserve`, `terminalAnnotation`, `terminalProposeInput`, `terminalRequestInput`, `hostMetadataRead`, `hostMutationPropose`, `hostSessionRequest`, `remoteInspect`, `remoteExecRequest`, `networkDomain`, `localFiles`, `localProcess`, `storagePlugin`, `credentialsPlugin`, `sftpRead`, `sftpWrite`, `metricsRead`, `sshSync`, `appPreferencesRead`, `terminalHistoryRead`.
 
 ## PluginCapabilityGrant
 

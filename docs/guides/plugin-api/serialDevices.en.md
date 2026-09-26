@@ -23,7 +23,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `deviceSerial`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `deviceSerial`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 candidateId is a short-lived lookup reference, not a device path or opening grant. Devices can disappear; refresh when selecting again. See the index for native and hardware availability. Candidates expire after two minutes; rediscovery replaces old candidates for the current consumer.
 

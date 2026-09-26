@@ -24,7 +24,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`remoteExecRequest`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`remoteExecRequest`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 handle 来自 remoteExecStart。closeStdin 省略时为 false；发送 EOF 时使用空 dataBase64。读取 remoteExecOutput/remoteExecExited 事件，不把 remoteExecSent 当作命令完成。
 

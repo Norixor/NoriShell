@@ -34,6 +34,7 @@ const statusText = computed(() => {
   if (status.value === "updateAvailable") {
     return t("releases.status.updateAvailable", { version: latestVersion.value ?? "" });
   }
+  if (status.value === "failed" && updates.checkFailureCode) return t(`releases.checkErrors.${updates.checkFailureCode}`);
   return t(`releases.status.${status.value}`);
 });
 
@@ -135,6 +136,9 @@ onBeforeUnmount(() => {
           <NvxStatusLabel :tone="tone">
             {{ statusText }}
           </NvxStatusLabel>
+          <span v-if="status === 'failed' && updates.checkDiagnosticId">
+            {{ t('releases.diagnosticId', { id: updates.checkDiagnosticId }) }}
+          </span>
           <span v-if="status === 'updateAvailable' && !updates.supportsAutoInstall">
             {{ t(latestVersion?.includes('-') ? 'releases.install.prereleaseManual' : 'releases.install.portableManual') }}
           </span>
@@ -153,7 +157,8 @@ onBeforeUnmount(() => {
             v-if="updates.installStatus === 'failed'"
             tone="error"
           >
-            {{ t('releases.install.failed') }}
+            {{ t(updates.installFailureCode ? `releases.install.failures.${updates.installFailureCode}` : 'releases.install.failed') }}
+            <span v-if="updates.installDiagnosticId">{{ t('releases.diagnosticId', { id: updates.installDiagnosticId }) }}</span>
           </NvxInlineNotice>
           <NvxInlineNotice
             v-if="updates.installStatus === 'cancelled'"
@@ -165,13 +170,15 @@ onBeforeUnmount(() => {
             v-if="updates.installStatus === 'restartRequired'"
             tone="warning"
           >
-            {{ t('releases.install.restartRequired') }}
+            {{ t(updates.installFailureCode === 'restartFailed' ? 'releases.install.failures.restartFailed' : 'releases.install.restartRequired') }}
+            <span v-if="updates.installDiagnosticId">{{ t('releases.diagnosticId', { id: updates.installDiagnosticId }) }}</span>
           </NvxInlineNotice>
           <NvxInlineNotice
             v-if="updates.installStatus === 'restartNeeded'"
             tone="warning"
           >
-            {{ t('releases.install.restartNeeded') }}
+            {{ t(updates.installFailureCode === 'installFailed' ? 'releases.install.failures.installFailed' : 'releases.install.restartNeeded') }}
+            <span v-if="updates.installDiagnosticId">{{ t('releases.diagnosticId', { id: updates.installDiagnosticId }) }}</span>
           </NvxInlineNotice>
         </div>
         <div class="about-settings__actions">

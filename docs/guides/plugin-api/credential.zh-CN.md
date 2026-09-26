@@ -24,7 +24,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`credentialsPlugin`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`credentialsPlugin`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 create 只提交 label、origin、注入方式和幂等信息；秘密由 Core 受保护窗口接收。list 返回 handle/revision/state，不能读取秘密。仅 ready 引用可用于 networkStart 的 credential；origin 必须匹配。
 

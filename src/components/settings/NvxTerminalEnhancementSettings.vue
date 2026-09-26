@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { useTerminalPreferencesStore, type PasteWarningMode } from "../../stores/terminalPreferences";
 import { useTipsStore } from "../../stores/tips";
+import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { NvxSelect } from "../ui";
 
 const { t } = useI18n();
@@ -19,7 +20,10 @@ const markerOptions = computed(() => [
 function report(ok: boolean) {
   tips.show({ scope: "terminal-enhancement-settings", tone: ok ? "success" : "error", title: t(`terminalEnhancements.${ok ? "saved" : "saveFailed"}`) });
 }
-function changePaste(value: string) { report(preferences.setPasteWarning(value as PasteWarningMode)); }
+async function changePaste(value: string) {
+  try { report(await preferences.setPasteWarning(value as PasteWarningMode)); }
+  catch (error) { tips.show({ scope: "terminal-enhancement-settings", tone: "error", title: t(`applicationPreferenceErrors.${applicationPreferenceFailure(error)}`) }); }
+}
 function changeMarkers(value: string) { report(markers.setEnabled(value === "show") === "saved"); }
 </script>
 

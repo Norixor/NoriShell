@@ -58,6 +58,7 @@ const CORE_PLUGIN_FAILURE_CODES: Partial<Record<string, PluginErrorCode>> = {
   "plugin.capability_rejected": "capabilityRejected",
   "plugin.protocol_incompatible": "protocolIncompatible",
   "plugin.app_version_incompatible": "appVersionIncompatible",
+  "plugin.core_api_incompatible": "coreApiIncompatible",
   "plugin.conflict": "installConflict",
   "plugin.runtime_rejected": "runtimeRejected",
   "plugin.runtime_quota_exceeded": "runtimeQuotaExceeded",

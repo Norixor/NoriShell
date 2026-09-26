@@ -12,6 +12,7 @@ import { canUseDesktopCore, createHostGroup, createIdentity, createKeyboardInter
 import type { HostCatalogEntry, HostGroupSummary, HostSummary, HostTagSummary, IdentitySummary, OpenSshConfigPreviewResponse, OpenSshImportRoutePreview, SshAgentKeySummary } from "../core-api/generated/core-api";
 import { useTipsStore } from "../stores/tips";
 import { openToolWindow, onToolWindowChanged } from "../tool-windows";
+import { useRouteReveal } from "../routeReveal";
 
 const { t } = useI18n();
 
@@ -22,6 +23,7 @@ const hostMarkers = useHostMarkersStore();
 const route = useRoute();
 
 const router = useRouter();
+const revealRoute = useRouteReveal();
 
 const catalog = ref<HostCatalogEntry[]>([]);
 
@@ -31,7 +33,7 @@ const tags = ref<HostTagSummary[]>([]);
 
 const identities = ref<IdentitySummary[]>([]);
 
-const loading = ref(false);
+const loading = ref(true);
 
 const loadFailed = ref(false);
 
@@ -634,13 +636,18 @@ function connect(host: HostSummary) {
 
 onMounted(async () => {
   try {
-    const stop = await onToolWindowChanged(kind => { if (kind === "hostEditor") void refresh(); });
-    if (viewDisposed) stop(); else stopToolWindowListener = stop;
-  } catch { /* Native events are unavailable in browser-only previews. */ }
-  if (viewDisposed) return;
-  await refresh();
-  if (route.query.create === "1") openCreate();
-  if (route.query.importSshConfig === "1") openOpenSshImport();
+    try {
+      const stop = await onToolWindowChanged(kind => { if (kind === "hostEditor") void refresh(); });
+      if (viewDisposed) stop(); else stopToolWindowListener = stop;
+    } catch { /* Native events are unavailable in browser-only previews. */ }
+    if (viewDisposed) return;
+    await refresh();
+    if (route.query.create === "1") openCreate();
+    if (route.query.importSshConfig === "1") openOpenSshImport();
+  } finally {
+    loading.value = false;
+    revealRoute();
+  }
 });
 
 let viewDisposed = false;

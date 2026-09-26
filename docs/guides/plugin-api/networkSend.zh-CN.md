@@ -24,7 +24,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`networkDomain`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`networkDomain`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 handle 来自 networkStart，目标不能改变。networkSent 仅表示本地 socket writer 接受数据，不能据此显示远端已收到。
 

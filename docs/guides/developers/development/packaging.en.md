@@ -29,6 +29,7 @@ Exactly one `manifest.json` and one `plugin.wasm` must be at the ZIP root. `asse
 | `architectures` | string[] | Yes | Supported architecture declaration; portable Wasm examples use `["universal"]` |
 | `capabilities` | string[] | Yes | Requested capabilities, at most 32 without duplicates; declaration is not approval |
 | `minimumAppVersion` | string | Yes | The minimum app version appropriate to the features used |
+| `minimumCoreApiVersion` | `{ major, minor }` | Required for sync plugins | Minimum Core API version used by the plugin. Core checks this on install and enable, requiring the same major and a minor at least as high. A mismatch returns the distinct `coreApiIncompatible` error. Older sync packages without the field require an upgrade; other older packages retain their previous validation. |
 | `publisherKeyId` | string or null | No | Publisher signing metadata; do not invent a key ID |
 | `publisherSignature` | string or null | No | The corresponding signature; a string alone does not establish verified local publisher identity |
 | `packageUrl` | string or null | No | Package source metadata; local development packages may omit it, and it does not publish a package |
@@ -97,6 +98,6 @@ These are package validation bounds. Runtime API calls, UI documents and resourc
 1. Import the ZIP in NoriShell's plugin manager. Review its name, version, publisher description and requested permissions.
 2. Approve the capabilities actually needed through the host flow, enable the plugin, then open it and perform the main action.
 3. Check refusal, cancellation and disable behavior, including UI and resource cleanup.
-4. For updates, retain the plugin identity and increment the version. Rebuild, check and import the candidate. Changes to content or permissions go through host validation again; do not reuse handles from the old package.
+4. For a released update, retain the plugin identity and increment the version. During development, a different package hash at the same version can also be imported after reviewing the old and new hashes and the data handoff notice in the existing import confirmation. An unsigned replacement does not inherit the old package's permissions. Changes to content or permissions still go through host validation; do not reuse handles from the old package.
 
 `pack` and `check` do not install, authorize or publish a plugin. Before distributing it, test your candidate in the target application and platforms. See [Errors and troubleshooting](./errors.en.md).

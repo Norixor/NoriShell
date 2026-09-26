@@ -336,8 +336,8 @@ describe("NvxWorkspaceTabBar", () => {
       quickCommandsOpen: false,
     });
     const shortcuts = useShortcutsStore();
-    expect(shortcuts.setBinding("macos", "navigation.sftp", "Meta+Shift+KeyX")).toEqual({ ok: true });
-    expect(shortcuts.setBinding("macos", "workspace.new-local", "Meta+Shift+KeyN")).toEqual({ ok: true });
+    expect(await shortcuts.setBinding("macos", "navigation.sftp", "Meta+Shift+KeyX")).toEqual({ ok: true });
+    expect(await shortcuts.setBinding("macos", "workspace.new-local", "Meta+Shift+KeyN")).toEqual({ ok: true });
     const wrapper = mount(NvxWorkspaceTabBar, {
       attachTo: document.body,
       global: { plugins: [pinia, router, i18n] },

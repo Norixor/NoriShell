@@ -24,7 +24,8 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`remoteExecRequest`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`remoteExecRequest`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
+选择“记住相同操作”时，批准绑定 Core 解析的主机、端点和具体 `command`；换一条命令必须重新批准。`timeoutMs` 变化不改变已批准的命令，但每次仍受 Core 校验和撤权检查。
 
 hostHandle 来自 Core 下发的当前主机上下文。Core 解析保存的主机、凭据、路由和 Known Hosts；不借用插件可控 SSH session。命令执行结果通过 remoteExec 事件返回。 command 非空、最多 16 KiB 且不含 NUL；timeoutMs 为 100–120000。
 

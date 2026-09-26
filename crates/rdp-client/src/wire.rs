@@ -97,7 +97,8 @@ impl Wire {
         let mut output = WriteBuf::new();
         let written = if let Some(hint) = sequence.next_pdu_hint() {
             let bytes = self.hint(hint).await?;
-            sequence.step(&bytes, &mut output)
+            // This boxed transport has no driver-owned monotonic clock epoch.
+            sequence.step(&bytes, None, &mut output)
         } else {
             sequence.step_no_input(&mut output)
         }

@@ -2,6 +2,8 @@
 
 公开 document schema 是版本化且由宿主渲染的。可按允许使用 `stack`、`grid`、`section`、`divider`、`dialog`；展示节点包括 text/code/status/progress；有界控件包括 button/copy button/text field/select/checkbox/switch/table/menu/disclosure。Core 会拒绝未知 node、跨 document field、未批准 target 和陈旧 revision。
 
+`tone` 只能使用 `neutral`、`info`、`success`、`warning` 或 `danger`；插件返回其他值时 Core 会拒绝该文档。同步结果的 `accountNotConnected` 表示当前插件身份尚无登录会话，应提供登录入口；它与暂时断网的 `networkUnavailable` 不同。
+
 target 只能来自 `ExtensionTargetRegistry`。每个 target 有稳定 id、surface kind、允许 node 集、类型化 contextual projection、尺寸预算与风险级别。target 位置不授予终端、Host、文件系统或网络访问。`ui.page` 和受控 plugin navigation 仍在插件区域内，插件不能插入一级导航、任意 header 控件、宿主 route 或 DOM。
 
 导航栏显示 `ui.navigation.label`，插件应按应用语言提供简短文案；已安装插件管理仍显示包内插件名称。

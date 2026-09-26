@@ -11,7 +11,7 @@ const props = defineProps<{
   fit: boolean;
   panning: boolean;
 }>();
-const emit = defineEmits<{ error: [] }>();
+const emit = defineEmits<{ error: []; resolutionError: [error: unknown] }>();
 const { t } = useI18n();
 
 const inputSink = ref<HTMLTextAreaElement | null>(null);
@@ -21,6 +21,20 @@ const canvas = ref<HTMLCanvasElement | null>(null);
 const ready = ref(false);
 const controlled = ref(false);
 const panningNow = ref(false);
+const frameSize = ref({ width: 0, height: 0 });
+const viewportSize = ref({ width: 0, height: 0 });
+const canvasStyle = computed(() => {
+  if (!props.fit || props.panning || !frameSize.value.width || !frameSize.value.height
+    || !viewportSize.value.width || !viewportSize.value.height) return undefined;
+  const scale = Math.min(
+    viewportSize.value.width / frameSize.value.width,
+    viewportSize.value.height / frameSize.value.height,
+  );
+  return {
+    width: `${frameSize.value.width * scale}px`,
+    height: `${frameSize.value.height * scale}px`,
+  };
+});
 
 let reportedFrameError = false;
 let mounted = false;
@@ -251,7 +265,7 @@ function wheel(event: WheelEvent) {
 
 async function pull() {
   if (!mounted) return;
-  timer = setTimeout(() => void pull(), 50);
+  timer = setTimeout(() => void pull(), 16);
   if (!frameBusy && canRun.value && !document.hidden) {
     frameBusy = true;
     const key = identity.value;
@@ -264,9 +278,18 @@ async function pull() {
         reportedFrameError = false;
         const context = canvas.value.getContext("2d");
         if (!context) return;
-        canvas.value.width = frame.width;
-        canvas.value.height = frame.height;
-        context.putImageData(new ImageData(frame.rgba, frame.width, frame.height), 0, 0);
+        if (frame.base !== 0n && (frame.base !== after || canvas.value.width !== frame.width || canvas.value.height !== frame.height)) {
+          after = 0n;
+          return;
+        }
+        if (canvas.value.width !== frame.width || canvas.value.height !== frame.height) {
+          canvas.value.width = frame.width;
+          canvas.value.height = frame.height;
+        }
+        if (frameSize.value.width !== frame.width || frameSize.value.height !== frame.height) {
+          frameSize.value = { width: frame.width, height: frame.height };
+        }
+        context.putImageData(new ImageData(frame.rgba, frame.rectWidth, frame.rectHeight), frame.x, frame.y);
         after = frame.sequence;
       }
     } catch {
@@ -281,6 +304,7 @@ async function pull() {
 }
 
 function visibility() {
+  scheduleResolution();
   if (
     canRun.value
     && !document.hidden
@@ -291,11 +315,64 @@ function visibility() {
   void invalidate();
 }
 
+let resolutionTimer: ReturnType<typeof setTimeout> | undefined;
+let resolutionBusy = false;
+let attemptedResolution = "";
+function desiredResolution() {
+  const size = viewportSize.value;
+  const profile = props.session.profile;
+  const adaptive = profile.protocol === "rdp" ? profile.rdpResolutionMode === "adaptive" : profile.vncResolutionMode === "adaptive";
+  if (!mounted || !canRun.value || document.hidden || !adaptive || size.width <= 0 || size.height <= 0) return null;
+  let width = Math.min(8192, Math.max(200, Math.floor(size.width)));
+  let height = Math.min(8192, Math.max(200, Math.floor(size.height)));
+  if (width * height > 16_777_216) {
+    const scale = Math.sqrt(16_777_216 / (width * height));
+    width = Math.floor(width * scale);
+    height = Math.floor(height * scale);
+  }
+  if (profile.protocol === "rdp") width -= width % 2;
+  return { width, height, key: `${identity.value}:${width}x${height}` };
+}
+function scheduleResolution() {
+  clearTimeout(resolutionTimer);
+  const desired = desiredResolution();
+  if (!desired || desired.key === attemptedResolution) return;
+  resolutionTimer = setTimeout(() => { void requestResolution(); }, 200);
+}
+async function requestResolution() {
+  const desired = desiredResolution();
+  if (!desired || resolutionBusy || desired.key === attemptedResolution) return;
+  const session = props.session;
+  const key = identity.value;
+  // Deduplicate rejected sizes too; retries require a new size or connection, not a tight loop.
+  attemptedResolution = desired.key;
+  const currentWidth = frameSize.value.width || session.width;
+  const currentHeight = frameSize.value.height || session.height;
+  if (currentWidth === desired.width && currentHeight === desired.height) return;
+  resolutionBusy = true;
+  try {
+    await desktopClient.resolution(session, desired.width, desired.height);
+    // Only server frames and snapshots may change the displayed remote size.
+  } catch (error) {
+    if (mounted && key === identity.value && canRun.value && desiredResolution()?.key === desired.key) emit("resolutionError", error);
+  } finally {
+    resolutionBusy = false;
+    scheduleResolution();
+  }
+}
+watch([identity, canRun, () => props.session.profile.rdpResolutionMode, () => props.session.profile.vncResolutionMode, viewportSize], scheduleResolution);
 let observer: MutationObserver | null = null;
+let resizeObserver: ResizeObserver | null = null;
+function measureViewport() {
+  if (viewport.value) viewportSize.value = { width: viewport.value.clientWidth, height: viewport.value.clientHeight };
+}
 watch(identity, () => {
+  attemptedResolution = "";
+  scheduleResolution();
   stopPanning();
   reportedFrameError = false;
   after = 0n;
+  frameSize.value = { width: 0, height: 0 };
   canvas.value?.getContext("2d")?.clearRect(0, 0, canvas.value.width, canvas.value.height);
   void invalidate();
 });
@@ -316,6 +393,12 @@ onMounted(async () => {
   ready.value = true;
   mounted = true;
   await nextTick();
+  measureViewport();
+  if (typeof ResizeObserver !== "undefined" && viewport.value) {
+    resizeObserver = new ResizeObserver(measureViewport);
+    resizeObserver.observe(viewport.value);
+  }
+  window.addEventListener("resize", measureViewport);
   void pull();
   window.addEventListener("blur", visibility);
   document.addEventListener("visibilitychange", visibility);
@@ -331,8 +414,11 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   mounted = false;
   clearTimeout(timer);
+  clearTimeout(resolutionTimer);
   void invalidate();
   observer?.disconnect();
+  resizeObserver?.disconnect();
+  window.removeEventListener("resize", measureViewport);
   window.removeEventListener("blur", visibility);
   document.removeEventListener("visibilitychange", visibility);
 });
@@ -363,6 +449,7 @@ defineExpose({ invalidate, clipboard });
       >
         <canvas
           ref="canvas"
+          :style="canvasStyle"
           tabindex="0"
           :aria-label="t(panning ? 'desktop.panFocus' : 'desktop.focus')"
           @pointerdown="pointer"
@@ -450,12 +537,6 @@ defineExpose({ invalidate, clipboard });
 canvas {
   display: block;
   outline: none;
-}
-
-.desktop-display__viewport--fit canvas {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
 }
 
 canvas:focus-visible {

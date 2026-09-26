@@ -26,7 +26,8 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `localProcess`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `localProcess`. A declaration still requires an effective grant and any applicable protected-operation approval.
+Remembered approval is bound to the executable path, Core-verified file identity, and full argument list; changing the program or arguments requires a new approval. Changing `timeoutMs` does not change the approved command, but Core still validates every request and revocation.
 
 program must be an absolute executable available on this platform; /bin/cat applies only where that executable exists. timeoutMs is 1–120000; at most 128 arguments, each at most 4096 bytes without NUL. Core owns the working directory and environment.
 

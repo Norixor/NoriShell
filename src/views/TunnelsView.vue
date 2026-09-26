@@ -18,6 +18,7 @@ import type {
   ForwardSessionState, ForwardSessionSummary, HostSummary, PortForwardRule,
 } from "../core-api/generated/core-api";
 import { useTipsStore } from "../stores/tips";
+import { useRouteReveal } from "../routeReveal";
 import { buildForwardRule, ruleListener, ruleTarget, ruleToDraft, type ForwardKind, type ForwardRuleDraft } from "../tunnels/forward-rule";
 import {
   createTunnelVisualFixtureSession,
@@ -40,6 +41,7 @@ interface TunnelRow {
 const { t } = useI18n();
 const router = useRouter();
 const tips = useTipsStore();
+const revealRoute = useRouteReveal();
 const tipScope = "tunnels";
 const hosts = ref<HostSummary[]>([]);
 const savedRules = ref<ForwardRuleSummary[]>([]);
@@ -389,9 +391,10 @@ onMounted(async () => {
     const rule = tunnelVisualFixture.rules[0];
     if (rule) editRule(rule);
     loading.value = false;
+    revealRoute();
     return;
   }
-  try { await refresh(); } catch { showOperationError(); } finally { loading.value = false; }
+  try { await refresh(); } catch { showOperationError(); } finally { loading.value = false; revealRoute(); }
   if (!disposed) refreshTimer = window.setInterval(() => void refresh().catch(() => undefined), 2_000);
 });
 onBeforeUnmount(() => { disposed = true; if (refreshTimer !== null) window.clearInterval(refreshTimer); });

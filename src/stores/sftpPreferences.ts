@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { corePreferencesEnabled, saveApplicationPreferences } from "../core-api/application-preferences";
 
 export const SFTP_PREFERENCES_KEY = "norishell.sftp.preferences.v1";
 export interface SftpBrowserPreferences {
@@ -124,6 +125,32 @@ export const useSftpPreferencesStore = defineStore("sftpPreferences", () => {
   const browser = ref(initial.browser);
   const rememberLastDirectory = ref(initial.rememberLastDirectory);
   const directories = ref(initial.directories);
+  const directoryMemoryPersistenceFailed = ref(false);
+  function hydrateCorePreferences(next: { browser: SftpBrowserPreferences; rememberLastDirectory: boolean }) {
+    browser.value = { ...next.browser };
+    rememberLastDirectory.value = next.rememberLastDirectory;
+    if (!next.rememberLastDirectory) directories.value = emptyDirectoryMemory();
+  }
+  async function saveGlobal(next: StoredSftpPreferences) {
+    if (corePreferencesEnabled()) {
+      const expected = generalPreferences();
+      const value = { browser: { ...next.browser }, rememberLastDirectory: next.rememberLastDirectory };
+      if (!await saveApplicationPreferences("files", value, expected)) return false;
+      browser.value = { ...next.browser };
+      rememberLastDirectory.value = next.rememberLastDirectory;
+      directories.value = copyDirectoryMemory(next.directories);
+      // Directory memory is device-local and remains in the existing key.
+      try {
+        localStorage.setItem(SFTP_PREFERENCES_KEY, JSON.stringify({ version: 1, ...next }));
+        directoryMemoryPersistenceFailed.value = false;
+      } catch {
+        // Core committed the global setting; only the device-local directory memory failed.
+        directoryMemoryPersistenceFailed.value = true;
+      }
+      return true;
+    }
+    return persist(next);
+  }
   function persist(next: StoredSftpPreferences) {
     try {
       localStorage.setItem(SFTP_PREFERENCES_KEY, JSON.stringify({
@@ -136,22 +163,23 @@ export const useSftpPreferencesStore = defineStore("sftpPreferences", () => {
     browser.value = { ...next.browser };
     rememberLastDirectory.value = next.rememberLastDirectory;
     directories.value = copyDirectoryMemory(next.rememberLastDirectory ? next.directories : emptyDirectoryMemory());
+    directoryMemoryPersistenceFailed.value = false;
     return true;
   }
-  function replaceBrowser(next: SftpBrowserPreferences) {
+  async function replaceBrowser(next: SftpBrowserPreferences) {
     if (!validSftpBrowserPreferences(next)) return false;
-    return persist({ browser: { ...next }, rememberLastDirectory: rememberLastDirectory.value, directories: directories.value });
+    return saveGlobal({ browser: { ...next }, rememberLastDirectory: rememberLastDirectory.value, directories: directories.value });
   }
   function generalPreferences() {
     return { browser: { ...browser.value }, rememberLastDirectory: rememberLastDirectory.value };
   }
-  function replaceGeneralPreferences(next: ReturnType<typeof generalPreferences>, expected: ReturnType<typeof generalPreferences>) {
+  async function replaceGeneralPreferences(next: ReturnType<typeof generalPreferences>, expected: ReturnType<typeof generalPreferences>) {
     if (!validSftpBrowserPreferences(next.browser) || typeof next.rememberLastDirectory !== "boolean"
       || JSON.stringify(generalPreferences()) !== JSON.stringify(expected)) return false;
-    return persist({ ...next, directories: next.rememberLastDirectory ? directories.value : emptyDirectoryMemory() });
+    return saveGlobal({ ...next, directories: next.rememberLastDirectory ? directories.value : emptyDirectoryMemory() });
   }
-  function setRememberLastDirectory(enabled: boolean) {
-    return persist({
+  async function setRememberLastDirectory(enabled: boolean) {
+    return saveGlobal({
       browser: browser.value,
       rememberLastDirectory: enabled,
       directories: enabled ? directories.value : emptyDirectoryMemory(),
@@ -188,6 +216,8 @@ export const useSftpPreferencesStore = defineStore("sftpPreferences", () => {
   return {
     browser,
     rememberLastDirectory,
+    directoryMemoryPersistenceFailed,
+    hydrateCorePreferences,
     replaceBrowser,
     generalPreferences,
     replaceGeneralPreferences,

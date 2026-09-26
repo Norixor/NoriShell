@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `terminalProvider`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `terminalProvider`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 providerId must name a provider declared by the package; configuration follows its settings schema with allowed boolean/number/string values. The example uses Protocol Demo framedTcp and its endpoint setting; it applies only to a package declaring that provider. launchId identifies a launch record, not a connected terminal.
 

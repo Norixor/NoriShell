@@ -479,7 +479,7 @@ describe("NvxTerminalView interaction preferences", () => {
     await appTheme.refreshThemes();
     const profile = cloneDefaultAppThemeProfile();
     profile.lightThemeId = "plugin:org.norishell.test-theme:test";
-    expect(appTheme.saveProfile(profile)).toBe(true);
+    expect(await appTheme.saveProfile(profile)).toBe(true);
     await flushPromises();
     expect(terminalMocks.instances).toHaveLength(1);
     expect(terminalMocks.instances[0]!.options.theme).toMatchObject({ background: "#faf9f0" });

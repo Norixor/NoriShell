@@ -600,6 +600,39 @@ describe("NvxPluginExtensionTarget", () => {
     } as never);
     expect((await requestAction("sync.login", []))?.closeDialogOnSuccess).toBe(true);
     expect((await requestAction("sync.status", []))?.closeDialogOnSuccess).toBe(false);
+    const tips = useTipsStore();
+    invoke.mockResolvedValue({
+      contribution: { ...contribution, contributionRevision: "2" },
+      sshSyncStatus: { profileId: "primary", accountState: "connected", operationState: "needsReview", stableErrorCode: "vaultLocked", diagnosticCode: null },
+      hostDomOperations: null, clipboardText: null, hostApprovalId: null,
+      terminalInputSuggestion: null, isolatedSurfaceOpened: false,
+    } as never);
+    await requestAction("sync.status", []);
+    expect(tips.items.at(-1)?.title).toContain("Vault 已锁定");
+    invoke.mockResolvedValue({
+      contribution: { ...contribution, contributionRevision: "2" },
+      sshSyncStatus: { profileId: "primary", accountState: "connected", operationState: "needsReview", stableErrorCode: null, diagnosticCode: null },
+      hostDomOperations: null, clipboardText: null, hostApprovalId: null,
+      terminalInputSuggestion: null, isolatedSurfaceOpened: false,
+    } as never);
+    await requestAction("sync.status", []);
+    expect(tips.items.at(-1)?.title).toContain("请在同步页继续审阅");
+    invoke.mockResolvedValue({
+      contribution: { ...contribution, contributionRevision: "2" },
+      sshSyncStatus: { profileId: "primary", accountState: "connected", operationState: "failed", stableErrorCode: "remoteRequestRejected", diagnosticCode: null, httpStatus: 404 },
+      hostDomOperations: null, clipboardText: null, hostApprovalId: null,
+      terminalInputSuggestion: null, isolatedSurfaceOpened: false,
+    } as never);
+    await requestAction("sync.status", []);
+    expect(tips.items.at(-1)?.title).toContain("HTTP 404");
+    invoke.mockResolvedValue({
+      contribution: { ...contribution, contributionRevision: "2" },
+      sshSyncStatus: { profileId: "primary", accountState: "disconnected", operationState: "failed", stableErrorCode: "accountNotConnected", diagnosticCode: null },
+      hostDomOperations: null, clipboardText: null, hostApprovalId: null,
+      terminalInputSuggestion: null, isolatedSurfaceOpened: false,
+    } as never);
+    await requestAction("sync.status", []);
+    expect(tips.items.at(-1)?.title).toContain("请先在同步页登录");
     wrapper.unmount();
   });
 

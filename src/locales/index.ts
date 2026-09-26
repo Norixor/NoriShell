@@ -1,6 +1,11 @@
 import { createI18n } from "vue-i18n";
 
 import { releasesEn, releasesZhCN } from "./releases";
+import { secureWindowEn, secureWindowZhCN } from "./secure-windows";
+import { sftpToolWindowEn, sftpToolWindowZhCN } from "./sftp-tool-window";
+import { diagnosticsEn, diagnosticsZhCN } from "./diagnostics";
+import { offlineBackupErrorsEn, offlineBackupErrorsZhCN } from "./offline-backup-errors";
+import { applicationPreferenceErrorsEn, applicationPreferenceErrorsZhCN } from "./application-preference-errors";
 import { en } from "./messages/en";
 import { zhCN } from "./messages/zh-CN";
 
@@ -17,8 +22,8 @@ export function resolveLocale(preference: LocalePreference, languages: readonly 
 }
 
 const messages = {
-  "zh-CN": { ...zhCN, releases: releasesZhCN },
-  en: { ...en, releases: releasesEn },
+  "zh-CN": { ...zhCN, releases: releasesZhCN, secureWindow: secureWindowZhCN, sftpToolWindow: sftpToolWindowZhCN, diagnostics: diagnosticsZhCN, offlineBackupErrors: offlineBackupErrorsZhCN, applicationPreferenceErrors: applicationPreferenceErrorsZhCN },
+  en: { ...en, releases: releasesEn, secureWindow: secureWindowEn, sftpToolWindow: sftpToolWindowEn, diagnostics: diagnosticsEn, offlineBackupErrors: offlineBackupErrorsEn, applicationPreferenceErrors: applicationPreferenceErrorsEn },
 } as const;
 
 export const i18n = createI18n({

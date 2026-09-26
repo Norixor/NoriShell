@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSftpPreferencesStore, type SftpBrowserPreferences } from "../../stores/sftpPreferences";
+import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { useTipsStore } from "../../stores/tips";
 import { NvxCheckbox, NvxField, NvxSelect } from "../ui";
 
@@ -9,16 +10,23 @@ const { t } = useI18n();
 const preferences = useSftpPreferencesStore();
 const tips = useTipsStore();
 const sorts = computed(() => (["name", "size", "modified"] as const).map((value) => ({ value, label: t(`sftp.sorts.${value}`) })));
-function save(patch: Partial<SftpBrowserPreferences>) {
-  const ok = preferences.replaceBrowser({ ...preferences.browser, ...patch });
-  tips.show({ scope: "sftp-preferences", tone: ok ? "success" : "error", title: t(`sftpSettings.${ok ? "saved" : "saveFailed"}`) });
+async function save(patch: Partial<SftpBrowserPreferences>) {
+  try { report(await preferences.replaceBrowser({ ...preferences.browser, ...patch })); }
+  catch (error) { reportError(error); }
+}
+function report(ok: boolean) {
+  tips.show({ scope: "sftp-preferences", tone: !ok || preferences.directoryMemoryPersistenceFailed ? "error" : "success",
+    title: t(!ok ? "sftpSettings.saveFailed" : preferences.directoryMemoryPersistenceFailed ? "sftpSettings.globalSavedLocalMemoryFailed" : "sftpSettings.saved") });
+}
+function reportError(error: unknown) {
+  tips.show({ scope: "sftp-preferences", tone: "error", title: t(`applicationPreferenceErrors.${applicationPreferenceFailure(error)}`) });
 }
 function setSort(sort: string) {
   if (sort === "name" || sort === "size" || sort === "modified") save({ sort });
 }
-function setRememberLastDirectory(value: boolean) {
-  const ok = preferences.setRememberLastDirectory(value);
-  tips.show({ scope: "sftp-preferences", tone: ok ? "success" : "error", title: t(`sftpSettings.${ok ? "saved" : "saveFailed"}`) });
+async function setRememberLastDirectory(value: boolean) {
+  try { report(await preferences.setRememberLastDirectory(value)); }
+  catch (error) { reportError(error); }
 }
 </script>
 

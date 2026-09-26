@@ -14,7 +14,7 @@ import (
 const (
 	clientID      = "norishell-self-host"
 	scope         = "ssh.sync"
-	serverVersion = "0.1.11"
+	serverVersion = "0.1.12"
 )
 
 func main() {

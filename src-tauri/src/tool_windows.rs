@@ -221,13 +221,26 @@ pub(crate) async fn tool_file_preview(
     window: WebviewWindow,
     state: State<'_, ToolWindows>,
     service: State<'_, crate::sftp_session_service::SftpSessionService>,
-) -> Result<wire::SftpFilePreview, String> {
-    let ToolTarget::SftpFile { request, .. } = state.target(window.label())? else {
-        return Err("unavailable".into());
+) -> Result<wire::SftpFilePreview, Box<wire::CoreApiError>> {
+    let target = state.target(window.label()).map_err(|_| {
+        crate::core_api_error::core_error(
+            wire::RequestId::new(),
+            "tool_window.unavailable",
+            wire::ErrorCategory::Unavailable,
+            wire::RetryStrategy::Never,
+            "errors.core.unavailable",
+        )
+    })?;
+    let ToolTarget::SftpFile { request, .. } = target else {
+        return Err(crate::core_api_error::core_error(
+            wire::RequestId::new(),
+            "tool_window.invalid_target",
+            wire::ErrorCategory::Validation,
+            wire::RetryStrategy::Never,
+            "errors.core.invalidRequest",
+        ));
     };
-    crate::sftp_session_service::sftp_file_preview(request, service)
-        .await
-        .map_err(|_| "unavailable".into())
+    crate::sftp_session_service::sftp_file_preview(request, service).await
 }
 #[tauri::command]
 pub(crate) async fn tool_file_tail(
@@ -235,9 +248,24 @@ pub(crate) async fn tool_file_tail(
     state: State<'_, ToolWindows>,
     service: State<'_, crate::sftp_session_service::SftpSessionService>,
     offset: wire::WireSequence,
-) -> Result<wire::SftpFileTailResult, String> {
-    let ToolTarget::SftpFile { request, .. } = state.target(window.label())? else {
-        return Err("unavailable".into());
+) -> Result<wire::SftpFileTailResult, Box<wire::CoreApiError>> {
+    let target = state.target(window.label()).map_err(|_| {
+        crate::core_api_error::core_error(
+            wire::RequestId::new(),
+            "tool_window.unavailable",
+            wire::ErrorCategory::Unavailable,
+            wire::RetryStrategy::Never,
+            "errors.core.unavailable",
+        )
+    })?;
+    let ToolTarget::SftpFile { request, .. } = target else {
+        return Err(crate::core_api_error::core_error(
+            wire::RequestId::new(),
+            "tool_window.invalid_target",
+            wire::ErrorCategory::Validation,
+            wire::RetryStrategy::Never,
+            "errors.core.invalidRequest",
+        ));
     };
     crate::sftp_session_service::sftp_file_tail(
         wire::SftpFileTailRequest {
@@ -251,7 +279,6 @@ pub(crate) async fn tool_file_tail(
         service,
     )
     .await
-    .map_err(|_| "unavailable".into())
 }
 #[tauri::command]
 pub(crate) async fn tool_file_save(
@@ -262,19 +289,49 @@ pub(crate) async fn tool_file_save(
     text: String,
     meta: wire::RequestMeta,
     operation_id: wire::OperationId,
-) -> Result<(), String> {
+) -> Result<(), Box<wire::CoreApiError>> {
+    let target = state.target(window.label()).map_err(|_| {
+        crate::core_api_error::core_error(
+            meta.request_id.clone(),
+            "tool_window.unavailable",
+            wire::ErrorCategory::Unavailable,
+            wire::RetryStrategy::Never,
+            "errors.core.unavailable",
+        )
+    })?;
     let ToolTarget::SftpFile {
         request,
         path,
         precondition,
         tail,
         ..
-    } = state.target(window.label())?
+    } = target
     else {
-        return Err("unavailable".into());
+        return Err(crate::core_api_error::core_error(
+            meta.request_id.clone(),
+            "tool_window.invalid_target",
+            wire::ErrorCategory::Validation,
+            wire::RetryStrategy::Never,
+            "errors.core.invalidRequest",
+        ));
     };
-    if tail || text.len() > 1_048_576 {
-        return Err("unavailable".into());
+    if tail {
+        return Err(crate::core_api_error::core_error(
+            meta.request_id.clone(),
+            "tool_window.read_only",
+            wire::ErrorCategory::Validation,
+            wire::RetryStrategy::Never,
+            "sftpToolWindow.readOnly",
+        ));
+    }
+    if text.len() > 1_048_576 {
+        return Err(crate::core_api_error::core_error(
+            meta.request_id.clone(),
+            "tool_window.content_too_large",
+            wire::ErrorCategory::Validation,
+            wire::RetryStrategy::Never,
+            "sftpToolWindow.contentTooLarge",
+        ));
     }
     let idempotency_key = operation_id.to_string();
     crate::sftp_session_service::sftp_file_mutate(
@@ -293,8 +350,7 @@ pub(crate) async fn tool_file_save(
         service,
         lifecycle,
     )
-    .await
-    .map_err(|_| "unavailable".to_owned())?;
+    .await?;
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 mod api;
 mod api_credentials;
+mod api_data;
 mod api_file;
 mod api_host;
 mod api_invocation;
@@ -12,8 +13,8 @@ mod api_sftp;
 mod api_subscriptions;
 pub(crate) mod app_integration;
 mod approval_policy;
-mod auto_sync;
 mod broker_chain;
+mod data_reads;
 mod input;
 pub(crate) mod isolated;
 mod operations;
@@ -155,8 +156,6 @@ pub(crate) struct PluginService {
     package_limits: PackageLimits,
     local_import_root: Arc<PathBuf>,
     app_handle: Arc<Mutex<Option<AppHandle>>>,
-    auto_sync_task: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
-    auto_sync_stopped: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     test_lifecycle: Arc<Mutex<Option<LifecycleState>>>,
     safe_mode_next_marker: Arc<PathBuf>,
@@ -502,6 +501,7 @@ fn ssh_sync_browser_empty_snapshot(
         host_rows_omitted: 0,
         credential_rows_omitted: 0,
         remote_updated_at_unix_ms: None,
+        verified_at_unix_ms: None,
         hosts: Vec::new(),
         credentials: Vec::new(),
     }
@@ -602,22 +602,6 @@ fn ssh_sync_request_profile_id(request: &norishell_core_api::PluginSshSyncReques
         | norishell_core_api::PluginSshSyncRequest::Sync { profile_id, .. }
         | norishell_core_api::PluginSshSyncRequest::ConfigureScope { profile_id }
         | norishell_core_api::PluginSshSyncRequest::ResetRemote { profile_id, .. } => profile_id,
-    }
-}
-
-fn trusted_ssh_sync_policy(
-    settings: Option<&serde_json::Value>,
-    key: &str,
-) -> norishell_core_api::PluginSshSyncConflictPolicy {
-    if settings
-        .and_then(|value| value.get("values"))
-        .and_then(|value| value.get(key))
-        .and_then(serde_json::Value::as_str)
-        == Some("newest")
-    {
-        norishell_core_api::PluginSshSyncConflictPolicy::Newest
-    } else {
-        norishell_core_api::PluginSshSyncConflictPolicy::Prompt
     }
 }
 
@@ -821,8 +805,6 @@ impl PluginService {
             package_limits,
             local_import_root: Arc::new(local_import_root),
             app_handle: Arc::new(Mutex::new(None)),
-            auto_sync_task: Arc::new(Mutex::new(None)),
-            auto_sync_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             test_lifecycle: Arc::new(Mutex::new(None)),
             safe_mode_next_marker: Arc::new(safe_mode_next_marker),
@@ -1003,10 +985,20 @@ impl PluginService {
             if current.state == PluginInstallState::Enabled
                 && current.state_version == expected_state_version
             {
+                let incompatible = matches!(
+                    error_code,
+                    "plugin.core_api_incompatible"
+                        | "plugin.app_version_incompatible"
+                        | "plugin.protocol_incompatible"
+                );
                 repository.set_plugin_install_state(
                     plugin_id,
                     expected_state_version,
-                    PluginInstallState::Crashed,
+                    if incompatible {
+                        PluginInstallState::Incompatible
+                    } else {
+                        PluginInstallState::Crashed
+                    },
                 )?;
                 repository.append_plugin_audit(
                     Some(plugin_id),
@@ -1194,12 +1186,123 @@ impl PluginService {
             }
         };
         let database_active = self.plugin_installation_fact(plugin_id)?;
+        if operation.expected_active_version.as_deref() == Some(candidate_version) {
+            let filesystem_hash = self
+                .installer
+                .read_active_package_sha256(plugin_id)
+                .ok()
+                .flatten();
+            if let Some(installed) = database_active
+                .as_ref()
+                .filter(|installed| installed.active_version == candidate_version)
+            {
+                if filesystem_hash.as_deref() == Some(installed.package_sha256.as_str()) {
+                    let backup_exists = self
+                        .installer
+                        .replacement_backup_exists(plugin_id, &operation.operation_id)
+                        .unwrap_or(false);
+                    if !backup_exists
+                        && operation.phase != PluginOperationPhase::DatabaseCommitted
+                        && !(operation.phase == PluginOperationPhase::ReconcileRequired
+                            && operation.state == PluginOperationState::Running)
+                    {
+                        if operation.phase == PluginOperationPhase::ReconcileRequired
+                            && crate::plugin_oauth::discard_oauth_signer_transfer(
+                                self.local_import_root
+                                    .parent()
+                                    .expect("import directory has app root"),
+                                plugin_id.as_str(),
+                                &operation.operation_id,
+                            )
+                            .is_err()
+                        {
+                            return self.fail_operation_record(
+                                operation,
+                                PluginOperationPhase::ReconcileRequired,
+                                "install_conflict",
+                            );
+                        }
+                        return self.fail_operation_record(
+                            operation,
+                            PluginOperationPhase::Completed,
+                            "install_conflict",
+                        );
+                    }
+                    // An interrupted operation may have committed SQLite but not
+                    // removed the durable old-directory backup yet.
+                    if self
+                        .installer
+                        .finalize_replacement(
+                            plugin_id,
+                            candidate_version,
+                            &installed.package_sha256,
+                            &operation.operation_id,
+                        )
+                        .is_ok()
+                        && crate::plugin_oauth::finalize_oauth_signer_transfer(
+                            self.local_import_root
+                                .parent()
+                                .expect("import directory has app root"),
+                            plugin_id.as_str(),
+                            &operation.operation_id,
+                        )
+                        .is_ok()
+                    {
+                        return self.complete_operation_record(operation);
+                    }
+                } else if self
+                    .installer
+                    .restore_replacement(
+                        plugin_id,
+                        candidate_version,
+                        &installed.package_sha256,
+                        filesystem_hash.as_deref().unwrap_or(&"0".repeat(64)),
+                        &operation.operation_id,
+                    )
+                    .is_ok()
+                    && crate::plugin_oauth::discard_oauth_signer_transfer(
+                        self.local_import_root
+                            .parent()
+                            .expect("import directory has app root"),
+                        plugin_id.as_str(),
+                        &operation.operation_id,
+                    )
+                    .is_ok()
+                {
+                    return self.fail_operation_record(
+                        operation,
+                        PluginOperationPhase::Completed,
+                        "install_conflict",
+                    );
+                }
+            }
+            return self.fail_operation_record(
+                operation,
+                PluginOperationPhase::ReconcileRequired,
+                "install_conflict",
+            );
+        }
         if filesystem_active.as_deref() == Some(candidate_version)
             && database_active
                 .as_ref()
                 .is_some_and(|installed| installed.active_version == candidate_version)
         {
-            return self.complete_operation_record(operation);
+            if crate::plugin_oauth::finalize_oauth_signer_transfer(
+                self.local_import_root
+                    .parent()
+                    .expect("import directory has app root"),
+                plugin_id.as_str(),
+                &operation.operation_id,
+            )
+            .is_ok()
+            {
+                return self.complete_operation_record(operation);
+            }
+            return self.fail_operation_record(
+                operation,
+                PluginOperationPhase::ReconcileRequired,
+                "install_conflict",
+            );
         }
         if filesystem_active.as_deref() == Some(candidate_version)
             && database_active.as_ref().is_none_or(|installed| {
@@ -1216,6 +1319,14 @@ impl PluginService {
                     &operation.operation_id,
                 )
                 .is_ok()
+                && crate::plugin_oauth::discard_oauth_signer_transfer(
+                    self.local_import_root
+                        .parent()
+                        .expect("import directory has app root"),
+                    plugin_id.as_str(),
+                    &operation.operation_id,
+                )
+                .is_ok()
             {
                 return self.fail_operation_record(
                     operation,
@@ -1228,6 +1339,14 @@ impl PluginService {
                 Some(installed.active_version.as_str())
                     == operation.expected_active_version.as_deref()
             })
+            && crate::plugin_oauth::discard_oauth_signer_transfer(
+                self.local_import_root
+                    .parent()
+                    .expect("import directory has app root"),
+                plugin_id.as_str(),
+                &operation.operation_id,
+            )
+            .is_ok()
         {
             return self.fail_operation_record(
                 operation,
@@ -1537,8 +1656,14 @@ impl PluginService {
                 return Err(map_persistence_error(request_id, error));
             }
         };
+        let package_sha256 = hex::encode(inspected.package_sha256);
         if existing.as_ref().is_some_and(|current| {
-            !plugin_version_is_newer(&inspected.manifest.version, &current.active_version)
+            !plugin_version_can_replace(
+                &inspected.manifest.version,
+                &package_sha256,
+                &current.active_version,
+                &current.package_sha256,
+            )
         }) {
             let _ = fs::remove_file(&private_path);
             return Err(plugin_error(
@@ -1550,7 +1675,18 @@ impl PluginService {
                 existing.as_ref().map(|value| value.state_version),
             ));
         }
-        let package_sha256 = hex::encode(inspected.package_sha256);
+        let prior_package_sha256 = match self.hosts.with_plugin_repository(|repository| {
+            repository.plugin_installed_version_package_sha256(
+                &inspected.manifest.plugin_id,
+                &inspected.manifest.version,
+            )
+        }) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = fs::remove_file(&private_path);
+                return Err(map_persistence_error(request_id, error));
+            }
+        };
         let preview = PluginLocalPackagePreview {
             preparation_id: preparation_id.clone(),
             plugin_id: inspected.manifest.plugin_id.clone(),
@@ -1562,6 +1698,7 @@ impl PluginService {
             capabilities: inspected.manifest.capabilities.clone(),
             current_version: existing.as_ref().map(|value| value.active_version.clone()),
             current_state_version: existing.as_ref().map(|value| value.state_version),
+            prior_package_sha256,
             retained_capability_grants: Vec::new(),
             approved_special_grants: Vec::new(),
             special_permission_expires_at_unix_ms: None,
@@ -1626,9 +1763,21 @@ impl PluginService {
         let expected_state_version = existing.as_ref().map(|record| record.state_version);
         if expected_state_version != request.expected_state_version
             || request.expected_package_sha256 != hex::encode(inspected.package_sha256)
-            || existing
-                .as_ref()
-                .is_some_and(|current| !plugin_version_is_newer(&version, &current.active_version))
+            || self
+                .hosts
+                .with_plugin_repository(|repository| {
+                    repository.plugin_installed_version_package_sha256(&plugin_id, &version)
+                })
+                .map_err(|error| map_persistence_error(request_id.clone(), error))?
+                != prepared.preview.prior_package_sha256
+            || existing.as_ref().is_some_and(|current| {
+                !plugin_version_can_replace(
+                    &version,
+                    &request.expected_package_sha256,
+                    &current.active_version,
+                    &current.package_sha256,
+                )
+            })
         {
             return Err(plugin_conflict_error(request_id, expected_state_version));
         }
@@ -1801,24 +1950,69 @@ impl PluginService {
         let expected_active = existing
             .as_ref()
             .map(|record| record.active_version.as_str());
-        let activation =
-            match self
-                .installer
+        let same_version_replacement = existing.as_ref().is_some_and(|record| {
+            record.active_version == version && record.package_sha256 != package_sha256
+        });
+        let activation = match if same_version_replacement {
+            self.installer.activate_replacement(
+                staged,
+                &existing
+                    .as_ref()
+                    .expect("replacement has existing package")
+                    .package_sha256,
+                &request.operation_id,
+            )
+        } else {
+            self.installer
                 .activate(staged, expected_active, &request.operation_id)
-            {
-                Ok(activation) => activation,
-                Err(error) => {
-                    return self.recover_or_require_reconciliation(
-                        operation,
-                        &plugin_id,
-                        &version,
-                        expected_active,
-                        platform_error_code(&error),
-                        request_id,
-                    );
-                }
-            };
+        } {
+            Ok(activation) => activation,
+            Err(error) => {
+                return self.recover_or_require_reconciliation(
+                    operation,
+                    &plugin_id,
+                    (&version, &package_sha256),
+                    existing.as_ref().map(|record| {
+                        (
+                            record.active_version.as_str(),
+                            record.package_sha256.as_str(),
+                        )
+                    }),
+                    platform_error_code(&error),
+                    request_id,
+                );
+            }
+        };
         debug_assert_eq!(activation.active_version, version);
+        if existing.is_some()
+            && crate::plugin_oauth::record_oauth_signer_transfer(
+                self.local_import_root
+                    .parent()
+                    .expect("import directory has app root"),
+                plugin_id.as_str(),
+                &existing
+                    .as_ref()
+                    .expect("replacement has existing package")
+                    .package_sha256,
+                &package_sha256,
+                &request.operation_id,
+            )
+            .is_err()
+        {
+            return self.recover_or_require_reconciliation(
+                operation,
+                &plugin_id,
+                (&version, &package_sha256),
+                existing.as_ref().map(|record| {
+                    (
+                        record.active_version.as_str(),
+                        record.package_sha256.as_str(),
+                    )
+                }),
+                "install_conflict",
+                request_id,
+            );
+        }
         let operation = match self.advance_operation(
             operation.clone(),
             PluginOperationState::Running,
@@ -1831,8 +2025,13 @@ impl PluginService {
                 return self.recover_or_require_reconciliation(
                     operation,
                     &plugin_id,
-                    &version,
-                    expected_active,
+                    (&version, &package_sha256),
+                    existing.as_ref().map(|record| {
+                        (
+                            record.active_version.as_str(),
+                            record.package_sha256.as_str(),
+                        )
+                    }),
                     "install_conflict",
                     request_id,
                 );
@@ -1903,8 +2102,13 @@ impl PluginService {
                     return self.recover_or_require_reconciliation(
                         operation,
                         &plugin_id,
-                        &version,
-                        expected_active,
+                        (&version, &package_sha256),
+                        existing.as_ref().map(|record| {
+                            (
+                                record.active_version.as_str(),
+                                record.package_sha256.as_str(),
+                            )
+                        }),
                         persistence_error_code(&error),
                         request_id,
                     );
@@ -1928,6 +2132,42 @@ impl PluginService {
             None,
             request_id.clone(),
         )?;
+        if same_version_replacement
+            && self
+                .installer
+                .finalize_replacement(&plugin_id, &version, &package_sha256, &request.operation_id)
+                .is_err()
+        {
+            return self
+                .advance_operation(
+                    operation,
+                    PluginOperationState::Running,
+                    PluginOperationPhase::ReconcileRequired,
+                    Some("install_conflict"),
+                    request_id,
+                )
+                .map(operation_to_wire);
+        }
+        if existing.is_some()
+            && crate::plugin_oauth::finalize_oauth_signer_transfer(
+                self.local_import_root
+                    .parent()
+                    .expect("import directory has app root"),
+                plugin_id.as_str(),
+                &request.operation_id,
+            )
+            .is_err()
+        {
+            return self
+                .advance_operation(
+                    operation,
+                    PluginOperationState::Running,
+                    PluginOperationPhase::ReconcileRequired,
+                    Some("install_conflict"),
+                    request_id,
+                )
+                .map(operation_to_wire);
+        }
         self.advance_operation(
             operation,
             PluginOperationState::Succeeded,
@@ -1980,15 +2220,62 @@ impl PluginService {
         &self,
         operation: PluginOperationRecord,
         plugin_id: &PluginId,
-        candidate_version: &str,
-        previous_version: Option<&str>,
+        candidate: (&str, &str),
+        previous: Option<(&str, &str)>,
         error_code: &str,
         request_id: RequestId,
     ) -> CoreResult<PluginOperationSummary> {
+        let (candidate_version, candidate_hash) = candidate;
+        let (previous_version, previous_hash) = previous
+            .map(|(version, hash)| (Some(version), Some(hash)))
+            .unwrap_or((None, None));
+        if previous_version == Some(candidate_version) {
+            if let Some(previous_hash) = previous_hash
+                && self
+                    .installer
+                    .restore_replacement(
+                        plugin_id,
+                        candidate_version,
+                        previous_hash,
+                        candidate_hash,
+                        &operation.operation_id,
+                    )
+                    .is_ok()
+                && crate::plugin_oauth::discard_oauth_signer_transfer(
+                    self.local_import_root
+                        .parent()
+                        .expect("import directory has app root"),
+                    plugin_id.as_str(),
+                    &operation.operation_id,
+                )
+                .is_ok()
+            {
+                return self.fail_operation(
+                    operation,
+                    PluginOperationPhase::Completed,
+                    error_code,
+                    request_id,
+                );
+            }
+            return self.fail_operation(
+                operation,
+                PluginOperationPhase::ReconcileRequired,
+                error_code,
+                request_id,
+            );
+        }
         let active = self.installer.read_active_version(plugin_id);
         if active
             .as_ref()
             .is_ok_and(|active| active.as_deref() == previous_version)
+            && crate::plugin_oauth::discard_oauth_signer_transfer(
+                self.local_import_root
+                    .parent()
+                    .expect("import directory has app root"),
+                plugin_id.as_str(),
+                &operation.operation_id,
+            )
+            .is_ok()
         {
             return self.fail_operation(
                 operation,
@@ -2009,6 +2296,14 @@ impl PluginService {
                     &operation.operation_id,
                 )
                 .is_ok()
+            && crate::plugin_oauth::discard_oauth_signer_transfer(
+                self.local_import_root
+                    .parent()
+                    .expect("import directory has app root"),
+                plugin_id.as_str(),
+                &operation.operation_id,
+            )
+            .is_ok()
         {
             return self.fail_operation(
                 operation,
@@ -2652,6 +2947,8 @@ impl PluginService {
             },
             async { self.api.resources.stop_plugin(plugin_id).await.is_ok() }
         );
+        self.api.blobs.remove_plugin(plugin_id);
+        self.api.data_states.remove_plugin(plugin_id);
         // Every owner below still needs a bounded cleanup attempt when an earlier owner fails.
         // The failing owner retains its own record for a later reconciliation retry.
         self.emit_ssh_sync_browser_invalidated(Some(plugin_id.clone()), None);
@@ -2790,7 +3087,6 @@ impl PluginService {
     }
 
     pub(crate) async fn shutdown_all(&self) -> CoreResult<()> {
-        self.stop_auto_sync().await;
         let mut plugin_ids = {
             let runtime = self
                 .runtime
@@ -5447,19 +5743,23 @@ impl PluginService {
                 }
             }
         }
-        let ssh_sync_status = if let Some(mut sync_request) = parsed.ssh_sync_request.clone() {
-            if let norishell_core_api::PluginSshSyncRequest::Sync {
-                conflict_policy,
-                deletion_policy,
-                ..
-            } = &mut sync_request
-            {
-                // The guest cannot turn a user's review policy into unattended
-                // overwrite authority by changing its request payload.
-                *conflict_policy =
-                    trusted_ssh_sync_policy(settings_projection.as_ref(), "conflictPolicy");
-                *deletion_policy =
-                    trusted_ssh_sync_policy(settings_projection.as_ref(), "deletionPolicy");
+        let ssh_sync_status = if let Some(sync_request) = parsed.ssh_sync_request.clone() {
+            if matches!(
+                sync_request,
+                norishell_core_api::PluginSshSyncRequest::Refresh { .. }
+                    | norishell_core_api::PluginSshSyncRequest::Sync { .. }
+                    | norishell_core_api::PluginSshSyncRequest::ConfigureScope { .. }
+                    | norishell_core_api::PluginSshSyncRequest::ResetRemote { .. }
+            ) {
+                self.clear_ui_action_in_flight(&request);
+                return Err(plugin_error(
+                    request.meta.request_id,
+                    "plugin.core_api_incompatible",
+                    ErrorCategory::Incompatible,
+                    RetryStrategy::Never,
+                    "errors.plugin.coreApiIncompatible",
+                    None,
+                ));
             }
             let ssh_sync_profile_id = ssh_sync_request_profile_id(&sync_request).to_owned();
             let capability = self.has_capability(
@@ -5522,17 +5822,6 @@ impl PluginService {
                     request.meta.request_id,
                     Some(PluginHostProcessError::Rejected),
                 ));
-            }
-            if !matches!(
-                &sync_request,
-                norishell_core_api::PluginSshSyncRequest::Status { .. }
-            ) {
-                coordinator
-                    .invalidate_browser_profile(request.plugin_id.as_str(), &ssh_sync_profile_id);
-                self.emit_ssh_sync_browser_invalidated(
-                    Some(request.plugin_id.clone()),
-                    Some(ssh_sync_profile_id.clone()),
-                );
             }
             let status = coordinator
                 .clone()
@@ -6576,6 +6865,12 @@ pub(crate) async fn plugin_enable(
                 &installed.package_sha256,
             )
             .map_err(|_| plugin_validation_error(request.meta.request_id.clone()))?;
+        if !norishell_plugin_platform::plugin_core_api_compatible(&manifest) {
+            return Err(platform_request_error(
+                request.meta.request_id,
+                &PluginPlatformError::CoreApiIncompatible,
+            ));
+        }
         if manifest.name != installed.name
             || manifest.publisher != installed.publisher
             || manifest.capabilities != installed.capabilities
@@ -6614,6 +6909,12 @@ pub(crate) async fn plugin_enable(
             &installed.package_sha256,
         )
         .map_err(|_| plugin_validation_error(request.meta.request_id.clone()))?;
+    if !norishell_plugin_platform::plugin_core_api_compatible(&manifest) {
+        return Err(platform_request_error(
+            request.meta.request_id,
+            &PluginPlatformError::CoreApiIncompatible,
+        ));
+    }
     if manifest.name != installed.name
         || manifest.publisher != installed.publisher
         || manifest.capabilities != installed.capabilities
@@ -7883,9 +8184,16 @@ fn current_app_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("workspace package version must be semver")
 }
 
-fn plugin_version_is_newer(candidate: &str, current: &str) -> bool {
+fn plugin_version_can_replace(
+    candidate: &str,
+    candidate_hash: &str,
+    current: &str,
+    current_hash: &str,
+) -> bool {
     match (Version::parse(candidate), Version::parse(current)) {
-        (Ok(candidate), Ok(current)) => candidate > current,
+        (Ok(candidate), Ok(current)) => {
+            candidate > current || (candidate == current && candidate_hash != current_hash)
+        }
         _ => false,
     }
 }
@@ -7935,6 +8243,8 @@ fn supported_plugin_capability(capability: &PluginCapability) -> bool {
             | PluginCapability::SftpRead
             | PluginCapability::SftpWrite
             | PluginCapability::SshSync
+            | PluginCapability::AppPreferencesRead
+            | PluginCapability::TerminalHistoryRead
     )
 }
 
@@ -7969,6 +8279,8 @@ fn special_plugin_capability(capability: PluginCapability) -> bool {
             | PluginCapability::SftpRead
             | PluginCapability::SftpWrite
             | PluginCapability::SshSync
+            | PluginCapability::AppPreferencesRead
+            | PluginCapability::TerminalHistoryRead
     )
 }
 
@@ -8223,6 +8535,8 @@ fn platform_error_code(error: &PluginPlatformError) -> &'static str {
         | PluginPlatformError::InvalidSettingsSchema
         | PluginPlatformError::InvalidWorkflowCatalog
         | PluginPlatformError::InvalidProtocolCatalog => "manifest_mismatch",
+        PluginPlatformError::CoreApiIncompatible => "core_api_incompatible",
+        PluginPlatformError::AppVersionIncompatible => "app_version_incompatible",
         PluginPlatformError::InvalidSettingsValues => "runtime_rejected",
         PluginPlatformError::InstallConflict | PluginPlatformError::InstallCommitUncertain => {
             "install_conflict"
@@ -8242,14 +8556,20 @@ fn platform_request_error(request_id: RequestId, error: &PluginPlatformError) ->
         request_id,
         &format!("plugin.{suffix}"),
         match error {
-            PluginPlatformError::InvalidProtocolCatalog => ErrorCategory::Incompatible,
+            PluginPlatformError::InvalidProtocolCatalog
+            | PluginPlatformError::CoreApiIncompatible
+            | PluginPlatformError::AppVersionIncompatible => ErrorCategory::Incompatible,
             PluginPlatformError::InstallConflict | PluginPlatformError::InstallCommitUncertain => {
                 ErrorCategory::Conflict
             }
             _ => ErrorCategory::Validation,
         },
         RetryStrategy::Never,
-        "errors.plugin.invalidPackage",
+        match error {
+            PluginPlatformError::CoreApiIncompatible => "errors.plugin.coreApiIncompatible",
+            PluginPlatformError::AppVersionIncompatible => "errors.plugin.appVersionIncompatible",
+            _ => "errors.plugin.invalidPackage",
+        },
         None,
     )
 }
@@ -8340,6 +8660,7 @@ fn parse_plugin_error_code(value: &str) -> Option<PluginErrorCode> {
         "capability_rejected" => PluginErrorCode::CapabilityRejected,
         "protocol_incompatible" => PluginErrorCode::ProtocolIncompatible,
         "app_version_incompatible" => PluginErrorCode::AppVersionIncompatible,
+        "core_api_incompatible" => PluginErrorCode::CoreApiIncompatible,
         "install_conflict" => PluginErrorCode::InstallConflict,
         "runtime_rejected" => PluginErrorCode::RuntimeRejected,
         "runtime_quota_exceeded" => PluginErrorCode::RuntimeQuotaExceeded,
@@ -8574,26 +8895,11 @@ mod tests {
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
     #[test]
-    fn ssh_sync_policy_is_derived_from_host_settings() {
-        use norishell_core_api::PluginSshSyncConflictPolicy::{Newest, Prompt};
-
-        assert_eq!(trusted_ssh_sync_policy(None, "deletionPolicy"), Prompt);
-        let settings = serde_json::json!({"values": {
-            "conflictPolicy": "newest", "deletionPolicy": "prompt"
-        }});
-        assert_eq!(
-            trusted_ssh_sync_policy(Some(&settings), "conflictPolicy"),
-            Newest
-        );
-        assert_eq!(
-            trusted_ssh_sync_policy(Some(&settings), "deletionPolicy"),
-            Prompt
-        );
-        let forged = serde_json::json!({"values": {"deletionPolicy": "unexpected"}});
-        assert_eq!(
-            trusted_ssh_sync_policy(Some(&forged), "deletionPolicy"),
-            Prompt
-        );
+    fn local_version_policy_accepts_only_newer_or_changed_same_version() {
+        assert!(plugin_version_can_replace("1.0.1", "b", "1.0.0", "a"));
+        assert!(plugin_version_can_replace("1.0.0", "b", "1.0.0", "a"));
+        assert!(!plugin_version_can_replace("1.0.0", "a", "1.0.0", "a"));
+        assert!(!plugin_version_can_replace("0.9.9", "b", "1.0.0", "a"));
     }
 
     #[test]
@@ -9392,6 +9698,9 @@ mod tests {
             "architectures": ["universal"],
             "capabilities": capabilities,
             "minimumAppVersion": "0.1.0",
+            "minimumCoreApiVersion": capabilities
+                .contains(&PluginCapability::SshSync)
+                .then(norishell_core_api::CoreApiVersion::current),
         });
         archive
             .start_file("manifest.json", options)

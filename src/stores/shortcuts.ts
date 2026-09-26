@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
+import { corePreferencesEnabled, saveApplicationPreferences } from "../core-api/application-preferences";
 
 import {
   SHORTCUT_COMMANDS,
@@ -66,6 +67,11 @@ export const useShortcutsStore = defineStore("shortcuts", () => {
     },
   }));
 
+  function hydrateCorePreferences(next: ShortcutProfile) {
+    macosBindings.value = cloneBindings(next.bindings.macos);
+    windowsBindings.value = cloneBindings(next.bindings.windows);
+  }
+
   function bindingsFor(platform: ShortcutPlatform) {
     return platform === "macos" ? macosBindings.value : windowsBindings.value;
   }
@@ -79,7 +85,7 @@ export const useShortcutsStore = defineStore("shortcuts", () => {
     }
   }
 
-  function updatePlatform(platform: ShortcutPlatform, nextBindings: ShortcutBindings) {
+  async function updatePlatform(platform: ShortcutPlatform, nextBindings: ShortcutBindings) {
     const next: ShortcutProfile = {
       version: SHORTCUT_PROFILE_VERSION,
       bindings: {
@@ -87,17 +93,19 @@ export const useShortcutsStore = defineStore("shortcuts", () => {
         windows: platform === "windows" ? cloneBindings(nextBindings) : cloneBindings(windowsBindings.value),
       },
     };
-    if (!persist(next)) return false;
+    if (corePreferencesEnabled()) {
+      if (!await saveApplicationPreferences("shortcuts", next, profile.value)) return false;
+    } else if (!persist(next)) return false;
     if (platform === "macos") macosBindings.value = next.bindings.macos;
     else windowsBindings.value = next.bindings.windows;
     return true;
   }
 
-  function setBinding(
+  async function setBinding(
     platform: ShortcutPlatform,
     commandId: ShortcutCommandId,
     value: ShortcutBinding,
-  ): ShortcutSaveResult {
+  ): Promise<ShortcutSaveResult> {
     const command = getShortcutCommand(commandId);
     if (!command) return { ok: false, reason: "not-found" };
     const validation = validateShortcutBinding(value, platform, command.scope);
@@ -108,18 +116,18 @@ export const useShortcutsStore = defineStore("shortcuts", () => {
       return { ok: false, reason: "conflict", conflicts: conflicts.map((item) => item.id) };
     }
     const next = { ...current, [commandId]: validation.binding };
-    if (!updatePlatform(platform, next)) return { ok: false, reason: "storage-error" };
+    if (!await updatePlatform(platform, next)) return { ok: false, reason: "storage-error" };
     return { ok: true };
   }
 
-  function resetBinding(platform: ShortcutPlatform, commandId: ShortcutCommandId): ShortcutSaveResult {
+  async function resetBinding(platform: ShortcutPlatform, commandId: ShortcutCommandId): Promise<ShortcutSaveResult> {
     const defaults = createDefaultShortcutBindings(platform);
     return setBinding(platform, commandId, defaults[commandId]);
   }
 
-  function resetAll(platform: ShortcutPlatform): ShortcutSaveResult {
+  async function resetAll(platform: ShortcutPlatform): Promise<ShortcutSaveResult> {
     const next = createDefaultShortcutBindings(platform);
-    if (!updatePlatform(platform, next)) return { ok: false, reason: "storage-error" };
+    if (!await updatePlatform(platform, next)) return { ok: false, reason: "storage-error" };
     return { ok: true };
   }
 
@@ -127,12 +135,13 @@ export const useShortcutsStore = defineStore("shortcuts", () => {
     return serializeShortcutProfile(profile.value);
   }
 
-  function importProfile(text: string): ShortcutImportResult {
+  async function importProfile(text: string): Promise<ShortcutImportResult> {
     const parsed = parseShortcutProfile(text);
     if (!parsed.ok) return { ok: false, reason: parsed.error };
-    if (!persist(parsed.profile)) return { ok: false, reason: "storage-error" };
-    macosBindings.value = cloneBindings(parsed.profile.bindings.macos);
-    windowsBindings.value = cloneBindings(parsed.profile.bindings.windows);
+    if (corePreferencesEnabled()) {
+      if (!await saveApplicationPreferences("shortcuts", parsed.profile, profile.value)) return { ok: false, reason: "storage-error" };
+    } else if (!persist(parsed.profile)) return { ok: false, reason: "storage-error" };
+    hydrateCorePreferences(parsed.profile);
     return { ok: true };
   }
 
@@ -140,6 +149,7 @@ export const useShortcutsStore = defineStore("shortcuts", () => {
     macosBindings,
     windowsBindings,
     profile,
+    hydrateCorePreferences,
     commands: SHORTCUT_COMMANDS,
     bindingsFor,
     setBinding,

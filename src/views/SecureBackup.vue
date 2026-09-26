@@ -4,9 +4,10 @@ import { useI18n } from "vue-i18n";
 import NvxSecureWindow from "../components/layout/NvxSecureWindow.vue";
 import { NvxButton, NvxCheckbox, NvxField, NvxInlineNotice, NvxInput } from "../components/ui";
 import { secureBackupClient, type SecureBackupPrompt } from "../core-api/offline-backup-client";
+import { parseCoreApiError } from "../core-api/client";
 import { MIN_NEW_SECRET_PASSWORD_CHARACTERS, passwordCharacterCount } from "../password-policy";
 
-const { t } = useI18n();
+const { t, te } = useI18n();
 const id = new URLSearchParams(window.location.search).get("prompt") ?? "";
 const prompt = ref<SecureBackupPrompt | null>(null);
 const password = ref("");
@@ -14,6 +15,14 @@ const confirmation = ref("");
 const confirmed = ref(false);
 const pending = ref(false);
 const failed = ref(false);
+const failureText = ref("");
+function showFailure(error: unknown) {
+  const failure = parseCoreApiError(error);
+  const key = failure?.messageKey;
+  failureText.value = (key && te(key) ? t(key) : t("offlineBackup.secure.failed"))
+    + (failure?.diagnosticId ? ` ${t("diagnostics.id", { id: failure.diagnosticId })}` : "");
+  failed.value = true;
+}
 const exporting = computed(() => prompt.value?.kind === "export");
 const restoring = computed(() => prompt.value?.kind === "restoreVault" || prompt.value?.kind === "mergeVault");
 const requiresConfirmation = computed(() => exporting.value || restoring.value);
@@ -44,12 +53,13 @@ async function submit() {
   if (pending.value || !valid.value) return;
   pending.value = true;
   failed.value = false;
+  failureText.value = "";
   const request = secureBackupClient.submit(id, password.value, confirmation.value, confirmed.value);
   clear();
   try {
     await request;
-  } catch {
-    failed.value = true;
+  } catch (error) {
+    showFailure(error);
     pending.value = false;
   }
 }
@@ -60,8 +70,8 @@ async function cancel() {
   pending.value = true;
   try {
     await secureBackupClient.cancel(id);
-  } catch {
-    failed.value = true;
+  } catch (error) {
+    showFailure(error);
     pending.value = false;
   }
 }
@@ -69,8 +79,8 @@ async function cancel() {
 onMounted(async () => {
   try {
     prompt.value = await secureBackupClient.get(id);
-  } catch {
-    failed.value = true;
+  } catch (error) {
+    showFailure(error);
   }
 });
 onBeforeUnmount(clear);
@@ -135,7 +145,7 @@ onBeforeUnmount(clear);
         v-if="failed"
         tone="error"
       >
-        {{ t("offlineBackup.secure.failed") }}
+        {{ failureText || t("offlineBackup.secure.failed") }}
       </NvxInlineNotice>
       <button
         type="submit"

@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `networkDomain`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `networkDomain`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 Use the handle from networkStart; its destination cannot change. networkSent means the local socket writer accepted bytes, not that the peer received them.
 

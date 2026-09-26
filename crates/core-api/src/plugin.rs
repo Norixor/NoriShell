@@ -141,6 +141,8 @@ pub enum PluginCapability {
     SftpWrite,
     MetricsRead,
     SshSync,
+    AppPreferencesRead,
+    TerminalHistoryRead,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -207,6 +209,7 @@ pub enum PluginErrorCode {
     CapabilityRejected,
     ProtocolIncompatible,
     AppVersionIncompatible,
+    CoreApiIncompatible,
     InstallConflict,
     RuntimeRejected,
     RuntimeQuotaExceeded,
@@ -357,6 +360,8 @@ pub struct PluginLocalPackagePreview {
     pub capabilities: Vec<PluginCapability>,
     pub current_version: Option<String>,
     pub current_state_version: Option<WireSequence>,
+    /// The prior artifact for this version can remain after uninstall.
+    pub prior_package_sha256: Option<String>,
     /// Only verified publisher continuity can retain installed decisions.
     #[serde(default)]
     pub retained_capability_grants: Vec<PluginCapabilityGrant>,
@@ -700,6 +705,21 @@ mod tests {
             serde_json::from_str::<PluginCapability>(&encoded).expect("deserialize"),
             PluginCapability::SshSync
         );
+    }
+
+    #[test]
+    fn independent_local_data_capabilities_use_stable_camel_case_wire_names() {
+        for (capability, name) in [
+            (PluginCapability::AppPreferencesRead, "appPreferencesRead"),
+            (PluginCapability::TerminalHistoryRead, "terminalHistoryRead"),
+        ] {
+            let encoded = serde_json::to_string(&capability).expect("serialize");
+            assert_eq!(encoded, format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<PluginCapability>(&encoded).expect("deserialize"),
+                capability
+            );
+        }
     }
 
     #[test]

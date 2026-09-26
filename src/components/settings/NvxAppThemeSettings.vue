@@ -7,6 +7,7 @@ import { useRouter } from "vue-router";
 import { themeStyles, themeWithOverride, validateAppThemeProfile, validateThemeDefinition, type AppThemeProfile, type ThemeDefinition } from "../../app-theme";
 import { exportJsonFile } from "../../platform-file-export";
 import { useAppThemeStore } from "../../stores/appTheme";
+import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { useUiStore, type ThemePreference } from "../../stores/ui";
 import { NvxButton, NvxField, NvxIcon, NvxInlineNotice, NvxInput, NvxSelect, NvxStatusLabel } from "../ui";
 
@@ -92,19 +93,23 @@ function discard() {
   draft.value = clone(store.profile); baseline.value = clone(store.profile);
   error.value = ""; message.value = "";
 }
-function save() {
+async function save() {
   if (!valid.value) { error.value = "invalid"; return; }
-  if (!store.saveProfile(clone(draft.value), baseline.value)) { error.value = "saveFailed"; return; }
-  draft.value = clone(store.profile); baseline.value = clone(store.profile);
-  // Keep the saved profile as the retry baseline if mode persistence fails.
-  if (pendingMode.value !== null && !ui.setThemePreference(pendingMode.value)) { error.value = "modeSaveFailed"; return; }
-  pendingMode.value = null;
-  message.value = "saved"; error.value = "";
+  try {
+    if (!await store.saveProfile(clone(draft.value), baseline.value)) { error.value = "saveFailed"; return; }
+    draft.value = clone(store.profile); baseline.value = clone(store.profile);
+    // Keep the saved profile as the retry baseline if mode persistence fails.
+    if (pendingMode.value !== null && !await ui.setThemePreference(pendingMode.value)) { error.value = "modeSaveFailed"; return; }
+    pendingMode.value = null;
+    message.value = "saved"; error.value = "";
+  } catch (failure) { error.value = `preference:${applicationPreferenceFailure(failure)}`; }
 }
-function changeMode(value: string) {
-  if (!ui.setThemePreference(value as ThemePreference)) { error.value = "saveFailed"; return; }
-  pendingMode.value = null;
-  previewAppearance.value = ui.theme;
+async function changeMode(value: string) {
+  try {
+    if (!await ui.setThemePreference(value as ThemePreference)) { error.value = "saveFailed"; return; }
+    pendingMode.value = null;
+    previewAppearance.value = ui.theme;
+  } catch (failure) { error.value = `preference:${applicationPreferenceFailure(failure)}`; }
 }
 async function readFile(event: Event) {
   const input = event.target as HTMLInputElement;
@@ -387,7 +392,7 @@ onBeforeUnmount(() => { alive = false; });
       tone="error"
       role="alert"
     >
-      {{ t(`appTheme.errors.${error || 'invalid'}`) }}
+      {{ error.startsWith('preference:') ? t(`applicationPreferenceErrors.${error.slice(11)}`) : t(`appTheme.errors.${error || 'invalid'}`) }}
     </NvxInlineNotice>
     <p
       v-if="message"

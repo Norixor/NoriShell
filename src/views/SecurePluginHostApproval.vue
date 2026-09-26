@@ -120,7 +120,24 @@ onMounted(() => void load());
         :disabled="pending"
         :remember-policy="approval.rememberPolicy"
         risk="host"
+        part="details"
       />
+    </template>
+    <template
+      v-if="approval && !loading && !failed && !outcome"
+      #decision
+    >
+      <NvxPluginApprovalPolicy
+        v-model="policy"
+        v-model:model-expiry="expiry"
+        :disabled="pending"
+        :remember-policy="approval.rememberPolicy"
+        risk="host"
+        part="choice"
+      />
+    </template>
+    <template #actionHint>
+      {{ policy === "always" ? t("plugins.approvalPolicy.exactOperation") : t("window.approvalHint") }}
     </template>
     <template
       v-if="approval && !loading && !failed && !outcome"

@@ -24,7 +24,8 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `remoteExecRequest`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `remoteExecRequest`. A declaration still requires an effective grant and any applicable protected-operation approval.
+Remembered approval is bound to the Core-resolved host, endpoint, and exact `command`; a different command requires a new approval. Changing `timeoutMs` does not change the approved command, but Core still validates every request and revocation.
 
 hostHandle comes from the current Core-issued host context. Core resolves the saved host, credentials, route, and Known Hosts; no guest-controlled SSH session is accepted. Execution results arrive through remoteExec events. command is nonempty, at most 16 KiB, and contains no NUL; timeoutMs is 100–120000.
 

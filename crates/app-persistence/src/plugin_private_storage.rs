@@ -2022,7 +2022,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("storage count");
-        assert_eq!(remaining, 0);
+        assert!(remaining > 0);
+        assert!(matches!(
+            repository.get_plugin_private_storage_kv(&owner, "alpha", &granted),
+            Err(AppPersistenceError::NotFound)
+        ));
     }
 
     #[test]

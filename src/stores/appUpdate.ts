@@ -9,6 +9,8 @@ import { flushTerminalWorkspaceBeforeExit } from "../terminal-workspace-persiste
 
 type ReleaseStatus = "idle" | "checking" | "upToDate" | "updateAvailable" | "noRelease" | "failed";
 type InstallStatus = "idle" | "checking" | "downloading" | "installing" | "resourcesActive" | "cancelled" | "failed" | "restartNeeded" | "restartRequired";
+type ReleaseFailureCode = "windowNotAllowed" | "requestFailed" | "httpRejected" | "responseTooLarge" | "invalidResponse" | "invalidCurrentVersion" | "internal";
+type InstallFailureCode = "packageUnavailable" | "versionChanged" | "downloadFailed" | "readinessFailed" | "installFailed" | "restartFailed";
 
 interface ReleaseCheckResponse {
   currentVersion: string;
@@ -20,6 +22,10 @@ interface ReleaseCheckResponse {
 export const useAppUpdateStore = defineStore("appUpdate", () => {
   const status = ref<ReleaseStatus>("idle");
   const installStatus = ref<InstallStatus>("idle");
+  const checkFailureCode = ref<ReleaseFailureCode | null>(null);
+  const installFailureCode = ref<InstallFailureCode | null>(null);
+  const checkDiagnosticId = ref<string | null>(null);
+  const installDiagnosticId = ref<string | null>(null);
   const currentVersion = ref<string | null>(null);
   const latestVersion = ref<string | null>(null);
   const supportsAutoInstall = ref(false);
@@ -32,6 +38,8 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     if (checkInFlight) return checkInFlight;
     if (installInFlight) return installInFlight;
     status.value = "checking";
+    checkFailureCode.value = null;
+    checkDiagnosticId.value = null;
     checkInFlight = invoke<ReleaseCheckResponse>("release_check")
       .then((result) => {
         currentVersion.value = result.currentVersion;
@@ -39,7 +47,19 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
         latestVersion.value = result.latestVersion;
         supportsAutoInstall.value = result.supportsAutoInstall;
       })
-      .catch(() => { status.value = "failed"; })
+      .catch((error: unknown) => {
+        let failure: unknown = error;
+        if (typeof error === "string") {
+          try { failure = JSON.parse(error) as unknown; } catch { failure = null; }
+        }
+        const code = typeof failure === "object" && failure !== null && "code" in failure ? failure.code : null;
+        checkFailureCode.value = typeof code === "string" && ["windowNotAllowed", "requestFailed", "httpRejected", "responseTooLarge", "invalidResponse", "invalidCurrentVersion", "internal"].includes(code)
+          ? code as ReleaseFailureCode : "internal";
+        const diagnosticId = typeof failure === "object" && failure !== null && "diagnosticId" in failure ? failure.diagnosticId : null;
+        checkDiagnosticId.value = typeof diagnosticId === "string" ? diagnosticId : checkFailureCode.value === "internal" ? crypto.randomUUID() : null;
+        if (checkDiagnosticId.value && diagnosticId !== checkDiagnosticId.value) console.warn(`Release check failed; diagnosticId=${checkDiagnosticId.value}`, error);
+        status.value = "failed";
+      })
       .finally(() => { checkInFlight = null; });
     return checkInFlight;
   }
@@ -57,22 +77,35 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     try {
       await invoke("release_update_allow_relaunch");
       await relaunch();
-    } catch {
-      // The restart action remains available if the platform could not relaunch.
+    } catch (error) {
+      installFailureCode.value = "restartFailed";
+      installDiagnosticId.value = crypto.randomUUID();
+      console.warn(`App restart failed; diagnosticId=${installDiagnosticId.value}`, error);
+      installStatus.value = "restartRequired";
     }
   }
 
   async function performInstall(disconnectActiveResources: boolean) {
     let update: Update | null = null;
     let prepared = false;
+    let stage: "package" | "download" | "readiness" | "install" = "package";
     installStatus.value = "checking";
+    installFailureCode.value = null;
+    installDiagnosticId.value = null;
     progressPercent.value = null;
     try {
       update = await check({ timeout: 15_000 });
-      if (!update || update.version !== latestVersion.value) {
+      if (!update) {
+        installFailureCode.value = "packageUnavailable";
         installStatus.value = "failed";
         return;
       }
+      if (update.version !== latestVersion.value) {
+        installFailureCode.value = "versionChanged";
+        installStatus.value = "failed";
+        return;
+      }
+      stage = "download";
       installStatus.value = "downloading";
       let downloaded = 0;
       let total: number | undefined;
@@ -81,6 +114,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
         if (event.event === "Progress") downloaded += event.data.chunkLength;
         if (total && total > 0) progressPercent.value = Math.min(100, Math.floor((downloaded / total) * 100));
       });
+      stage = "readiness";
 
       // Both checks happen after the signed package is downloaded, so failed
       // downloads never interrupt a live terminal or transfer.
@@ -96,6 +130,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
         return;
       }
       prepared = true;
+      stage = "install";
       installStatus.value = "installing";
       await update.install();
       // Windows exits after starting its updater; macOS needs an explicit relaunch.
@@ -106,10 +141,20 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
       }
     } catch (error) {
       if (installStatus.value !== "restartRequired") {
-        if (prepared) installStatus.value = "restartNeeded";
+        if (prepared) {
+          installFailureCode.value = "installFailed";
+          installStatus.value = "restartNeeded";
+        }
         else if (typeof error === "object" && error !== null && "code" in error
           && error.code === "app.tool_window_exit_cancelled") installStatus.value = "cancelled";
-        else installStatus.value = "failed";
+        else {
+          installFailureCode.value = stage === "download" ? "downloadFailed" : stage === "readiness" ? "readinessFailed" : "packageUnavailable";
+          installStatus.value = "failed";
+        }
+        if (installStatus.value !== "cancelled") {
+          installDiagnosticId.value = crypto.randomUUID();
+          console.warn(`App update failed during ${stage}; diagnosticId=${installDiagnosticId.value}`, error);
+        }
       }
     } finally {
       if (installStatus.value !== "installing" && installStatus.value !== "restartRequired") {
@@ -118,5 +163,5 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     }
   }
 
-  return { status, installStatus, currentVersion, latestVersion, supportsAutoInstall, progressPercent, hasUpdate, checkForUpdates, installUpdate, restartApp };
+  return { status, installStatus, checkFailureCode, installFailureCode, checkDiagnosticId, installDiagnosticId, currentVersion, latestVersion, supportsAutoInstall, progressPercent, hasUpdate, checkForUpdates, installUpdate, restartApp };
 });

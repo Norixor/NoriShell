@@ -6,6 +6,7 @@ class FakeWorker {
   static instances: FakeWorker[] = [];
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: (() => void) | null = null;
+  onmessageerror: (() => void) | null = null;
   postMessage = vi.fn();
   terminate = vi.fn();
   constructor() { FakeWorker.instances.push(this); }
@@ -33,7 +34,7 @@ describe("xterm highlighting worker lifecycle", () => {
     const { terminal, callbacks, disposals } = fixture(); const report = vi.fn(); const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, report);
     highlighter.update(config); vi.advanceTimersByTime(80); const first = FakeWorker.instances[0]!;
     vi.advanceTimersByTime(500); expect(first.terminate).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1_500); expect(first.terminate).toHaveBeenCalledOnce(); expect(report).toHaveBeenLastCalledWith(true);
+    vi.advanceTimersByTime(1_500); expect(first.terminate).toHaveBeenCalledOnce(); expect(report).toHaveBeenLastCalledWith("startup-timeout");
     callbacks[0]!(); vi.advanceTimersByTime(2_000); expect(FakeWorker.instances).toHaveLength(1);
     highlighter.update(config); vi.advanceTimersByTime(80); expect(FakeWorker.instances).toHaveLength(2);
     // A queued failure from the terminated worker cannot stop its replacement.
@@ -50,7 +51,45 @@ describe("xterm highlighting worker lifecycle", () => {
     callbacks[0]!(); vi.advanceTimersByTime(80);
     vi.advanceTimersByTime(500);
     expect(worker.terminate).toHaveBeenCalledOnce();
-    expect(report).toHaveBeenLastCalledWith(true);
+    expect(report).toHaveBeenLastCalledWith("scan-timeout");
+    highlighter.dispose();
+  });
+  it("reports Worker and rule failures without retaining terminal text", () => {
+    const { terminal } = fixture(); const report = vi.fn();
+    const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, report);
+    highlighter.update(config); vi.advanceTimersByTime(80);
+    FakeWorker.instances[0]!.reply([], true);
+    expect(report).toHaveBeenLastCalledWith("evaluation-failed");
+    highlighter.update(config); expect(report).toHaveBeenLastCalledWith(null);
+    vi.advanceTimersByTime(80);
+    FakeWorker.instances[1]!.onmessageerror?.();
+    expect(report).toHaveBeenLastCalledWith("worker-error");
+    highlighter.dispose();
+  });
+  it("reports Worker construction failure separately from a timeout", () => {
+    const { terminal } = fixture(); const report = vi.fn();
+    vi.stubGlobal("Worker", class { constructor() { throw new Error("unavailable"); } });
+    const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, report);
+    highlighter.update(config); vi.advanceTimersByTime(80);
+    expect(report).toHaveBeenLastCalledWith("worker-unavailable");
+    highlighter.dispose();
+  });
+  it("classifies a startup error before the first response as unavailable", () => {
+    const { terminal } = fixture(); const report = vi.fn();
+    const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, report);
+    highlighter.update(config); vi.advanceTimersByTime(80);
+    FakeWorker.instances[0]!.onerror?.();
+    expect(report).toHaveBeenLastCalledWith("worker-unavailable");
+    highlighter.dispose();
+  });
+  it("classifies an error after a successful reply as a runtime failure", () => {
+    const { terminal } = fixture(); const report = vi.fn();
+    const highlighter = createTerminalHighlighter(terminal as unknown as Terminal, report);
+    highlighter.update(config); vi.advanceTimersByTime(80);
+    const worker = FakeWorker.instances[0]!;
+    worker.reply();
+    worker.onerror?.();
+    expect(report).toHaveBeenLastCalledWith("worker-error");
     highlighter.dispose();
   });
   it("keeps unchanged highlights across frequent redraws and reconciles changed text", () => {

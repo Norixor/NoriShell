@@ -4,6 +4,15 @@
 
 | 方法 | 请求 payload | 成功结果 |
 | --- | --- | --- |
+| [`dataCatalog`](./dataCatalog.zh-CN.md) | 按类别划分的请求 | `dataCatalog` |
+| [`dataRead`](./dataRead.zh-CN.md) | 按类别划分的请求 | `dataRead` |
+| [`dataSnapshot`](./dataSnapshot.zh-CN.md) | 按类别划分的请求 | `dataSnapshot` |
+| [`dataInspect`](./dataInspect.zh-CN.md) | 按类别划分的请求 | `dataInspect` |
+| [`dataCompose`](./dataCompose.zh-CN.md) | 按类别划分的请求 | `dataCompose` |
+| [`dataApply`](./dataApply.zh-CN.md) | 按类别划分的请求 | `dataApply` |
+| [`dataExport`](./dataExport.zh-CN.md) | 按类别划分的请求 | `dataExport` |
+| [`dataCheckpoint`](./dataCheckpoint.zh-CN.md) | 按类别划分的请求 | `dataCheckpoint` |
+| [`dataRelease`](./dataRelease.zh-CN.md) | 精确临时句柄 | `dataRelease` |
 | `appRegister` | [`PluginAppRegistration`](types.zh-CN.md#pluginappregistration) | `appAccepted` |
 | `appNotify` | [`PluginAppNotification`](types.zh-CN.md#pluginappnotification) | `appAccepted` |
 | `appNavigate` | [`PluginAppNavigation`](types.zh-CN.md#pluginappnavigation) | `appAccepted` |

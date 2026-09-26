@@ -49,6 +49,9 @@ pub enum VncEvent {
     /// If the [crate::VncEncoding::DesktopSizePseudo] is set
     ///
     SetResolution(Screen),
+    /// Result of a client SetDesktopSize request. Status 4 is forwarded and
+    /// does not yet establish that the requested layout was applied.
+    ResizeResult { applied: bool, status: u16 },
     /// If the connector doesn't call `set_pixel_format` method
     ///
     /// The engine will generate a [VncEvent::SetPixelFormat] to let the window know how to render image

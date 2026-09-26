@@ -13,6 +13,7 @@ use crate::{
 pub enum PluginSshSyncBrowserState {
     NotLoaded,
     Ready,
+    Stale,
     Empty,
     NeedsCreation,
     NeedsUnlock,
@@ -90,6 +91,8 @@ pub struct PluginSshSyncBrowserSnapshot {
     pub desktop_profile_rows_omitted: u32,
     #[ts(type = "number | null")]
     pub remote_updated_at_unix_ms: Option<i64>,
+    #[ts(type = "number | null")]
+    pub verified_at_unix_ms: Option<i64>,
     pub hosts: Vec<PluginSshSyncBrowserHost>,
     pub credentials: Vec<PluginSshSyncBrowserCredential>,
     pub desktop_profiles: Vec<PluginSshSyncBrowserDesktopProfile>,

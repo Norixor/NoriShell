@@ -1,9 +1,15 @@
+import { parseCoreApiError } from "./core-api/client";
+
 // Transfer files contain only explicitly registered global non-secret preferences, never localStorage or runtime state.
 export const PREFERENCE_TRANSFER_VERSION = 1;
 export const MAX_PREFERENCE_TRANSFER_BYTES = 256 * 1024;
 export const PREFERENCE_GROUP_IDS = ["application", "appearance", "interaction", "highlights", "shortcuts", "files", "desktop", "commandNotifications"] as const;
 export type PreferenceGroupId = typeof PREFERENCE_GROUP_IDS[number];
 export type PreferenceGroupResult = "pending" | "applying" | "applied" | "unchanged" | "conflict" | "failed";
+export type PreferenceTransferFailureCode = "tooLarge" | "emptySelection" | "invalidFile" | "invalidGroup" | "unavailableGroup" | "incompletePreferences";
+export class PreferenceTransferError extends Error {
+  constructor(readonly code: PreferenceTransferFailureCode) { super(code); }
+}
 
 export interface PreferenceGroupAdapter {
   id: PreferenceGroupId;
@@ -18,6 +24,7 @@ export interface PreferencePreviewGroup {
   readonly before: string;
   readonly after: string;
   result: PreferenceGroupResult;
+  failureCode?: string;
 }
 
 export interface PreferenceTransferFile {
@@ -27,11 +34,11 @@ export interface PreferenceTransferFile {
 }
 
 export function validateFullSyncPreferences(value: unknown, adapters: readonly PreferenceGroupAdapter[]): PreferenceTransferFile {
-  if (!object(value)) throw new Error("invalidFile");
+  if (!object(value)) throw new PreferenceTransferError("invalidFile");
   const parsed = parsePreferenceTransfer(JSON.stringify(value), adapters);
   if (adapters.length !== PREFERENCE_GROUP_IDS.length
     || PREFERENCE_GROUP_IDS.some((id) => !adapters.some((adapter) => adapter.id === id) || !(id in parsed.groups))
-    || Object.keys(parsed.groups).length !== PREFERENCE_GROUP_IDS.length) throw new Error("incompletePreferences");
+    || Object.keys(parsed.groups).length !== PREFERENCE_GROUP_IDS.length) throw new PreferenceTransferError("incompletePreferences");
   return parsed;
 }
 
@@ -54,28 +61,30 @@ export function preferenceValuesEqual(left: unknown, right: unknown): boolean {
 }
 
 export function parsePreferenceTransfer(text: string, adapters: readonly PreferenceGroupAdapter[]): PreferenceTransferFile {
-  if (new TextEncoder().encode(text).byteLength > MAX_PREFERENCE_TRANSFER_BYTES) throw new Error("tooLarge");
-  const file: unknown = JSON.parse(text);
+  if (new TextEncoder().encode(text).byteLength > MAX_PREFERENCE_TRANSFER_BYTES) throw new PreferenceTransferError("tooLarge");
+  let file: unknown;
+  try { file = JSON.parse(text) as unknown; }
+  catch { throw new PreferenceTransferError("invalidFile"); }
   if (!object(file) || Object.keys(file).some((key) => !["product", "version", "groups"].includes(key))
     || file.product !== "NoriShell" || file.version !== PREFERENCE_TRANSFER_VERSION || !object(file.groups)
-    || Object.keys(file.groups).length === 0) throw new Error("invalidFile");
+    || Object.keys(file.groups).length === 0) throw new PreferenceTransferError("invalidFile");
   for (const [id, value] of Object.entries(file.groups)) {
     const adapter = adapters.find((item) => item.id === id);
-    if (!adapter || !adapter.validate(value)) throw new Error("invalidGroup");
+    if (!adapter || !adapter.validate(value)) throw new PreferenceTransferError("invalidGroup");
   }
   return file as unknown as PreferenceTransferFile;
 }
 
 export async function exportPreferenceTransfer(adapters: readonly PreferenceGroupAdapter[]): Promise<string> {
-  if (adapters.length === 0) throw new Error("emptySelection");
+  if (adapters.length === 0) throw new PreferenceTransferError("emptySelection");
   const groups: PreferenceTransferFile["groups"] = {};
   for (const adapter of adapters) {
     const value = await adapter.read();
-    if (!adapter.validate(value)) throw new Error("unavailableGroup");
+    if (!adapter.validate(value)) throw new PreferenceTransferError("unavailableGroup");
     groups[adapter.id] = value;
   }
   const text = JSON.stringify({ product: "NoriShell", version: PREFERENCE_TRANSFER_VERSION, groups }, null, 2);
-  if (new TextEncoder().encode(text).byteLength > MAX_PREFERENCE_TRANSFER_BYTES) throw new Error("tooLarge");
+  if (new TextEncoder().encode(text).byteLength > MAX_PREFERENCE_TRANSFER_BYTES) throw new PreferenceTransferError("tooLarge");
   return text;
 }
 
@@ -83,9 +92,9 @@ export async function previewPreferenceTransfer(file: PreferenceTransferFile, ad
   const preview: PreferencePreviewGroup[] = [];
   for (const [id, value] of Object.entries(file.groups)) {
     const adapter = adapters.find((item) => item.id === id);
-    if (!adapter || !adapter.validate(value)) throw new Error("invalidGroup");
+    if (!adapter || !adapter.validate(value)) throw new PreferenceTransferError("invalidGroup");
     const before = await adapter.read();
-    if (!adapter.validate(before)) throw new Error("unavailableGroup");
+    if (!adapter.validate(before)) throw new PreferenceTransferError("unavailableGroup");
     // A string snapshot isolates later file or form edits; callers cannot replace the preview with a new pending object.
     const group = { result: "pending" as PreferenceGroupResult } as PreferencePreviewGroup;
     Object.defineProperties(group, {
@@ -114,6 +123,9 @@ export async function applyPreferencePreview(preview: readonly PreferencePreview
       const next: unknown = JSON.parse(group.after);
       if (!adapter.validate(next)) { group.result = "failed"; continue; }
       group.result = await adapter.apply(next, current) ? "applied" : "failed";
-    } catch { group.result = "failed"; }
+    } catch (error) {
+      group.failureCode = parseCoreApiError(error)?.code;
+      group.result = group.failureCode === "application_preferences.conflict" ? "conflict" : "failed";
+    }
   }
 }

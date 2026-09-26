@@ -13,6 +13,7 @@ export const desktopClient = {
   close: (session: DesktopSessionSummary) => invoke<void>("desktop_session_close", { request: sessionRequest(session) }),
   focus: (session: DesktopSessionSummary | null) => invoke<WireSequence>("desktop_focus_change", { request: { meta: meta(), sessionId: session?.id ?? null, generation: session?.generation ?? null } }),
   frame: (session: DesktopSessionSummary, afterSequence: WireSequence) => invoke<ArrayBuffer>("desktop_frame_get", { request: { ...sessionRequest(session), afterSequence } }),
+  resolution: (session: DesktopSessionSummary, width: number, height: number) => invoke<void>("desktop_resolution_set", { request: { ...sessionRequest(session), width, height } }),
   input: (request: Omit<DesktopInputRequest, "meta">) => invoke<void>("desktop_input", { request: { meta: meta(), ...request } }),
   mute: (session: DesktopSessionSummary, muted: boolean) => invoke<void>("desktop_audio_mute", { request: { ...sessionRequest(session), muted } }),
   clipboard: (session: DesktopSessionSummary) => invoke<string | null>("desktop_clipboard_get", { request: sessionRequest(session) }),

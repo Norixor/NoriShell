@@ -24,7 +24,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`localProcess`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`localProcess`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 handle 来自 processStart。closeStdin 默认 false；true 必须同时 dataBase64=""。processSent 只说明 stdin writer 接受，读取 processOutput/processExited 事件判断实际输出和退出。
 

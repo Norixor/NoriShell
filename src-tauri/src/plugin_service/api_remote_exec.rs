@@ -42,7 +42,8 @@ impl PluginService {
             target_label: target.label.clone(),
             persisted_target_label: target.label.clone(),
             details,
-            exact_scope: serde_json::json!({ "host": target, "command": request.command, "timeoutMs": request.timeout_ms }),
+            exact_scope: serde_json::json!({ "hostId": target.host_id, "endpoint": target.endpoint, "command": request.command }),
+            policy_identity: Some("remote.execute.v1"),
             target_fence: Some(admission.clone()),
         }).await?;
         if !admission() {

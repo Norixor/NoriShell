@@ -30,7 +30,7 @@ May also return `{"kind":"inputSent"}` with no other fields.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `terminalRequestInput`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `terminalRequestInput`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 terminalHandle comes from the current Core terminal context. Requires an explicit user action. Core rechecks generation, focus, and input ownership immediately before writing. inputApprovalRequested awaits approval; inputSent means input was written, not shell command completion. The current Wasm isolated entry always returns interactionRequired; actual input requires the host declarative-action path. api_request cannot manufacture focus or change entry identity.
 

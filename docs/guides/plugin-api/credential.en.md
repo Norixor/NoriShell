@@ -24,7 +24,7 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 ## Permissions, timing, and resource scope
 
-Capability hint: `credentialsPlugin`. A declaration still requires an effective grant and any applicable exact-operation approval.
+Capability hint: `credentialsPlugin`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
 create carries only label, origin, injection mode, and idempotency metadata; Core receives the secret through a protected surface. list exposes handle/revision/state, never secret bytes. Only ready references can be used as networkStart credentials, with matching origin.
 

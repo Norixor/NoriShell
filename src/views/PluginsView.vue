@@ -14,11 +14,13 @@ import { openPluginSpecialPermission } from "../core-api/client";
 import type { InstalledPluginSummary, PluginCapability, PluginCapabilityGrant, PluginOperationSummary, PluginSpecialPermissionOutcome } from "../core-api/generated/core-api";
 import { pluginFailureCode, usePluginsStore } from "../stores/plugins";
 import { useTipsStore } from "../stores/tips";
+import { useRouteReveal } from "../routeReveal";
 
 const { locale, t } = useI18n();
 const router = useRouter();
 const plugins = usePluginsStore();
 const tips = useTipsStore();
+const revealRoute = useRouteReveal();
 const feedbackScope = "plugins-operation";
 const permissionTarget = ref<InstalledPluginSummary | null>(null);
 const operationPermissionTarget = ref<InstalledPluginSummary | null>(null);
@@ -42,6 +44,9 @@ const installedPlugins = computed(() => [...plugins.installed].sort((left, right
   Number(right.pluginId === "org.norixor") - Number(left.pluginId === "org.norixor")
 )));
 const preparedIsUpdate = computed(() => plugins.preparedPackage?.currentVersion !== null && plugins.preparedPackage?.currentVersion !== undefined);
+const preparedCurrentPlugin = computed(() => plugins.installed.find((plugin) => plugin.pluginId === plugins.preparedPackage?.pluginId) ?? null);
+const preparedSameVersionOverwrite = computed(() => !!plugins.preparedPackage?.priorPackageSha256
+  && plugins.preparedPackage.packageSha256 !== plugins.preparedPackage.priorPackageSha256);
 const preparedPluginWasEnabled = computed(() => {
   const pluginId = plugins.preparedPackage?.pluginId;
   return pluginId !== undefined && plugins.installed.some((plugin) => plugin.pluginId === pluginId && plugin.state === "enabled");
@@ -298,6 +303,7 @@ function applyVisualFixture() {
       capabilities: utility.capabilities,
       currentVersion: utility.activeVersion,
       currentStateVersion: utility.stateVersion,
+      priorPackageSha256: null,
       retainedCapabilityGrants: utility.grants,
       approvedSpecialGrants: [],
       specialPermissionExpiresAtUnixMs: null,
@@ -310,7 +316,8 @@ function applyVisualFixture() {
   return true;
 }
 onMounted(() => {
-  if (!applyVisualFixture()) void plugins.initialize();
+  if (applyVisualFixture()) revealRoute();
+  else void plugins.initialize().finally(revealRoute);
   window.addEventListener("norishell:plugin-special-permission-changed", handleSpecialPermissionChanged);
   window.addEventListener("norishell:plugin-terminal-input-decided", handleTerminalInputDecided);
 });
@@ -773,7 +780,20 @@ onBeforeUnmount(() => {
             {{ plugins.preparedPackage.packageSha256 }}
           </dd>
         </div>
+        <div v-if="preparedSameVersionOverwrite">
+          <dt>{{ t("plugins.permissions.sameVersionOverwrite.currentHash") }}</dt>
+          <dd class="plugin-mono">
+            {{ plugins.preparedPackage.priorPackageSha256 }}
+          </dd>
+        </div>
       </dl>
+      <NvxInlineNotice
+        v-if="preparedSameVersionOverwrite"
+        tone="warning"
+        :title="t('plugins.permissions.sameVersionOverwrite.title')"
+      >
+        {{ t(preparedCurrentPlugin ? 'plugins.permissions.sameVersionOverwrite.description' : 'plugins.permissions.sameVersionOverwrite.reinstallDescription') }}
+      </NvxInlineNotice>
       <NvxInlineNotice
         v-if="preparedApprovalExpired"
         tone="warning"

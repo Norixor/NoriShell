@@ -15,7 +15,7 @@ members = [
   "crates/telnet-runtime",
   "src-tauri",
 ]
-exclude = ["vendor/russh", "vendor/russh-sftp", "vendor/vnc-rs", "vendor/picky", "vendor/sspi", "vendor/ironrdp-connector", "vendor/ironrdp-session", "vendor/ironrdp-rdpsnd", "vendor/tauri-plugin-updater"]
+exclude = ["vendor/russh", "vendor/russh-sftp", "vendor/vnc-rs", "vendor/picky", "vendor/sspi", "vendor/ironrdp-connector", "vendor/ironrdp-session", "vendor/ironrdp-rdpsnd", "vendor/ironrdp-upstream", "vendor/tauri-plugin-updater"]
 resolver = "2"
 
 [workspace.package]
@@ -65,9 +65,13 @@ zeroize = { version = "1.9.0", features = ["derive"] }
 
 [patch.crates-io]
 tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }
-ironrdp-rdpsnd = { path = "vendor/ironrdp-rdpsnd" }
-ironrdp-session = { path = "vendor/ironrdp-session" }
-ironrdp-connector = { path = "vendor/ironrdp-connector" }
+ironrdp = { path = "vendor/ironrdp-upstream/crates/ironrdp" }
+ironrdp-rdpsnd = { path = "vendor/ironrdp-upstream/crates/ironrdp-rdpsnd" }
+ironrdp-session = { path = "vendor/ironrdp-upstream/crates/ironrdp-session" }
+ironrdp-connector = { path = "vendor/ironrdp-upstream/crates/ironrdp-connector" }
+ironrdp-tls = { path = "vendor/ironrdp-upstream/crates/ironrdp-tls" }
+ironrdp-rdpeudp = { path = "vendor/ironrdp-upstream/crates/ironrdp-rdpeudp" }
+ironrdp-rdpemt = { path = "vendor/ironrdp-upstream/crates/ironrdp-rdpemt" }
 picky = { path = "vendor/picky" }
 sspi = { path = "vendor/sspi" }
 russh = { path = "vendor/russh" }

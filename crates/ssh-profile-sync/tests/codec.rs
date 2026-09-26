@@ -28,6 +28,7 @@ fn sample_bundle() -> PortableBundleV1 {
 
     PortableBundleV1 {
         schema: BundleSchema::V1,
+        selected_categories: None,
         revision: 2,
         preferences: None,
         objects: PortableObjects {
@@ -197,6 +198,10 @@ fn sample_desktop_bundle() -> PortableBundleV1 {
             clipboard_enabled: true,
             audio_playback_enabled: true,
             vnc_protocol_version: norishell_ssh_profile_sync::PortableVncProtocolVersion::Auto,
+            vnc_resolution_mode: Default::default(),
+            rdp_transport_mode: Default::default(),
+            rdp_graphics_mode: Default::default(),
+            rdp_resolution_mode: Default::default(),
         });
     bundle
 }
@@ -337,6 +342,56 @@ fn desktop_profile_validation_matches_runtime_endpoint_and_protocol_limits() {
     invalid_size.objects.desktop_profiles[0].width = 8_192;
     invalid_size.objects.desktop_profiles[0].height = 8_192;
     assert!(invalid_size.validate().is_err());
+}
+
+#[test]
+fn desktop_modes_require_v6_and_old_profiles_keep_defaults() {
+    let mut old = serde_json::to_value(sample_desktop_bundle()).unwrap();
+    let profile = old["objects"]["desktopProfiles"][0]
+        .as_object_mut()
+        .unwrap();
+    for name in [
+        "rdpTransportMode",
+        "rdpGraphicsMode",
+        "rdpResolutionMode",
+        "vncResolutionMode",
+    ] {
+        profile.remove(name);
+    }
+    let restored: PortableBundleV1 = serde_json::from_value(old).unwrap();
+    let desktop = &restored.objects.desktop_profiles[0];
+    assert_eq!(desktop.rdp_transport_mode, PortableRdpTransportMode::Auto);
+    assert_eq!(desktop.rdp_graphics_mode, PortableRdpGraphicsMode::Auto);
+    assert_eq!(
+        desktop.rdp_resolution_mode,
+        PortableRdpResolutionMode::Fixed
+    );
+    assert_eq!(
+        desktop.vnc_resolution_mode,
+        PortableVncResolutionMode::Server
+    );
+
+    let mut changed = restored;
+    changed.objects.desktop_profiles[0].rdp_transport_mode = PortableRdpTransportMode::TcpOnly;
+    changed.objects.desktop_profiles[0].rdp_graphics_mode = PortableRdpGraphicsMode::Bitmap;
+    changed.objects.desktop_profiles[0].rdp_resolution_mode = PortableRdpResolutionMode::Adaptive;
+    assert!(changed.validate().is_err());
+    changed.schema = BundleSchema::V6;
+    changed.validate_current_business_exchange().unwrap();
+    let encoded = canonical_bundle_bytes(&changed).unwrap();
+    assert_eq!(
+        decode_bundle(Zeroizing::new(encoded.to_vec())).unwrap(),
+        changed
+    );
+
+    changed.objects.desktop_profiles[0].protocol = PortableDesktopProtocol::Vnc;
+    assert!(changed.validate().is_err());
+    changed.objects.desktop_profiles[0].rdp_transport_mode = PortableRdpTransportMode::Auto;
+    changed.objects.desktop_profiles[0].rdp_graphics_mode = PortableRdpGraphicsMode::Auto;
+    changed.objects.desktop_profiles[0].rdp_resolution_mode = PortableRdpResolutionMode::Fixed;
+    changed.objects.desktop_profiles[0].vnc_resolution_mode = PortableVncResolutionMode::Adaptive;
+    changed.objects.desktop_profiles[0].audio_playback_enabled = false;
+    changed.validate_current_business_exchange().unwrap();
 }
 
 #[test]
@@ -815,6 +870,7 @@ fn sample_preferences() -> PortablePreferencesV1 {
 fn empty_v4_preferences_bundle() -> PortableBundleV1 {
     PortableBundleV1 {
         schema: BundleSchema::V4,
+        selected_categories: None,
         revision: 2,
         objects: PortableObjects::default(),
         preferences: Some(sample_preferences()),
@@ -857,6 +913,187 @@ fn v5_item_and_preference_times_roundtrip_inside_authenticated_bundle() {
     old = serde_json::from_value(encoded).unwrap();
     assert!(old.update_times.is_empty());
     assert!(old.preference_update_times.is_empty());
+}
+
+fn plugin_binding() -> PluginExchangeBinding {
+    PluginExchangeBinding {
+        plugin_id: "org.example.sync".into(),
+        signer_fingerprint_sha256:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+        profile_id: "primary".into(),
+        revision: 2,
+        base_revision: Some(1),
+        base_etag: Some("etag-base-1".into()),
+    }
+}
+
+#[test]
+fn v6_desktop_and_item_times_roundtrip_through_both_plugin_exchanges() {
+    let mut bundle = sample_desktop_bundle();
+    bundle.schema = BundleSchema::V6;
+    bundle.update_times.push(PortableItemUpdateTime {
+        kind: PortableObjectKind::DesktopProfile,
+        id: bundle.objects.desktop_profiles[0].id,
+        update_time_unix_ms: 1_700_000_000_000,
+    });
+    let canonical = canonical_bundle_bytes(&bundle).expect("v6 canonical bundle");
+    let value: Value = serde_json::from_slice(&canonical).unwrap();
+    assert_eq!(value["schema"], BUNDLE_SCHEMA_V6);
+    assert!(value.get("preferences").is_none());
+    assert!(value.get("preferenceUpdateTimes").is_none());
+    assert_eq!(
+        decode_bundle(Zeroizing::new(canonical.to_vec())).unwrap(),
+        bundle
+    );
+
+    let key = SyncKey::from_bytes([7; 32]);
+    let encoded =
+        create_plugin_exchange_with_key(&bundle, &key, b"opaque vault wrap", &plugin_binding())
+            .expect("v6 vault exchange");
+    let (_, summary) = inspect_plugin_exchange_owner(
+        &encoded,
+        "org.example.sync",
+        &plugin_binding().signer_fingerprint_sha256,
+        "primary",
+    )
+    .unwrap();
+    assert_eq!(summary.schema, BundleSchema::V6);
+    assert_eq!(
+        open_plugin_exchange_with_key(&encoded, &key, &plugin_binding()).unwrap(),
+        bundle
+    );
+
+    let password = RecoveryPassword::new("independent recovery password").unwrap();
+    let encoded = create_plugin_exchange(&bundle, &password, &plugin_binding())
+        .expect("v6 recovery exchange");
+    assert_eq!(
+        inspect_plugin_exchange(&encoded, &plugin_binding())
+            .unwrap()
+            .schema,
+        BundleSchema::V6
+    );
+    assert_eq!(
+        open_plugin_exchange(&encoded, &password, &plugin_binding()).unwrap(),
+        bundle
+    );
+}
+
+#[test]
+fn v6_selected_categories_are_authenticated_and_exclude_other_objects() {
+    let mut bundle = sample_bundle();
+    bundle.schema = BundleSchema::V6;
+    bundle.selected_categories = Some(vec![PortableDataCategory::DesktopProfiles]);
+    assert!(matches!(
+        bundle.validate(),
+        Err(SyncCodecError::InvalidBundle(
+            "exchange contains an unselected category"
+        ))
+    ));
+
+    bundle.objects = PortableObjects::default();
+    bundle.secrets.clear();
+    bundle.skipped_machine_bound.clear();
+    bundle.tombstones.clear();
+    bundle.update_times.clear();
+    let bytes = canonical_bundle_bytes(&bundle).expect("selected V6 bundle");
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["selectedCategories"], json!(["desktopProfiles"]));
+    assert_eq!(
+        decode_bundle(Zeroizing::new(bytes.to_vec())).unwrap(),
+        bundle
+    );
+
+    bundle.selected_categories = Some(vec![
+        PortableDataCategory::DesktopProfiles,
+        PortableDataCategory::Hosts,
+    ]);
+    assert!(matches!(
+        bundle.validate(),
+        Err(SyncCodecError::InvalidBundle("invalid selected categories"))
+    ));
+}
+
+#[test]
+fn v6_reads_legacy_preferences_but_current_writes_reject_them() {
+    let mut legacy = sample_desktop_bundle();
+    legacy.schema = BundleSchema::V5;
+    legacy.preferences = Some(sample_preferences());
+    legacy.update_times.push(PortableItemUpdateTime {
+        kind: PortableObjectKind::Host,
+        id: legacy.objects.hosts[0].id,
+        update_time_unix_ms: 1_700_000_000_000,
+    });
+    legacy
+        .preference_update_times
+        .insert("application".into(), 1_700_000_000_001);
+    let key = SyncKey::from_bytes([7; 32]);
+    let encoded =
+        create_plugin_exchange_with_key(&legacy, &key, b"opaque vault wrap", &plugin_binding())
+            .expect("published v5 exchange");
+    assert_eq!(
+        open_plugin_exchange_with_key(&encoded, &key, &plugin_binding()).unwrap(),
+        legacy
+    );
+    assert!(matches!(
+        open_plugin_exchange_with_key(&encoded, &SyncKey::from_bytes([8; 32]), &plugin_binding()),
+        Err(SyncCodecError::AuthenticationFailed)
+    ));
+
+    let mut v6 = legacy.clone();
+    v6.schema = BundleSchema::V6;
+    v6.validate().expect("published v6 shape remains readable");
+    let v6_encoded =
+        create_plugin_exchange_with_key(&v6, &key, b"opaque vault wrap", &plugin_binding())
+            .expect("historical v6 exchange");
+    assert_eq!(
+        open_plugin_exchange_with_key(&v6_encoded, &key, &plugin_binding()).unwrap(),
+        v6
+    );
+    assert!(v6.validate_current_business_exchange().is_err());
+    v6.preferences = None;
+    assert!(v6.validate().is_err());
+    v6.preference_update_times.clear();
+    v6.validate_current_business_exchange()
+        .expect("v6 without preferences");
+}
+
+#[test]
+fn v6_merge_keeps_desktop_and_item_times_without_preferences() {
+    let mut base = sample_desktop_bundle();
+    base.schema = BundleSchema::V6;
+    base.secrets
+        .retain(|secret| secret.id == id(10) || secret.id == id(14));
+    let local = base.clone();
+    let mut remote = base.clone();
+    remote.objects.desktop_profiles[0].label = "updated desktop".into();
+    remote.update_times.push(PortableItemUpdateTime {
+        kind: PortableObjectKind::DesktopProfile,
+        id: remote.objects.desktop_profiles[0].id,
+        update_time_unix_ms: 1_700_000_000_000,
+    });
+    let BundleMergeOutcome::Merged(merged) =
+        merge_bundles_three_way(&base, &local, &remote, 3).unwrap()
+    else {
+        panic!("v6 merge should succeed")
+    };
+    assert_eq!(merged.schema, BundleSchema::V6);
+    assert_eq!(
+        merged.objects.desktop_profiles,
+        remote.objects.desktop_profiles
+    );
+    assert_eq!(merged.update_times, remote.update_times);
+    assert!(merged.preferences.is_none());
+    assert!(merged.preference_update_times.is_empty());
+
+    let mut legacy = base.clone();
+    legacy.schema = BundleSchema::V5;
+    legacy.preferences = Some(sample_preferences());
+    assert!(matches!(
+        merge_bundles_three_way(&legacy, &local, &remote, 3),
+        Err(SyncCodecError::InvalidBundle(
+            "mixed bundle v6 merge requires projection"
+        ))
+    ));
 }
 
 #[test]

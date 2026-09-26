@@ -156,6 +156,7 @@ impl ServiceDemo {
                         request: PluginNetworkStartRequest {
                             timeout_ms: 10_000,
                             credential: None,
+                            oauth_profile_id: None,
                             operation: PluginNetworkOperation::Http {
                                 method: PluginHttpMethod::Get,
                                 headers: vec![

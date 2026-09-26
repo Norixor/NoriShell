@@ -1,6 +1,6 @@
 # Broker API reference
 
-All **35** methods in protocol **1.13**, each with request/result tables, prerequisites, and deserializable PluginApiCall JSON. Start with [calling the API](../developers/development/calling-api.en.md), then select a method below.
+All **44** methods in protocol **1.13**, each with request/result tables, prerequisites, and deserializable PluginApiCall JSON. Start with [calling the API](../developers/development/calling-api.en.md), then select a method below.
 
 ## Native availability and invocation context
 
@@ -47,6 +47,22 @@ Resources bind the current package, grants, caller owner, and instance generatio
 | [resourceClose](./resourceClose.en.md) | Close an owned resource and trigger its cleanup. | `closed` |
 | [timerStart](./timerStart.en.md) | Create a one-shot or repeating timer. | `timerStarted` |
 | [subscriptionStart](./subscriptionStart.en.md) | Subscribe to metadata changes within the allowed scope. | `subscriptionStarted` |
+
+## Category data
+
+Core API 1.88 declares category data methods. `dataCatalog`, the separately authorized `dataRead`, and protected exchange operations are wired in Core service; native and end-to-end acceptance remains open. The self-host sync plugin selects only hosts, credentials and desktopProfiles.
+
+| Method | Result kind |
+| --- | --- |
+| [dataCatalog](./dataCatalog.en.md) | `dataCatalog` |
+| [dataRead](./dataRead.en.md) | `dataRead` |
+| [dataSnapshot](./dataSnapshot.en.md) | `dataSnapshot` |
+| [dataInspect](./dataInspect.en.md) | `dataInspect` |
+| [dataCompose](./dataCompose.en.md) | `dataCompose` |
+| [dataApply](./dataApply.en.md) | `dataApply` |
+| [dataExport](./dataExport.en.md) | `dataExport` |
+| [dataCheckpoint](./dataCheckpoint.en.md) | `dataCheckpoint` |
+| [dataRelease](./dataRelease.en.md) | `dataRelease` |
 
 ## Network
 

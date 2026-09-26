@@ -37,6 +37,10 @@ pub enum PluginPlatformError {
     ExtractionLimitExceeded,
     #[error("plugin manifest is invalid or incompatible")]
     ManifestMismatch,
+    #[error("plugin requires an incompatible Core API version")]
+    CoreApiIncompatible,
+    #[error("plugin requires a newer application version")]
+    AppVersionIncompatible,
     #[error("plugin settings schema is invalid")]
     InvalidSettingsSchema,
     #[error("plugin settings values are invalid")]

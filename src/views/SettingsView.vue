@@ -62,6 +62,8 @@ import { requestSecureVault, type SecureVaultMode } from "../core-api/secure-vau
 import type { VaultStatus } from "../core-api/generated/core-api";
 import { resolveLocale, type LocalePreference } from "../locales";
 import { useTipsStore } from "../stores/tips";
+import { applicationPreferenceFailure } from "../core-api/application-preferences";
+import { useRouteReveal } from "../routeReveal";
 import {
   useUiStore,
   type NewTerminalBehavior,
@@ -95,6 +97,7 @@ const { t, te } = useI18n();
 const route = useRoute();
 const ui = useUiStore();
 const tips = useTipsStore();
+const revealRoute = useRouteReveal();
 const nativeTerminal = useNativeTerminalStore();
 const appUpdate = useAppUpdateStore();
 
@@ -118,12 +121,13 @@ const enhancementSections = [
 ];
 const highlightHosts = ref<{ hostId: string; label: string }[]>([]);
 const highlightHostsFailed = ref(false);
+let initialHighlightLoad: Promise<void> | null = null;
 async function loadHighlightHosts() {
   highlightHostsFailed.value = false;
   try { highlightHosts.value = (await listHostCatalog()).map(({ host }) => ({ hostId: host.hostId, label: host.label || host.address })); }
   catch { highlightHostsFailed.value = true; }
 }
-watch(activeSection, (section) => { if (section === "highlights") void loadHighlightHosts(); });
+watch(activeSection, (section) => { if (section === "highlights") initialHighlightLoad = loadHighlightHosts(); });
 watch(() => route.query.section, (section) => {
   if (typeof section === "string" && ["appearance", "application", "terminal", "vault", "knownHosts", "identities", "enhancements", "highlights", "shortcuts", "files", "interaction", "desktop", "transfer", "about"].includes(section)) activeSection.value = section as SettingsSection;
 }, { immediate: true });
@@ -131,8 +135,14 @@ watch(() => route.query.section, (section) => {
 const uiZoomOptions = UI_ZOOM_LEVELS.map((value) => ({ value: String(value), label: `${value}%` }));
 
 async function setUiZoom(value: string) {
-  if (await ui.setUiZoom(Number(value))) return;
-  tips.show({ scope: "settings-zoom", tone: "error", title: t("sshSettings.applicationPreferences.zoomFailed") });
+  try {
+    if (await ui.setUiZoom(Number(value))) return;
+    tips.show({ scope: "settings-zoom", tone: "error", title: t("sshSettings.applicationPreferences.zoomFailed") });
+  } catch (error) { showPreferenceError(error); }
+}
+
+function showPreferenceError(error: unknown) {
+  tips.show({ scope: "settings-preferences", tone: "error", title: t(`applicationPreferenceErrors.${applicationPreferenceFailure(error)}`) });
 }
 
 const localeOptions = computed(() => [
@@ -339,40 +349,50 @@ const customErrorMessage = computed(() => {
 
 async function setLocale(value: string) {
   const locale = value as LocalePreference;
+  const previous = ui.localePreference;
   try {
     await setPluginLocale(resolveLocale(locale));
-    ui.setLocale(locale);
-  } catch {
+    if (!await ui.setLocale(locale)) throw new Error("preference save failed");
+  } catch (error) {
+    await setPluginLocale(resolveLocale(previous)).catch(() => {});
     tips.show({
       tone: "error",
-      title: t("sshSettings.applicationPreferences.languageChangeFailed"),
+      title: applicationPreferenceFailure(error) === "unknown"
+        ? t("sshSettings.applicationPreferences.languageChangeFailed")
+        : t(`applicationPreferenceErrors.${applicationPreferenceFailure(error)}`),
     });
   }
 }
 
+async function saveApplicationPreference(operation: () => Promise<boolean>) {
+  try {
+    if (!await operation()) showPreferenceError(null);
+  } catch (error) { showPreferenceError(error); }
+}
+
 function setTerminalStartupBehavior(value: string) {
-  ui.setTerminalStartupBehavior(value as TerminalStartupBehavior);
+  void saveApplicationPreference(() => ui.setTerminalStartupBehavior(value as TerminalStartupBehavior));
 }
 
 function setNewTerminalBehavior(value: string) {
-  ui.setNewTerminalBehavior(value as NewTerminalBehavior);
+  void saveApplicationPreference(() => ui.setNewTerminalBehavior(value as NewTerminalBehavior));
 }
 
 function setSinglePaneTabCloseBehavior(value: string) {
-  ui.setSinglePaneTabCloseBehavior(value as SinglePaneTabCloseBehavior);
+  void saveApplicationPreference(() => ui.setSinglePaneTabCloseBehavior(value as SinglePaneTabCloseBehavior));
 }
 
 function selectTerminalScheme(mode: TerminalThemeMode) {
-  ui.setTerminalThemeMode(mode);
+  void saveApplicationPreference(() => ui.setTerminalThemeMode(mode));
 }
 
 function setTerminalFontFamily(value: string) {
-  ui.setTerminalFontFamily(value);
+  void saveApplicationPreference(() => ui.setTerminalFontFamily(value));
 }
 
 function updateTerminalFontSize(value: string) {
   terminalFontSizeDraft.value = value;
-  if (!terminalFontSizeInvalid.value) ui.setTerminalFontSize(value);
+  if (!terminalFontSizeInvalid.value) void saveApplicationPreference(() => ui.setTerminalFontSize(value));
 }
 
 function restoreTerminalFontSizeDraft() {
@@ -381,7 +401,7 @@ function restoreTerminalFontSizeDraft() {
 
 function updateTerminalLineHeight(value: string) {
   terminalLineHeightDraft.value = value;
-  if (!terminalLineHeightInvalid.value) ui.setTerminalLineHeight(value);
+  if (!terminalLineHeightInvalid.value) void saveApplicationPreference(() => ui.setTerminalLineHeight(value));
 }
 
 function restoreTerminalLineHeightDraft() {
@@ -390,7 +410,7 @@ function restoreTerminalLineHeightDraft() {
 
 function updateTerminalLetterSpacing(value: string) {
   terminalLetterSpacingDraft.value = value;
-  if (!terminalLetterSpacingInvalid.value) ui.setTerminalLetterSpacing(value);
+  if (!terminalLetterSpacingInvalid.value) void saveApplicationPreference(() => ui.setTerminalLetterSpacing(value));
 }
 
 function restoreTerminalLetterSpacingDraft() {
@@ -404,19 +424,24 @@ onMounted(() => window.addEventListener("norishell:vault-changed", refreshVaultA
 onBeforeUnmount(() => window.removeEventListener("norishell:vault-changed", refreshVaultAfterNativeChange));
 
 onMounted(async () => {
-  const [fonts, status] = await Promise.all([
-    detectInstalledTerminalFonts(),
-    fetchVaultStatus().catch(() => null),
-  ]);
-  installedTerminalFonts.value = fonts;
-  vaultStatus.value = status;
-  vaultStatusLoading.value = false;
-  terminalFontsLoading.value = false;
-  if (
-    ui.terminalFontFamily
-    && !installedTerminalFonts.value.includes(ui.terminalFontFamily)
-  ) {
-    ui.setTerminalFontFamily("");
+  try {
+    const [fonts, status] = await Promise.all([
+      detectInstalledTerminalFonts().catch(() => null),
+      fetchVaultStatus().catch(() => null),
+    ]);
+    installedTerminalFonts.value = fonts ?? [];
+    vaultStatus.value = status;
+    if (activeSection.value === "highlights") await (initialHighlightLoad ?? loadHighlightHosts());
+    if (
+      fonts && ui.terminalFontFamily
+      && !installedTerminalFonts.value.includes(ui.terminalFontFamily)
+    ) {
+      void saveApplicationPreference(() => ui.setTerminalFontFamily(""));
+    }
+  } finally {
+    vaultStatusLoading.value = false;
+    terminalFontsLoading.value = false;
+    revealRoute();
   }
 });
 
@@ -533,7 +558,7 @@ function colorInputValue(key: TerminalColorKey) {
   return isHexColor(customPalette.value[key]) ? customPalette.value[key] : "#000000";
 }
 
-function saveCustomScheme() {
+async function saveCustomScheme() {
   if (!customName.value.trim()) {
     customError.value = "name";
     return;
@@ -543,7 +568,7 @@ function saveCustomScheme() {
     customError.value = "colors";
     return;
   }
-  if (!ui.saveCustomTerminalPalette(customName.value, parsedPalette)) {
+  if (!await ui.saveCustomTerminalPalette(customName.value, parsedPalette)) {
     customError.value = "storage";
     return;
   }
@@ -1003,7 +1028,7 @@ function saveCustomScheme() {
                     :model-value="String(ui.terminalFontWeight)"
                     :options="terminalFontWeightOptions"
                     :aria-label="t('sshSettings.terminalAppearance.typography.fontWeight')"
-                    @update:model-value="ui.setTerminalFontWeight"
+                    @update:model-value="saveApplicationPreference(() => ui.setTerminalFontWeight($event))"
                   />
                 </NvxField>
                 <NvxField :label="t('sshSettings.terminalAppearance.typography.boldFontWeight')">
@@ -1011,7 +1036,7 @@ function saveCustomScheme() {
                     :model-value="String(ui.terminalBoldFontWeight)"
                     :options="terminalFontWeightOptions"
                     :aria-label="t('sshSettings.terminalAppearance.typography.boldFontWeight')"
-                    @update:model-value="ui.setTerminalBoldFontWeight"
+                    @update:model-value="saveApplicationPreference(() => ui.setTerminalBoldFontWeight($event))"
                   />
                 </NvxField>
                 <NvxField
@@ -1053,13 +1078,13 @@ function saveCustomScheme() {
                     :model-value="ui.terminalCursorStyle"
                     :options="terminalCursorStyleOptions"
                     :aria-label="t('sshSettings.terminalAppearance.typography.cursorStyle')"
-                    @update:model-value="ui.setTerminalCursorStyle($event as TerminalCursorStyle)"
+                    @update:model-value="saveApplicationPreference(() => ui.setTerminalCursorStyle($event as TerminalCursorStyle))"
                   />
                 </NvxField>
                 <NvxField :label="t('sshSettings.terminalAppearance.typography.cursorBlink')">
                   <NvxCheckbox
                     :model-value="ui.terminalCursorBlink"
-                    @update:model-value="ui.setTerminalCursorBlink"
+                    @update:model-value="saveApplicationPreference(() => ui.setTerminalCursorBlink($event))"
                   >
                     {{ t("sshSettings.terminalAppearance.typography.cursorBlinkEnabled") }}
                   </NvxCheckbox>

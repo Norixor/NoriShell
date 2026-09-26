@@ -25,9 +25,11 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`networkDomain`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`networkDomain`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
-Core 固定解析后的目标并执行受保护授权；请求不能带解析 IP、代理或授权标记。credential 是可选的凭据 handle/revision 引用。返回 handle 后读取 network 事件中的 opened、httpResponse、data、closed 或 error。 endpoint 最多 2048 字节，timeoutMs 为 100–120000。
+Core 固定解析后的目标并执行受保护授权；请求不能带解析 IP、代理或授权标记。选择“记住相同操作”后，同一插件访问同一协议、主机、端口及解析地址集合时可复用网络授权，不因路径、方法、请求内容或页面动作变化再次询问；更换目标需重新授权。每次仍校验请求和凭据权限。credential 是可选的凭据 handle/revision 引用。返回 handle 后读取 network 事件中的 opened、httpResponse、data、closed 或 error。 endpoint 最多 2048 字节，timeoutMs 为 100–120000。
+
+`request.oauthProfileId` 请求 Core 为冻结且已授权的来源注入当前 profile 的 OAuth bearer，不能与 `credential` 同时使用。加密同步选择 `operation.kind="httpExchange"`，提供 `profileId`、可选 Core `bodyBlobHandle` 和有界 `maxResponseBytes`。插件选择 method 与 ETag/CAS header；Core 保存 body，经 `resourceEvents` 返回 `httpExchangeCompleted`。取得启动句柄不证明远端已写入。此桥接仍在运行接线中。
 
 ## 调用示例
 

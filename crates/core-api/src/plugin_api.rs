@@ -26,6 +26,31 @@ pub struct PluginApiCall {
     deny_unknown_fields
 )]
 pub enum PluginApiOperation {
+    DataCatalog {},
+    DataRead {
+        request: crate::PluginDataReadRequest,
+    },
+    DataSnapshot {
+        request: crate::PluginDataSnapshotRequest,
+    },
+    DataInspect {
+        request: crate::PluginDataInspectRequest,
+    },
+    DataCompose {
+        request: crate::PluginDataComposeRequest,
+    },
+    DataApply {
+        request: crate::PluginDataApplyRequest,
+    },
+    DataExport {
+        request: crate::PluginDataExportRequest,
+    },
+    DataCheckpoint {
+        request: crate::PluginDataCheckpointRequest,
+    },
+    DataRelease {
+        request: crate::PluginDataReleaseRequest,
+    },
     AppRegister {
         registration: crate::PluginAppRegistration,
     },
@@ -95,6 +120,9 @@ pub enum PluginApiOperation {
     ResourceEvents {
         handle: String,
         limit: u16,
+        /// Wait for a newly queued event, bounded by Core. Zero polls immediately.
+        #[serde(default)]
+        wait_ms: u32,
     },
     /// Core turns this untrusted request into one frozen endpoint and a protected approval before
     /// starting any socket. It never accepts guest-supplied resolved addresses or authority.
@@ -176,6 +204,46 @@ pub enum PluginApiOutcome {
     deny_unknown_fields
 )]
 pub enum PluginApiValue {
+    DataCatalog {
+        catalog: crate::PluginDataCatalog,
+    },
+    DataRead {
+        result: crate::PluginDataReadResult,
+    },
+    DataSnapshot {
+        snapshot_handle: String,
+        key_pending: bool,
+        local_counts: crate::PluginDataLocalCounts,
+        objects: Vec<crate::PluginDataObjectDescriptor>,
+    },
+    DataInspect {
+        inspection_handle: String,
+        objects: Vec<crate::PluginDataObjectDescriptor>,
+        remote_revision: u64,
+        etag: String,
+        migration_required: bool,
+        excluded_categories: Vec<crate::PluginDataCategory>,
+    },
+    DataCompose {
+        composed_handle: String,
+        objects: Vec<crate::PluginDataObjectDescriptor>,
+    },
+    DataApply {
+        apply_receipt_handle: String,
+    },
+    DataExport {
+        export_handle: String,
+        blob_handle: String,
+        revision: u64,
+        idempotency_key: String,
+        content_type: String,
+        objects: Vec<crate::PluginDataObjectDescriptor>,
+    },
+    DataCheckpoint {
+        #[ts(type = "number")]
+        synced_at_unix_ms: i64,
+    },
+    DataRelease {},
     AppAccepted {},
     Task {
         snapshot: crate::PluginWorkflowTaskSnapshot,
@@ -322,6 +390,22 @@ pub enum PluginApiErrorCode {
     VaultMissing,
     VaultLocked,
     VaultRequiresReload,
+    AuthorizationExpired,
+    AccountNotConnected,
+    NetworkUnavailable,
+    LocalStateChanged,
+    OwnerConflict,
+    KeyBindingConflict,
+    RevisionExhausted,
+    RestoreConflict,
+    MergeInvalid,
+    RemoteRequestRejected,
+    RemoteDataInvalid,
+    RemoteFormatUnsupported,
+    RecoveryAuthenticationFailed,
+    RecoveryActionExpired,
+    LocalDataInvalid,
+    LocalKeyUnavailable,
     Unsupported,
     Revoked,
     NotFound,

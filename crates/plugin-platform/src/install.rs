@@ -61,7 +61,7 @@ impl PluginInstaller {
     pub fn new(root: impl AsRef<Path>, limits: PackageLimits) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
-        reject_symlink(&root)?;
+        reject_directory(&root)?;
         sync_directory(&root)?;
         Ok(Self { root, limits })
     }
@@ -76,9 +76,10 @@ impl PluginInstaller {
         let version = Version::parse(&inspected.manifest.version)
             .map_err(|_| PluginPlatformError::ManifestMismatch)?
             .to_string();
+        reject_directory(&self.root)?;
         let staging_root = self.root.join(".staging");
         fs::create_dir_all(&staging_root)?;
-        reject_symlink(&staging_root)?;
+        reject_directory(&staging_root)?;
         let path = staging_root.join(format!(
             "{}-{}-{}",
             plugin_id.as_str(),
@@ -202,6 +203,212 @@ impl PluginInstaller {
 
     pub fn read_active_version(&self, plugin_id: &PluginId) -> Result<Option<String>> {
         read_optional_pointer(&self.root.join(plugin_id.as_str()).join(ACTIVE_POINTER))
+    }
+
+    pub fn read_active_package_sha256(&self, plugin_id: &PluginId) -> Result<Option<String>> {
+        reject_directory(&self.root)?;
+        let plugin_root = self.root.join(plugin_id.as_str());
+        match fs::symlink_metadata(&plugin_root) {
+            Ok(_) => {
+                reject_directory(&plugin_root)?;
+                reject_directory(&plugin_root.join("versions"))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let Some(version) = self.read_active_version(plugin_id)? else {
+            return Ok(None);
+        };
+        let version_root = plugin_root.join("versions").join(version);
+        match fs::symlink_metadata(&version_root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        reject_tree_symlinks(&version_root)?;
+        read_lower_hex_marker(&version_root.join(HASH_MARKER)).map(Some)
+    }
+
+    fn replacement_backup(
+        &self,
+        plugin_id: &PluginId,
+        operation_id: &PluginOperationId,
+    ) -> PathBuf {
+        self.root.join(".replaced").join(format!(
+            "{}-{}",
+            plugin_id.as_str(),
+            operation_id.as_str()
+        ))
+    }
+
+    pub fn replacement_backup_exists(
+        &self,
+        plugin_id: &PluginId,
+        operation_id: &PluginOperationId,
+    ) -> Result<bool> {
+        reject_directory(&self.root)?;
+        reject_optional_directory(&self.root.join(".replaced"))?;
+        let backup = self.replacement_backup(plugin_id, operation_id);
+        match fs::symlink_metadata(&backup) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        reject_symlink(&backup)?;
+        Ok(true)
+    }
+
+    /// A same-version replacement keeps the old immutable directory until the
+    /// SQLite commit is known. The operation id makes crash recovery unambiguous.
+    pub fn activate_replacement(
+        &self,
+        staged: StagedPlugin,
+        expected_old_hash: &str,
+        operation_id: &PluginOperationId,
+    ) -> Result<ActivationResult> {
+        reject_directory(&self.root)?;
+        let staging_root = self.root.join(".staging");
+        reject_directory(&staging_root)?;
+        if staged.path.parent() != Some(staging_root.as_path()) {
+            return Err(PluginPlatformError::InstallConflict);
+        }
+        let plugin_root = self.root.join(staged.plugin_id.as_str());
+        reject_directory(&plugin_root)?;
+        let versions = plugin_root.join("versions");
+        reject_directory(&versions)?;
+        if !lower_hex_64(expected_old_hash)
+            || self.read_active_version(&staged.plugin_id)?.as_deref()
+                != Some(staged.version.as_str())
+            || self
+                .read_active_package_sha256(&staged.plugin_id)?
+                .as_deref()
+                != Some(expected_old_hash)
+            || expected_old_hash == lower_hex(&staged.package_sha256)
+        {
+            return Err(PluginPlatformError::InstallConflict);
+        }
+        reject_tree_symlinks(&staged.path)?;
+        if read_lower_hex_marker(&staged.path.join(HASH_MARKER))?
+            != lower_hex(&staged.package_sha256)
+        {
+            return Err(PluginPlatformError::InstallConflict);
+        }
+        let version_directory = versions.join(&staged.version);
+        let backup_root = self.root.join(".replaced");
+        fs::create_dir_all(&backup_root)?;
+        reject_directory(&backup_root)?;
+        let backup = self.replacement_backup(&staged.plugin_id, operation_id);
+        if path_exists_no_follow(&backup)? {
+            return Err(PluginPlatformError::InstallConflict);
+        }
+        fs::rename(&version_directory, &backup)?;
+        if sync_directory(&versions).is_err() || sync_directory(&backup_root).is_err() {
+            return Err(PluginPlatformError::InstallCommitUncertain);
+        }
+        fs::rename(&staged.path, &version_directory)?;
+        if sync_directory(&versions).is_err() {
+            return Err(PluginPlatformError::InstallCommitUncertain);
+        }
+        Ok(ActivationResult {
+            plugin_id: staged.plugin_id,
+            previous_version: Some(staged.version.clone()),
+            active_version: staged.version,
+            version_directory,
+        })
+    }
+
+    pub fn restore_replacement(
+        &self,
+        plugin_id: &PluginId,
+        version: &str,
+        old_hash: &str,
+        candidate_hash: &str,
+        operation_id: &PluginOperationId,
+    ) -> Result<()> {
+        reject_directory(&self.root)?;
+        reject_directory(&self.root.join(plugin_id.as_str()))?;
+        let versions = self.root.join(plugin_id.as_str()).join("versions");
+        reject_directory(&versions)?;
+        reject_optional_directory(&self.root.join(".replaced"))?;
+        if !lower_hex_64(old_hash)
+            || !lower_hex_64(candidate_hash)
+            || self.read_active_version(plugin_id)?.as_deref() != Some(version)
+        {
+            return Err(PluginPlatformError::InstallConflict);
+        }
+        let live = versions.join(version);
+        let backup = self.replacement_backup(plugin_id, operation_id);
+        let discarded = self
+            .root
+            .join(".replaced")
+            .join(format!("{}-discard", operation_id.as_str()));
+        if !path_exists_no_follow(&backup)? {
+            if self.read_active_package_sha256(plugin_id)?.as_deref() != Some(old_hash) {
+                return Err(PluginPlatformError::InstallConflict);
+            }
+            if path_exists_no_follow(&discarded)? {
+                reject_tree_symlinks(&discarded)?;
+                if read_lower_hex_marker(&discarded.join(HASH_MARKER))? != candidate_hash {
+                    return Err(PluginPlatformError::InstallConflict);
+                }
+                fs::remove_dir_all(&discarded)?;
+                sync_directory(&self.root.join(".replaced"))
+                    .map_err(|_| PluginPlatformError::InstallCommitUncertain)?;
+            }
+            return Ok(());
+        }
+        reject_tree_symlinks(&backup)?;
+        if read_lower_hex_marker(&backup.join(HASH_MARKER))? != old_hash {
+            return Err(PluginPlatformError::InstallConflict);
+        }
+        if path_exists_no_follow(&live)? {
+            reject_tree_symlinks(&live)?;
+            if read_lower_hex_marker(&live.join(HASH_MARKER))? != candidate_hash {
+                return Err(PluginPlatformError::InstallConflict);
+            }
+            if path_exists_no_follow(&discarded)? {
+                return Err(PluginPlatformError::InstallConflict);
+            }
+            fs::rename(&live, &discarded)?;
+            sync_directory(&versions).map_err(|_| PluginPlatformError::InstallCommitUncertain)?;
+        }
+        fs::rename(&backup, &live)?;
+        sync_directory(&versions).map_err(|_| PluginPlatformError::InstallCommitUncertain)?;
+        sync_directory(&self.root.join(".replaced"))
+            .map_err(|_| PluginPlatformError::InstallCommitUncertain)?;
+        if path_exists_no_follow(&discarded)? {
+            reject_tree_symlinks(&discarded)?;
+            fs::remove_dir_all(&discarded)?;
+            sync_directory(&self.root.join(".replaced"))
+                .map_err(|_| PluginPlatformError::InstallCommitUncertain)?;
+        }
+        Ok(())
+    }
+
+    pub fn finalize_replacement(
+        &self,
+        plugin_id: &PluginId,
+        version: &str,
+        candidate_hash: &str,
+        operation_id: &PluginOperationId,
+    ) -> Result<()> {
+        reject_directory(&self.root)?;
+        reject_directory(&self.root.join(plugin_id.as_str()))?;
+        reject_directory(&self.root.join(plugin_id.as_str()).join("versions"))?;
+        reject_optional_directory(&self.root.join(".replaced"))?;
+        if self.read_active_version(plugin_id)?.as_deref() != Some(version)
+            || self.read_active_package_sha256(plugin_id)?.as_deref() != Some(candidate_hash)
+        {
+            return Err(PluginPlatformError::InstallConflict);
+        }
+        let backup = self.replacement_backup(plugin_id, operation_id);
+        if path_exists_no_follow(&backup)? {
+            reject_tree_symlinks(&backup)?;
+            fs::remove_dir_all(&backup)?;
+            sync_directory(&self.root.join(".replaced"))
+                .map_err(|_| PluginPlatformError::InstallCommitUncertain)?;
+        }
+        Ok(())
     }
 
     /// Restores (or clears) the active pointer with compare-and-swap semantics.
@@ -874,6 +1081,31 @@ fn reject_symlink(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn reject_directory(path: &Path) -> Result<()> {
+    reject_symlink(path)?;
+    reject_reparse(path)?;
+    if !fs::symlink_metadata(path)?.is_dir() {
+        return Err(PluginPlatformError::InstallConflict);
+    }
+    Ok(())
+}
+
+fn reject_optional_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => reject_directory(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn path_exists_no_follow(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn reject_reparse(path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
@@ -994,6 +1226,25 @@ mod windows_directory_tests {
         std::fs::write(&file, b"fixture").unwrap();
         assert!(super::sync_directory(&file).is_err());
     }
+
+    #[test]
+    fn staging_junction_is_not_an_install_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("plugins");
+        let external = directory.path().join("external");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        let junction = root.join(".staging");
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&external)
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "junction fixture creation failed");
+        assert!(super::reject_directory(&root).is_ok());
+        assert!(super::reject_directory(&junction).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1010,11 +1261,193 @@ mod tests {
     use sha2::{Digest, Sha256};
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-    use super::PluginInstaller;
+    use super::{ACTIVE_POINTER, HASH_MARKER, PluginInstaller, StagedPlugin};
     use crate::{
         InspectedFile, InspectedPackage, PackageLimits, PluginManifest, inspect_local_package,
         inspect_plugin_protocols,
     };
+
+    #[test]
+    fn same_version_replacement_keeps_recoverable_old_directory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let installer =
+            PluginInstaller::new(directory.path().join("plugins"), PackageLimits::default())
+                .expect("installer");
+        let plugin_id = PluginId::parse("com.norishell.replacement").expect("plugin id");
+        let plugin_root = installer.root.join(plugin_id.as_str());
+        let versions = plugin_root.join("versions");
+        std::fs::create_dir_all(&versions).expect("versions");
+        std::fs::write(plugin_root.join(ACTIVE_POINTER), b"1.0.0").expect("pointer");
+        let old_hash = "a".repeat(64);
+        let new_hash = "b".repeat(64);
+        let live = versions.join("1.0.0");
+        std::fs::create_dir(&live).expect("old version");
+        std::fs::write(live.join(HASH_MARKER), &old_hash).expect("old hash");
+        std::fs::write(live.join("plugin.wasm"), b"old").expect("old code");
+
+        let operation = PluginOperationId::new();
+        let staging_root = installer.root.join(".staging");
+        std::fs::create_dir(&staging_root).expect("staging root");
+        let staged_path = staging_root.join("candidate");
+        std::fs::create_dir(&staged_path).expect("candidate");
+        std::fs::write(staged_path.join(HASH_MARKER), &new_hash).expect("new hash");
+        std::fs::write(staged_path.join("plugin.wasm"), b"new").expect("new code");
+        let staged = StagedPlugin {
+            plugin_id: plugin_id.clone(),
+            version: "1.0.0".to_owned(),
+            package_sha256: [0xbb; 32],
+            path: staged_path,
+        };
+        installer
+            .activate_replacement(staged, &old_hash, &operation)
+            .expect("replace");
+        assert_eq!(
+            installer.read_active_package_sha256(&plugin_id).unwrap(),
+            Some(new_hash.clone())
+        );
+        assert!(
+            installer
+                .replacement_backup_exists(&plugin_id, &operation)
+                .unwrap()
+        );
+        installer
+            .restore_replacement(&plugin_id, "1.0.0", &old_hash, &new_hash, &operation)
+            .expect("restore after failed database commit");
+        assert_eq!(
+            installer.read_active_package_sha256(&plugin_id).unwrap(),
+            Some(old_hash)
+        );
+        assert_eq!(std::fs::read(live.join("plugin.wasm")).unwrap(), b"old");
+        assert!(
+            !installer
+                .replacement_backup_exists(&plugin_id, &operation)
+                .unwrap()
+        );
+
+        let interrupted_operation = PluginOperationId::new();
+        let backup = installer.replacement_backup(&plugin_id, &interrupted_operation);
+        std::fs::rename(&live, &backup).expect("simulate interrupted directory switch");
+        installer
+            .restore_replacement(
+                &plugin_id,
+                "1.0.0",
+                &"a".repeat(64),
+                &new_hash,
+                &interrupted_operation,
+            )
+            .expect("restore when candidate directory was not installed");
+        assert_eq!(std::fs::read(live.join("plugin.wasm")).unwrap(), b"old");
+
+        let final_operation = PluginOperationId::new();
+        let final_staged_path = staging_root.join("final-candidate");
+        std::fs::create_dir(&final_staged_path).expect("final candidate");
+        std::fs::write(final_staged_path.join(HASH_MARKER), &new_hash).expect("hash");
+        let final_staged = StagedPlugin {
+            plugin_id: plugin_id.clone(),
+            version: "1.0.0".to_owned(),
+            package_sha256: [0xbb; 32],
+            path: final_staged_path,
+        };
+        installer
+            .activate_replacement(final_staged, &"a".repeat(64), &final_operation)
+            .expect("activate final candidate");
+        installer
+            .finalize_replacement(&plugin_id, "1.0.0", &new_hash, &final_operation)
+            .expect("finalize committed replacement");
+        assert!(
+            !installer
+                .replacement_backup_exists(&plugin_id, &final_operation)
+                .unwrap()
+        );
+        assert_eq!(
+            installer.read_active_package_sha256(&plugin_id).unwrap(),
+            Some(new_hash)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_rejects_linked_ancestors_before_touching_external_tree() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let installer =
+            PluginInstaller::new(directory.path().join("plugins"), PackageLimits::default())
+                .expect("installer");
+        let plugin_id = PluginId::parse("com.norishell.linked").expect("plugin id");
+        let external = directory.path().join("external");
+        std::fs::create_dir(&external).expect("external");
+        std::fs::write(external.join("sentinel"), b"unchanged").expect("sentinel");
+        let plugin_root = installer.root.join(plugin_id.as_str());
+        symlink(&external, &plugin_root).expect("linked plugin root");
+        assert!(installer.read_active_package_sha256(&plugin_id).is_err());
+        std::fs::remove_file(&plugin_root).expect("remove link");
+
+        let versions = plugin_root.join("versions");
+        std::fs::create_dir_all(&versions).expect("versions");
+        std::fs::write(plugin_root.join(ACTIVE_POINTER), b"1.0.0").expect("pointer");
+        let live = versions.join("1.0.0");
+        std::fs::create_dir(&live).expect("live");
+        std::fs::write(live.join(HASH_MARKER), "a".repeat(64)).expect("old hash");
+        let staging_root = installer.root.join(".staging");
+        symlink(&external, &staging_root).expect("linked staging root");
+        let staging = staging_root.join("candidate");
+        assert!(
+            installer
+                .activate_replacement(
+                    StagedPlugin {
+                        plugin_id: plugin_id.clone(),
+                        version: "1.0.0".to_owned(),
+                        package_sha256: [0xbb; 32],
+                        path: staging.clone(),
+                    },
+                    &"a".repeat(64),
+                    &PluginOperationId::new(),
+                )
+                .is_err()
+        );
+        std::fs::remove_file(&staging_root).expect("remove staging link");
+        std::fs::create_dir(&staging_root).expect("staging root");
+        std::fs::create_dir(&staging).expect("staging");
+        std::fs::write(staging.join(HASH_MARKER), "b".repeat(64)).expect("new hash");
+        symlink(&external, installer.root.join(".replaced")).expect("linked backup root");
+        let operation = PluginOperationId::new();
+        let staged = StagedPlugin {
+            plugin_id: plugin_id.clone(),
+            version: "1.0.0".to_owned(),
+            package_sha256: [0xbb; 32],
+            path: staging,
+        };
+        assert!(
+            installer
+                .activate_replacement(staged, &"a".repeat(64), &operation)
+                .is_err()
+        );
+        assert!(
+            installer
+                .restore_replacement(
+                    &plugin_id,
+                    "1.0.0",
+                    &"a".repeat(64),
+                    &"b".repeat(64),
+                    &operation,
+                )
+                .is_err()
+        );
+        assert!(
+            installer
+                .finalize_replacement(&plugin_id, "1.0.0", &"a".repeat(64), &operation,)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(external.join("sentinel")).unwrap(),
+            b"unchanged"
+        );
+        assert_eq!(
+            std::fs::read(live.join(HASH_MARKER)).unwrap(),
+            "a".repeat(64).as_bytes()
+        );
+    }
 
     #[test]
     fn immutable_version_and_active_pointer_use_compare_and_swap() {
@@ -1037,6 +1470,7 @@ mod tests {
                 PluginCapability::UiWebviewIsolated,
             ],
             minimum_app_version: "0.1.0".to_owned(),
+            minimum_core_api_version: None,
         };
         let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest");
         let file = File::create(&package_path).expect("package");
@@ -1274,6 +1708,26 @@ mod tests {
                 )
                 .is_err()
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let external = directory.path().join("external-staging");
+            std::fs::create_dir(&external).expect("external staging");
+            std::fs::write(external.join("sentinel"), b"unchanged").expect("sentinel");
+            let staging_root = installer.root.join(".staging");
+            std::fs::remove_dir_all(&staging_root).expect("clear staging");
+            symlink(&external, &staging_root).expect("linked staging");
+            assert!(
+                installer
+                    .stage(&package_path, &inspected, &PluginOperationId::new())
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(external.join("sentinel")).expect("untouched sentinel"),
+                b"unchanged"
+            );
+        }
     }
 
     fn workspace_root() -> PathBuf {

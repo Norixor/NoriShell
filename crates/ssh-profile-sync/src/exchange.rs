@@ -134,7 +134,7 @@ pub fn create_plugin_exchange(
     binding.validate()?;
     if !matches!(
         bundle.schema,
-        BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5
+        BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5 | BundleSchema::V6
     ) || bundle.revision != binding.revision
     {
         return Err(SyncCodecError::BindingMismatch);
@@ -183,7 +183,7 @@ pub fn create_plugin_exchange_with_key(
     binding.validate()?;
     if !matches!(
         bundle.schema,
-        BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5
+        BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5 | BundleSchema::V6
     ) || bundle.revision != binding.revision
         || vault_key_envelope.is_empty()
         || vault_key_envelope.len() > 64 * 1024
@@ -415,9 +415,11 @@ fn authenticated_object_binding(
     match schema {
         // Older authenticated exchanges remain readable, while current writes
         // bind the current schema into the AEAD associated data.
-        BundleSchema::V2 | BundleSchema::V3 | BundleSchema::V4 | BundleSchema::V5 => {
-            Ok(object_binding_for_schema(binding, key_version, schema))
-        }
+        BundleSchema::V2
+        | BundleSchema::V3
+        | BundleSchema::V4
+        | BundleSchema::V5
+        | BundleSchema::V6 => Ok(object_binding_for_schema(binding, key_version, schema)),
         BundleSchema::V1 => Err(SyncCodecError::BindingMismatch),
     }
 }
@@ -515,6 +517,7 @@ mod tests {
     fn empty_bundle() -> PortableBundleV1 {
         PortableBundleV1 {
             schema: crate::BundleSchema::V3,
+            selected_categories: None,
             revision: 1,
             objects: crate::PortableObjects::default(),
             preferences: None,

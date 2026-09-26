@@ -1,7 +1,9 @@
 //! Tauri adapters validate callers, lifecycle, and input permissions; they contain no protocol implementation.
 use super::DesktopService;
 use norishell_core_api::*;
-use norishell_desktop_protocol::{DesktopInput, EngineCommand, EngineError};
+use norishell_desktop_protocol::{
+    DesktopFrame, DesktopInput, DesktopRect, EngineCommand, EngineError,
+};
 use tauri::{State, WebviewWindow, ipc::Response};
 use tokio::sync::oneshot;
 
@@ -29,6 +31,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn patch_requires_matching_base_and_small_bounded_dirty_region() {
+        let frame = DesktopFrame::new(8, 8).unwrap();
+        let dirty = DesktopRect {
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 2,
+        };
+        assert_eq!(frame_region(&frame, 5, 5, Some(dirty), false), (5, dirty));
+        assert_eq!(frame_region(&frame, 4, 5, Some(dirty), false).0, 0);
+        assert_eq!(frame_region(&frame, 5, 5, Some(dirty), true).0, 0);
+        assert_eq!(
+            frame_region(
+                &frame,
+                5,
+                5,
+                Some(DesktopRect {
+                    x: 0,
+                    y: 0,
+                    width: 8,
+                    height: 8
+                }),
+                false
+            )
+            .0,
+            0
+        );
+    }
+
+    #[test]
     fn desktop_availability_is_limited_to_embedded_rdp_and_vnc() {
         let availability = desktop_availability();
 
@@ -39,13 +71,138 @@ mod tests {
             entry.available && entry.reason_key.is_none() && entry.presentation == "embeddedCanvas"
         }));
     }
+
+    #[test]
+    fn profile_conflict_and_missing_profile_keep_separate_codes() {
+        let meta = RequestMeta {
+            request_id: RequestId::new(),
+        };
+        let conflict = map_profile_error(
+            &meta,
+            norishell_app_persistence::AppPersistenceError::Conflict,
+        );
+        let missing = map_profile_error(
+            &meta,
+            norishell_app_persistence::AppPersistenceError::NotFound,
+        );
+        assert_eq!(conflict.code, "desktop.profile_conflict");
+        assert_eq!(missing.code, "desktop.profile_not_found");
+        assert_eq!(conflict.message_key, "desktop.profileErrors.conflict");
+    }
+}
+fn frame_region(
+    frame: &DesktopFrame,
+    after: u64,
+    base: u64,
+    dirty: Option<DesktopRect>,
+    requires_full: bool,
+) -> (u64, DesktopRect) {
+    let patch = if !requires_full && after == base && after != 0 {
+        dirty.filter(|rect| {
+            rect.fits(frame.width, frame.height)
+                && u64::from(rect.width) * u64::from(rect.height) * 2
+                    < u64::from(frame.width) * u64::from(frame.height)
+        })
+    } else {
+        None
+    };
+    match patch {
+        Some(rect) => (after, rect),
+        None => (
+            0,
+            DesktopRect {
+                x: 0,
+                y: 0,
+                width: frame.width,
+                height: frame.height,
+            },
+        ),
+    }
 }
 fn map_error(meta: &RequestMeta, error: EngineError) -> Box<CoreApiError> {
+    let (category, retry_strategy) = match error {
+        EngineError::InvalidConfiguration
+        | EngineError::RdpResolutionModeDisabled
+        | EngineError::VncResolutionModeDisabled => {
+            (ErrorCategory::Validation, RetryStrategy::Never)
+        }
+        EngineError::AuthenticationRejected | EngineError::CertificateRejected => {
+            (ErrorCategory::Permission, RetryStrategy::WaitForUser)
+        }
+        EngineError::UnsupportedAuthentication
+        | EngineError::UnsupportedOperation
+        | EngineError::RdpUdpUnavailable
+        | EngineError::RdpGraphicsUnavailable
+        | EngineError::RdpResolutionUnavailable
+        | EngineError::VncResolutionUnavailable
+        | EngineError::VncResolutionRejected => (ErrorCategory::Incompatible, RetryStrategy::Never),
+        EngineError::Protocol => (ErrorCategory::Internal, RetryStrategy::Never),
+        EngineError::ResourceLimit | EngineError::ConnectionLost => {
+            (ErrorCategory::Unavailable, RetryStrategy::RefreshSnapshot)
+        }
+        EngineError::Timeout
+        | EngineError::RdpResolutionNotApplied
+        | EngineError::VncResolutionNotApplied => {
+            (ErrorCategory::Timeout, RetryStrategy::RefreshSnapshot)
+        }
+        EngineError::Cancelled => (ErrorCategory::Unavailable, RetryStrategy::Never),
+        EngineError::StaleInput => (ErrorCategory::Conflict, RetryStrategy::RefreshSnapshot),
+    };
+    let diagnostic_id = matches!(error, EngineError::Protocol).then(|| {
+        let id = uuid::Uuid::new_v4().to_string();
+        eprintln!("desktop protocol failed: diagnostic_id={id}");
+        id
+    });
     Box::new(CoreApiError {
         code: format!("desktop.{error}"),
-        category: ErrorCategory::Internal,
+        category,
         message_key: format!("desktop.errors.{error}"),
-        retry_strategy: RetryStrategy::Never,
+        retry_strategy,
+        request_id: Some(meta.request_id.clone()),
+        diagnostic_id,
+        params: Default::default(),
+        conflict: None,
+    })
+}
+
+fn map_profile_error(
+    meta: &RequestMeta,
+    error: norishell_app_persistence::AppPersistenceError,
+) -> Box<CoreApiError> {
+    use norishell_app_persistence::AppPersistenceError;
+    let (code, category, retry_strategy, message_key) = match error {
+        AppPersistenceError::Conflict | AppPersistenceError::IdempotencyConflict => (
+            "desktop.profile_conflict",
+            ErrorCategory::Conflict,
+            RetryStrategy::RefreshSnapshot,
+            "desktop.profileErrors.conflict",
+        ),
+        AppPersistenceError::NotFound => (
+            "desktop.profile_not_found",
+            ErrorCategory::Unavailable,
+            RetryStrategy::RefreshSnapshot,
+            "desktop.profileErrors.notFound",
+        ),
+        AppPersistenceError::InvalidInput(_) | AppPersistenceError::Endpoint(_) => (
+            "desktop.profile_invalid",
+            ErrorCategory::Validation,
+            RetryStrategy::Never,
+            "desktop.errors.invalidConfiguration",
+        ),
+        _ => {
+            let diagnostic_id = uuid::Uuid::new_v4().to_string();
+            eprintln!("desktop profile operation failed: diagnostic_id={diagnostic_id}");
+            return Box::new(CoreApiError::safe_internal(
+                meta.request_id.clone(),
+                diagnostic_id,
+            ));
+        }
+    };
+    Box::new(CoreApiError {
+        code: code.to_owned(),
+        category,
+        retry_strategy,
+        message_key: message_key.to_owned(),
         request_id: Some(meta.request_id.clone()),
         diagnostic_id: None,
         params: Default::default(),
@@ -61,7 +218,7 @@ pub(crate) fn desktop_profile_list(
     service
         .hosts
         .with_desktop_repository(|repo| repo.list_desktop_profiles())
-        .map_err(|_| map_error(&meta, EngineError::InvalidConfiguration))
+        .map_err(|error| map_profile_error(&meta, error))
 }
 #[tauri::command]
 pub(crate) fn desktop_profile_save(
@@ -78,7 +235,7 @@ pub(crate) fn desktop_profile_save(
             .hosts
             .with_desktop_repository(|repo| repo.save_desktop_profile(&request.profile)),
     };
-    result.map_err(|_| map_error(&request.meta, EngineError::InvalidConfiguration))
+    result.map_err(|error| map_profile_error(&request.meta, error))
 }
 #[tauri::command]
 pub(crate) fn desktop_profile_delete(
@@ -90,7 +247,7 @@ pub(crate) fn desktop_profile_delete(
         .with_desktop_repository(|repo| {
             repo.delete_desktop_profile(&request.id, request.expected_revision)
         })
-        .map_err(|_| map_error(&request.meta, EngineError::InvalidConfiguration))
+        .map_err(|error| map_profile_error(&request.meta, error))
 }
 #[tauri::command]
 pub(crate) fn desktop_session_open(
@@ -145,7 +302,7 @@ pub(crate) fn desktop_frame_get(
     let session = service
         .session(&request.session_id, request.generation.get())
         .map_err(|error| map_error(&request.meta, error))?;
-    let projection = session
+    let mut projection = session
         .projection
         .lock()
         .map_err(|_| map_error(&request.meta, EngineError::Protocol))?;
@@ -153,14 +310,36 @@ pub(crate) fn desktop_frame_get(
     if request.after_sequence.get() >= sequence {
         return Ok(Response::new(Vec::<u8>::new()));
     }
-    let Some(frame) = &projection.frame else {
+    let Some(frame) = projection.frame.clone() else {
         return Ok(Response::new(Vec::<u8>::new()));
     };
-    let mut bytes = Vec::with_capacity(16 + frame.rgba.len());
+    let (base, rect) = frame_region(
+        &frame,
+        request.after_sequence.get(),
+        projection.frame_base_sequence,
+        projection.frame_dirty,
+        projection.frame_requires_full,
+    );
+    projection.frame_base_sequence = sequence;
+    projection.frame_dirty = None;
+    projection.frame_requires_full = false;
+    drop(projection);
+
+    let row_bytes = usize::from(rect.width) * 4;
+    let mut bytes = Vec::with_capacity(40 + row_bytes * usize::from(rect.height));
     bytes.extend_from_slice(&sequence.to_le_bytes());
+    bytes.extend_from_slice(&base.to_le_bytes());
     bytes.extend_from_slice(&u32::from(frame.width).to_le_bytes());
     bytes.extend_from_slice(&u32::from(frame.height).to_le_bytes());
-    bytes.extend_from_slice(&frame.rgba);
+    bytes.extend_from_slice(&u32::from(rect.x).to_le_bytes());
+    bytes.extend_from_slice(&u32::from(rect.y).to_le_bytes());
+    bytes.extend_from_slice(&u32::from(rect.width).to_le_bytes());
+    bytes.extend_from_slice(&u32::from(rect.height).to_le_bytes());
+    for row in 0..usize::from(rect.height) {
+        let start =
+            ((usize::from(rect.y) + row) * usize::from(frame.width) + usize::from(rect.x)) * 4;
+        bytes.extend_from_slice(&frame.rgba[start..start + row_bytes]);
+    }
     Ok(Response::new(bytes))
 }
 
@@ -274,6 +453,32 @@ pub(crate) async fn desktop_input(
                     DesktopInput::Clipboard(text)
                 }
                 DesktopInputEvent::Resize { width, height } => {
+                    let profile = &session.summary().profile;
+                    match profile.protocol {
+                        DesktopProtocol::Rdp
+                            if profile.rdp_resolution_mode != RdpResolutionMode::Adaptive =>
+                        {
+                            return Err(map_error(
+                                &request.meta,
+                                EngineError::RdpResolutionModeDisabled,
+                            ));
+                        }
+                        DesktopProtocol::Vnc
+                            if profile.vnc_resolution_mode != VncResolutionMode::Adaptive =>
+                        {
+                            return Err(map_error(
+                                &request.meta,
+                                EngineError::VncResolutionModeDisabled,
+                            ));
+                        }
+                        _ => {}
+                    }
+                    if width < 200
+                        || height < 200
+                        || profile.protocol == DesktopProtocol::Rdp && !width.is_multiple_of(2)
+                    {
+                        return Err(map_error(&request.meta, EngineError::InvalidConfiguration));
+                    }
                     DesktopInput::Resize { width, height }
                 }
                 DesktopInputEvent::ReleaseAll => DesktopInput::ReleaseAll,
@@ -286,7 +491,7 @@ pub(crate) async fn desktop_input(
                 .commands
                 .try_send(EngineCommand {
                     input,
-                    focus_epoch: focus.epoch,
+                    focus_epoch: Some(focus.epoch),
                     completion,
                 })
                 .map_err(|_| map_error(&request.meta, EngineError::ResourceLimit))?;
@@ -303,6 +508,71 @@ pub(crate) async fn desktop_input(
             }
         })
         .await
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_resolution_set(
+    request: DesktopResolutionRequest,
+    window: WebviewWindow,
+    service: State<'_, DesktopService>,
+) -> CoreResult<()> {
+    let session = service
+        .session(&request.session_id, request.generation.get())
+        .map_err(|error| map_error(&request.meta, error))?;
+    if window.label() != "main" {
+        return Err(map_error(&request.meta, EngineError::StaleInput));
+    }
+    let summary = session.summary();
+    if summary.state != DesktopSessionState::Running {
+        return Err(map_error(&request.meta, EngineError::StaleInput));
+    }
+    match summary.profile.protocol {
+        DesktopProtocol::Rdp
+            if summary.profile.rdp_resolution_mode != RdpResolutionMode::Adaptive =>
+        {
+            return Err(map_error(
+                &request.meta,
+                EngineError::RdpResolutionModeDisabled,
+            ));
+        }
+        DesktopProtocol::Vnc
+            if summary.profile.vnc_resolution_mode != VncResolutionMode::Adaptive =>
+        {
+            return Err(map_error(
+                &request.meta,
+                EngineError::VncResolutionModeDisabled,
+            ));
+        }
+        _ => {}
+    }
+    let input = DesktopInput::Resize {
+        width: request.width,
+        height: request.height,
+    };
+    input
+        .validate()
+        .map_err(|error| map_error(&request.meta, error))?;
+    if request.width < 200
+        || request.height < 200
+        || summary.profile.protocol == DesktopProtocol::Rdp && !request.width.is_multiple_of(2)
+    {
+        return Err(map_error(&request.meta, EngineError::InvalidConfiguration));
+    }
+    let (completion, response) = oneshot::channel();
+    session
+        .commands
+        .try_send(EngineCommand {
+            input,
+            focus_epoch: None,
+            completion,
+        })
+        .map_err(|_| map_error(&request.meta, EngineError::ResourceLimit))?;
+    match tokio::time::timeout(std::time::Duration::from_secs(14), response).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(map_error(&request.meta, error)),
+        Ok(Err(_)) => Err(map_error(&request.meta, EngineError::ConnectionLost)),
+        Err(_) => Err(map_error(&request.meta, EngineError::Timeout)),
+    }
 }
 
 #[tauri::command]

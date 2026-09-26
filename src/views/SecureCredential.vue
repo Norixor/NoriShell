@@ -5,14 +5,22 @@ import NvxSecureWindow from "../components/layout/NvxSecureWindow.vue";
 import { NvxButton, NvxField, NvxInlineNotice, NvxInput, NvxTextarea } from "../components/ui";
 import { secureCredentialClient, type SecureCredentialPrompt } from "../core-api/secure-credential-client";
 import { requestSecureVault } from "../core-api/secure-vault-client";
+import { parseCoreApiError } from "../core-api/client";
 
-const { t } = useI18n();
+const { t, te } = useI18n();
 const id = new URLSearchParams(window.location.search).get("prompt") ?? "";
 const prompt = ref<SecureCredentialPrompt | null>(null);
 const secret = ref("");
 const passphrase = ref("");
 const pending = ref(false);
 const failed = ref(false);
+const failureText = ref("");
+function showFailure(error: unknown) {
+  const failure = parseCoreApiError(error);
+  failureText.value = (failure?.messageKey && te(failure.messageKey) ? t(failure.messageKey) : t("sshTerminal.connectFailedBody"))
+    + (failure?.diagnosticId ? ` ${t("diagnostics.id", { id: failure.diagnosticId })}` : "");
+  failed.value = true;
+}
 
 const privateKey = computed(() => prompt.value?.kind === "privateKey");
 const valid = computed(() => !!prompt.value && secret.value.length > 0);
@@ -32,6 +40,7 @@ async function submit() {
   if (pending.value || !valid.value || !prompt.value) return;
   pending.value = true;
   failed.value = false;
+  failureText.value = "";
   try {
     if (prompt.value.persistent && !await requestSecureVault("ensureUnlocked")) {
       pending.value = false;
@@ -40,9 +49,9 @@ async function submit() {
     const request = secureCredentialClient.submit(id, secret.value, privateKey.value ? passphrase.value : "");
     clear();
     await request;
-  } catch {
+  } catch (error) {
     clear();
-    failed.value = true;
+    showFailure(error);
     pending.value = false;
   }
 }
@@ -53,8 +62,8 @@ async function cancel() {
   clear();
   try {
     await secureCredentialClient.cancel(id);
-  } catch {
-    failed.value = true;
+  } catch (error) {
+    showFailure(error);
     pending.value = false;
   }
 }
@@ -62,8 +71,8 @@ async function cancel() {
 onMounted(async () => {
   try {
     prompt.value = await secureCredentialClient.get(id);
-  } catch {
-    failed.value = true;
+  } catch (error) {
+    showFailure(error);
   }
 });
 onBeforeUnmount(clear);
@@ -131,7 +140,7 @@ onBeforeUnmount(clear);
         v-if="failed"
         tone="error"
       >
-        {{ t("sshTerminal.connectFailedBody") }}
+        {{ failureText || t("sshTerminal.connectFailedBody") }}
       </NvxInlineNotice>
       <button
         type="submit"
@@ -143,7 +152,7 @@ onBeforeUnmount(clear);
       v-else-if="failed"
       tone="error"
     >
-      {{ t("sshTerminal.connectFailedBody") }}
+      {{ failureText || t("sshTerminal.connectFailedBody") }}
     </NvxInlineNotice>
     <template #actions>
       <NvxButton

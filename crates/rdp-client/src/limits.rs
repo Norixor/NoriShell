@@ -96,6 +96,21 @@ impl Limits {
         }
         Ok(())
     }
+
+    /// UDP carries unframed DRDYNVC. Bound its declared total before IronRDP
+    /// allocates fragment storage, just as the TCP path does after SVC reassembly.
+    pub fn check_udp_dvc(bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() || bytes.len() > u16::MAX as usize {
+            return Err(EngineError::ResourceLimit);
+        }
+        if let DrdynvcServerPdu::Data(DrdynvcDataPdu::DataFirst(first)) =
+            decode(bytes).map_err(|_| EngineError::Protocol)?
+            && first.length() as usize > MAX_CHANNEL
+        {
+            return Err(EngineError::ResourceLimit);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -127,5 +142,17 @@ mod tests {
             limits.check(Action::FastPath, &packet),
             Err(EngineError::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn udp_dvc_rejects_oversized_declared_message_before_reassembly() {
+        use ironrdp::dvc::pdu::DataFirstPdu;
+        let pdu = DataFirstPdu::new(1, (MAX_CHANNEL + 1) as u32, vec![1]);
+        let bytes = encode_vec(&DrdynvcServerPdu::Data(DrdynvcDataPdu::DataFirst(pdu))).unwrap();
+        assert_eq!(
+            Limits::check_udp_dvc(&bytes),
+            Err(EngineError::ResourceLimit)
+        );
+        assert_eq!(Limits::check_udp_dvc(&[]), Err(EngineError::ResourceLimit));
     }
 }

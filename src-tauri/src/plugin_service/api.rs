@@ -17,6 +17,9 @@ pub(super) struct ApiAccessReview {
     pub(super) persisted_target_label: String,
     pub(super) details: String,
     pub(super) exact_scope: serde_json::Value,
+    /// A Core-validated permission family may span several UI actions. Other
+    /// calls remain bound to their individual action identity.
+    pub(super) policy_identity: Option<&'static str>,
     pub(super) target_fence: Option<crate::plugin_api::ResourceFence>,
 }
 
@@ -83,6 +86,15 @@ impl PluginService {
             && !matches!(
                 &call.operation,
                 norishell_core_api::PluginApiOperation::Describe { .. }
+                    | norishell_core_api::PluginApiOperation::DataCatalog { .. }
+                    | norishell_core_api::PluginApiOperation::DataRead { .. }
+                    | norishell_core_api::PluginApiOperation::DataSnapshot { .. }
+                    | norishell_core_api::PluginApiOperation::DataInspect { .. }
+                    | norishell_core_api::PluginApiOperation::DataCompose { .. }
+                    | norishell_core_api::PluginApiOperation::DataApply { .. }
+                    | norishell_core_api::PluginApiOperation::DataExport { .. }
+                    | norishell_core_api::PluginApiOperation::DataCheckpoint { .. }
+                    | norishell_core_api::PluginApiOperation::DataRelease { .. }
                     | norishell_core_api::PluginApiOperation::Permissions { .. }
                     | norishell_core_api::PluginApiOperation::PermissionRevoke { .. }
                     | norishell_core_api::PluginApiOperation::PermissionsForget { .. }
@@ -263,6 +275,21 @@ impl PluginService {
             norishell_core_api::PluginApiOperation::Storage { operation } => api_reply(
                 call,
                 self.invoke_api_storage(&invocation, &owner, operation, &current),
+            ),
+            norishell_core_api::PluginApiOperation::DataRead { request } => api_reply(
+                call,
+                self.read_api_data(&invocation, &owner, request, &current),
+            ),
+            norishell_core_api::PluginApiOperation::DataSnapshot { .. }
+            | norishell_core_api::PluginApiOperation::DataInspect { .. }
+            | norishell_core_api::PluginApiOperation::DataCompose { .. }
+            | norishell_core_api::PluginApiOperation::DataApply { .. }
+            | norishell_core_api::PluginApiOperation::DataExport { .. }
+            | norishell_core_api::PluginApiOperation::DataCheckpoint { .. }
+            | norishell_core_api::PluginApiOperation::DataRelease { .. } => api_reply(
+                call,
+                self.invoke_api_data(&invocation, &owner, &call.operation, &current)
+                    .await,
             ),
             norishell_core_api::PluginApiOperation::FilePick {
                 picker_kind,
@@ -470,6 +497,9 @@ impl PluginService {
             )
             .map_err(|_| PluginApiErrorCode::PermissionDenied)?;
         let lifetime = self.api_resource_fence(owner.clone(), Some((review.capability, epoch)));
+        let policy_identity = review
+            .policy_identity
+            .unwrap_or_else(|| invocation.operation_identity());
         let prepared = self
             .operation_policies
             .prepare(
@@ -477,9 +507,9 @@ impl PluginService {
                 review.capability,
                 current_plugin_permission_binding(&installed.package_sha256),
                 review.operation,
-                invocation.operation_identity(),
+                policy_identity,
                 &review.persisted_target_label,
-                &(invocation.operation_identity(), review.exact_scope),
+                &(policy_identity, review.exact_scope),
             )
             .ok();
         let invocation_fence = self.api_invocation_fence(owner, invocation);

@@ -16,6 +16,7 @@ pub enum VncEncoding {
     CursorPseudo = -239,
     DesktopSizePseudo = -223,
     LastRectPseudo = -224,
+    ExtendedDesktopSizePseudo = -308,
 }
 
 impl TryFrom<i32> for VncEncoding {
@@ -31,6 +32,7 @@ impl TryFrom<i32> for VncEncoding {
             -239 => Ok(VncEncoding::CursorPseudo),
             -223 => Ok(VncEncoding::DesktopSizePseudo),
             -224 => Ok(VncEncoding::LastRectPseudo),
+            -308 => Ok(VncEncoding::ExtendedDesktopSizePseudo),
             _ => Err(VncError::UnsupportedOperation),
         }
     }

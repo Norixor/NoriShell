@@ -20,10 +20,12 @@ import { requestSecureSshChallenge } from "../core-api/secure-ssh-challenge-clie
 import { createUuidV7 } from "../core-api/ids";
 import { overviewVisualFixture } from "../overview/visual-fixture";
 import { useTipsStore } from "../stores/tips";
+import { useRouteReveal } from "../routeReveal";
 
 const { t } = useI18n();
 const router = useRouter();
 const tips = useTipsStore();
+const revealRoute = useRouteReveal();
 const snapshot = ref<ServerOverviewSnapshot | null>(null);
 const loading = ref(true);
 const loadFailed = ref(false);
@@ -122,11 +124,13 @@ onMounted(async () => {
   if (import.meta.env.DEV && visualFixture) {
     snapshot.value = overviewVisualFixture;
     loading.value = false;
+    revealRoute();
     return;
   }
   if (!canUseDesktopCore()) {
     loading.value = false;
     loadFailed.value = true;
+    revealRoute();
     return;
   }
   try {
@@ -135,6 +139,7 @@ onMounted(async () => {
     // Snapshot remains independently readable when one or more monitored Hosts need attention.
   }
   await refresh();
+  revealRoute();
   if (!disposed) refreshTimer = window.setInterval(() => void refresh(), 2_000);
 });
 

@@ -804,7 +804,120 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
     }
     if current == 44 {
         migrate_v44_to_v45(connection)?;
+        current = 45;
     }
+    if current == 45 {
+        migrate_v45_to_v46(connection)?;
+        current = 46;
+    }
+    if current == 46 {
+        migrate_v46_to_v47(connection)?;
+    }
+    Ok(())
+}
+
+fn migrate_v46_to_v47(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE plugin_private_storage RENAME TO plugin_private_storage_v46;
+         CREATE TABLE plugin_private_storage (
+           plugin_id TEXT NOT NULL CHECK(length(plugin_id) BETWEEN 1 AND 160),
+           signer_fingerprint_sha256 TEXT NOT NULL CHECK(length(signer_fingerprint_sha256) = 64),
+           namespace TEXT NOT NULL CHECK(namespace IN ('kv','blob','cache','meta')),
+           storage_key TEXT NOT NULL CHECK(length(CAST(storage_key AS BLOB)) BETWEEN 1 AND 128),
+           chunk_index INTEGER NOT NULL DEFAULT 0 CHECK(chunk_index >= -1),
+           value_bytes BLOB NOT NULL CHECK(length(value_bytes) <= 65536),
+           value_revision INTEGER NOT NULL CHECK(value_revision >= 1),
+           store_revision INTEGER NOT NULL CHECK(store_revision >= 1),
+           expires_at_ms INTEGER CHECK(expires_at_ms IS NULL OR expires_at_ms >= 0),
+           PRIMARY KEY(plugin_id, signer_fingerprint_sha256, namespace, storage_key, chunk_index)
+         ) STRICT;
+         INSERT INTO plugin_private_storage
+           (plugin_id, signer_fingerprint_sha256, namespace, storage_key, chunk_index,
+            value_bytes, value_revision, store_revision, expires_at_ms)
+         SELECT plugin_id, signer_fingerprint_sha256, namespace, storage_key, chunk_index,
+                value_bytes, value_revision, store_revision, expires_at_ms
+         FROM plugin_private_storage_v46;
+         DROP TABLE plugin_private_storage_v46;
+         CREATE INDEX plugin_private_storage_owner_revision
+           ON plugin_private_storage
+             (plugin_id, signer_fingerprint_sha256, namespace, storage_key, chunk_index, store_revision);
+         PRAGMA user_version = 47;
+         COMMIT;",
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod private_storage_retention_migration_tests {
+    use super::*;
+
+    #[test]
+    fn v47_keeps_existing_bytes_after_installation_is_removed() {
+        let connection = Connection::open_in_memory().expect("database");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE plugin_installations (plugin_id TEXT PRIMARY KEY) STRICT;
+                 INSERT INTO plugin_installations VALUES ('org.example.fixture');
+                 CREATE TABLE plugin_private_storage (
+                   plugin_id TEXT NOT NULL REFERENCES plugin_installations(plugin_id) ON DELETE CASCADE,
+                   signer_fingerprint_sha256 TEXT NOT NULL CHECK(length(signer_fingerprint_sha256) = 64),
+                   namespace TEXT NOT NULL CHECK(namespace IN ('kv','blob','cache','meta')),
+                   storage_key TEXT NOT NULL CHECK(length(CAST(storage_key AS BLOB)) BETWEEN 1 AND 128),
+                   chunk_index INTEGER NOT NULL DEFAULT 0 CHECK(chunk_index >= -1),
+                   value_bytes BLOB NOT NULL CHECK(length(value_bytes) <= 65536),
+                   value_revision INTEGER NOT NULL CHECK(value_revision >= 1),
+                   store_revision INTEGER NOT NULL CHECK(store_revision >= 1),
+                   expires_at_ms INTEGER CHECK(expires_at_ms IS NULL OR expires_at_ms >= 0),
+                   PRIMARY KEY(plugin_id, signer_fingerprint_sha256, namespace, storage_key, chunk_index)
+                 ) STRICT;
+                 CREATE INDEX plugin_private_storage_owner_revision
+                   ON plugin_private_storage
+                     (plugin_id, signer_fingerprint_sha256, namespace, storage_key, chunk_index, store_revision);
+                 PRAGMA user_version = 46;",
+            )
+            .expect("v46 schema");
+        connection
+            .execute(
+                "INSERT INTO plugin_private_storage VALUES (?1, ?2, 'kv', 'saved', 0, X'00FF', 1, 2, NULL)",
+                rusqlite::params!["org.example.fixture", "a".repeat(64)],
+            )
+            .expect("v46 data");
+
+        migrate_v46_to_v47(&connection).expect("migration");
+        connection
+            .execute("DELETE FROM plugin_installations", [])
+            .expect("remove installation");
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT value_bytes FROM plugin_private_storage",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retained bytes");
+        assert_eq!(bytes, [0, 255]);
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, 47);
+    }
+}
+
+fn migrate_v45_to_v46(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE application_preferences (
+           group_id TEXT PRIMARY KEY CHECK(group_id IN (
+             'application', 'appearance', 'interaction', 'highlights', 'shortcuts', 'files'
+           )),
+           revision INTEGER NOT NULL CHECK(revision >= 1),
+           value_json TEXT NOT NULL CHECK(length(CAST(value_json AS BLOB)) <= 65536),
+           updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
+         ) STRICT;
+         PRAGMA user_version = 46;
+         COMMIT;",
+    )?;
     Ok(())
 }
 

@@ -47,6 +47,7 @@ const packagePreview: PluginLocalPackagePreview = {
   capabilities: ["uiPanel"],
   currentVersion: "1.1.0",
   currentStateVersion: "5",
+  priorPackageSha256: null,
   retainedCapabilityGrants: [{ capability: "uiPanel", granted: true }],
   approvedSpecialGrants: [],
   specialPermissionExpiresAtUnixMs: null,
@@ -155,5 +156,43 @@ describe("PluginsView", () => {
       expectedStateVersion: "6",
       capabilityGrants: [{ capability: "uiPanel", granted: false }],
     });
+  });
+
+  it("shows a same-version package replacement in the existing import confirmation", async () => {
+    client.prepareLocalPluginPackage.mockResolvedValue({
+      ...packagePreview,
+      version: installedPlugin.activeVersion,
+      currentVersion: installedPlugin.activeVersion,
+      priorPackageSha256: installedPlugin.packageSha256,
+      retainedCapabilityGrants: [],
+    });
+    const wrapper = await mountPlugins();
+    const importButton = wrapper.findAll("button").find((button) => button.text().includes("Import ZIP"));
+    await importButton!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Replace the package for this version");
+    expect(wrapper.text()).toContain(installedPlugin.packageSha256);
+    expect(wrapper.text()).toContain(packagePreview.packageSha256);
+    expect(wrapper.findAll("button").filter((button) => button.text().includes("Confirm Update"))).toHaveLength(1);
+  });
+
+  it("discloses the retained package identity when reinstalling after uninstall", async () => {
+    client.listInstalledPlugins.mockResolvedValue([]);
+    client.prepareLocalPluginPackage.mockResolvedValue({
+      ...packagePreview,
+      currentVersion: null,
+      currentStateVersion: null,
+      priorPackageSha256: installedPlugin.packageSha256,
+    });
+    const wrapper = await mountPlugins();
+    const importButton = wrapper.findAll("button").find((button) => button.text().includes("Import ZIP"));
+    await importButton!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Replace the package for this version");
+    expect(wrapper.text()).toContain("Private storage and sign-in state remain bound to the old package identity");
+    expect(wrapper.text()).toContain(installedPlugin.packageSha256);
+    expect(wrapper.findAll("button").filter((button) => button.text().includes("Confirm Install"))).toHaveLength(1);
   });
 });

@@ -14,8 +14,8 @@ use norishell_core_api::{
     DesktopPromptKind, DesktopSessionState, DesktopSessionSummary, WireSequence,
 };
 use norishell_desktop_protocol::{
-    AudioMuteState, AudioPlaybackState, DesktopFrame, EngineCommand, EngineControl, EngineError,
-    EngineEvent, EventSink, Result,
+    AudioMuteState, AudioPlaybackState, DesktopFrame, DesktopRect, EngineCommand, EngineControl,
+    EngineError, EngineEvent, EventSink, Result,
 };
 use std::{
     collections::BTreeMap,
@@ -57,8 +57,33 @@ struct Session {
 struct Projection {
     summary: DesktopSessionSummary,
     frame: Option<Arc<DesktopFrame>>,
+    frame_base_sequence: u64,
+    frame_dirty: Option<DesktopRect>,
+    frame_requires_full: bool,
     clipboard: Option<String>,
     cleanup_failed: bool,
+}
+
+fn accumulate_dirty(
+    previous_size: Option<(u16, u16)>,
+    frame: &DesktopFrame,
+    pending: Option<DesktopRect>,
+    requires_full: bool,
+    dirty: Option<DesktopRect>,
+) -> (Option<DesktopRect>, bool) {
+    let Some(rect) = dirty.filter(|rect| rect.fits(frame.width, frame.height)) else {
+        return (None, true);
+    };
+    if previous_size != Some((frame.width, frame.height)) {
+        return (None, true);
+    }
+    if requires_full {
+        return (None, true);
+    }
+    (
+        Some(pending.map_or(rect, |previous| previous.union(rect))),
+        false,
+    )
 }
 
 impl Session {
@@ -104,7 +129,44 @@ impl Session {
             .projection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dirty = match &event {
+            EngineEvent::FrameDirty(_, rect) => Some(*rect),
+            _ => None,
+        };
         match event {
+            EngineEvent::RdpTransport(actual) => {
+                projection.summary.rdp_transport_actual = Some(match actual {
+                    norishell_desktop_protocol::RdpTransportActual::Tcp => {
+                        norishell_core_api::RdpTransportActual::Tcp
+                    }
+                    norishell_desktop_protocol::RdpTransportActual::Udp => {
+                        norishell_core_api::RdpTransportActual::Udp
+                    }
+                });
+                projection.summary.revision =
+                    WireSequence::new(projection.summary.revision.get() + 1);
+            }
+            EngineEvent::RdpGraphics(actual) => {
+                let mapped = match actual {
+                    norishell_desktop_protocol::RdpGraphicsActual::Bitmap => {
+                        norishell_core_api::RdpGraphicsActual::Bitmap
+                    }
+                    norishell_desktop_protocol::RdpGraphicsActual::RemoteFx => {
+                        norishell_core_api::RdpGraphicsActual::RemoteFx
+                    }
+                    norishell_desktop_protocol::RdpGraphicsActual::RemoteFxProgressive => {
+                        norishell_core_api::RdpGraphicsActual::RemoteFxProgressive
+                    }
+                    norishell_desktop_protocol::RdpGraphicsActual::Avc420 => {
+                        norishell_core_api::RdpGraphicsActual::Avc420
+                    }
+                };
+                if projection.summary.rdp_graphics_actual != Some(mapped) {
+                    projection.summary.rdp_graphics_actual = Some(mapped);
+                    projection.summary.revision =
+                        WireSequence::new(projection.summary.revision.get() + 1);
+                }
+            }
             EngineEvent::AudioState(state) => {
                 projection.summary.audio_state = match state {
                     AudioPlaybackState::Waiting => DesktopAudioState::Waiting,
@@ -121,7 +183,7 @@ impl Session {
                 projection.summary.revision =
                     WireSequence::new(projection.summary.revision.get() + 1);
             }
-            EngineEvent::Frame(frame) => {
+            EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
                 if norishell_desktop_protocol::frame_len(frame.width, frame.height).ok()
                     != Some(frame.rgba.len())
                 {
@@ -129,6 +191,17 @@ impl Session {
                     self.fail_and_stop("resourceLimit");
                     return;
                 }
+                let previous_size = projection
+                    .frame
+                    .as_ref()
+                    .map(|previous| (previous.width, previous.height));
+                (projection.frame_dirty, projection.frame_requires_full) = accumulate_dirty(
+                    previous_size,
+                    &frame,
+                    projection.frame_dirty,
+                    projection.frame_requires_full,
+                    dirty,
+                );
                 projection.summary.width = frame.width;
                 projection.summary.height = frame.height;
                 projection.summary.frame_sequence =
@@ -230,6 +303,8 @@ impl DesktopService {
                 DesktopAudioState::Disabled
             },
             audio_muted: false,
+            rdp_transport_actual: None,
+            rdp_graphics_actual: None,
             profile: request.profile,
             generation: WireSequence::new(1),
             revision: WireSequence::new(1),
@@ -242,6 +317,9 @@ impl DesktopService {
             projection: Mutex::new(Projection {
                 summary: summary.clone(),
                 frame: None,
+                frame_base_sequence: 0,
+                frame_dirty: None,
+                frame_requires_full: true,
                 clipboard: None,
                 cleanup_failed: false,
             }),
@@ -446,7 +524,7 @@ impl DesktopService {
             let connection = gateway::connect(self, &session).await?;
             Ok::<_, EngineError>((credentials, connection))
         };
-        let ((username, domain, password), (stream, cleanup)) = tokio::select! { biased;
+        let ((username, domain, password), (stream, udp_peer, cleanup)) = tokio::select! { biased;
             _ = control.stop.changed() => return Err(EngineError::Cancelled),
             result = prepared => result?,
         };
@@ -490,6 +568,32 @@ impl DesktopService {
                         audio_playback_enabled: profile.audio_playback_enabled,
                         audio_muted: session.audio_muted.subscribe(),
                         certificate_approval: Some(approval),
+                        udp_peer,
+                        transport_mode: match profile.rdp_transport_mode {
+                            norishell_core_api::RdpTransportMode::Auto => {
+                                norishell_rdp_client::TransportMode::Auto
+                            }
+                            norishell_core_api::RdpTransportMode::TcpOnly => {
+                                norishell_rdp_client::TransportMode::TcpOnly
+                            }
+                            norishell_core_api::RdpTransportMode::UdpRequired => {
+                                norishell_rdp_client::TransportMode::UdpRequired
+                            }
+                        },
+                        graphics_mode: match profile.rdp_graphics_mode {
+                            norishell_core_api::RdpGraphicsMode::Auto => {
+                                norishell_rdp_client::GraphicsMode::Auto
+                            }
+                            norishell_core_api::RdpGraphicsMode::RemoteFx => {
+                                norishell_rdp_client::GraphicsMode::RemoteFx
+                            }
+                            norishell_core_api::RdpGraphicsMode::Avc420 => {
+                                norishell_rdp_client::GraphicsMode::Avc420
+                            }
+                            norishell_core_api::RdpGraphicsMode::Bitmap => {
+                                norishell_rdp_client::GraphicsMode::Bitmap
+                            }
+                        },
                     },
                     receiver,
                     control,
@@ -504,6 +608,9 @@ impl DesktopService {
                         password,
                         allow_unauthenticated: false,
                         clipboard_enabled: profile.clipboard_enabled,
+                        initial_resize: (profile.vnc_resolution_mode
+                            == norishell_core_api::VncResolutionMode::Fixed)
+                            .then_some((profile.width, profile.height)),
                         version: match profile.vnc_protocol_version {
                             norishell_core_api::VncProtocolVersion::Auto => None,
                             norishell_core_api::VncProtocolVersion::Rfb33 => {
@@ -625,5 +732,51 @@ impl DesktopService {
             })
             .map(|(id, _)| id.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn skipped_updates_accumulate_but_reactivation_forces_full_even_at_same_size() {
+        let frame = DesktopFrame::new(8, 8).unwrap();
+        let first = DesktopRect {
+            x: 1,
+            y: 1,
+            width: 1,
+            height: 1,
+        };
+        let second = DesktopRect {
+            x: 5,
+            y: 5,
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(
+            accumulate_dirty(None, &frame, None, false, Some(first)),
+            (None, true)
+        );
+        let (pending, full) = accumulate_dirty(Some((8, 8)), &frame, None, false, Some(first));
+        let (pending, full) = accumulate_dirty(Some((8, 8)), &frame, pending, full, Some(second));
+        assert_eq!(
+            (pending, full),
+            (
+                Some(DesktopRect {
+                    x: 1,
+                    y: 1,
+                    width: 5,
+                    height: 5
+                }),
+                false
+            )
+        );
+        let (pending, full) = accumulate_dirty(Some((8, 8)), &frame, pending, full, None);
+        assert_eq!((pending, full), (None, true));
+        assert_eq!(
+            accumulate_dirty(Some((8, 8)), &frame, pending, full, Some(second)),
+            (None, true)
+        );
     }
 }

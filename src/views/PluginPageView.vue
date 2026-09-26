@@ -9,11 +9,13 @@ import { NvxInlineNotice } from "../components/ui";
 import { listInstalledPlugins } from "../core-api/client";
 import { usePluginExtensionsStore } from "../stores/pluginExtensions";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { useRouteReveal } from "../routeReveal";
 
 const { t } = useI18n();
 const route = useRoute();
 const extensions = usePluginExtensionsStore();
 const workspaceTabs = useWorkspaceTabsStore();
+const revealRoute = useRouteReveal();
 const pluginId = computed(() => String(route.params.pluginId ?? ""));
 const pageId = computed(() => String(route.params.pageId ?? ""));
 const navigationItem = computed(() => extensions.navigation.find((item) => (
@@ -62,7 +64,7 @@ watch([pluginId, pageId, navigationItem], () => {
 });
 onMounted(() => {
   window.addEventListener("norishell:plugin-special-permission-changed", handlePermissionChanged);
-  void load().catch(() => undefined);
+  void load().catch(() => undefined).finally(revealRoute);
 });
 onBeforeUnmount(() => {
   window.removeEventListener("norishell:plugin-special-permission-changed", handlePermissionChanged);

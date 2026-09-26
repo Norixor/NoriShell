@@ -106,9 +106,12 @@ impl PluginService {
         };
         let plan = candidate.freeze(candidate_id, settings)?;
         let exact_scope = serde_json::json!({ "device": plan.canonical_path(),
-            "identity": plan.platform_identity(), "settings": settings });
-        let details = serde_json::to_string_pretty(&exact_scope)
-            .map_err(|_| PluginApiErrorCode::InvalidRequest)?;
+            "identity": plan.platform_identity() });
+        let details = serde_json::to_string_pretty(&serde_json::json!({
+            "target": exact_scope,
+            "settingsForThisRequest": settings
+        }))
+        .map_err(|_| PluginApiErrorCode::InvalidRequest)?;
         let opaque_id = candidate_id.chars().take(8).collect::<String>();
         let persisted_target_label = format!("Selected serial device · {opaque_id}");
         let fence = self
@@ -123,6 +126,7 @@ impl PluginService {
                     persisted_target_label,
                     details,
                     exact_scope,
+                    policy_identity: Some("serial.access.v1"),
                     target_fence: None,
                 },
             )

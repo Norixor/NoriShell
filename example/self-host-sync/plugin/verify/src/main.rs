@@ -57,15 +57,11 @@ fn main() {
         page.on_open_action_id.as_ref().expect("lifecycle").as_str(),
         "sync.pageOpened"
     );
+    verify_page_open_status(&wasm, &settings);
 
     for (action, expected) in [
-        ("sync.pageOpened", "refresh"),
         ("sync.status", "status"),
         ("sync.login", "login"),
-        ("sync.refresh", "refresh"),
-        ("sync.run", "sync"),
-        ("sync.scope", "configureScope"),
-        ("sync.reset", "resetRemote"),
         ("sync.logout", "logout"),
     ] {
         let result = execute(
@@ -93,18 +89,13 @@ fn main() {
             );
             assert!(request.get("password").is_none());
         }
-        if expected == "sync" {
-            assert_eq!(request["source"]["url"], request["destination"]["url"]);
-            assert_eq!(request["destination"]["method"], "put");
-            assert_eq!(request["destination"]["useOauth"], true);
-            assert_eq!(request["conflictPolicy"], "newest");
-            assert_eq!(request["deletionPolicy"], "newest");
-        }
-        if action == "sync.pageOpened" {
-            assert_eq!(request["source"]["url"], "https://127.0.0.1:8443/exchange");
-            assert_eq!(request["source"]["useOauth"], true);
-            assert!(request.get("destination").is_none());
-        }
+        execute(
+            &mut runtime,
+            PluginHostMessageKind::SshSyncResult,
+            json!({
+                "locale":"en", "actionId":action, "result":{"accountState":"connected","operationState":"succeeded"}
+            }),
+        );
     }
 
     let callback = execute(
@@ -147,26 +138,61 @@ fn main() {
     );
     assert_eq!(
         find("settingsDialog")["children"],
-        json!([
-            "serverSettings",
-            "scopeRow",
-            "automationRow",
-            "policyRow",
-            "remoteRow"
-        ])
+        json!(["serverSettings", "scopeRow", "policyRow"])
     );
     assert_eq!(find("syncState")["label"], "Up to date");
     assert_eq!(find("syncState")["tone"], "success");
     assert_eq!(find("hostCount")["text"], "2");
     assert_eq!(find("accountPasswordField")["fieldKind"], "password");
+    let offline = execute(
+        &mut runtime,
+        PluginHostMessageKind::SshSyncResult,
+        json!({
+            "locale":"en", "actionId":"sync.refresh", "result":{
+                "accountState":"connected", "operationState":"failed",
+                "differenceState":"unavailable", "stableErrorCode":"networkUnavailable",
+                "localHostCount":2, "remoteHostCount":null,
+                "localCredentialCount":1, "remoteCredentialCount":null,
+                "remoteDesktopProfileCount":null,
+                "diagnosticCode":null, "httpStatus":null
+            }
+        }),
+    );
+    assert_eq!(offline.len(), 1);
+    let offline_payload: Value =
+        serde_json::from_str(&offline[0].payload_json).expect("offline output");
+    let offline_document: PluginUiDocument =
+        serde_json::from_value(offline_payload["document"].clone()).expect("offline document");
+    validate_plugin_page_document(&offline_document).expect("valid offline page");
+    assert!(offline[0].payload_json.contains("Cannot reach the server"));
+    assert!(
+        offline[0]
+            .payload_json
+            .contains("Cloud counts are from the last successful read")
+    );
+    let not_signed_in = execute(
+        &mut runtime,
+        PluginHostMessageKind::SshSyncResult,
+        json!({
+            "locale":"en", "actionId":"sync.refresh", "result":{
+                "accountState":"disconnected", "operationState":"failed",
+                "differenceState":"unavailable", "stableErrorCode":"accountNotConnected"
+            }
+        }),
+    );
+    let sign_in_payload: Value =
+        serde_json::from_str(&not_signed_in[0].payload_json).expect("sign-in output");
+    let sign_in_document: PluginUiDocument =
+        serde_json::from_value(sign_in_payload["document"].clone()).expect("sign-in document");
+    validate_plugin_page_document(&sign_in_document).expect("valid sign-in page");
+    assert!(
+        not_signed_in[0]
+            .payload_json
+            .contains("Connect your account first")
+    );
     for (row, children) in [
-        ("scopeRow", json!(["scopeText", "scopeButton"])),
-        (
-            "automationRow",
-            json!(["automationText", "automationButton"]),
-        ),
+        ("scopeRow", json!(["scopeText"])),
         ("policyRow", json!(["policyText", "policyButton"])),
-        ("remoteRow", json!(["remoteText", "resetDialog"])),
     ] {
         assert_eq!(find(row)["children"], children);
     }
@@ -185,7 +211,7 @@ fn main() {
             &mut runtime,
             PluginHostMessageKind::SshSyncResult,
             json!({
-                "locale":"en", "actionId":"sync.pageOpened", "result":{
+                "locale":"en", "actionId":"sync.refresh", "result":{
                     "accountState":account_state, "operationState":"needsReview",
                     "differenceState":"unavailable", "stableErrorCode":error_code,
                     "localHostCount":0,"remoteHostCount":null,
@@ -198,7 +224,42 @@ fn main() {
         let page_document: PluginUiDocument =
             serde_json::from_value(document["document"].clone()).expect("status document payload");
         validate_plugin_page_document(&page_document).expect("valid status page");
+        let page: Value = serde_json::to_value(&page_document).expect("status page JSON");
+        let run = page["nodes"]
+            .as_array()
+            .expect("status nodes")
+            .iter()
+            .find(|node| node["nodeId"] == "run")
+            .expect("sync button");
+        assert_eq!(run["label"], "Review and sync");
     }
+    let rejected = execute(
+        &mut runtime,
+        PluginHostMessageKind::SshSyncResult,
+        json!({
+            "locale":"en", "actionId":"sync.refresh", "result":{
+                "accountState":"connected", "operationState":"failed",
+                "stableErrorCode":"remoteRequestRejected", "httpStatus":404
+            }
+        }),
+    );
+    let document: Value = serde_json::from_str(&rejected[0].payload_json).expect("failed status");
+    let rejected_page: PluginUiDocument =
+        serde_json::from_value(document["document"].clone()).expect("failed status document");
+    validate_plugin_page_document(&rejected_page).expect("valid failed status page");
+    let error = document["document"]["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|node| node["nodeId"] == "errorNotice")
+        .expect("error notice");
+    assert_eq!(error["tone"], "danger");
+    assert!(
+        error["label"]
+            .as_str()
+            .expect("error label")
+            .contains("HTTP 404")
+    );
     let chinese_callback = execute(
         &mut runtime,
         PluginHostMessageKind::SshSyncResult,
@@ -290,7 +351,7 @@ fn main() {
     let http_action = execute(
         &mut runtime,
         PluginHostMessageKind::UiAction,
-        json!({"locale":"zh-CN", "actionId":"sync.pageOpened", "fields":[], "settings":http_settings}),
+        json!({"locale":"zh-CN", "actionId":"sync.login", "fields":[], "settings":http_settings}),
     );
     assert_eq!(http_action.len(), 1);
     assert_eq!(http_action[0].kind, "ssh.sync.request");
@@ -304,7 +365,7 @@ fn main() {
         http_request["auth"]["loginUrl"],
         "http://127.0.0.1:8787/auth/login"
     );
-    assert_eq!(http_request["action"], "refresh");
+    assert_eq!(http_request["action"], "login");
     let invalid_settings =
         json!({"revision":"4","values":{"serverUrl":"ftp://sync.example.invalid"}});
     let invalid = execute(
@@ -372,7 +433,10 @@ fn main() {
         )
         .expect("write visual fixture");
     }
-    println!("self-host sync Wasm page, requests, and callback validated");
+    verify_provider_flow(&mut runtime, &settings);
+    println!(
+        "self-host sync Wasm page, provider data/network orchestration, and callback validated"
+    );
 }
 
 fn execute(
@@ -395,4 +459,171 @@ fn execute(
         })
         .expect("guest execution");
     outputs
+}
+
+fn api_call(outputs: &[norishell_core_api::PluginRuntimeOutput], kind: &str) -> Value {
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].kind, "api.request");
+    let value: Value = serde_json::from_str(&outputs[0].payload_json).expect("API call");
+    assert_eq!(value["operation"]["kind"], kind);
+    assert!(
+        value["callId"]
+            .as_str()
+            .unwrap()
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+    );
+    serde_json::from_value::<norishell_core_api::PluginApiCall>(value.clone())
+        .expect("typed data/network request");
+    value
+}
+
+fn verify_page_open_status(wasm: &[u8], settings: &Value) {
+    let mut runtime = WasmRuntime::new(wasm, RuntimeLimits::default()).expect("production ABI");
+    execute(
+        &mut runtime,
+        PluginHostMessageKind::Initialize,
+        json!({"pluginId":"com.norishell.self-host-sync","locale":"en","storage":null,"settings":settings}),
+    );
+    let opened = execute(
+        &mut runtime,
+        PluginHostMessageKind::UiAction,
+        json!({"locale":"en","actionId":"sync.pageOpened","settings":settings}),
+    );
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].kind, "ssh.sync.request");
+    let request: Value = serde_json::from_str(&opened[0].payload_json).expect("status request");
+    assert_eq!(request["action"], "status");
+    let status = execute(
+        &mut runtime,
+        PluginHostMessageKind::SshSyncResult,
+        json!({"locale":"en","actionId":"sync.pageOpened","result":{
+            "accountState":"connected","operationState":"idle","stableErrorCode":null
+        }}),
+    );
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].kind, "ui.document");
+    let document: Value = serde_json::from_str(&status[0].payload_json).expect("document");
+    assert!(document.to_string().contains("Connected"));
+}
+
+fn reply(
+    runtime: &mut WasmRuntime,
+    call: &Value,
+    value: Value,
+) -> Vec<norishell_core_api::PluginRuntimeOutput> {
+    serde_json::from_value::<norishell_core_api::PluginApiValue>(value.clone())
+        .expect("typed API response");
+    execute(
+        runtime,
+        PluginHostMessageKind::BrokerResult,
+        json!({"locale":"en","actionId":"sync.run",
+        "result":{"kind":"api","reply":{"callId":call["callId"],"outcome":{"kind":"completed","value":value}}}}),
+    )
+}
+
+fn network_receipt(status: u16, receipt: &str, blob: Option<&str>, etag: Option<&str>) -> Value {
+    json!({"kind":"resourceEvents","handle":"network","backpressured":false,"events":[{
+        "sequence":"1","kind":{"kind":"network","event":{"kind":"httpExchangeCompleted",
+            "status":status,"receiptHandle":receipt,"bodyBlobHandle":blob,"etag":etag,"byteLength":0}}
+    }]})
+}
+
+fn verify_provider_flow(runtime: &mut WasmRuntime, settings: &Value) {
+    let output = execute(
+        runtime,
+        PluginHostMessageKind::UiAction,
+        json!({"locale":"en","actionId":"sync.run","settings":settings}),
+    );
+    let snapshot = api_call(&output, "dataSnapshot");
+    assert_eq!(
+        snapshot["operation"]["request"]["categories"],
+        json!(["hosts", "credentials", "desktopProfiles"])
+    );
+    let object = json!({"category":"hosts","kind":"host","stableId":"host-one","objectHandle":"object",
+        "equalityTag":"keyed","updateTimeUnixMs":10,"tombstone":false,"dependency":false,
+        "display":{"kind":"host","label":"Production","address":"host.example","port":22}});
+    let output = reply(
+        runtime,
+        &snapshot,
+        json!({"kind":"dataSnapshot","snapshotHandle":"local","keyPending":false,"localCounts":{"hostCount":1,"credentialCount":0,"desktopProfileCount":0,"tombstoneCount":0},"objects":[object]}),
+    );
+    let get = api_call(&output, "networkStart");
+    assert_eq!(get["operation"]["request"]["operation"]["method"], "get");
+    let output = reply(
+        runtime,
+        &get,
+        json!({"kind":"networkStarted","handle":"network"}),
+    );
+    let poll = api_call(&output, "resourceEvents");
+    assert_eq!(poll["operation"]["waitMs"], 30000);
+    let output = reply(runtime, &poll, network_receipt(404, "empty", None, None));
+    let close = api_call(&output, "resourceClose");
+    let output = reply(runtime, &close, json!({"kind":"closed","handle":"network"}));
+    let export = api_call(&output, "dataExport");
+    assert_eq!(export["operation"]["request"]["sourceHandle"], "local");
+    let output = reply(
+        runtime,
+        &export,
+        json!({"kind":"dataExport","blobHandle":"encrypted","exportHandle":"exported","objects":[object],"revision":7,
+        "idempotencyKey":"00000000-0000-4000-8000-000000000777","contentType":"application/vnd.norishell.ssh-sync-exchange+json;version=1"}),
+    );
+    let put = api_call(&output, "networkStart");
+    let http = &put["operation"]["request"]["operation"];
+    assert_eq!(http["method"], "put");
+    assert_eq!(http["bodyBlobHandle"], "encrypted");
+    let headers = http["headers"].as_array().unwrap();
+    assert!(headers.iter().any(
+        |header| header["name"] == "X-NoriShell-Expected-Next-Revision" && header["value"] == "7"
+    ));
+    assert!(!headers.iter().any(|header| header["name"] == "If-Match"));
+    let output = reply(
+        runtime,
+        &put,
+        json!({"kind":"networkStarted","handle":"network"}),
+    );
+    let poll = api_call(&output, "resourceEvents");
+    let output = reply(
+        runtime,
+        &poll,
+        network_receipt(200, "uploaded", None, Some("\"v7\"")),
+    );
+    let close = api_call(&output, "resourceClose");
+    let output = reply(runtime, &close, json!({"kind":"closed","handle":"network"}));
+    let checkpoint = api_call(&output, "dataCheckpoint");
+    assert_eq!(
+        checkpoint["operation"]["request"]["authoritativeReceiptHandle"],
+        "uploaded"
+    );
+    let output = reply(
+        runtime,
+        &checkpoint,
+        json!({"kind":"dataCheckpoint","syncedAtUnixMs":100}),
+    );
+    let release = api_call(&output, "dataRelease");
+    assert_eq!(
+        release["operation"]["request"]["stateHandles"],
+        json!(["local", "exported"])
+    );
+    assert_eq!(
+        release["operation"]["request"]["blobHandles"],
+        json!(["encrypted"])
+    );
+    assert_eq!(
+        release["operation"]["request"]["receiptHandles"],
+        json!(["empty", "uploaded"])
+    );
+    let output = reply(runtime, &release, json!({"kind":"dataRelease"}));
+    let document = output
+        .iter()
+        .find(|output| output.kind == "ui.document")
+        .expect("finished document");
+    assert!(document.payload_json.contains("Production"));
+    let storage = output
+        .iter()
+        .find(|output| output.kind == "storage.write")
+        .expect("offline cache");
+    for forbidden in ["keyed", "objectHandle", "encrypted", "uploaded"] {
+        assert!(!storage.payload_json.contains(forbidden));
+    }
 }

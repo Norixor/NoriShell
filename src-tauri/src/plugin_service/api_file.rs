@@ -129,6 +129,7 @@ impl PluginService {
                     persisted_target_label: persisted_label,
                     details,
                     exact_scope,
+                    policy_identity: Some("file.access.v1"),
                     target_fence: None,
                 },
             )

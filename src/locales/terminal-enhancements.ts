@@ -11,7 +11,13 @@ export const terminalEnhancementsZhCN = {
   saveFailed: "设置未保存，请重试。",
   hostListFailed: "主机列表暂时不可用；仍可设置全局高亮。",
   retry: "重试",
-  highlightSuspended: "高亮规则运行超时或不可用，已暂停；请在设置中调整规则。",
+  highlightSuspended: {
+    "worker-unavailable": "高亮 Worker 无法启动或接收任务，已暂停；请在设置中关闭再打开高亮以重试。",
+    "worker-error": "高亮 Worker 运行出错，已暂停；请在设置中关闭再打开高亮以重试。",
+    "evaluation-failed": "高亮规则计算失败，已暂停；请在设置中检查规则。",
+    "startup-timeout": "高亮 Worker 首次响应超过 2 秒，已暂停；请在设置中调整规则后重试。",
+    "scan-timeout": "高亮规则扫描超过 500 毫秒，已暂停；请在设置中调整规则后重试。",
+  },
   paste: {
     setting: "粘贴前提醒",
     settingHint: "多行文本或末尾换行可能立即执行命令。不会额外追加 Enter。",
@@ -49,7 +55,13 @@ export const terminalEnhancementsEn = {
   saveFailed: "Settings were not saved. Please try again.",
   hostListFailed: "The host list is unavailable. Global highlighting is still configurable.",
   retry: "Retry",
-  highlightSuspended: "Highlighting timed out or is unavailable. Adjust the rules in Settings to resume.",
+  highlightSuspended: {
+    "worker-unavailable": "The highlighting worker could not start or accept a task. Turn highlighting off and on in Settings to retry.",
+    "worker-error": "The highlighting worker encountered an error. Turn highlighting off and on in Settings to retry.",
+    "evaluation-failed": "A highlighting rule failed to evaluate. Check the rules in Settings.",
+    "startup-timeout": "The highlighting worker did not respond within 2 seconds. Adjust the rules in Settings to retry.",
+    "scan-timeout": "A highlighting scan exceeded 500 milliseconds. Adjust the rules in Settings to retry.",
+  },
   paste: {
     setting: "Confirm before pasting",
     settingHint: "Multiple lines or a trailing newline may execute commands immediately. No extra Enter is appended.",

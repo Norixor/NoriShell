@@ -1,6 +1,6 @@
 # Broker API 参考
 
-协议 **1.13** 的全部 **35** 个方法。每篇包括请求与返回表、前置条件和可反序列化的 PluginApiCall JSON。先看[调用 API](../developers/development/calling-api.zh-CN.md)，再按需要查下面的方法。
+协议 **1.13** 的全部 **44** 个方法。每篇包括请求与返回表、前置条件和可反序列化的 PluginApiCall JSON。先看[调用 API](../developers/development/calling-api.zh-CN.md)，再按需要查下面的方法。
 
 ## 原生能力与调用上下文
 
@@ -47,6 +47,22 @@
 | [resourceClose](./resourceClose.zh-CN.md) | 关闭自身资源并触发相应清理。 | `closed` |
 | [timerStart](./timerStart.zh-CN.md) | 创建一次性或周期定时器。 | `timerStarted` |
 | [subscriptionStart](./subscriptionStart.zh-CN.md) | 订阅允许范围内的元数据变更。 | `subscriptionStarted` |
+
+## 分类数据
+
+Core API 1.88 声明了分类数据方法。`dataCatalog`、`dataRead` 和受保护数据操作已在 Core service 接线；原生及端到端同步尚待验收。自建同步插件只选 hosts、credentials、desktopProfiles。
+
+| 方法 | 结果 kind |
+| --- | --- |
+| [dataCatalog](./dataCatalog.zh-CN.md) | `dataCatalog` |
+| [dataRead](./dataRead.zh-CN.md) | `dataRead` |
+| [dataSnapshot](./dataSnapshot.zh-CN.md) | `dataSnapshot` |
+| [dataInspect](./dataInspect.zh-CN.md) | `dataInspect` |
+| [dataCompose](./dataCompose.zh-CN.md) | `dataCompose` |
+| [dataApply](./dataApply.zh-CN.md) | `dataApply` |
+| [dataExport](./dataExport.zh-CN.md) | `dataExport` |
+| [dataCheckpoint](./dataCheckpoint.zh-CN.md) | `dataCheckpoint` |
+| [dataRelease](./dataRelease.zh-CN.md) | `dataRelease` |
 
 ## 网络
 

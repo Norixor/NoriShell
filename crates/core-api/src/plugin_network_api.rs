@@ -75,6 +75,10 @@ pub struct PluginNetworkStartRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub credential: Option<crate::PluginNetworkCredentialRef>,
+    /// Core resolves this plugin-owned OAuth session for the frozen endpoint origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub oauth_profile_id: Option<String>,
     pub operation: PluginNetworkOperation,
 }
 
@@ -83,6 +87,7 @@ impl fmt::Debug for PluginNetworkStartRequest {
         formatter
             .debug_struct("PluginNetworkStartRequest")
             .field("timeout_ms", &self.timeout_ms)
+            .field("oauth_profile_id", &self.oauth_profile_id)
             .field("operation", &self.operation)
             .finish()
     }
@@ -104,6 +109,16 @@ pub enum PluginNetworkOperation {
         /// Standard base64 without a data-URL prefix. This avoids unbounded JSON number arrays.
         body_base64: String,
     },
+    /// Request and response bodies are Core-owned opaque blobs; no exchange bytes enter Wasm.
+    HttpExchange {
+        method: PluginHttpMethod,
+        headers: Vec<PluginNetworkHeader>,
+        profile_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        body_blob_handle: Option<String>,
+        max_response_bytes: u32,
+    },
     WebSocket {
         headers: Vec<PluginNetworkHeader>,
     },
@@ -124,6 +139,20 @@ impl fmt::Debug for PluginNetworkOperation {
                 .field("method", method)
                 .field("header_count", &headers.len())
                 .field("body_base64_bytes", &body_base64.len())
+                .finish(),
+            Self::HttpExchange {
+                method,
+                headers,
+                profile_id,
+                body_blob_handle,
+                max_response_bytes,
+            } => formatter
+                .debug_struct("HttpExchange")
+                .field("method", method)
+                .field("header_count", &headers.len())
+                .field("profile_id", profile_id)
+                .field("has_body_blob", &body_blob_handle.is_some())
+                .field("max_response_bytes", max_response_bytes)
                 .finish(),
             Self::WebSocket { headers } => formatter
                 .debug_struct("WebSocket")
@@ -201,6 +230,13 @@ pub enum PluginNetworkEvent {
         status: u16,
         headers: Vec<PluginNetworkHeader>,
     },
+    HttpExchangeCompleted {
+        receipt_handle: String,
+        status: u16,
+        etag: Option<String>,
+        body_blob_handle: Option<String>,
+        byte_length: u32,
+    },
     Data {
         data_base64: String,
     },
@@ -229,6 +265,15 @@ impl fmt::Debug for PluginNetworkEvent {
                 .field("status", status)
                 .field("header_count", &headers.len())
                 .finish(),
+            Self::HttpExchangeCompleted {
+                status,
+                byte_length,
+                ..
+            } => formatter
+                .debug_struct("HttpExchangeCompleted")
+                .field("status", status)
+                .field("byte_length", byte_length)
+                .finish_non_exhaustive(),
             Self::Data { data_base64 } => formatter
                 .debug_struct("Data")
                 .field("data_base64_bytes", &data_base64.len())
@@ -264,6 +309,8 @@ pub enum PluginNetworkErrorCode {
     HttpFailed,
     ProtocolFailed,
     TimedOut,
+    QuotaExceeded,
+    OutcomeUnknown,
     Revoked,
     Cancelled,
     Unavailable,

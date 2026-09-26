@@ -26,7 +26,7 @@
 
 ## 权限、时机与资源范围
 
-能力提示：`sftpRead`。声明能力后仍须有当前有效授权及适用的精确操作批准。
+能力提示：`sftpRead`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
 hostHandle 来自 Core 提供的主机上下文，不是 HostId 或 SSH session ID。Core 审核 rootPath 后授予根句柄；write=true 还需要 sftpWrite。连接独立于已有终端。
 
