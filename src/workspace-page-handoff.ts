@@ -1,11 +1,17 @@
 import type { Router } from "vue-router";
 
-import type { WorkspacePageTab } from "./stores/workspaceTabs";
+import type { WorkspacePageTab, WorkspacePageType } from "./stores/workspaceTabs";
 import type { useWorkspaceTabsStore } from "./stores/workspaceTabs";
 import type { WorkspaceTabHandoff } from "./workspace-tab-transfer";
 import { isWorkspaceChildWindow } from "./workspace-window-context";
 
 type WorkspaceTabsStore = ReturnType<typeof useWorkspaceTabsStore>;
+const PAGE_TYPES: Record<WorkspacePageType, true> = {
+  newPage: true,
+  knownHosts: true,
+  sshIdentities: true,
+  plugin: true,
+};
 
 function isPageTab(value: unknown): value is WorkspacePageTab {
   if (!value || typeof value !== "object") return false;
@@ -13,7 +19,8 @@ function isPageTab(value: unknown): value is WorkspacePageTab {
   return typeof tab.groupId === "string"
     && typeof tab.route === "string"
     && typeof tab.label === "string"
-    && (tab.pageType === "newPage" || tab.pageType === "knownHosts" || tab.pageType === "sshIdentities" || tab.pageType === "plugin")
+    && typeof tab.pageType === "string"
+    && PAGE_TYPES[tab.pageType as WorkspacePageType] === true
     && (tab.labelKey === null || typeof tab.labelKey === "string")
     && (tab.iconName === null || typeof tab.iconName === "string");
 }
