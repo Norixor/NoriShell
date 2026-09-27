@@ -4,7 +4,8 @@
 
 html,
 body,
-#app {
+#app,
+#workspace-window-app {
   min-width: calc(1024px / var(--nvx-ui-zoom, 1));
   min-height: calc(720px / var(--nvx-ui-zoom, 1));
   height: 100%;
@@ -79,4 +80,21 @@ textarea:focus-visible {
 ::selection {
   background: var(--nvx-color-selection, var(--nvx-color-accent-soft));
   color: var(--nvx-color-selection-text, var(--nvx-color-text-primary));
+}
+
+.workspace-incoming-fade-enter-active,
+.workspace-incoming-fade-leave-active {
+  transition: opacity 140ms ease;
+}
+
+.workspace-incoming-fade-enter-from,
+.workspace-incoming-fade-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-incoming-fade-enter-active,
+  .workspace-incoming-fade-leave-active {
+    transition-duration: 0ms;
+  }
 }

@@ -26,11 +26,17 @@ import { createSftpTerminalLaunch } from "./sftpTerminalLaunch";
 
 const defaultNavigatorPlatform = navigator.platform;
 const nativeEvents = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
+const workspaceLabel = vi.hoisted(() => ({ value: "main" }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, callback: (event: { payload: unknown }) => void) => {
     nativeEvents.set(name, callback);
     return () => nativeEvents.delete(name);
   }),
+}));
+
+vi.mock("../workspace-tab-windows", () => ({
+  workspaceWindowLabel: () => workspaceLabel.value,
+  snapshotWorkspaceTabs: vi.fn(async () => ({ owned: [], incoming: [], outgoing: [], others: [] })),
 }));
 
 const client = vi.hoisted(() => ({
@@ -670,6 +676,7 @@ describe("SshTerminalView route and Header behavior", () => {
   });
 
   beforeEach(() => {
+    workspaceLabel.value = "main";
     pluginClient.fetchPluginTerminalSessionSnapshot.mockResolvedValue({ snapshotRevision: "0", sessions: [] });
     pluginClient.listPluginProtocolLaunches.mockResolvedValue([]);
     vi.clearAllMocks();
@@ -849,6 +856,48 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
+  it("persists an imported Tab into an initially empty workspace window", async () => {
+    workspaceLabel.value = "workspace-test";
+    const { wrapper, pinia } = await mountShell();
+    const controller = useWorkspaceTabsStore(pinia).terminalController!;
+    const tabId = "019d0000-0000-7000-8000-000000000951";
+    const paneId = "019d0000-0000-7000-8000-000000000952";
+    await controller.importTabHandoff!({
+      schemaVersion: 1,
+      tabId,
+      layout: { kind: "pane", paneId, terminalId: paneId },
+      activePaneId: paneId,
+      panes: [{ kind: "launcher", paneId, label: "New connection" }],
+    });
+    await expect(controller.commitImportedTabHandoff!(tabId)).resolves.toBeUndefined();
+    expect(client.replaceTerminalWorkspaceLayout).toHaveBeenCalledWith(expect.objectContaining({
+      layout: expect.objectContaining({ activeTabId: tabId }),
+    }));
+    expect(useWorkspaceTabsStore(pinia).terminalTabs.map((tab) => tab.groupId)).toEqual([tabId]);
+    wrapper.unmount();
+  });
+
+  it("keeps a committed imported Tab visible when layout persistence fails", async () => {
+    workspaceLabel.value = "workspace-test";
+    client.replaceTerminalWorkspaceLayout.mockRejectedValue(new Error("SQLite unavailable"));
+    const { wrapper, pinia } = await mountShell();
+    const controller = useWorkspaceTabsStore(pinia).terminalController!;
+    const tabId = "019d0000-0000-7000-8000-000000000953";
+    const paneId = "019d0000-0000-7000-8000-000000000954";
+    await controller.importTabHandoff!({
+      schemaVersion: 1,
+      tabId,
+      layout: { kind: "pane", paneId, terminalId: paneId },
+      activePaneId: paneId,
+      panes: [{ kind: "launcher", paneId, label: "New connection" }],
+    });
+    await expect(controller.commitImportedTabHandoff!(tabId)).rejects.toThrow();
+    await flushPromises();
+    expect(useWorkspaceTabsStore(pinia).terminalTabs.map((tab) => tab.groupId)).toEqual([tabId]);
+    expect(wrapper.text()).toContain(i18n.global.t("sshTerminal.workspacePersistenceFailed"));
+    wrapper.unmount();
+  });
+
   it("waits for an in-flight write and the latest projection before exit", async () => {
     const firstWrite = deferred<{
       revision: string;
@@ -880,6 +929,9 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(exitBarrierResolved).toBe(false);
 
     const firstLayout = client.replaceTerminalWorkspaceLayout.mock.calls[0]?.[0].layout;
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({
+      revision: "2", layout: firstLayout, updatedAtUnixMs: 1,
+    });
     firstWrite.resolve({ revision: "2", layout: firstLayout, updatedAtUnixMs: 1 });
     await exitBarrier;
 
@@ -1209,8 +1261,9 @@ describe("SshTerminalView route and Header behavior", () => {
 
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(client.replaceTerminalWorkspaceLayout).toHaveBeenCalledTimes(1);
-    expect(client.replaceTerminalWorkspaceLayout.mock.calls[0]?.[0].layout.tabs[0]?.panes[0]?.kind)
-      .toBe("launcher");
+    expect(client.replaceTerminalWorkspaceLayout.mock.calls[0]?.[0].layout.tabs.map(
+      (tab: { panes: { kind: string }[] }) => tab.panes[0]?.kind,
+    )).toEqual(["sshHost", "launcher"]);
     wrapper.unmount();
   });
 

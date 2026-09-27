@@ -28,7 +28,7 @@ describe("NvxSftpPaneActionsMenu", () => {
     await wrapper.get('[aria-haspopup="menu"]').trigger("click");
     const menu = document.querySelector<HTMLElement>('.sftp-pane-actions-menu__popover');
     expect(menu?.parentElement).toBe(document.body);
-    expect(menu?.querySelectorAll('[role="menuitem"]')).toHaveLength(5);
+    expect(menu?.querySelectorAll('[role="menuitem"]')).toHaveLength(6);
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await wrapper.vm.$nextTick();

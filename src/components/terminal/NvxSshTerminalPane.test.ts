@@ -84,6 +84,9 @@ const terminalViewStub = defineComponent({
     expose({
       writeBytes: writes.bytes,
       writeGap: writes.gap,
+      whenOutputParsed: async () => {},
+      finishReplay: async () => {},
+      outputGeometrySnapshot: () => [{ afterOutputSeq: "0", ...viewDimensions }],
       dimensions: () => viewDimensions,
       focus: writes.focus,
       findNext: writes.findNext,

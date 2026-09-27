@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { Monitor, Plus, ChevronDown, RotateCw, Unplug, Scaling, Scan, Maximize2, ClipboardCopy, ClipboardPaste, Volume2, VolumeX, Hand, X, PanelLeftClose, PanelLeftOpen, Minimize2, Settings2 } from "lucide-vue-next";
@@ -15,12 +16,21 @@ import { useTipsStore } from "../stores/tips";
 import { onToolWindowChanged, openToolWindow } from "../tool-windows";
 import { useRouteReveal } from "../routeReveal";
 import { onSavedConnectionsChanged } from "../saved-connections";
+import { filterDesktopSessions, type DesktopTabHandoffSnapshot } from "../workspace-desktop-handoff";
+import { snapshotWorkspaceTabs, workspaceWindowLabel } from "../workspace-tab-windows";
 defineOptions({ name: "DesktopView" });
 const { t, te } = useI18n(), router = useRouter(), workspace = useWorkspaceTabsStore(), tips = useTipsStore();
 const revealRoute = useRouteReveal();
 let initialRouteReady = false;
 const availability = ref<DesktopAvailability[]>([]);
 const profiles = ref<DesktopProfile[]>([]), sessions = ref<DesktopSessionSummary[]>([]);
+const frozenIds = ref<ReadonlySet<string>>(new Set());
+const stagedIds = ref<ReadonlySet<string>>(new Set());
+const localCreated = new Set<string>();
+const frozenActive = new Map<string, boolean>();
+let projectionRevision = 0;
+const visibleSessions = computed(() => sessions.value.filter((session) => !frozenIds.value.has(`desktop:${session.id}`)
+  && !stagedIds.value.has(`desktop:${session.id}`)));
 const activeId = ref(""), active = ref(true), loading = ref(true), busy = ref(false), failed = ref(false), deleteTarget = ref<DesktopProfile | null>(null), fit = ref(true), panning = ref(false);
 const failureText = ref("");
 const sidebarCollapsed = ref(false), fullscreen = ref(false), fullscreenBusy = ref(false);
@@ -33,7 +43,8 @@ type FullscreenElement = HTMLElement & { webkitRequestFullscreen?: () => Promise
 const fullscreenDocument = document as FullscreenDocument;
 let fullscreenOperation = 0, fullscreenSession = "", escapeConsumed = false;
 const display = ref<InstanceType<typeof NvxDesktopCanvas> | null>(null);
-const current = computed(() => sessions.value.find((session) => session.id === activeId.value));
+const current = computed(() => sessions.value.find((session) => session.id === activeId.value
+  && !frozenIds.value.has(`desktop:${session.id}`) && !stagedIds.value.has(`desktop:${session.id}`)));
 const settingsDraft = ref<DesktopProfile | null>(null);
 const settingsSession = ref<DesktopSessionSummary | null>(null);
 const settingsError = ref("");
@@ -115,7 +126,7 @@ function toggleProtocol(protocol: DesktopProfile["protocol"]) {
     ? collapsedProtocols.value.filter((item) => item !== protocol)
     : [...collapsedProtocols.value, protocol];
 }
-let timer: ReturnType<typeof setTimeout> | undefined, disposed = false, snapshotBusy = false;
+let timer: ReturnType<typeof setTimeout> | undefined, disposed = false, snapshotBusy = false, refreshPending = false;
 function notice(key = "error", tone: "error" | "success" = "error") { tips.show({ scope: "desktop", tone, title: t(`desktop.${key}`) }); }
 function noticeFailure(error: unknown) {
   const failure = parseCoreApiError(error);
@@ -134,11 +145,23 @@ function pageFailure(error: unknown) {
   failed.value = true;
 }
 async function refresh() {
-  if (snapshotBusy || disposed) return;
+  if (disposed) return;
+  if (snapshotBusy) { refreshPending = true; return; }
   snapshotBusy = true;
-  try { const result = await desktopClient.snapshot(); if (!disposed) { sessions.value = result; if (!result.some((item) => item.id === activeId.value)) activeId.value = result[0]?.id ?? ""; } }
+  const revision = projectionRevision;
+  try {
+    const [result, ownership] = await Promise.all([desktopClient.snapshot(), snapshotWorkspaceTabs()]);
+    if (!disposed && revision === projectionRevision) {
+      sessions.value = filterDesktopSessions(result, ownership, workspaceWindowLabel(), stagedIds.value, localCreated);
+      const visible = sessions.value.filter((item) => !frozenIds.value.has(`desktop:${item.id}`));
+      if (!visible.some((item) => item.id === activeId.value)) activeId.value = visible[0]?.id ?? "";
+    }
+  }
   catch (error) { pageFailure(error); }
-  finally { snapshotBusy = false; }
+  finally {
+    snapshotBusy = false;
+    if (refreshPending && !disposed) { refreshPending = false; void refresh(); }
+  }
 }
 async function poll() { if (disposed) return; if (active.value && !document.hidden) await refresh(); if (!disposed) timer = setTimeout(() => void poll(), 750); }
 let profilesSequence = 0;
@@ -169,12 +192,12 @@ async function edit(profile?: DesktopProfile) {
 }
 async function open(profile: DesktopProfile) {
   if (busy.value) return; busy.value = true;
-  try { workspace.terminalController?.deactivate(); await desktopClient.focus(null); const session = await desktopClient.open(profile); sessions.value = [...sessions.value.filter((item) => item.id !== session.id), session]; activeId.value = session.id; await router.push("/desktop"); }
+  try { workspace.terminalController?.deactivate(); await desktopClient.focus(null); const session = await desktopClient.open(profile); localCreated.add(`desktop:${session.id}`); projectionRevision++; sessions.value = [...sessions.value.filter((item) => item.id !== session.id), session]; activeId.value = session.id; await router.push("/desktop"); }
   catch (error) { noticeFailure(error); } finally { busy.value = false; }
 }
 async function close(tabId: string) {
-  const session = sessions.value.find((item) => `desktop:${item.id}` === tabId); if (!session) return;
-  try { if (session.id === activeId.value) await display.value?.invalidate(); await desktopClient.close(session); sessions.value = sessions.value.filter((item) => item.id !== session.id); if (activeId.value === session.id) activeId.value = sessions.value[0]?.id ?? ""; }
+  const session = visibleSessions.value.find((item) => `desktop:${item.id}` === tabId); if (!session) return;
+  try { if (session.id === activeId.value) await display.value?.invalidate(); await desktopClient.close(session); localCreated.delete(tabId); projectionRevision++; sessions.value = sessions.value.filter((item) => item.id !== session.id); if (activeId.value === session.id) activeId.value = visibleSessions.value[0]?.id ?? ""; }
   catch (error) { noticeFailure(error); await refresh(); }
 }
 async function disconnect(session: DesktopSessionSummary) { busy.value = true; try { await display.value?.invalidate(); await desktopClient.disconnect(session); await refresh(); } catch (error) { noticeFailure(error); } finally { busy.value = false; } }
@@ -272,22 +295,82 @@ function togglePanning() {
   panning.value = !panning.value;
   if (panning.value) fit.value = false;
 }
-function activate(tabId: string) { const session = sessions.value.find((item) => `desktop:${item.id}` === tabId); if (!session) return; workspace.terminalController?.deactivate(); activeId.value = session.id; void router.push("/desktop"); }
-const unregister = workspace.registerDesktopController({ activate, close: (id) => void close(id), closeMany: (ids) => { void (async () => { for (const id of ids) await close(id); })(); }, deactivate: () => { active.value = false; void display.value?.invalidate(); } });
-watch([sessions, activeId, busy, () => t("desktop.title")], () => workspace.syncDesktopState({ tabs: sessions.value.map((session) => ({ groupId: `desktop:${session.id}`, label: session.profile.label, stateLabel: t(`desktop.states.${session.state}`) })), activeTabId: activeId.value ? `desktop:${activeId.value}` : "", busy: busy.value }), { deep: true, immediate: true });
+function activate(tabId: string) { const session = visibleSessions.value.find((item) => `desktop:${item.id}` === tabId); if (!session) return; workspace.terminalController?.deactivate(); activeId.value = session.id; void router.push("/desktop"); }
+function snapshotHandoff(tabId: string): DesktopTabHandoffSnapshot {
+  const session = visibleSessions.value.find((item) => `desktop:${item.id}` === tabId);
+  if (!session) throw new Error("workspace_tab.desktop_not_found");
+  return { schemaVersion: 1, tabId, sessionId: session.id, generation: session.generation };
+}
+async function freezeHandoff(tabId: string) {
+  const session = visibleSessions.value.find((item) => `desktop:${item.id}` === tabId);
+  if (!session) throw new Error("workspace_tab.desktop_not_found");
+  if (session.id === activeId.value) {
+    await display.value?.invalidate();
+    await desktopClient.focus(null);
+  }
+  frozenActive.set(tabId, activeId.value === session.id);
+  frozenIds.value = new Set([...frozenIds.value, tabId]);
+  projectionRevision++;
+  if (activeId.value === session.id) activeId.value = visibleSessions.value[0]?.id ?? "";
+}
+async function importHandoff(session: DesktopSessionSummary) {
+  const tabId = `desktop:${session.id}`;
+  if (sessions.value.some((item) => item.id === session.id)) throw new Error("workspace_tab.desktop_duplicate");
+  stagedIds.value = new Set([...stagedIds.value, tabId]);
+  projectionRevision++;
+  sessions.value = [...sessions.value, session];
+  activeId.value = session.id;
+}
+function commitHandoff(tabId: string) {
+  frozenIds.value = new Set([...frozenIds.value].filter((id) => id !== tabId));
+  frozenActive.delete(tabId);
+  localCreated.delete(tabId);
+  projectionRevision++;
+  sessions.value = sessions.value.filter((item) => `desktop:${item.id}` !== tabId);
+  if (activeId.value === tabId.slice("desktop:".length)) activeId.value = visibleSessions.value[0]?.id ?? "";
+}
+async function rollbackHandoff(tabId: string) {
+  const wasActive = frozenActive.get(tabId);
+  frozenActive.delete(tabId);
+  frozenIds.value = new Set([...frozenIds.value].filter((id) => id !== tabId));
+  projectionRevision++;
+  if (wasActive) {
+    activeId.value = tabId.slice("desktop:".length);
+    await router.push("/desktop");
+  }
+}
+async function discardHandoff(tabId: string) {
+  if (!stagedIds.value.has(tabId)) return;
+  stagedIds.value = new Set([...stagedIds.value].filter((id) => id !== tabId));
+  projectionRevision++;
+  sessions.value = sessions.value.filter((item) => `desktop:${item.id}` !== tabId);
+  if (activeId.value === tabId.slice("desktop:".length)) activeId.value = visibleSessions.value[0]?.id ?? "";
+}
+async function admitHandoff(tabId: string) {
+  if (!stagedIds.value.has(tabId)) {
+    if (visibleSessions.value.some((session) => `desktop:${session.id}` === tabId)) return;
+    throw new Error("workspace_tab.desktop_import_missing");
+  }
+  stagedIds.value = new Set([...stagedIds.value].filter((id) => id !== tabId));
+  projectionRevision++;
+}
+const unregister = workspace.registerDesktopController({ activate, close: (id) => void close(id), closeMany: (ids) => { void (async () => { for (const id of ids) await close(id); })(); }, deactivate: () => { active.value = false; void display.value?.invalidate(); }, snapshotHandoff, freezeHandoff, importHandoff, commitHandoff, rollbackHandoff, discardHandoff, admitHandoff });
+watch([visibleSessions, activeId, busy, () => t("desktop.title")], () => workspace.syncDesktopState({ tabs: visibleSessions.value.map((session) => ({ groupId: `desktop:${session.id}`, label: session.profile.label, stateLabel: t(`desktop.states.${session.state}`) })), activeTabId: activeId.value ? `desktop:${activeId.value}` : "", busy: busy.value }), { deep: true, immediate: true });
 let focusOperation = "";
 let disposeToolWindowListener: (() => void) | undefined;
 let disposeSavedConnectionsListener: (() => void) | undefined;
+let disposeOwnershipListener: UnlistenFn | undefined;
 watch(() => router.currentRoute.value.query.focusOperation, async (operation) => {
   if (typeof operation !== "string" || operation === focusOperation || router.currentRoute.value.path !== "/desktop") return;
   focusOperation = operation;
   const query = { ...router.currentRoute.value.query };
   try {
-    const snapshot = await desktopClient.snapshot();
+    const [snapshot, ownership] = await Promise.all([desktopClient.snapshot(), snapshotWorkspaceTabs()]);
     if (disposed || router.currentRoute.value.query.focusOperation !== operation) return;
-    const target = snapshot.find((session) => session.id === query.focusSessionId && session.generation === query.focusGeneration);
+    const filtered = filterDesktopSessions(snapshot, ownership, workspaceWindowLabel(), stagedIds.value, localCreated);
+    const target = filtered.find((session) => session.id === query.focusSessionId && session.generation === query.focusGeneration);
     if (!target || document.querySelector('[role="dialog"][aria-modal="true"]')) throw new Error("unavailable");
-    sessions.value = snapshot; activeId.value = target.id;
+    sessions.value = filtered; activeId.value = target.id;
   } catch { if (!disposed) tips.show({ tone: "error", title: t("errors.tray.actionUnavailable") }); }
 }, { immediate: true });
 
@@ -304,6 +387,9 @@ onMounted(() => {
   void onSavedConnectionsChanged(() => { void refreshProfiles().catch(noticeFailure); }).then((dispose) => {
     if (disposed) dispose(); else disposeSavedConnectionsListener = dispose;
   }).catch(() => { /* Initial and activation reads still load saved profiles. */ });
+  void listen("workspace-tab-state-changed", () => { void refresh(); }).then((dispose) => {
+    if (disposed) dispose(); else disposeOwnershipListener = dispose;
+  }).catch(() => { /* Polling still reconciles ownership while this page is active. */ });
 });
 onActivated(() => { active.value = true; workspace.terminalController?.deactivate(); void refresh(); void refreshProfiles().catch(noticeFailure); if (initialRouteReady) revealRoute(); });
 onDeactivated(() => { active.value = false; void display.value?.invalidate(); });
@@ -313,7 +399,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("webkitfullscreenchange", fullscreenChanged);
   window.removeEventListener("keydown", fullscreenKey, true);
   window.removeEventListener("keyup", fullscreenKey, true);
-  disposed = true; clearTimeout(timer); disposeToolWindowListener?.(); disposeSavedConnectionsListener?.(); unregister(); });
+  disposed = true; clearTimeout(timer); disposeToolWindowListener?.(); disposeSavedConnectionsListener?.(); disposeOwnershipListener?.(); unregister(); });
 </script>
 <template>
   <section
@@ -585,8 +671,9 @@ onBeforeUnmount(() => {
         >
           <NvxDesktopCanvas
             ref="display"
+            :key="sessionKey()"
             :session="current"
-            :active="active && !deleteTarget && !settingsDraft"
+            :active="active && !stagedIds.has(`desktop:${current.id}`) && !deleteTarget && !settingsDraft"
             :fit="fit"
             :panning="panning"
             @error="notice('inputFailed')"

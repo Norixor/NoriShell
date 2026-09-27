@@ -65,7 +65,7 @@ use russh_sftp::{
     protocol::{FileAttributes as RemoteFileAttributes, OpenFlags},
 };
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, watch};
 use zeroize::Zeroizing;
@@ -9497,11 +9497,12 @@ type CoreResult<T> = Result<T, Box<wire::CoreApiError>>;
 pub(crate) async fn sftp_session_open(
     mut request: wire::SftpSessionOpenRequest,
     service: State<'_, SftpSessionService>,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
     lifecycle: State<'_, LifecycleState>,
     app: AppHandle,
     window: WebviewWindow,
 ) -> CoreResult<wire::SftpSessionSummary> {
-    if window.label() != "main" {
+    if window.label() != "main" && !workspaces.contains(window.label()) {
         return Err(map_sftp_core_error(
             request.meta.request_id,
             SftpRuntimeError::InvalidInput.into(),
@@ -9527,6 +9528,7 @@ pub(crate) async fn sftp_session_open(
         };
         if !crate::secure_ssh_challenge::prompt_sftp_host_key(
             &app,
+            window.label(),
             request.operation_id.as_str(),
             &endpoint,
             &observed,
@@ -9534,6 +9536,15 @@ pub(crate) async fn sftp_session_open(
         .await
         {
             return Ok(summary);
+        }
+        // A decision can outlive the ordinary window that started this open operation.
+        if app.get_webview_window(window.label()).is_none()
+            || window.label() != "main" && !workspaces.contains(window.label())
+        {
+            return Err(map_sftp_core_error(
+                request_id,
+                SftpRuntimeError::Conflict.into(),
+            ));
         }
         if !service
             .trust_observed_for_open(&request, &summary, &endpoint, &observed)

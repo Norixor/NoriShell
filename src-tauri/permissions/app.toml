@@ -2,9 +2,27 @@
 
 [[permission]]
 identifier = "main-window-commands"
-description = "Allows the trusted main NoriShell WebView to call the application command surface."
+description = "Allows trusted ordinary NoriShell WebViews to call the application command surface; sensitive commands still validate the caller in Core."
 commands.allow = [
   "window_renderer_ready",
+  "workspace_window_open",
+  "workspace_window_list",
+  "workspace_window_at_cursor",
+  "workspace_window_focus",
+  "workspace_window_close",
+  "workspace_window_close_empty",
+  "workspace_tab_register",
+  "workspace_tab_update",
+  "workspace_tab_unregister",
+  "workspace_tab_prepare",
+  "workspace_tab_source_frozen",
+  "workspace_tab_target_ready",
+  "workspace_tab_commit",
+  "workspace_tab_abort",
+  "workspace_tab_snapshot",
+  "workspace_tab_drag_begin",
+  "workspace_tab_drag_cancel",
+  "workspace_tab_drag_finish",
   "tool_window_open",
   "secure_vault_open",
   "secure_vault_ensure_for_host",

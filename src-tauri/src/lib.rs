@@ -64,6 +64,8 @@ mod window_frame;
 #[cfg(windows)]
 #[allow(dead_code)]
 mod windows_process_control;
+mod workspace_tab_drag;
+mod workspace_windows;
 
 use tauri::{Emitter, Manager};
 
@@ -322,6 +324,24 @@ impl ProductionInvokeRuntime for tauri::Wry {
             window_frame::window_set_native_header_height,
             window_frame::window_set_windows_maximize_hit_region,
             window_first_show::window_renderer_ready,
+            workspace_windows::workspace_window_open,
+            workspace_windows::workspace_window_list,
+            workspace_windows::workspace_window_at_cursor,
+            workspace_windows::workspace_window_focus,
+            workspace_windows::workspace_window_close,
+            workspace_windows::workspace_window_close_empty,
+            workspace_windows::workspace_tab_register,
+            workspace_windows::workspace_tab_update,
+            workspace_windows::workspace_tab_unregister,
+            workspace_windows::workspace_tab_prepare,
+            workspace_windows::workspace_tab_source_frozen,
+            workspace_windows::workspace_tab_target_ready,
+            workspace_windows::workspace_tab_commit,
+            workspace_windows::workspace_tab_abort,
+            workspace_windows::workspace_tab_snapshot,
+            workspace_tab_drag::workspace_tab_drag_begin,
+            workspace_tab_drag::workspace_tab_drag_cancel,
+            workspace_tab_drag::workspace_tab_drag_finish,
             plugin_service::plugin_local_package_prepare,
             plugin_service::plugin_host_approval_open,
             plugin_service::plugin_host_approval_get,
@@ -417,6 +437,8 @@ pub fn run() {
         .manage(LifecycleState::default())
         .manage(UpdateExitState::default())
         .manage(window_first_show::WindowFirstShow::default())
+        .manage(workspace_windows::WorkspaceWindows::default())
+        .manage(workspace_tab_drag::WorkspaceTabDrag::default())
         .setup(|app| {
             #[cfg(any(windows, target_os = "macos"))]
             if let Some(window) = app.get_webview_window("main") {
@@ -628,6 +650,10 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            workspace_windows::on_window_event(window, event);
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                workspace_tab_drag::on_window_destroyed(window.app_handle(), window.label());
+            }
             #[cfg(any(windows, target_os = "macos"))]
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window_first_show::forget(window.app_handle(), window.label());

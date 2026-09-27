@@ -17,6 +17,7 @@ import {
   NvxWindowFrame,
   NvxWorkspaceTabBar,
 } from "./components/layout";
+import NvxWorkspaceIncomingSkeleton from "./components/layout/NvxWorkspaceIncomingSkeleton.vue";
 import { NvxPluginCommandPalette } from "./components/terminal";
 import { NvxPluginExtensionTarget } from "./components/plugins";
 import NvxPluginFloatingControls from "./components/plugins/NvxPluginFloatingControls.vue";
@@ -40,6 +41,8 @@ import { setNativeNotificationContext, type NativeResourceNotificationClick } fr
 import { requestExitAfterTerminalWorkspaceFlush } from "./terminal-workspace-persistence";
 import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./views/sftpPluginNavigation";
 import { routeRevealKey } from "./routeReveal";
+import { startWorkspaceTabWindowUi } from "./workspace-tab-window-ui";
+import { visibleIncomingWorkspaceTabs } from "./workspace-tab-transfer";
 
 function isToolWindowExitCancelled(error: unknown) { return typeof error === "object" && error !== null && "code" in error && error.code === "app.tool_window_exit_cancelled"; }
 
@@ -58,6 +61,8 @@ const workspaceTabs = useWorkspaceTabsStore(pinia);
 const nativeTerminal = useNativeTerminalStore(pinia);
 const appUpdate = useAppUpdateStore(pinia);
 let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
+let stopWorkspaceTabWindows: (() => void) | null = null;
+let workspaceWindowUiDisposed = false;
 watch(() => ui.locale, () => {
   if (isTauri()) void setNativeNotificationContext(ui.locale).catch(() => { /* Settings exposes permission and availability. */ });
 }, { immediate: true });
@@ -196,6 +201,11 @@ async function confirmResourceCleanupAndExit() {
 let disposeStartupVaultTip: (() => void) | undefined;
 onMounted(async () => {
   if (!isTauri()) return;
+  void startWorkspaceTabWindowUi(workspaceTabs, router).then((stop) => {
+    if (workspaceWindowUiDisposed) stop(); else stopWorkspaceTabWindows = stop;
+  }).catch(() => {
+    tips.show({ scope: "workspace-tab-windows", tone: "error", title: t("workspaceTabs.unavailable") });
+  });
   void appUpdate.checkForUpdates();
   updateCheckTimer = setInterval(() => { void appUpdate.checkForUpdates(); }, 6 * 60 * 60 * 1000);
   disposeStartupVaultTip = initializeStartupVaultTip({ t, tips });
@@ -300,6 +310,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  workspaceWindowUiDisposed = true;
+  stopWorkspaceTabWindows?.();
   if (updateCheckTimer) clearInterval(updateCheckTimer);
   disposeStartupVaultTip?.();
   trayDisposed = true;
@@ -360,7 +372,7 @@ onBeforeUnmount(() => {
               class="app-route-content"
             >
               <RouterView v-slot="{ Component, route }">
-                <KeepAlive include="SshTerminalView,DesktopView,SftpView">
+                <KeepAlive include="SshTerminalView,DesktopView,FileWorkspaceView,SftpView">
                   <component
                     :is="Component"
                     :key="route.path"
@@ -404,6 +416,9 @@ onBeforeUnmount(() => {
           >
             {{ t("navigation.loading") }}
           </div>
+          <Transition name="workspace-incoming-fade">
+            <NvxWorkspaceIncomingSkeleton v-if="visibleIncomingWorkspaceTabs" />
+          </Transition>
         </main>
       </div>
     </div>
@@ -472,7 +487,7 @@ onBeforeUnmount(() => {
   overflow: auto;
 }
 
-.app-main--route-pending > :not(.app-route-placeholder) {
+.app-main--route-pending > :not(.app-route-placeholder, .workspace-incoming) {
   visibility: hidden;
 }
 

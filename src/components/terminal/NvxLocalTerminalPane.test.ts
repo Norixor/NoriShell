@@ -37,6 +37,7 @@ import NvxLocalTerminalPane from "./NvxLocalTerminalPane.vue";
 
 const paneId = "019d0000-0000-7000-8000-000000001001";
 let viewDimensions = { rows: 31, cols: 101 };
+let parsedOutput: Promise<void> = Promise.resolve();
 const writes = {
   bytes: vi.fn(),
   clearSearch: vi.fn(),
@@ -54,12 +55,16 @@ const terminalViewStub = defineComponent({
     terminalLabel: { type: String, default: "" },
     gapLabel: { type: String, default: "" },
     shellPromptKey: { type: String, default: null },
+    initialDimensions: { type: Object, default: undefined },
   },
   emits: ["input", "resize", "searchRequest", "selectionChange"],
   setup(props, { expose }) {
     expose({
       writeBytes: writes.bytes,
       writeGap: writes.gap,
+      whenOutputParsed: () => parsedOutput,
+      finishReplay: () => parsedOutput,
+      outputGeometrySnapshot: () => [{ afterOutputSeq: "0", ...viewDimensions }],
       dimensions: () => viewDimensions,
       focus: writes.focus,
       findNext: writes.findNext,
@@ -70,6 +75,7 @@ const terminalViewStub = defineComponent({
     return () => h("div", {
       class: "terminal-view-stub",
       "data-read-only": String(props.readOnly),
+      "data-initial-cols": String((props.initialDimensions as { cols: number } | undefined)?.cols ?? ""),
     });
   },
 });
@@ -135,6 +141,8 @@ function mountPane(
   active = true,
   deferredStart = false,
   visible = true,
+  initialDimensions?: { rows: number; cols: number },
+  initialOutputGeometry?: Array<{ afterOutputSeq: string; rows: number; cols: number }>,
 ) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -147,6 +155,8 @@ function mountPane(
       deferredStart,
       active,
       visible,
+      initialDimensions,
+      initialOutputGeometry,
       canSplitHorizontal: true,
       canSplitVertical: true,
       canSplitWorkspaceRight: true,
@@ -159,6 +169,7 @@ describe("NvxLocalTerminalPane", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     viewDimensions = { rows: 31, cols: 101 };
+    parsedOutput = Promise.resolve();
     resetTerminalInputFocusForTests();
     i18n.global.locale.value = "en";
     client.fetchTerminalInputFocusSnapshot.mockResolvedValue({
@@ -249,7 +260,7 @@ describe("NvxLocalTerminalPane", () => {
     await flushPromises();
     onEvent(output(nextSession, "1", 66));
     await flushPromises();
-    expect(writes.bytes).toHaveBeenLastCalledWith([66]);
+    expect(writes.bytes).toHaveBeenLastCalledWith([66], "1");
     wrapper.unmount();
   });
 
@@ -497,7 +508,7 @@ describe("NvxLocalTerminalPane", () => {
     const wrapper = mountPane(running);
     await flushPromises();
 
-    expect(writes.bytes).toHaveBeenCalledWith([27, 91, 51, 49, 109]);
+    expect(writes.bytes).toHaveBeenCalledWith([27, 91, 51, 49, 109], "1");
     await vi.advanceTimersByTimeAsync(10_000);
     expect(client.heartbeatLocalAttachment).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: running.sessionId,
@@ -510,6 +521,37 @@ describe("NvxLocalTerminalPane", () => {
       intent: "rendererUnavailable",
       confirmation: null,
     }));
+  });
+
+  it("keeps the source column count through hidden handoff replay before reporting ready", async () => {
+    const running = summary("running");
+    client.getLocalSession.mockResolvedValue(details(running));
+    client.attachLocalSession.mockResolvedValue({
+      stateRevision: running.stateRevision,
+      attachmentRevision: running.attachmentRevision,
+      attachment: attachment(),
+      replay: [{ kind: "frame", payload: {
+        sessionId: running.sessionId, generation: running.generation, ptyId: running.ptyId!,
+        outputSeq: "1", bytes: [37, ...Array(119).fill(32), 13, 32, 13],
+      } }],
+    });
+    let finishParsing!: () => void;
+    parsedOutput = new Promise<void>((resolve) => { finishParsing = resolve; });
+    const wrapper = mountPane(running, false, false, false, { rows: 38, cols: 120 },
+      [{ afterOutputSeq: "0", rows: 38, cols: 120 }]);
+    await flushPromises();
+
+    expect(wrapper.find(".terminal-view-stub").attributes("data-initial-cols")).toBe("120");
+    expect(writes.bytes).toHaveBeenCalledTimes(1);
+    let ready = false;
+    const handoffReady = (wrapper.vm as unknown as { waitForHandoffReplay(): Promise<void> })
+      .waitForHandoffReplay().then(() => { ready = true; });
+    await flushPromises();
+    expect(ready).toBe(false);
+    finishParsing();
+    await handoffReady;
+    expect(ready).toBe(true);
+    wrapper.unmount();
   });
 
   it("resumes after a stale heartbeat without replaying output already rendered", async () => {

@@ -22,10 +22,11 @@ describe("NvxTerminalTabBar native drag boundaries", () => {
     vi.unstubAllGlobals();
   });
 
-  function mountTabs(tabItems: readonly TerminalTabItem[] = items) {
+  function mountTabs(tabItems: readonly TerminalTabItem[] = items, dragEnabled = false) {
     return mount(NvxTerminalTabBar, {
       props: {
         items: tabItems,
+        dragEnabled,
         modelValue: "one",
         label: "Terminal tabs",
         newLabel: "New terminal",
@@ -120,5 +121,31 @@ describe("NvxTerminalTabBar native drag boundaries", () => {
     await tabs[0]?.trigger("contextmenu", { clientX: 120, clientY: 40 });
     await wrapper.get('[role="menu"] [role="menuitem"]:last-child').trigger("click");
     expect(wrapper.emitted("closeMany")?.at(-1)).toEqual([["one", "two"]]);
+  });
+
+  it("offers an explicit return to main from a detached window", async () => {
+    const wrapper = mountTabs(items, true);
+    await wrapper.setProps({ moveToMainWindowLabel: "Move to main window" });
+    await wrapper.findAll(".nvx-terminal-tab-bar__item")[0]?.trigger("contextmenu", { clientX: 120, clientY: 40 });
+    await wrapper.findAll('[role="menuitem"]')
+      .find((item) => item.text() === "Move to main window")?.trigger("click");
+    expect(wrapper.emitted("move-to-main-window")).toEqual([["one"]]);
+  });
+
+  it("starts native preview gestures only from enabled tab buttons", async () => {
+    const defaultWrapper = mountTabs();
+    await defaultWrapper.findAll<HTMLButtonElement>("[role='tab']")[0]?.trigger("pointerdown", { button: 0 });
+    expect(defaultWrapper.emitted("tab-pointer-down")).toBeUndefined();
+    defaultWrapper.unmount();
+
+    const wrapper = mountTabs(items, true);
+    const tabs = wrapper.findAll<HTMLButtonElement>("[role='tab']");
+    expect(tabs.every((tab) => tab.attributes("draggable") === undefined)).toBe(true);
+    await tabs[0]?.trigger("pointerdown", { button: 2 });
+    expect(wrapper.emitted("tab-pointer-down")).toBeUndefined();
+    await tabs[0]?.trigger("pointerdown", { button: 0 });
+    expect(wrapper.emitted("tab-pointer-down")?.[0]?.[0]).toBe("one");
+    await wrapper.findAll(".nvx-terminal-tab-bar__close")[0]?.trigger("pointerdown", { button: 0 });
+    expect(wrapper.emitted("tab-pointer-down")).toHaveLength(1);
   });
 });
