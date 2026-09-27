@@ -25,17 +25,24 @@ export const router = createRouter({
   ],
 });
 
-router.beforeEach(async (to) => {
+export async function guardPluginPageRoute(path: string): Promise<string | void> {
   if (!isTauri()) return;
-  const pluginPage = /^\/plugin\/([^/]+)\/([^/]+)$/.exec(to.path);
+  const pluginPage = /^\/plugin\/([^/]+)\/([^/]+)$/.exec(path);
   if (!pluginPage) return;
   let tabId: string;
   try {
     tabId = `page:plugin:${decodeURIComponent(pluginPage[1]!)}:${decodeURIComponent(pluginPage[2]!)}`;
   } catch { return; }
-  const state = await snapshotWorkspaceTabs().catch(() => null);
-  const otherOwner = state?.others.find((tab) => tab.id === tabId)?.owner;
+  const state = await snapshotWorkspaceTabs();
+  const fallback = workspaceWindowLabel() === "main" ? "/terminal" : "/workspace-window";
+  if (state.outgoing.some((entry) => entry.tab.id === tabId)
+    || state.incoming.some((entry) => entry.tab.id === tabId)) return fallback;
+  const otherOwner = state.others.find((tab) => tab.id === tabId)?.owner;
   if (!otherOwner) return;
   await focusWorkspaceWindowTarget(otherOwner).catch(() => undefined);
-  return workspaceWindowLabel() === "main" ? "/terminal" : "/workspace-window";
+  return fallback;
+}
+
+router.beforeEach(async (to) => {
+  return guardPluginPageRoute(to.path);
 });

@@ -54,6 +54,7 @@ let unlisteners: UnlistenFn[] = [];
 let prepareIncomingKind: ((kind: WorkspaceTabKind) => Promise<void>) | null = null;
 const missingTimers = new Map<string, number>();
 const observedOwnedTabIds = new Set<string>();
+const claimingLocalTabIds = new Set<string>();
 let consumeQueue = Promise.resolve();
 
 function showIncoming(id: string): void {
@@ -73,6 +74,13 @@ export function registerWorkspaceHandoff(handler: WorkspaceTabHandoff): () => vo
   return () => {
     if (handlers.get(handler.kind) === handler) handlers.delete(handler.kind);
   };
+}
+
+/** A freshly claimed local Tab is not a lost WebView recovery record. */
+export function holdLocalWorkspaceTabClaim(id: string): () => void {
+  if (claimingLocalTabIds.has(id)) throw new Error("workspace_tab.claim_pending");
+  claimingLocalTabIds.add(id);
+  return () => { claimingLocalTabIds.delete(id); };
 }
 
 /** Keep the native close guard in sync with tabs created directly in this window. */
@@ -293,6 +301,7 @@ async function consumeIncomingNow(): Promise<void> {
     }
   }
   for (const record of state.owned) {
+    if (claimingLocalTabIds.has(record.id)) continue;
     const handler = handlers.get(record.kind);
     if (!handler) continue;
     if (imported.has(record.id)) {
@@ -305,6 +314,8 @@ async function consumeIncomingNow(): Promise<void> {
       continue;
     }
     if (!handler.owns(record.id)) {
+      // A locally closed tab stays in Core briefly for safe unregister; it is not a crash recovery.
+      if (observedOwnedTabIds.has(record.id)) continue;
       try {
         await prepareIncomingKind?.(record.kind);
         await handler.import(record.id, record.payload);
@@ -357,5 +368,6 @@ export async function startWorkspaceTabTransfers(
     incomingVisualCount.value = 0;
     outgoingVisualIds.value = new Set();
     observedOwnedTabIds.clear();
+    claimingLocalTabIds.clear();
   };
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { hiddenOutgoingWorkspaceTabs, moveWorkspaceTab, moveWorkspaceTabToNewWindow, registerWorkspaceHandoff, startWorkspaceTabTransfers, visibleIncomingWorkspaceTabs } from "./workspace-tab-transfer";
+import { hiddenOutgoingWorkspaceTabs, holdLocalWorkspaceTabClaim, moveWorkspaceTab, moveWorkspaceTabToNewWindow, registerWorkspaceHandoff, startWorkspaceTabTransfers, syncLocalWorkspaceTabRecords, visibleIncomingWorkspaceTabs } from "./workspace-tab-transfer";
 
 const ipc = vi.hoisted(() => {
   const listeners = new Map<string, (event: { payload: unknown }) => void>();
@@ -67,16 +67,18 @@ describe("Workspace Tab owner handoff", () => {
     activate: vi.fn(),
     activateExisting: vi.fn(),
   };
+  const prepareKind = vi.fn(async () => undefined);
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    handler.owns.mockReturnValue(true);
     ipc.ownerLabel = "main";
     ipc.snapshot.mockResolvedValue({ owned: [record], incoming: [], outgoing: [], others: [] });
     ipc.prepare.mockResolvedValue("ticket-1");
     ipc.commit.mockResolvedValue({ ...record, owner: "workspace-a", revision: 4 });
     ipc.abort.mockResolvedValue(undefined);
     dispose = registerWorkspaceHandoff(handler);
-    stop = await startWorkspaceTabTransfers(async () => undefined);
+    stop = await startWorkspaceTabTransfers(prepareKind);
   });
 
   afterEach(() => {
@@ -84,6 +86,43 @@ describe("Workspace Tab owner handoff", () => {
     dispose?.();
     stop = null;
     dispose = null;
+    vi.useRealTimers();
+  });
+
+  it("does not recover a locally closed tab while its Core record awaits unregister", async () => {
+    vi.useFakeTimers();
+    await syncLocalWorkspaceTabRecords([{ id: record.id, kind: "page" }]);
+    handler.owns.mockReturnValue(false);
+    await syncLocalWorkspaceTabRecords([]);
+
+    ipc.listeners.get("workspace-tab-state-changed")?.({ payload: record.id });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(prepareKind).not.toHaveBeenCalled();
+    expect(handler.import).not.toHaveBeenCalled();
+    expect(handler.activate).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(ipc.unregister).toHaveBeenCalledWith(record.id, record.revision);
+  });
+
+  it("still recovers a Core-owned tab not observed in this window", async () => {
+    handler.owns.mockReturnValue(false);
+    ipc.listeners.get("workspace-tab-state-changed")?.({ payload: record.id });
+
+    await vi.waitFor(() => expect(handler.activate).toHaveBeenCalledWith(record.id));
+    expect(prepareKind).toHaveBeenCalledWith("page");
+    expect(handler.import).toHaveBeenCalledWith(record.id, record.payload);
+  });
+
+  it("does not recover a Page Tab before its local Core claim reaches Pinia", async () => {
+    handler.owns.mockReturnValue(false);
+    const release = holdLocalWorkspaceTabClaim(record.id);
+    ipc.listeners.get("workspace-tab-state-changed")?.({ payload: record.id });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(prepareKind).not.toHaveBeenCalled();
+    expect(handler.import).not.toHaveBeenCalled();
+    release();
   });
 
   it("freezes before target readiness and releases source only after Core commits", async () => {
