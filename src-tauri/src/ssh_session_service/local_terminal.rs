@@ -2005,6 +2005,12 @@ fn terminate_after_failure(
 ) -> bool {
     let mut cleaned = true;
     if let Err(error) = process.terminate() {
+        #[cfg(test)]
+        eprintln!(
+            "PTY cleanup error: kind={:?} os_error={:?} detail={error}",
+            error.kind(),
+            error.raw_os_error()
+        );
         cleaned = false;
         reason = failure(
             LocalSessionFailureCode::ProcessCleanupFailed,
@@ -2711,7 +2717,7 @@ mod tests {
     async fn backpressured_writer_does_not_block_owner_or_exit_blocker_cleanup() {
         let (session_id, live_sessions, mut sessions) =
             session_fixture(LocalSessionState::Running, None, true);
-        let (_metadata, process) = LocalPtyProcess::spawn(24, 80).expect("spawn backpressure PTY");
+        let (metadata, process) = LocalPtyProcess::spawn(24, 80).expect("spawn backpressure PTY");
         let (actor_tx, mut actor_rx) = mpsc::channel(8);
         let (commands, command_rx) =
             std_mpsc::sync_channel::<LocalProcessCommand>(LOCAL_PROCESS_MAILBOX_CAPACITY);
@@ -2779,8 +2785,15 @@ mod tests {
         })
         .await
         .expect("backpressured owner cleanup remained blocked");
-        assert!(sessions.process_failed(session_id.as_str(), failure.0, failure.1));
-        assert!(!live_sessions.lock().unwrap().contains(session_id.as_str()));
+        let (generation, reason) = failure;
+        let observed_reason = reason.clone();
+        assert!(sessions.process_failed(session_id.as_str(), generation, reason));
+        assert!(
+            !live_sessions.lock().unwrap().contains(session_id.as_str()),
+            "PTY cleanup retained root_pid={} shell={} reason={observed_reason:?}",
+            metadata.process_id,
+            metadata.shell_path.display()
+        );
         assert!(
             tokio::time::timeout(Duration::from_secs(2), &mut blocked_completed)
                 .await
