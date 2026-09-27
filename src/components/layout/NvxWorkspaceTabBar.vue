@@ -12,6 +12,8 @@ import {
 } from "lucide-vue-next";
 import { storeToRefs } from "pinia";
 import { computed, onBeforeUnmount, onMounted, watch } from "vue";
+import { isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 
@@ -33,12 +35,22 @@ import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { useShortcutsStore } from "../../stores/shortcuts";
 import { useWorkspaceTabsStore, type WorkspacePageType } from "../../stores/workspaceTabs";
 import { useUiStore } from "../../stores/ui";
+import { hiddenOutgoingWorkspaceTabs, moveWorkspaceTab, moveWorkspaceTabToNewWindow } from "../../workspace-tab-transfer";
+import {
+  beginWorkspaceTabDrag,
+  cancelWorkspaceTabDrag,
+  finishWorkspaceTabDrag,
+  workspaceWindowLabel,
+  type WorkspaceTabKind,
+} from "../../workspace-tab-windows";
+import { useTipsStore } from "../../stores/tips";
 
 const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const workspaceTabs = useWorkspaceTabsStore();
 const ui = useUiStore();
+const tips = useTipsStore();
 const shortcuts = useShortcutsStore();
 const hostMarkers = useHostMarkersStore();
 const {
@@ -71,6 +83,104 @@ const pageIcons = {
   plugin: Plug,
 } satisfies Record<WorkspacePageType, typeof Fingerprint>;
 
+interface PendingPointerDrag {
+  id: string;
+  kind: WorkspaceTabKind;
+  pointerId: number;
+  x: number;
+  y: number;
+}
+
+interface ActivePointerDrag {
+  id: string;
+  kind: WorkspaceTabKind;
+  nonce: string;
+}
+
+interface DragReleased {
+  id: string;
+  nonce: string;
+  target: string | null;
+  x: number;
+  y: number;
+}
+
+let pendingDrag: PendingPointerDrag | null = null;
+let activeDrag: ActivePointerDrag | null = null;
+let stopDragReleased: UnlistenFn | null = null;
+
+function tabKind(id: string): WorkspaceTabKind | null {
+  if (terminalTabs.value.some((tab) => tab.groupId === id)) return "terminal";
+  if (pageTabs.value.some((tab) => tab.groupId === id)) return "page";
+  if (desktopTabs.value.some((tab) => tab.groupId === id)) return "desktop";
+  if (fileTabs.value.some((tab) => tab.groupId === id)) return "file";
+  return null;
+}
+
+function moveFailure() {
+  tips.show({ scope: "workspace-tab-move", tone: "error", title: t("workspaceTabs.moveFailed") });
+}
+
+function tabPointerDown(id: string, event: PointerEvent) {
+  const kind = tabKind(id);
+  if (!isTauri() || !kind || activeDrag || event.button !== 0) return;
+  pendingDrag = { id, kind, pointerId: event.pointerId, x: event.screenX, y: event.screenY };
+}
+
+function pointerMove(event: PointerEvent) {
+  const pending = pendingDrag;
+  if (!pending || pending.pointerId !== event.pointerId) return;
+  if (!(event.buttons & 1)) { pendingDrag = null; return; }
+  if (Math.hypot(event.screenX - pending.x, event.screenY - pending.y) < 6) return;
+  pendingDrag = null;
+  const current = { id: pending.id, kind: pending.kind, nonce: crypto.randomUUID() };
+  activeDrag = current;
+  void beginWorkspaceTabDrag(current.id, current.nonce).catch((error: unknown) => {
+    if (activeDrag !== current) return;
+    activeDrag = null;
+    void cancelWorkspaceTabDrag(current.nonce).catch(() => undefined);
+    if (String(error) !== "workspace_tab.drag_button_released") moveFailure();
+  });
+}
+
+function pointerUp(event: PointerEvent) {
+  if (pendingDrag?.pointerId === event.pointerId) pendingDrag = null;
+}
+
+function cancelPointerDrag(event: KeyboardEvent) {
+  if (event.key !== "Escape") return;
+  pendingDrag = null;
+  const current = activeDrag;
+  if (!current) return;
+  activeDrag = null;
+  void cancelWorkspaceTabDrag(current.nonce).catch(() => undefined);
+}
+
+async function dragReleased(payload: DragReleased) {
+  const current = activeDrag;
+  if (!current || current.id !== payload.id || current.nonce !== payload.nonce) return;
+  activeDrag = null;
+  try {
+    if (payload.target === workspaceWindowLabel()) return;
+    if (payload.target) await moveWorkspaceTab(current.id, current.kind, payload.target);
+    else await moveWorkspaceTabToNewWindow(current.id, current.kind, { x: payload.x, y: payload.y });
+  } catch {
+    moveFailure();
+  } finally {
+    await finishWorkspaceTabDrag(current.nonce).catch(() => undefined);
+  }
+}
+
+function moveToNewWindow(id: string) {
+  const kind = tabKind(id);
+  if (kind) void moveWorkspaceTabToNewWindow(id, kind).catch(moveFailure);
+}
+
+function moveToMainWindow(id: string) {
+  const kind = tabKind(id);
+  if (kind) void moveWorkspaceTab(id, kind, "main").catch(moveFailure);
+}
+
 const items = computed<TerminalTabItem[]>(() => [
   ...terminalTabs.value.map((tab) => ({
     ...tab,
@@ -92,12 +202,20 @@ const items = computed<TerminalTabItem[]>(() => [
     icon: pageIcons[tab.pageType],
   })),
   ...desktopTabs.value.map((tab) => ({ ...tab, icon: Monitor, disabled: desktopBusy.value })),
-]);
+].filter((tab) => !hiddenOutgoingWorkspaceTabs.value.has(tab.groupId)));
+
+function pageIsActive(page: { pageType: WorkspacePageType; route: string }): boolean {
+  if (page.route === route.path) return true;
+  return route.path === "/settings" && (
+    (page.pageType === "knownHosts" && route.query.section === "knownHosts")
+    || (page.pageType === "sshIdentities" && route.query.section === "identities")
+  );
+}
 
 const activeGroupId = computed(() => {
   if (route.path === "/desktop") return activeDesktopTabId.value;
   if (route.path === "/sftp") return activeFileTabId.value;
-  const page = pageTabs.value.find((tab) => tab.route === route.path);
+  const page = pageTabs.value.find(pageIsActive);
   if (page) return page.groupId;
   return route.path === "/terminal" ? activeTerminalTabId.value : "";
 });
@@ -144,7 +262,7 @@ function closeGroup(groupId: string) {
     terminalController.value?.close(groupId);
     return;
   }
-  const closingActivePage = route.path === page.route;
+  const closingActivePage = pageIsActive(page);
   workspaceTabs.closePageTab(groupId);
   if (!closingActivePage) return;
   if (activeTerminalTabId.value && terminalController.value) {
@@ -159,11 +277,9 @@ async function closeGroups(groupIds: string[]) {
   const targetIds = new Set(groupIds);
   if (!targetIds.size) return;
   const fileIds = fileTabs.value.filter((tab) => targetIds.has(tab.groupId)).map((tab) => tab.groupId);
-  if (fileIds.length) {
-    for (const groupId of fileIds) {
-      activateGroup(groupId);
-      if (!await workspaceTabs.requestCloseFileTab(groupId)) return;
-    }
+  for (const id of fileIds) {
+    activateGroup(id);
+    if (!await workspaceTabs.requestCloseFileTab(id)) return;
   }
   const desktopIds = desktopTabs.value.filter((tab) => targetIds.has(tab.groupId)).map((tab) => tab.groupId);
   if (desktopIds.length) desktopController.value?.closeMany(desktopIds);
@@ -171,7 +287,7 @@ async function closeGroups(groupIds: string[]) {
     .filter((tab) => targetIds.has(tab.groupId))
     .map((tab) => tab.groupId);
   const closingActivePage = pageTabs.value.some((tab) => (
-    targetIds.has(tab.groupId) && tab.route === route.path
+    targetIds.has(tab.groupId) && pageIsActive(tab)
   ));
   for (const page of pageTabs.value.filter((tab) => targetIds.has(tab.groupId))) {
     workspaceTabs.closePageTab(page.groupId);
@@ -308,8 +424,28 @@ watch(
   { immediate: true },
 );
 
-onMounted(() => window.addEventListener("keydown", handleWorkspaceShortcut, { capture: true }));
-onBeforeUnmount(() => window.removeEventListener("keydown", handleWorkspaceShortcut, { capture: true }));
+onMounted(() => {
+  window.addEventListener("keydown", handleWorkspaceShortcut, { capture: true });
+  window.addEventListener("keydown", cancelPointerDrag, { capture: true });
+  window.addEventListener("pointermove", pointerMove, { capture: true });
+  window.addEventListener("pointerup", pointerUp, { capture: true });
+  window.addEventListener("pointercancel", pointerUp, { capture: true });
+  if (!isTauri()) return;
+  void listen<DragReleased>("workspace-tab-drag-released", ({ payload }) => {
+    void dragReleased(payload);
+  }).then((unlisten) => { stopDragReleased = unlisten; }).catch(() => undefined);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleWorkspaceShortcut, { capture: true });
+  window.removeEventListener("keydown", cancelPointerDrag, { capture: true });
+  window.removeEventListener("pointermove", pointerMove, { capture: true });
+  window.removeEventListener("pointerup", pointerUp, { capture: true });
+  window.removeEventListener("pointercancel", pointerUp, { capture: true });
+  stopDragReleased?.();
+  pendingDrag = null;
+  if (activeDrag) void cancelWorkspaceTabDrag(activeDrag.nonce).catch(() => undefined);
+  activeDrag = null;
+});
 </script>
 
 <template>
@@ -324,13 +460,19 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleWorkspaceShort
     :close-left-label="t('workspaceTabs.closeLeft')"
     :close-right-label="t('workspaceTabs.closeRight')"
     :context-menu-label="t('workspaceTabs.actions')"
+    :move-to-new-window-label="t('workspaceTabs.moveToNewWindow')"
+    :move-to-main-window-label="isTauri() && workspaceWindowLabel() !== 'main' ? t('workspaceTabs.moveToMainWindow') : ''"
     :scroll-backward-label="t('sshTerminal.scrollTabsBackward')"
     :scroll-forward-label="t('sshTerminal.scrollTabsForward')"
     :create-disabled="createDisabled"
+    :drag-enabled="isTauri()"
     @update:model-value="activateGroup"
     @create="createTerminal"
     @close="closeGroup"
     @close-many="closeGroups"
+    @tab-pointer-down="tabPointerDown"
+    @move-to-new-window="moveToNewWindow"
+    @move-to-main-window="moveToMainWindow"
   >
     <template
       #trailing-actions

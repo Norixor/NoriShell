@@ -34,6 +34,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(projectRoot, "index.html"),
+        workspaceWindow: resolve(projectRoot, "workspace-window.html"),
+        workspaceTabDragPreview: resolve(projectRoot, "workspace-tab-drag-preview.html"),
         toolWindow: resolve(projectRoot, "tool-window.html"),
         secureVault: resolve(projectRoot, "secure-vault.html"),
         secureBackup: resolve(projectRoot, "secure-backup.html"),

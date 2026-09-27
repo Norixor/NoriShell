@@ -17,6 +17,7 @@ import { captureTerminalInput } from "../../terminal-input-target";
 import { wordSeparatorForDoubleClickSelection } from "../../terminal/interaction-preferences";
 import { MacOptionKeyTracker, isPlainBackspace } from "../../terminal/keyboard-compatibility";
 import { TerminalBellAudio, type TerminalBellAudioAvailability } from "../../terminal/terminal-bell";
+import { geometryForOutput, recordOutputGeometry, type TerminalOutputGeometryMarker } from "../../terminal-output-geometry";
 import { findTerminalHttpLinks, openSafeTerminalHttpUrl, safeTerminalHttpUrl, terminalLinkModifierPressed } from "../../terminal/terminal-links";
 import { usePopoverMenu } from "../ui/usePopoverMenu";
 import NvxTerminalPasteGuard from "./NvxTerminalPasteGuard.vue";
@@ -29,6 +30,8 @@ const props = defineProps<{
   paneId?: string;
   hostId?: string | null;
   ghostSuggestion?: { draft: string; suffix: string } | null;
+  initialDimensions?: { rows: number; cols: number };
+  initialOutputGeometry?: TerminalOutputGeometryMarker[];
 }>();
 
 const emit = defineEmits<{
@@ -64,6 +67,11 @@ let alternateEntryLine: number | null = null;
 let awaitingShellAfterAlternate = false;
 let blockedLine: number | null = null;
 let terminal: Terminal | null = null;
+let lastWriteParsed: Promise<void> = Promise.resolve();
+let pendingRenderOperations = 0;
+let lastOutputSeq = "0";
+let replayingOutput = false;
+const outputGeometry: TerminalOutputGeometryMarker[] = props.initialOutputGeometry?.map((marker) => ({ ...marker })) ?? [];
 let fitAddon: FitAddon | null = null;
 let searchAddon: SearchAddon | null = null;
 let observer: ResizeObserver | null = null;
@@ -144,15 +152,28 @@ function terminalTheme() {
   };
 }
 
-function fit() {
+function fitAt(afterOutputSeq: string) {
   if (!terminal || !fitAddon || !host.value || host.value.clientWidth === 0) return;
+  if (replayingOutput) return;
   fitAddon.fit();
+  recordOutputGeometry(outputGeometry, afterOutputSeq, terminal.rows, terminal.cols);
   if (terminal.rows !== lastRows || terminal.cols !== lastCols) {
     lastRows = terminal.rows;
     lastCols = terminal.cols;
     emit("resize", terminal.rows, terminal.cols);
   }
   scheduleGhost();
+}
+
+function fit() {
+  const afterOutputSeq = lastOutputSeq;
+  if (pendingRenderOperations) {
+    pendingRenderOperations += 1;
+    lastWriteParsed = lastWriteParsed.then(() => fitAt(afterOutputSeq))
+      .finally(() => { pendingRenderOperations -= 1; });
+  } else {
+    fitAt(afterOutputSeq);
+  }
 }
 
 function clearGhost() {
@@ -217,7 +238,7 @@ function scheduleFit() {
   animationFrame = requestAnimationFrame(fit);
 }
 
-function writeBytes(bytes: readonly number[]) {
+function writeBytes(bytes: readonly number[], outputSeq?: string) {
   const text = bytes.includes(0x1b) ? String.fromCharCode(...bytes.slice(0, 4096)) : "";
   const csi = `${String.fromCharCode(0x1b)}[`;
   if (["H", "2J"].some((code) => text.includes(csi + code))) {
@@ -225,13 +246,42 @@ function writeBytes(bytes: readonly number[]) {
     blockedLine = null;
     invalidateDraft();
   }
-  terminal?.write(new Uint8Array(bytes));
+  if (!terminal) return;
+  const current = terminal;
+  const replayGeometry = replayingOutput && outputSeq
+    ? geometryForOutput(outputGeometry, outputSeq) : null;
+  if (outputSeq) lastOutputSeq = outputSeq;
+  pendingRenderOperations += 1;
+  lastWriteParsed = lastWriteParsed.then(() => new Promise<void>((resolve) => {
+    if (replayGeometry && (current.rows !== replayGeometry.rows || current.cols !== replayGeometry.cols)) {
+      current.resize(replayGeometry.cols, replayGeometry.rows);
+    }
+    current.write(new Uint8Array(bytes), resolve);
+  })).finally(() => { pendingRenderOperations -= 1; });
 }
 
 function writeGap() {
   invalidateDraft();
-  terminal?.writeln(`\r\n[${props.gapLabel}]\r\n`);
+  if (terminal) {
+    const current = terminal;
+    pendingRenderOperations += 1;
+    lastWriteParsed = lastWriteParsed.then(() => new Promise<void>((resolve) => current.writeln(`\r\n[${props.gapLabel}]\r\n`, resolve)))
+      .finally(() => { pendingRenderOperations -= 1; });
+  }
 }
+
+function whenOutputParsed() { return lastWriteParsed; }
+
+async function finishReplay() {
+  if (!replayingOutput) return;
+  await lastWriteParsed;
+  replayingOutput = false;
+  const latestMarkerSeq = outputGeometry.at(-1)?.afterOutputSeq;
+  if (latestMarkerSeq && BigInt(latestMarkerSeq) > BigInt(lastOutputSeq)) lastOutputSeq = latestMarkerSeq;
+  fit();
+}
+
+function outputGeometrySnapshot() { return outputGeometry.map((marker) => ({ ...marker })); }
 
 function dimensions() {
   return {
@@ -808,6 +858,9 @@ function observeSimpleInput(value: string) {
 defineExpose({
   writeBytes,
   writeGap,
+  whenOutputParsed,
+  finishReplay,
+  outputGeometrySnapshot,
   dimensions,
   focus,
   fit,
@@ -825,6 +878,9 @@ defineExpose({
 onMounted(async () => {
   window.addEventListener("blur", handleWindowBlur);
   terminal = new Terminal({
+    ...(props.initialOutputGeometry?.[0]
+      ? { rows: props.initialOutputGeometry[0].rows, cols: props.initialOutputGeometry[0].cols }
+      : props.initialDimensions ? { rows: props.initialDimensions.rows, cols: props.initialDimensions.cols } : {}),
     allowProposedApi: true,
     convertEol: false,
     customGlyphs: true,
@@ -845,6 +901,8 @@ onMounted(async () => {
     linkHandler: terminalLinkHandler(),
     theme: terminalTheme(),
   });
+  replayingOutput = Boolean(props.initialOutputGeometry?.length);
+  if (!outputGeometry.length) recordOutputGeometry(outputGeometry, "0", terminal.rows, terminal.cols);
   fitAddon = new FitAddon();
   searchAddon = new SearchAddon();
   terminal.loadAddon(fitAddon);

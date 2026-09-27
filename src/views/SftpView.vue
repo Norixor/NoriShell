@@ -50,6 +50,7 @@ import {
 } from "./sftpPaneState";
 import { pendingSftpPluginNavigations, resolveSftpPluginNavigation, takeSftpPluginNavigation } from "./sftpPluginNavigation";
 import { createSftpTerminalLaunch } from "./sftpTerminalLaunch";
+import type { FileTabHandoffSnapshot } from "./fileTabHandoffSnapshot";
 
 interface LocalTrailItem {
   capability: SftpLocalDirectoryCapability;
@@ -134,7 +135,8 @@ const props = withDefaults(defineProps<{
   initialKind?: "legacy" | "local" | "remote";
   initialHostId?: string | null;
   active?: boolean;
-}>(), { workspaceTabId: "", initialKind: "legacy", initialHostId: null, active: true });
+  handoffSnapshot?: FileTabHandoffSnapshot | null;
+}>(), { workspaceTabId: "", initialKind: "legacy", initialHostId: null, active: true, handoffSnapshot: null });
 const router = useRouter();
 const tips = useTipsStore();
 const workspaceTabs = useWorkspaceTabsStore();
@@ -196,7 +198,7 @@ const overwritePrompt = ref<OverwritePromptState | null>(null);
 const permissionsTarget = ref<PermissionsTarget | null>(null);
 const permissionMode = ref(0);
 const permissionsPending = ref(false);
-const activeSftpPaneId = ref(props.initialKind === "local" ? localPaneId : remotePaneId);
+const activeSftpPaneId = ref(props.handoffSnapshot?.activePaneId ?? (props.initialKind === "local" ? localPaneId : remotePaneId));
 const dragIntent = ref<SftpPaneDragIntent | null>(null);
 const dropPaneId = ref<string | null>(null);
 const pointerDrag = ref<PointerDragState | null>(null);
@@ -230,6 +232,9 @@ const searchOpenByPane = reactive<Record<string, boolean>>({});
 const pendingPaneIds = reactive(new Set<string>());
 const localTrailByPane = new Map<string, LocalTrailItem[]>();
 const localFilesystemPathByPane = new Map<string, string>();
+let handoffFrozen = false;
+let handoffCommitted = false;
+let handoffSnapshotSignature: string | null = null;
 let sftpViewMounted = false;
 let refreshTimer: number | null = null;
 let stopNativeFileDrop: (() => void) | null = null;
@@ -242,14 +247,33 @@ let appliedIntentSnapshotRevision: string | null = null;
 const transferTargetRefreshes = new Map<string, TransferTargetRefresh>();
 const completedTransferRefreshes = new Set<string>();
 
-const paneStates = reactive<Record<string, SftpPaneState>>({
-  [localPaneId]: createSftpPaneState(localPaneId, "local", browserPreferences.browser),
-  ...(props.initialKind === "local" ? {} : { [remotePaneId]: createSftpPaneState(remotePaneId, "remote", browserPreferences.browser) }),
-});
-const sftpLayout = ref<TerminalLayoutNode>(props.initialKind === "local" ? createTerminalPane(localPaneId, "local") : {
+function importedPaneStates(): Record<string, SftpPaneState> {
+  if (!props.handoffSnapshot) return {
+    [localPaneId]: createSftpPaneState(localPaneId, "local", browserPreferences.browser),
+    ...(props.initialKind === "local" ? {} : { [remotePaneId]: createSftpPaneState(remotePaneId, "remote", browserPreferences.browser) }),
+  };
+  return Object.fromEntries(props.handoffSnapshot.panes.map((saved) => {
+    const pane = createSftpPaneState(saved.paneId, saved.endpoint.kind, browserPreferences.browser);
+    pane.endpoint = { ...saved.endpoint };
+    pane.directory = saved.directory;
+    pane.directoryRef = saved.endpoint.kind === "local" ? saved.endpoint.directoryRef : null;
+    pane.remoteDirectoryPathBytes = saved.remoteDirectoryPathBytes ? [...saved.remoteDirectoryPathBytes] : null;
+    pane.search = saved.search;
+    pane.sort = saved.sort;
+    pane.showHidden = saved.showHidden;
+    pane.foldersFirst = saved.foldersFirst;
+    if (saved.endpoint.kind === "local") {
+      localTrailByPane.set(saved.paneId, saved.localTrail.map((item) => ({ ...item, capability: { ...item.capability } })));
+      if (saved.localRememberedPath) localFilesystemPathByPane.set(saved.paneId, saved.localRememberedPath);
+    }
+    return [saved.paneId, pane];
+  }));
+}
+const paneStates = reactive<Record<string, SftpPaneState>>(importedPaneStates());
+const sftpLayout = ref<TerminalLayoutNode>(props.handoffSnapshot?.layout ?? (props.initialKind === "local" ? createTerminalPane(localPaneId, "local") : {
   kind: "split", splitId: "sftp-initial-split", direction: "horizontal", ratio: 0.5,
   first: createTerminalPane(localPaneId, "local"), second: createTerminalPane(remotePaneId, "remote"),
-});
+}));
 watch(() => countTerminalPanes(sftpLayout.value), (count) => {
   if (props.workspaceTabId) workspaceTabs.syncFilePaneCount(props.workspaceTabId, count);
 }, { immediate: true });
@@ -408,7 +432,7 @@ function setPaneSearch(pane: SftpPaneState, value: string) {
 
 function sftpPaneKind(pane: TerminalPaneNode) { return pane.terminalId === "local" ? "local" : "remote" }
 function paneStillActive(pane: SftpPaneState, endpointRevision: number) {
-  return sftpViewMounted && paneStates[pane.paneId] === pane && pane.endpointRevision === endpointRevision;
+  return sftpViewMounted && !handoffFrozen && paneStates[pane.paneId] === pane && pane.endpointRevision === endpointRevision;
 }
 async function releaseLocalCapability(capability: SftpLocalDirectoryCapability) {
   await releaseSftpLocalDirectory({
@@ -555,7 +579,7 @@ function paneEntries(paneId: string) {
   return pane && paneReady(pane) ? visibleSftpPaneEntries(pane) : [];
 }
 function paneState(paneId: string) { return paneStates[paneId]! }
-function paneInteractionPending(paneId: string) { return pendingPaneIds.has(paneId) }
+function paneInteractionPending(paneId: string) { return handoffFrozen || pendingPaneIds.has(paneId) }
 function paneHostId(pane: SftpPaneState) {
   return pane.endpoint.kind === "remote" ? pane.endpoint.hostId ?? "" : "";
 }
@@ -563,7 +587,7 @@ function paneHasSession(pane: SftpPaneState) {
   return pane.endpoint.kind === "remote" && Boolean(pane.endpoint.sessionId);
 }
 function setPaneHostId(pane: SftpPaneState, hostId: string) {
-  if (pane.endpoint.kind !== "remote" || pane.endpoint.sessionId) return;
+  if (handoffFrozen || pane.endpoint.kind !== "remote" || pane.endpoint.sessionId) return;
   replaceSftpPaneEndpoint(pane, { kind: "remote", hostId: hostId || null, sessionId: null, generation: null }, "/", [47]);
 }
 function pathSuggestions(pane: SftpPaneState) {
@@ -816,7 +840,7 @@ function closeActiveSftpPane() {
   else void requestCloseFileTab();
 }
 function runFileShortcut(commandId: ShortcutCommandId) {
-  if (!props.active || !paneStates[activeSftpPaneId.value]) return;
+  if (handoffFrozen || !props.active || !paneStates[activeSftpPaneId.value]) return;
   switch (commandId) {
     case "terminal.split-right": splitSftpPane(activeSftpPaneId.value, "horizontal", "remote"); break;
     case "terminal.split-down": splitSftpPane(activeSftpPaneId.value, "vertical", "remote"); break;
@@ -843,8 +867,79 @@ function currentTabSessions() {
   });
 }
 
+function buildFileTabHandoff(): FileTabHandoffSnapshot {
+  const tab = workspaceTabs.fileTabs.find((item) => item.groupId === props.workspaceTabId);
+  if (!tab) throw new Error("workspace_tab.not_found");
+  const panes = Object.values(paneStates).map((pane) => ({
+    paneId: pane.paneId,
+    endpoint: { ...pane.endpoint },
+    directory: pane.directory,
+    remoteDirectoryPathBytes: pane.remoteDirectoryPathBytes ? [...pane.remoteDirectoryPathBytes] : null,
+    localTrail: (localTrailByPane.get(pane.paneId) ?? []).map((item) => ({
+      capability: { ...item.capability }, displayPath: item.displayPath, rememberedPath: item.rememberedPath,
+    })),
+    localRememberedPath: localFilesystemPathByPane.get(pane.paneId) ?? null,
+    search: pane.search,
+    sort: pane.sort,
+    showHidden: pane.showHidden,
+    foldersFirst: pane.foldersFirst,
+  }));
+  return {
+    version: 1,
+    tab: { ...tab, paneCount: panes.length },
+    layout: JSON.parse(JSON.stringify(sftpLayout.value)) as TerminalLayoutNode,
+    activePaneId: activeSftpPaneId.value,
+    panes,
+  };
+}
+
+function captureFileTabHandoff(): FileTabHandoffSnapshot {
+  if (!sftpViewMounted || !navigationReady || handoffFrozen || pendingPaneIds.size
+    || Object.values(paneStates).some((pane) => pane.loading) || navigationWorking
+    || operationPending.value || previewSaving.value || closeFileTabPending.value
+    || closeFileTabConfirm.value || overwritePrompt.value || mutationDialog.value
+    || fileUtilityDialog.value || permissionsTarget.value || cleanupRetainTarget.value
+    || closeRemotePaneTargetId.value) throw new Error("workspace_tab.file_busy");
+  return buildFileTabHandoff();
+}
+
+function snapshotFileTabHandoff() {
+  const snapshot = captureFileTabHandoff();
+  handoffSnapshotSignature = JSON.stringify(snapshot);
+  return snapshot;
+}
+
+function freezeFileTabHandoff() {
+  if (!handoffSnapshotSignature || JSON.stringify(captureFileTabHandoff()) !== handoffSnapshotSignature) {
+    throw new Error("workspace_tab.file_changed");
+  }
+  handoffFrozen = true;
+  stopPageObservers();
+}
+
+function rollbackFileTabHandoff() {
+  handoffFrozen = false;
+  handoffSnapshotSignature = null;
+  if (props.active && sftpViewMounted) startPageObservers();
+}
+
+function commitFileTabHandoff() {
+  handoffCommitted = true;
+  handoffSnapshotSignature = null;
+}
+
+function observeFileTabHandoff(listener: (snapshot: FileTabHandoffSnapshot) => void) {
+  return watch(() => {
+    if (!sftpViewMounted || handoffFrozen || handoffCommitted) return null;
+    try { return JSON.stringify(buildFileTabHandoff()); }
+    catch { return null; }
+  }, (value) => {
+    if (value) listener(JSON.parse(value) as FileTabHandoffSnapshot);
+  }, { immediate: true, flush: "post" });
+}
+
 async function requestCloseFileTab(): Promise<boolean> {
-  if (!props.workspaceTabId || closeFileTabConfirm.value || closeFileTabPending.value
+  if (handoffFrozen || !props.workspaceTabId || closeFileTabConfirm.value || closeFileTabPending.value
     || pendingPaneIds.size || operationPending.value || previewSaving.value) return false;
   if (Object.values(paneStates).some((pane) => pane.endpoint.kind === "remote" && pane.endpoint.sessionId)) {
     try { await refreshSnapshot(); }
@@ -969,8 +1064,9 @@ async function disconnectAndCloseRemotePane() {
 
 const recordedReadySessionGenerations = new Set<string>();
 async function refreshSnapshot() {
-  if (!canUseDesktopCore()) return;
+  if (handoffFrozen || !canUseDesktopCore()) return;
   const [sessionSnapshot, intentSnapshot] = await Promise.all([fetchSftpSessionSnapshot(), fetchSftpTransferIntentSnapshot()]);
+  if (handoffFrozen || !sftpViewMounted) return;
   const completedTransferIds = [
     ...sessionSnapshot.transfers.filter((transfer) => transfer.state === "completed").map((transfer) => transfer.transferId),
     ...intentSnapshot.transfers.filter((transfer) => transfer.state === "completed").map((transfer) => transfer.transferId),
@@ -1020,7 +1116,9 @@ async function refreshSnapshot() {
     && sessionForPane(pane)?.state === "ready"
     && sessionForPane(pane)?.generation === pane.endpoint.generation);
   await Promise.all(newlyReadyPanes.map((pane) => pane.endpoint.kind === "remote" && pane.endpoint.hostId
-    ? loadInitialRemoteDirectory(pane)
+    ? props.handoffSnapshot
+      ? loadRemoteDirectory(pane, pane.remoteDirectoryPathBytes ?? [47])
+      : loadInitialRemoteDirectory(pane)
     : loadRemoteDirectory(pane, pane.remoteDirectoryPathBytes ?? [47])));
   await refreshCompletedTransferTargets(completedTransferIds);
 }
@@ -2674,6 +2772,11 @@ onMounted(async () => {
   if (props.workspaceTabId) removeFileController = workspaceTabs.registerFileController(props.workspaceTabId, {
     requestClose: requestCloseFileTab,
     runShortcut: runFileShortcut,
+    snapshotHandoff: snapshotFileTabHandoff,
+    freezeHandoff: freezeFileTabHandoff,
+    rollbackHandoff: rollbackFileTabHandoff,
+    commitHandoff: commitFileTabHandoff,
+    observeHandoffSnapshot: observeFileTabHandoff,
   });
   if (canUseDesktopCore()) {
     try {
@@ -2692,11 +2795,24 @@ onMounted(async () => {
     await Promise.all([
       refreshSavedHosts(),
       refreshSnapshot(),
-      initializeDefaultLocalPaneSafely(paneStates[localPaneId]!),
+      ...(props.handoffSnapshot
+        ? Object.values(paneStates).filter((pane) => pane.endpoint.kind === "local")
+          .map((pane) => pane.endpoint.kind === "local" && pane.endpoint.directoryRef
+            ? loadLocalDirectory(pane) : initializeDefaultLocalPaneSafely(pane))
+        : [initializeDefaultLocalPaneSafely(paneStates[localPaneId]!)]),
     ]);
     const hostList = hosts.value;
     const pane = paneStates[remotePaneId];
-    if (pane?.endpoint.kind === "remote" && props.initialHostId) {
+    if (props.handoffSnapshot) {
+      for (const saved of props.handoffSnapshot.panes) {
+        const endpoint = saved.endpoint;
+        if (endpoint.kind === "remote" && endpoint.sessionId) {
+          if (!workspaceTabs.claimFileSession(endpoint.sessionId, props.workspaceTabId)) {
+            throw new Error("workspace_tab.file_session_owned");
+          }
+        }
+      }
+    } else if (pane?.endpoint.kind === "remote" && props.initialHostId) {
       const host = hostList.find((item) => item.hostId === props.initialHostId);
       if (host) {
         replaceSftpPaneEndpoint(pane, { kind: "remote", hostId: host.hostId, sessionId: null, generation: null }, "/", [47]);
@@ -2782,7 +2898,7 @@ onBeforeUnmount(() => {
   settleOverwriteConfirmation("skip");
   for (const paneId of Object.keys(paneStates)) {
     void cancelRemotePaneCursor(paneStates[paneId]);
-    void releaseLocalPane(paneId);
+    if (!handoffCommitted) void releaseLocalPane(paneId);
   }
 });
 </script>

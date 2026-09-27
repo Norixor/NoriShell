@@ -42,10 +42,14 @@ import { recordNativeTerminalHistory } from "../../core-api/native-terminal";
 import { useNativeTerminalStore } from "../../stores/nativeTerminal";
 import type { NativeTerminalSessionScope } from "../../core-api/generated/core-api";
 import type { ShortcutCommandId } from "../../shortcuts";
+import type { TerminalOutputGeometryMarker } from "../../terminal-output-geometry";
 
 interface TerminalViewExpose {
-  writeBytes(bytes: readonly number[]): void;
+  writeBytes(bytes: readonly number[], outputSeq?: string): void;
   writeGap(): void;
+  whenOutputParsed(): Promise<void>;
+  finishReplay(): Promise<void>;
+  outputGeometrySnapshot(): TerminalOutputGeometryMarker[];
   dimensions(): { rows: number; cols: number };
   focus(): void;
   findNext(term: string, incremental?: boolean): boolean;
@@ -68,12 +72,14 @@ const props = withDefaults(defineProps<{
   label: string;
   existingSession: LocalSessionSummary | null;
   deferredStart?: boolean;
+  initialDimensions?: { rows: number; cols: number };
+  initialOutputGeometry?: TerminalOutputGeometryMarker[];
   visible: boolean;
   active: boolean;
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
   canSplitWorkspaceRight: boolean;
-}>(), { deferredStart: false });
+}>(), { deferredStart: false, initialDimensions: undefined, initialOutputGeometry: undefined });
 
 const emit = defineEmits<{
   activate: [paneId: string];
@@ -113,6 +119,7 @@ let leaseTimer: number | null = null;
 let attachmentHeartbeatTimer: number | null = null;
 let unregisterInputTarget: (() => void) | null = null;
 let binding = false;
+let initialAttachmentReady: Promise<void> = Promise.resolve();
 let released = false;
 let lastAppliedEventSeq = 0n;
 let lastAppliedOutputSeq = 0n;
@@ -271,7 +278,7 @@ function applyOutputItem(item: LocalSessionOutputItem) {
     if (lastAppliedOutputSeq > 0n && outputSeq > lastAppliedOutputSeq + 1n) {
       terminalView.value?.writeGap();
     }
-    terminalView.value?.writeBytes(frame.bytes);
+    terminalView.value?.writeBytes(frame.bytes, frame.outputSeq);
     lastAppliedOutputSeq = outputSeq;
     return;
   }
@@ -427,10 +434,12 @@ async function attachExistingSession(resumeRenderedOutput = false) {
     const snapshotEventSeq = BigInt(details.session.eventSeq);
     if (snapshotEventSeq > lastAppliedEventSeq) lastAppliedEventSeq = snapshotEventSeq;
     response.replay.forEach(applyOutputItem);
+    if (props.initialOutputGeometry?.length) await terminalView.value?.finishReplay();
     binding = false;
     replayPendingEvents(details.session.sessionId, details.session.generation);
     startAttachmentHeartbeat();
     if (details.session.state === "running" && props.active) activateFromTab();
+    await terminalView.value?.whenOutputParsed();
   } catch {
     clearPendingEvents();
     emit("state", "failed", session.value);
@@ -675,12 +684,21 @@ function activateTerminalSurface(event: Event) {
   activate();
 }
 
-defineExpose({ terminateForClose, activateFromTab, deactivateFromTab, runShortcut });
+function terminalDimensions() { return terminalView.value?.dimensions() ?? null; }
+function terminalOutputGeometry() { return terminalView.value?.outputGeometrySnapshot() ?? null; }
+async function waitForHandoffReplay() {
+  await initialAttachmentReady;
+  if (!attachment.value) throw new Error("local-handoff:attachment-unavailable");
+  await terminalView.value?.whenOutputParsed();
+}
+
+defineExpose({ terminateForClose, activateFromTab, deactivateFromTab, runShortcut,
+  terminalDimensions, terminalOutputGeometry, waitForHandoffReplay });
 
 onMounted(() => {
   if (props.active) activateFromTab();
   window.addEventListener("beforeunload", releaseRendererBinding);
-  if (session.value) void attachExistingSession();
+  if (session.value) initialAttachmentReady = attachExistingSession();
   else if (!props.deferredStart) void open();
 });
 
@@ -820,6 +838,8 @@ onBeforeUnmount(() => {
     <NvxTerminalView
       ref="terminalView"
       :pane-id="paneId"
+      :initial-dimensions="initialDimensions"
+      :initial-output-geometry="initialOutputGeometry"
       :ghost-suggestion="ghostSuggestion"
       :read-only="!writable"
       :terminal-label="t('localSession.terminalLabel', { label: shellLabel })"

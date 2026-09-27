@@ -12,10 +12,11 @@ import type { DesktopHeaderController } from "../stores/workspaceTabs";
 const mocks = vi.hoisted(() => ({
   save: vi.fn(), snapshot: vi.fn(), profiles: vi.fn(), availability: vi.fn(), focus: vi.fn(), open: vi.fn(),
   close: vi.fn(), disconnect: vi.fn(), invalidate: vi.fn(), remoteKey: vi.fn(),
-  register: vi.fn(), sync: vi.fn(), tips: vi.fn(), windowAction: vi.fn(),
+  register: vi.fn(), sync: vi.fn(), tips: vi.fn(), windowAction: vi.fn(), ownership: vi.fn(),
 }));
 const savedConnections = vi.hoisted(() => ({ changed: undefined as (() => void) | undefined }));
 vi.mock("../core-api/desktop-client", () => ({ desktopClient: mocks }));
+vi.mock("../workspace-tab-windows", () => ({ snapshotWorkspaceTabs: mocks.ownership, workspaceWindowLabel: () => "main" }));
 vi.mock("../saved-connections", () => ({ onSavedConnectionsChanged: vi.fn(async (callback: () => void) => {
   savedConnections.changed = callback;
   return () => { savedConnections.changed = undefined; };
@@ -72,6 +73,7 @@ beforeEach(() => {
   mocks.focus.mockResolvedValue("1");
   mocks.open.mockResolvedValue(session("new"));
   mocks.snapshot.mockResolvedValue([session()]);
+  mocks.ownership.mockResolvedValue({ owned: [], incoming: [], outgoing: [], others: [] });
   mocks.profiles.mockResolvedValue([session().profile]);
   mocks.availability.mockResolvedValue([{ protocol: "rdp", available: true }]);
   mocks.invalidate.mockResolvedValue(undefined);
@@ -121,6 +123,38 @@ describe("desktop workspace layout", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(mocks.snapshot).toHaveBeenCalledTimes(calls + 2);
   });
+  it("freezes and restores a live session without disconnecting it", async () => {
+    const wrapper = await fixture();
+    expect(controller.snapshotHandoff?.("desktop:one")).toEqual({ schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" });
+    await controller.freezeHandoff?.("desktop:one");
+    await flushPromises();
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([]);
+    expect(mocks.invalidate).toHaveBeenCalled();
+    expect(mocks.disconnect).not.toHaveBeenCalled();
+    expect(mocks.close).not.toHaveBeenCalled();
+    await controller.rollbackHandoff?.("desktop:one");
+    await flushPromises();
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([expect.objectContaining({ groupId: "desktop:one" })]);
+    expect(wrapper.find("canvas").exists()).toBe(true);
+  });
+
+  it("keeps an imported canvas read-only until admission", async () => {
+    const wrapper = await fixture();
+    await controller.importHandoff?.(session("two"));
+    await flushPromises();
+    expect(wrapper.find("canvas").exists()).toBe(false);
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([expect.objectContaining({ groupId: "desktop:one" })]);
+    await controller.admitHandoff?.("desktop:two");
+    await flushPromises();
+    expect((wrapper.getComponent(canvas).props("session") as DesktopSessionSummary).id).toBe("two");
+    expect(wrapper.getComponent(canvas).props("active")).toBe(true);
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([
+      expect.objectContaining({ groupId: "desktop:one" }), expect.objectContaining({ groupId: "desktop:two" }),
+    ]);
+    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.disconnect).not.toHaveBeenCalled();
+  });
+
   it("refreshes saved profile names without remounting or reconnecting the active desktop", async () => {
     const wrapper = await fixture();
     const originalCanvas = wrapper.get("canvas").element;

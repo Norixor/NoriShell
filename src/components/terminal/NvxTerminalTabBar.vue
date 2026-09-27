@@ -29,11 +29,14 @@ const props = withDefaults(
     closeLeftLabel?: string;
     closeRightLabel?: string;
     contextMenuLabel?: string;
+    moveToNewWindowLabel?: string;
+    moveToMainWindowLabel?: string;
     scrollBackwardLabel?: string;
     scrollForwardLabel?: string;
     closable?: boolean;
     busy?: boolean;
     createDisabled?: boolean;
+    dragEnabled?: boolean;
   }>(),
   {
     closeLabel: "Close tab",
@@ -41,11 +44,14 @@ const props = withDefaults(
     closeLeftLabel: "Close tabs to the left",
     closeRightLabel: "Close tabs to the right",
     contextMenuLabel: "Tab actions",
+    moveToNewWindowLabel: "Move to a new window",
+    moveToMainWindowLabel: "",
     scrollBackwardLabel: "Show earlier tabs",
     scrollForwardLabel: "Show later tabs",
     closable: true,
     busy: false,
     createDisabled: false,
+    dragEnabled: false,
   },
 );
 
@@ -54,6 +60,9 @@ const emit = defineEmits<{
   create: [];
   close: [groupId: string];
   closeMany: [groupIds: string[]];
+  "tab-pointer-down": [groupId: string, event: PointerEvent];
+  "move-to-new-window": [groupId: string];
+  "move-to-main-window": [groupId: string];
 }>();
 
 const tabList = ref<HTMLElement | null>(null);
@@ -107,6 +116,13 @@ function handleWheel(event: WheelEvent) {
   list.scrollLeft += delta;
 }
 
+function handleTabPointerDown(groupId: string, event: PointerEvent) {
+  if (!props.dragEnabled || props.busy || event.button !== 0
+    || props.items.find((item) => item.groupId === groupId)?.disabled) return;
+  closeContextMenu();
+  emit("tab-pointer-down", groupId, event);
+}
+
 function focusTab(index: number) {
   const count = props.items.length;
   if (count === 0) return;
@@ -151,7 +167,7 @@ function openTabContextMenu(event: MouseEvent, index: number) {
   if (props.busy || props.items[index]?.disabled) return;
   event.preventDefault();
   const menuWidth = 196;
-  const menuHeight = 104;
+  const menuHeight = props.dragEnabled ? (props.moveToMainWindowLabel ? 180 : 142) : 104;
   contextMenu.value = {
     index,
     left: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
@@ -259,7 +275,9 @@ onBeforeUnmount(() => {
           :key="item.groupId"
           :ref="(element) => setTabItem(item.groupId, element)"
           class="nvx-terminal-tab-bar__item"
-          :class="{ 'nvx-terminal-tab-bar__item--active': modelValue === item.groupId }"
+          :class="{
+            'nvx-terminal-tab-bar__item--active': modelValue === item.groupId,
+          }"
           data-tauri-drag-region="false"
           @contextmenu="openTabContextMenu($event, index)"
         >
@@ -274,6 +292,8 @@ onBeforeUnmount(() => {
             :disabled="busy || item.disabled"
             @click="$emit('update:modelValue', item.groupId)"
             @keydown="handleTabKeydown($event, index)"
+            @pointerdown="handleTabPointerDown(item.groupId, $event)"
+            @dragstart.prevent
           >
             <NvxIcon
               :icon="item.icon ?? SquareTerminal"
@@ -376,6 +396,24 @@ onBeforeUnmount(() => {
       :aria-label="contextMenuLabel"
       :style="{ left: `${contextMenu.left}px`, top: `${contextMenu.top}px` }"
     >
+      <button
+        v-if="dragEnabled"
+        class="nvx-terminal-tab-bar__context-menu-item"
+        type="button"
+        role="menuitem"
+        @click="$emit('move-to-new-window', contextTarget.groupId); closeContextMenu()"
+      >
+        {{ moveToNewWindowLabel }}
+      </button>
+      <button
+        v-if="dragEnabled && moveToMainWindowLabel"
+        class="nvx-terminal-tab-bar__context-menu-item"
+        type="button"
+        role="menuitem"
+        @click="$emit('move-to-main-window', contextTarget.groupId); closeContextMenu()"
+      >
+        {{ moveToMainWindowLabel }}
+      </button>
       <button
         class="nvx-terminal-tab-bar__context-menu-item"
         type="button"

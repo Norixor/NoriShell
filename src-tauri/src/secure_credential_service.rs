@@ -141,6 +141,14 @@ fn require_window(window: &WebviewWindow, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn ordinary_owner_alive(app: &AppHandle, label: &str) -> bool {
+    app.get_webview_window(label).is_some()
+        && (label == "main"
+            || app
+                .state::<crate::workspace_windows::WorkspaceWindows>()
+                .contains(label))
+}
+
 impl SecureCredentialService {
     /// Used by the Vault gate to authorize only a live, Core-owned credential prompt.
     pub(crate) fn is_prompt_window(&self, label: &str) -> bool {
@@ -189,9 +197,9 @@ pub async fn secure_credential_open(
     vault: State<'_, VaultService>,
     metrics: State<'_, MetricsSessionService>,
 ) -> Result<Option<String>, SecureCredentialCommandError> {
-    // Opening is deliberately main-window-only. The child has no command that can open another
-    // credential prompt, and it can return only an opaque Core-issued reference.
-    if window.label() != "main" {
+    // Only registered ordinary windows can open a prompt. The prompt itself
+    // returns an opaque Core-issued reference through its isolated capability.
+    if !ordinary_owner_alive(&app, window.label()) {
         return Err("secureCredentialDenied".into());
     }
     if !valid_open_request(&request) {
@@ -270,8 +278,7 @@ pub async fn secure_credential_open(
     let deadline = tokio::time::sleep(Duration::from_secs(180));
     tokio::pin!(deadline);
     let mut owner_check = tokio::time::interval(Duration::from_millis(250));
-    let owner_valid =
-        || app.get_webview_window(window.label()).is_some() && window.label() == "main";
+    let owner_valid = || ordinary_owner_alive(&app, window.label());
     let mut answer = loop {
         tokio::select! {
             response = &mut receiver => {

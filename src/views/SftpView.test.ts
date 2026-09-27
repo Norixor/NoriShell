@@ -13,6 +13,7 @@ import { useTipsStore } from "../stores/tips";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./sftpPluginNavigation";
 import { takeSftpTerminalLaunch } from "./sftpTerminalLaunch";
+import type { FileTabHandoffSnapshot } from "./fileTabHandoffSnapshot";
 
 const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
 const pathApi = vi.hoisted(() => ({ homeDir: vi.fn(), sep: vi.fn(() => "/") }));
@@ -121,6 +122,7 @@ async function mountView(
     workspaceTab?: "local" | "remote";
     routeQuery?: Record<string, string>;
     setupStore?: (store: ReturnType<typeof useWorkspaceTabsStore>) => void;
+    handoffSnapshot?: (id: string) => FileTabHandoffSnapshot;
   } = {},
 ) {
   let currentSnapshot = snapshot;
@@ -195,7 +197,10 @@ async function mountView(
     template: '<RouterView v-slot="{ Component, route }"><KeepAlive include="SftpView"><component :is="Component" :key="route.path" /></KeepAlive></RouterView>',
   });
   const wrapper = mount(options.keepAlive ? cachedRoute : SftpView, {
-    props: workspaceTabId ? { workspaceTabId, initialKind: options.workspaceTab, active: true } : {},
+    props: workspaceTabId ? {
+      workspaceTabId, initialKind: options.workspaceTab, active: true,
+      handoffSnapshot: options.handoffSnapshot?.(workspaceTabId) ?? null,
+    } : {},
     global: {
       plugins: [pinia, router, i18n],
       stubs: {
@@ -740,6 +745,82 @@ describe("SftpView production boundaries", () => {
     expect(localPath.attributes("disabled")).toBeUndefined();
     await openPaneActions(localPane);
     expect(paneAction(localPane, "Change local folder")?.attributes("disabled")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("preserves the exact local directory capability when a File Tab leaves this window", async () => {
+    pathApi.homeDir.mockResolvedValue("/Users/test");
+    client.registerSftpLocalDirectory.mockResolvedValue({
+      directoryRef: "moved-local", revision: "6", displayName: "Home", rememberablePath: "/Users/test",
+    });
+    client.listSftpLocalDirectory.mockResolvedValue({
+      directoryRef: "moved-local", revision: "6", entries: [], nextCursor: null,
+    });
+    const { wrapper, workspaceTabs } = await mountView(undefined, undefined, "release.bin", { workspaceTab: "local" });
+    const id = workspaceTabs.fileTabs[0]!.groupId;
+    const controller = workspaceTabs.fileController(id)!;
+    const payload = controller.snapshotHandoff();
+    expect(payload.panes[0]?.endpoint).toEqual({
+      kind: "local", directoryRef: "moved-local", revision: "6", displayPath: "~/",
+    });
+
+    const localPane = wrapper.find(`[data-pane-id="${payload.panes[0]!.paneId}"]`);
+    await openPaneActions(localPane);
+    controller.freezeHandoff();
+    await paneAction(localPane, "Change local folder")?.trigger("click");
+    expect(dialog.open).not.toHaveBeenCalled();
+    controller.commitHandoff();
+    workspaceTabs.finishCloseFileTab(id);
+    wrapper.unmount();
+    await flushPromises();
+    expect(client.releaseSftpLocalDirectory).not.toHaveBeenCalledWith({ directoryRef: "moved-local", expectedRevision: "6" });
+    expect(client.disconnectSftpSession).not.toHaveBeenCalled();
+  });
+
+  it("imports the same SFTP generation and local capability without reconnecting", async () => {
+    const session = readySnapshot().sessions[0]!;
+    const pathBytes = Array.from(new TextEncoder().encode("/var/log"));
+    client.listSftpLocalDirectory.mockResolvedValue({
+      directoryRef: "transferred-local", revision: "11", entries: [], nextCursor: null,
+    });
+    const { wrapper, workspaceTabs } = await mountView(readySnapshot(), undefined, "release.bin", {
+      workspaceTab: "remote",
+      handoffSnapshot: (id) => ({
+        version: 1,
+        tab: { groupId: id, kind: "remote", hostId: host.hostId, label: "Files", paneCount: 2 },
+        layout: {
+          kind: "split", splitId: "transferred-split", direction: "horizontal", ratio: 0.5,
+          first: { kind: "pane", paneId: "transferred-local-pane", terminalId: "local" },
+          second: { kind: "pane", paneId: "transferred-remote-pane", terminalId: "remote" },
+        },
+        activePaneId: "transferred-remote-pane",
+        panes: [
+          {
+            paneId: "transferred-local-pane",
+            endpoint: { kind: "local", directoryRef: "transferred-local", revision: "11", displayPath: "Home" },
+            directory: "Home", remoteDirectoryPathBytes: null, localTrail: [], localRememberedPath: null,
+            search: "", sort: "name", showHidden: false, foldersFirst: true,
+          },
+          {
+            paneId: "transferred-remote-pane",
+            endpoint: { kind: "remote", hostId: host.hostId, sessionId: session.sessionId, generation: session.generation },
+            directory: "/var/log", remoteDirectoryPathBytes: pathBytes, localTrail: [], localRememberedPath: null,
+            search: "", sort: "name", showHidden: false, foldersFirst: true,
+          },
+        ],
+      }),
+    });
+
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    expect(client.registerSftpLocalDirectory).not.toHaveBeenCalled();
+    expect(client.listSftpLocalDirectory).toHaveBeenCalledWith(expect.objectContaining({
+      directoryRef: "transferred-local", expectedRevision: "11",
+    }));
+    expect(client.listSftpDirectory).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: session.sessionId, expectedGeneration: session.generation, path: { bytes: pathBytes },
+    }));
+    expect(workspaceTabs.fileSessionOwner(session.sessionId)).toBe(workspaceTabs.fileTabs[0]?.groupId);
+    expect(wrapper.find('[data-pane-id="transferred-remote-pane"]').exists()).toBe(true);
     wrapper.unmount();
   });
 

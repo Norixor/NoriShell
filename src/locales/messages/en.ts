@@ -89,6 +89,12 @@ export const en = {
     },
     workspaceTabs: {
       label: "Workspace tabs",
+      emptyWindow: "Drag a tab into this window",
+      movingIn: "Moving tab into this window…",
+      moveToNewWindow: "Move to a new window",
+      moveToMainWindow: "Move to main window",
+      moveFailed: "Could not move the tab. It remains in its original window.",
+      unavailable: "Tab windows are unavailable. Please reopen NoriShell.",
       pageState: "Page",
       close: "Close tab",
       actions: "Tab actions",
