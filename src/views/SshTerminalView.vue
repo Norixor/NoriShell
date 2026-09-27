@@ -116,6 +116,14 @@ import NvxPluginFloatingControls from "../components/plugins/NvxPluginFloatingCo
 import NvxTerminalPluginRegion from "../components/terminal/NvxTerminalPluginRegion.vue";
 import { terminalPluginToolsKey } from "../components/terminal/terminalPluginTools";
 import { takeSftpTerminalLaunch } from "./sftpTerminalLaunch";
+import {
+  mergeOwnedTerminalWorkspaceLayout,
+  parseTerminalTabHandoff,
+  type TerminalHandoffPane,
+  type TerminalTabHandoffSnapshot,
+} from "../terminal-workspace-handoff";
+import { isWorkspaceChildWindow } from "../workspace-window-context";
+import { snapshotWorkspaceTabs } from "../workspace-tab-windows";
 
 interface TerminalLauncherPane {
   kind: "launcher";
@@ -196,6 +204,9 @@ interface SshPaneExpose {
   activateFromTab(): void;
   deactivateFromTab(): void;
   runShortcut?(commandId: ShortcutCommandId): void;
+  terminalDimensions?(): { rows: number; cols: number } | null;
+  terminalOutputGeometry?(): Array<{ afterOutputSeq: string; rows: number; cols: number }> | null;
+  waitForHandoffReplay?(): Promise<void>;
 }
 
 const { t, te } = useI18n();
@@ -233,6 +244,18 @@ const credentialSavedDuringAttempt = ref(false);
 const quickCommandsOpen = ref(false);
 const tabs = ref<TerminalWorkspaceTab[]>([]);
 const activeTabId = ref("");
+const frozenTabIds = ref<Set<string>>(new Set());
+const snapshottedHandoffs = new Map<string, TerminalTabHandoffSnapshot>();
+const preparedHandoffs = new Map<string, { snapshot: TerminalTabHandoffSnapshot; wasActive: boolean }>();
+const importedHandoffs = new Map<string, TerminalTabHandoffSnapshot>();
+const incomingPaneDimensions = new Map<string, { rows: number; cols: number }>();
+const incomingPaneOutputGeometry = new Map<string, Array<{ afterOutputSeq: string; rows: number; cols: number }>>();
+const pendingImportedTabIds = ref<Set<string>>(new Set());
+const committedImportedTabIds = new Set<string>();
+const ownedTabIds = new Set<string>();
+const handoffSnapshotListeners = new Set<(snapshots: readonly TerminalTabHandoffSnapshot[]) => void>();
+let lastObservedHandoffProjection = "";
+const childWorkspace = isWorkspaceChildWindow();
 // BEL attention is renderer-only projection state: it never changes the session or workspace layout.
 const bellAttentionPaneIds = ref<Set<string>>(new Set());
 const requestedHost = ref<HostSummary | null>(null);
@@ -259,8 +282,6 @@ const CLOSE_TERMINALS_TIMEOUT_MS = 15_000;
 let closeTerminalsTimeout: number | null = null;
 let optimisticTabCloseInFlight = false;
 let optimisticTabCloseAttempt = 0;
-let workspaceRevision: string | null = null;
-
 let workspaceInitialized = false;
 let workspacePersistenceEnabled = false;
 let lastPersistedProjection = "";
@@ -441,7 +462,9 @@ function handleTerminalVisibilityChange() {
 }
 
 function activateTab(tabId: string) {
-  if (!tabs.value.some((tab) => tab.tabId === tabId)) return;
+  if (frozenTabIds.value.has(tabId)
+    || pendingImportedTabIds.value.has(tabId)
+    || !tabs.value.some((tab) => tab.tabId === tabId)) return;
   clearTabBellAttention(tabId);
   void clearTerminalInputFocus();
   const previousTab = activeTab.value;
@@ -463,6 +486,8 @@ function activateTab(tabId: string) {
 }
 
 function activatePane(tabId: string, paneId: string) {
+  if (frozenTabIds.value.has(tabId)
+    || pendingImportedTabIds.value.has(tabId)) return;
   const tab = tabs.value.find((candidate) => candidate.tabId === tabId);
   if (!tab || !findTerminalPane(tab.layout, paneId)) return;
   setPaneBellAttention(paneId, false);
@@ -1532,7 +1557,7 @@ function projectPluginSession(summary: PluginTerminalSessionSummary) {
 
 let protocolLaunchReconciliation: Promise<void> | null = null;
 function reconcilePluginProtocolLaunches() {
-  if (!canUseDesktopCore()) return Promise.resolve();
+  if (childWorkspace || !canUseDesktopCore()) return Promise.resolve();
   if (protocolLaunchReconciliation) return protocolLaunchReconciliation;
   protocolLaunchReconciliation = (async () => {
     await ensureTerminalWorkspaceInitialized();
@@ -1750,8 +1775,7 @@ function restorePersistedWorkspace(
 }
 
 async function persistOneWorkspaceProjection(serialized: string) {
-  if (!workspacePersistenceEnabled || workspaceRevision === null
-    || serialized === lastPersistedProjection) return;
+  if (!workspacePersistenceEnabled || serialized === lastPersistedProjection) return;
   let parsed: PersistedTerminalWorkspaceLayout | null = null;
   try {
     parsed = parseTerminalWorkspaceLayout(JSON.parse(serialized));
@@ -1765,13 +1789,25 @@ async function persistOneWorkspaceProjection(serialized: string) {
     return;
   }
   try {
-    const snapshot = await replaceTerminalWorkspaceLayout({
-      expectedRevision: workspaceRevision,
-      layout: parsed,
-    });
-    workspaceRevision = snapshot.revision;
-    lastPersistedProjection = serialized;
-    workspacePersistenceErrorVisible.value = false;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const latest = await fetchTerminalWorkspaceLayout();
+      const latestLayout = parseTerminalWorkspaceLayout(latest.layout);
+      if (!latestLayout) throw handoffError("invalid-persisted-layout");
+      const merged = mergeOwnedTerminalWorkspaceLayout(latestLayout, parsed, ownedTabIds);
+      if (JSON.stringify(merged) === JSON.stringify(latestLayout)) {
+        lastPersistedProjection = serialized;
+        workspacePersistenceErrorVisible.value = false;
+        return;
+      }
+      try {
+        await replaceTerminalWorkspaceLayout({ expectedRevision: latest.revision, layout: merged });
+        lastPersistedProjection = serialized;
+        workspacePersistenceErrorVisible.value = false;
+        return;
+      } catch (error) {
+        if (parseCoreApiError(error)?.code !== "ssh_metadata.conflict" || attempt === 4) throw error;
+      }
+    }
   } catch {
     workspacePersistenceEnabled = false;
     workspacePersistenceErrorVisible.value = true;
@@ -1786,7 +1822,12 @@ function persistWorkspaceProjection(serialized: string): Promise<void> {
 }
 
 function queueWorkspaceSave(serialized: string) {
-  if (!workspaceInitialized || !workspacePersistenceEnabled || optimisticTabCloseInFlight) return;
+  if (!workspaceInitialized || !workspacePersistenceEnabled || optimisticTabCloseInFlight
+    || preparedHandoffs.size > 0) return;
+  for (const tab of tabs.value) {
+    if (!importedHandoffs.has(tab.tabId) || committedImportedTabIds.has(tab.tabId)) ownedTabIds.add(tab.tabId);
+  }
+  notifyHandoffSnapshotListeners();
   if (workspaceSaveTimer !== null) window.clearTimeout(workspaceSaveTimer);
   workspaceSaveTimer = window.setTimeout(() => {
     workspaceSaveTimer = null;
@@ -1795,7 +1836,8 @@ function queueWorkspaceSave(serialized: string) {
 }
 
 async function flushTerminalWorkspaceLayout() {
-  if (optimisticTabCloseInFlight) {
+  if (optimisticTabCloseInFlight || preparedHandoffs.size > 0
+    || [...importedHandoffs.keys()].some((id) => !committedImportedTabIds.has(id))) {
     throw new Error("terminal tab closure is still pending");
   }
   while (true) {
@@ -1815,19 +1857,26 @@ async function flushTerminalWorkspaceLayout() {
 watch(workspaceProjection, queueWorkspaceSave);
 
 async function initializeTerminalWorkspace() {
+  if (childWorkspace) {
+    // Secondary WebViews receive Tabs only through handoff; global recovery
+    // would duplicate every live Session and race the SQLite owner.
+    workspacePersistenceEnabled = canUseDesktopCore();
+    workspaceInitialized = true;
+    return;
+  }
   if (!canUseDesktopCore()) return;
-  const [sshSnapshot, localSnapshot, telnetSnapshot, storedSnapshot, pluginSnapshot] = await Promise.all([
+  const [rawSshSnapshot, rawLocalSnapshot, rawTelnetSnapshot, storedSnapshot, rawPluginSnapshot, ownerSnapshot] = await Promise.all([
     fetchSshSessionSnapshot().catch(() => null),
     fetchLocalSessionSnapshot().catch(() => null),
     fetchTelnetSessionSnapshot().catch(() => null),
     fetchTerminalWorkspaceLayout().catch(() => null),
     fetchPluginTerminalSessionSnapshot().catch(() => null),
+    snapshotWorkspaceTabs().catch(() => null),
   ]);
-  const persistedLayout = storedSnapshot
+  let persistedLayout = storedSnapshot
     ? parseTerminalWorkspaceLayout(storedSnapshot.layout)
     : null;
   if (storedSnapshot && persistedLayout) {
-    workspaceRevision = storedSnapshot.revision;
     workspacePersistenceEnabled = true;
     lastPersistedProjection = JSON.stringify(persistedLayout);
   } else {
@@ -1837,12 +1886,94 @@ async function initializeTerminalWorkspace() {
   // A failed Core snapshot is not evidence that no live session exists. Do
   // not mount the restart-only SQLite projection or overwrite it from an
   // uncertain renderer state; the next renderer launch may recover normally.
-  if (!sshSnapshot || !localSnapshot || !telnetSnapshot || !pluginSnapshot) {
+  if (!rawSshSnapshot || !rawLocalSnapshot || !rawTelnetSnapshot || !rawPluginSnapshot || !ownerSnapshot) {
     workspacePersistenceEnabled = false;
     workspacePersistenceErrorVisible.value = true;
     workspaceInitialized = true;
     return;
   }
+
+  const foreignTabs = ownerSnapshot.others
+    .filter((item) => item.kind === "terminal" && item.owner !== "main");
+  const foreignTabIds = new Set(foreignTabs.map((item) => item.id));
+  // An empty registry projection does not prove that the foreign window has
+  // no live Session. Its newest Pane may not have reached SQLite yet.
+  const hasUnidentifiedForeignTab = foreignTabs.some((tab) => tab.terminalPanes.length === 0);
+  const mainOwnedSnapshots = ownerSnapshot.owned.flatMap((record) => {
+    if (record.kind !== "terminal") return [];
+    const snapshot = parseTerminalTabHandoff(record.payload);
+    return snapshot?.tabId === record.id ? [snapshot] : [];
+  });
+  const mainLivePanes = mainOwnedSnapshots.flatMap((tab) => tab.panes);
+  const foreignLivePanes = foreignTabs.flatMap((item) => item.terminalPanes);
+  const registeredForeignPaneIds = new Set(foreignLivePanes.map((pane) => pane.paneId));
+  const foreignPanes = persistedLayout?.tabs
+    .filter((tab) => foreignTabIds.has(tab.tabId)).flatMap((tab) => tab.panes) ?? [];
+  const unregisteredPersistedPaneIds = new Set(foreignPanes
+    .filter((pane) => !registeredForeignPaneIds.has(pane.paneId))
+    .map((pane) => pane.paneId));
+  if (persistedLayout) {
+    const tabs = persistedLayout.tabs.filter((tab) => !foreignTabIds.has(tab.tabId));
+    persistedLayout = { ...persistedLayout, tabs,
+      activeTabId: tabs.some((tab) => tab.tabId === persistedLayout?.activeTabId)
+        ? persistedLayout.activeTabId : tabs[0]?.tabId ?? null };
+  }
+  const mainPersistedPaneIds = new Set(persistedLayout?.tabs
+    .flatMap((tab) => tab.panes.map((pane) => pane.paneId)) ?? []);
+  const [sshOwnership, localOwnership] = await Promise.all([
+    Promise.all(activeSshSessions(rawSshSnapshot).map(async (summary) => ({
+      sessionId: summary.sessionId,
+      details: await getSshSession(summary.sessionId).catch(() => null),
+    }))),
+    Promise.all(activeLocalSessions(rawLocalSnapshot).map(async (summary) => ({
+      sessionId: summary.sessionId,
+      details: await getLocalSession(summary.sessionId).catch(() => null),
+    }))),
+  ]);
+  if (sshOwnership.some((item) => !item.details) || localOwnership.some((item) => !item.details)) {
+    workspacePersistenceEnabled = false;
+    workspacePersistenceErrorVisible.value = true;
+    workspaceInitialized = true;
+    return;
+  }
+  const belongsToForeignPane = (
+    kind: "ssh" | "local", sessionId: string, generation: string,
+    attachments: readonly { viewId: string }[],
+  ) => foreignLivePanes.some((pane) => pane.kind === kind && (
+    pane.sessionId && pane.generation
+      ? pane.sessionId === sessionId && pane.generation === generation
+      : attachments.some((attachment) => attachment.viewId === pane.paneId)
+  )) || attachments.some((attachment) => unregisteredPersistedPaneIds.has(attachment.viewId));
+  const foreignSshSessionIds = new Set(sshOwnership.filter((item) => item.details && belongsToForeignPane(
+    "ssh", item.sessionId, item.details.session.generation, item.details.attachments,
+  )).map((item) => item.sessionId));
+  const foreignLocalSessionIds = new Set(localOwnership.filter((item) => item.details && belongsToForeignPane(
+    "local", item.sessionId, item.details.session.generation, item.details.attachments,
+  )).map((item) => item.sessionId));
+  const belongsToKnownMainPane = (
+    kind: "ssh" | "local" | "telnet", sessionId: string, generation: string,
+    attachments: readonly { viewId: string }[] = [],
+  ) => mainLivePanes.some((pane) => pane.kind === kind
+    && pane.sessionId === sessionId && pane.generation === generation)
+    || attachments.some((attachment) => mainPersistedPaneIds.has(attachment.viewId));
+  const knownMainSshSessionIds = new Set(sshOwnership.filter((item) => item.details && belongsToKnownMainPane(
+    "ssh", item.sessionId, item.details.session.generation, item.details.attachments,
+  )).map((item) => item.sessionId));
+  const knownMainLocalSessionIds = new Set(localOwnership.filter((item) => item.details && belongsToKnownMainPane(
+    "local", item.sessionId, item.details.session.generation, item.details.attachments,
+  )).map((item) => item.sessionId));
+  const sshSnapshot: SshSessionSnapshot = { ...rawSshSnapshot,
+    sessions: rawSshSnapshot.sessions.filter((item) => !foreignSshSessionIds.has(item.sessionId)
+      && (!hasUnidentifiedForeignTab || knownMainSshSessionIds.has(item.sessionId))) };
+  const localSnapshot: LocalSessionSnapshot = { ...rawLocalSnapshot,
+    sessions: rawLocalSnapshot.sessions.filter((item) => !foreignLocalSessionIds.has(item.sessionId)
+      && (!hasUnidentifiedForeignTab || knownMainLocalSessionIds.has(item.sessionId))) };
+  const telnetSnapshot: TelnetSessionSnapshot = { ...rawTelnetSnapshot,
+    sessions: rawTelnetSnapshot.sessions.filter((item) => !foreignLivePanes.some((pane) => pane.kind === "telnet"
+      && pane.sessionId === item.sessionId && pane.generation === item.generation)
+      && (!hasUnidentifiedForeignTab || belongsToKnownMainPane("telnet", item.sessionId, item.generation))) };
+  const pluginSnapshot = { ...rawPluginSnapshot,
+    sessions: rawPluginSnapshot.sessions.filter((item) => !foreignTabIds.has(item.tabId)) };
 
   const hasLiveSessions = activeSshSessions(sshSnapshot).length > 0
     || activeLocalSessions(localSnapshot).length > 0
@@ -1850,6 +1981,21 @@ async function initializeTerminalWorkspace() {
     || pluginSnapshot.sessions.some((item) => item.cleanupBlocked || !["closed", "failed"].includes(item.state));
   const shouldRestoreHistory = ui.terminalStartupBehavior === "restoreHistory";
   const shouldAutoReconnectHistory = !hasLiveSessions && shouldRestoreHistory;
+  const restoreMainOwnedTabs = async () => {
+    if (!hasUnidentifiedForeignTab) return;
+    for (const snapshot of mainOwnedSnapshots) {
+      if (tabs.value.some((tab) => tab.tabId === snapshot.tabId)) continue;
+      try {
+        const panes = await Promise.all(snapshot.panes.map((pane) => restoreHandoffPane(pane, snapshot.tabId)));
+        tabs.value.push({ tabId: snapshot.tabId, layout: snapshot.layout,
+          activePaneId: snapshot.activePaneId, panes });
+      } catch {
+        // A stale live pointer or unavailable durable plugin profile cannot
+        // authorize this renderer to reconstruct the Tab.
+      }
+    }
+    if (!activeTabId.value) activeTabId.value = tabs.value[0]?.tabId ?? "";
+  };
   let canRestorePersistedLayout = persistedLayout !== null;
   let hostsById = new Map<string, HostSummary>();
   if (persistedLayout && (hasLiveSessions || shouldRestoreHistory)) {
@@ -1914,6 +2060,17 @@ async function initializeTerminalWorkspace() {
       // reuse it for a late existingSession prop that setup did not attach.
       restorePersistedWorkspace(persistedLayout, hostsById, false);
     }
+    await restoreMainOwnedTabs();
+    for (const tab of mainOwnedSnapshots) {
+      for (const pane of tab.panes) {
+        if (pane.kind === "ssh" && sshSnapshot.sessions.some((item) => item.sessionId === pane.sessionId
+          && item.generation === pane.generation)) sshPaneBySessionId.set(pane.sessionId, pane.paneId);
+        if (pane.kind === "local" && localSnapshot.sessions.some((item) => item.sessionId === pane.sessionId
+          && item.generation === pane.generation)) localPaneBySessionId.set(pane.sessionId, pane.paneId);
+        if (pane.kind === "telnet" && telnetSnapshot.sessions.some((item) => item.sessionId === pane.sessionId
+          && item.generation === pane.generation)) telnetPaneBySessionId.set(pane.sessionId, pane.paneId);
+      }
+    }
     recoverRendererSessions(
       sshSnapshot,
       localSnapshot,
@@ -1928,9 +2085,13 @@ async function initializeTerminalWorkspace() {
       hostsById,
       shouldAutoReconnectHistory,
     );
+    await restoreMainOwnedTabs();
+  } else {
+    await restoreMainOwnedTabs();
   }
 
   for (const summary of pluginSnapshot.sessions.filter((item) => item.cleanupBlocked || !["closed", "failed"].includes(item.state))) projectPluginSession(summary);
+  for (const tab of tabs.value) ownedTabIds.add(tab.tabId);
   workspaceInitialized = true;
   const currentProjection = workspaceProjection.value;
   if (
@@ -1947,7 +2108,8 @@ function ensureTerminalWorkspaceInitialized() {
   return workspaceInitializationPromise;
 }
 
-const tabItems = computed(() => tabs.value.map((tab) => {
+const tabItems = computed(() => tabs.value.filter((tab) => !frozenTabIds.value.has(tab.tabId)
+  && !pendingImportedTabIds.value.has(tab.tabId)).map((tab) => {
   const pane = tab.panes.find((candidate) => candidate.paneId === tab.activePaneId)
     ?? tab.panes[0]!;
   const state = pane.kind === "launcher"
@@ -1972,7 +2134,9 @@ const tabItems = computed(() => tabs.value.map((tab) => {
 
 function focusExistingPane(matches: (pane: TerminalWorkspacePane) => boolean) {
   if (terminalFocusIsBlocked() || document.querySelector('[role="dialog"][aria-modal="true"]')) return false;
-  const match = tabs.value.flatMap((tab) => tab.panes.map((pane) => ({ tab, pane }))).find(({ pane }) => matches(pane));
+  const match = tabs.value.filter((tab) => !frozenTabIds.value.has(tab.tabId)
+    && !pendingImportedTabIds.value.has(tab.tabId))
+    .flatMap((tab) => tab.panes.map((pane) => ({ tab, pane }))).find(({ pane }) => matches(pane));
   if (!match) return false;
   activatePane(match.tab.tabId, match.pane.paneId);
   return true;
@@ -2011,6 +2175,341 @@ function focusTelnetSession(sessionId: TelnetSessionId, generation: WireSequence
       && pane.summary.generation === generation
       && pane.summary.socketId === socketId
   ));
+}
+
+function handoffError(code: string): Error {
+  return new Error(`terminal-handoff:${code}`);
+}
+
+function handoffSnapshotForTab(tab: TerminalWorkspaceTab): TerminalTabHandoffSnapshot {
+  const panes: TerminalHandoffPane[] = tab.panes.map((pane) => {
+    if (pane.kind === "launcher") return { kind: "launcher", paneId: pane.paneId, label: pane.label };
+    if (pane.state !== "running" || !pane.summary || pane.deferredStart) {
+      if ((pane.summary && !["closed", "failed", "exited"].includes(pane.state))
+        || (!pane.deferredStart && !["closed", "failed", "exited"].includes(pane.state))) {
+        throw handoffError("pane-not-ready");
+      }
+      if (pane.kind === "session") {
+        return { kind: "sshDeferred", paneId: pane.paneId, label: pane.label, target: pane.target };
+      }
+      if (pane.kind === "local") return { kind: "localDeferred", paneId: pane.paneId, label: pane.label };
+      if (pane.kind === "telnet") {
+        return { kind: "telnetDeferred", paneId: pane.paneId, label: pane.label, endpoint: pane.endpoint };
+      }
+      if (!pane.profile) throw handoffError("plugin-profile-unavailable");
+      return { kind: "pluginDeferred", paneId: pane.paneId, label: pane.label,
+        pluginId: pane.profile.pluginId, providerId: pane.profile.providerId, schemaHash: pane.profile.schemaHash };
+    }
+    if (pane.kind === "session") {
+      const controller = paneRefs.get(pane.paneId);
+      const dimensions = controller?.terminalDimensions?.();
+      const outputGeometry = controller?.terminalOutputGeometry?.();
+      return { kind: "ssh", paneId: pane.paneId, label: pane.label,
+        sessionId: pane.summary.sessionId, generation: pane.summary.generation,
+        ...(dimensions ? { initialDimensions: dimensions } : {}),
+        ...(outputGeometry?.length ? { outputGeometry } : {}) };
+    }
+    if (pane.kind === "plugin" && pane.summary.tabId !== tab.tabId) throw handoffError("session-tab-mismatch");
+    const controller = paneRefs.get(pane.paneId);
+    const dimensions = controller?.terminalDimensions?.();
+    const outputGeometry = controller?.terminalOutputGeometry?.();
+    return { kind: pane.kind, paneId: pane.paneId, label: pane.label,
+      sessionId: pane.summary.sessionId, generation: pane.summary.generation,
+      ...(dimensions ? { initialDimensions: dimensions } : {}),
+      ...(outputGeometry?.length ? { outputGeometry } : {}) };
+  });
+  const snapshot = parseTerminalTabHandoff({
+    schemaVersion: 1, tabId: tab.tabId, layout: tab.layout, activePaneId: tab.activePaneId, panes,
+  });
+  if (!snapshot) throw handoffError("invalid-snapshot");
+  return snapshot;
+}
+
+function notifyHandoffSnapshotListeners() {
+  if (!handoffSnapshotListeners.size) return;
+  const snapshots = tabs.value.flatMap((tab) => {
+    if (!ownedTabIds.has(tab.tabId)) return [];
+    const prepared = preparedHandoffs.get(tab.tabId);
+    if (prepared) return [prepared.snapshot];
+    try { return [handoffSnapshotForTab(tab)]; } catch { return []; }
+  });
+  const projection = JSON.stringify(snapshots);
+  if (projection === lastObservedHandoffProjection) return;
+  lastObservedHandoffProjection = projection;
+  for (const listener of handoffSnapshotListeners) listener(snapshots);
+}
+
+function observeTabHandoffSnapshots(listener: (snapshots: readonly TerminalTabHandoffSnapshot[]) => void): () => void {
+  handoffSnapshotListeners.add(listener);
+  lastObservedHandoffProjection = "";
+  notifyHandoffSnapshotListeners();
+  return () => { handoffSnapshotListeners.delete(listener); };
+}
+
+watch(() => tabs.value.map((tab) => tab.panes.map((pane) => pane.kind === "launcher"
+  ? [pane.kind, pane.paneId]
+  : [pane.kind, pane.paneId, pane.state, pane.summary?.sessionId, pane.summary?.generation])),
+() => notifyHandoffSnapshotListeners(), { deep: true });
+
+async function handoffAttachmentsMatch(snapshot: TerminalTabHandoffSnapshot, attached: boolean): Promise<boolean> {
+  for (const pane of snapshot.panes) {
+    if (pane.kind === "launcher" || pane.kind === "sshDeferred" || pane.kind === "localDeferred"
+      || pane.kind === "telnetDeferred" || pane.kind === "pluginDeferred") continue;
+    if (pane.kind === "ssh") {
+      const details = await getSshSession(pane.sessionId);
+      if (details.session.generation !== pane.generation || details.session.state !== "running"
+        || details.attachments.some((item) => item.viewId === pane.paneId) !== attached) return false;
+    } else if (pane.kind === "local") {
+      const details = await getLocalSession(pane.sessionId);
+      if (details.session.generation !== pane.generation || details.session.state !== "running"
+        || details.attachments.some((item) => item.viewId === pane.paneId) !== attached) return false;
+    } else if (pane.kind === "telnet") {
+      const session = (await fetchTelnetSessionSnapshot()).sessions.find((item) => item.sessionId === pane.sessionId);
+      if (!session || session.generation !== pane.generation || session.state !== "running"
+        || (session.attachmentCount > 0) !== attached) return false;
+    } else {
+      const session = (await fetchPluginTerminalSessionSnapshot()).sessions.find((item) => item.sessionId === pane.sessionId);
+      if (!session || session.generation !== pane.generation || session.state !== "running"
+        || (session.attachmentCount > 0) !== attached) return false;
+    }
+  }
+  return true;
+}
+
+async function waitForHandoffAttachments(snapshot: TerminalTabHandoffSnapshot, attached: boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  do {
+    if (await handoffAttachmentsMatch(snapshot, attached)) {
+      if (attached) {
+        let timeout: number | undefined;
+        try {
+          await Promise.race([
+            Promise.all(snapshot.panes.filter((pane) => pane.kind !== "launcher"
+              && !pane.kind.endsWith("Deferred"))
+              .map((pane) => {
+                const controller = paneRefs.get(pane.paneId);
+                if (!controller?.waitForHandoffReplay) throw handoffError("renderer-not-ready");
+                return controller.waitForHandoffReplay();
+              })),
+            new Promise<never>((_, reject) => {
+              timeout = window.setTimeout(() => reject(handoffError("target-replay-timeout")),
+                Math.max(1, deadline - Date.now()));
+            }),
+          ]);
+        } finally {
+          if (timeout !== undefined) window.clearTimeout(timeout);
+        }
+      }
+      return;
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  throw handoffError(attached ? "target-attach-timeout" : "source-detach-timeout");
+}
+
+async function snapshotTabHandoff(tabId: string): Promise<TerminalTabHandoffSnapshot> {
+  if (preparedHandoffs.size || optimisticTabCloseInFlight || preparing.value || closingTab.value
+    || terminalFocusIsBlocked()) throw handoffError("busy");
+  const tab = tabs.value.find((item) => item.tabId === tabId);
+  if (!tab || frozenTabIds.value.has(tabId)) throw handoffError("tab-not-available");
+  await Promise.all(tab.panes.map((pane) => paneRefs.get(pane.paneId)?.waitForHandoffReplay?.()));
+  const snapshot = handoffSnapshotForTab(tab);
+  if (snapshot.panes.some((pane) => ["ssh", "local", "telnet", "plugin"].includes(pane.kind)
+    && (!paneRefs.has(pane.paneId) || !("initialDimensions" in pane && pane.initialDimensions)
+      || !("outputGeometry" in pane && pane.outputGeometry?.length)))) {
+    throw handoffError("renderer-not-ready");
+  }
+  snapshottedHandoffs.set(tabId, snapshot);
+  return snapshot;
+}
+
+async function freezeTabHandoff(tabId: string): Promise<void> {
+  const snapshot = snapshottedHandoffs.get(tabId);
+  const tab = tabs.value.find((item) => item.tabId === tabId);
+  if (!snapshot || !tab || JSON.stringify(handoffSnapshotForTab(tab)) !== JSON.stringify(snapshot)) {
+    throw handoffError("snapshot-changed");
+  }
+  if (preparedHandoffs.size || optimisticTabCloseInFlight || preparing.value || closingTab.value
+    || terminalFocusIsBlocked()) throw handoffError("busy");
+  await flushTerminalWorkspaceLayout();
+  await clearTerminalInputFocus();
+  for (const pane of tab.panes) paneRefs.get(pane.paneId)?.deactivateFromTab();
+  const wasActive = activeTabId.value === tabId;
+  preparedHandoffs.set(tabId, { snapshot, wasActive });
+  frozenTabIds.value = new Set([...frozenTabIds.value, tabId]);
+  if (wasActive) activeTabId.value = tabs.value.find((item) => !frozenTabIds.value.has(item.tabId))?.tabId ?? "";
+  try {
+    await nextTick();
+    await waitForHandoffAttachments(snapshot, false);
+  } catch (error) {
+    await rollbackTabHandoff(tabId);
+    throw error;
+  }
+}
+
+async function restoreHandoffPane(pane: TerminalHandoffPane, tabId: string): Promise<TerminalWorkspacePane> {
+  if (pane.kind === "launcher") return pane;
+  if (pane.kind === "sshDeferred") {
+    return { kind: "session", paneId: pane.paneId, label: pane.label, state: "closed",
+      target: pane.target, credentialRefId: null, summary: null, deferredStart: true,
+      deferredRecovery: "reconnect" };
+  }
+  if (pane.kind === "localDeferred") {
+    return { kind: "local", paneId: pane.paneId, label: pane.label, state: "closed",
+      summary: null, deferredStart: true };
+  }
+  if (pane.kind === "telnetDeferred") {
+    return { kind: "telnet", paneId: pane.paneId, label: pane.label, endpoint: pane.endpoint,
+      state: "closed", summary: null, deferredStart: true };
+  }
+  if (pane.kind === "pluginDeferred") {
+    const snapshot = await fetchTerminalWorkspaceLayout();
+    const layout = parseTerminalWorkspaceLayout(snapshot.layout);
+    const persisted = layout?.tabs.find((tab) => tab.tabId === tabId)?.panes.find((item) => item.paneId === pane.paneId);
+    if (!persisted || persisted.kind !== "plugin" || persisted.pluginId !== pane.pluginId
+      || persisted.providerId !== pane.providerId || persisted.schemaHash !== pane.schemaHash) {
+      throw handoffError("plugin-profile-not-durable");
+    }
+    return { kind: "plugin", paneId: pane.paneId, label: pane.label,
+      profile: { pluginId: persisted.pluginId, providerId: persisted.providerId,
+        schemaHash: persisted.schemaHash, configuration: persisted.configuration },
+      launch: null, state: "closed", summary: null, deferredStart: true };
+  }
+  if (pane.kind === "ssh") {
+    const summary = (await getSshSession(pane.sessionId)).session;
+    if (summary.generation !== pane.generation || summary.state !== "running") throw handoffError("session-changed");
+    return { kind: "session", paneId: pane.paneId, label: pane.label, state: summary.state,
+      target: summary.target, credentialRefId: null, summary: { ...summary, credentialRefId: null },
+      deferredStart: false, deferredRecovery: "reconnect" };
+  }
+  if (pane.kind === "local") {
+    const summary = (await getLocalSession(pane.sessionId)).session;
+    if (summary.generation !== pane.generation || summary.state !== "running") throw handoffError("session-changed");
+    return { kind: "local", paneId: pane.paneId, label: pane.label, state: summary.state,
+      summary, deferredStart: false };
+  }
+  if (pane.kind === "telnet") {
+    const summary = (await fetchTelnetSessionSnapshot()).sessions.find((item) => item.sessionId === pane.sessionId);
+    if (!summary || summary.generation !== pane.generation || summary.state !== "running") throw handoffError("session-changed");
+    return { kind: "telnet", paneId: pane.paneId, label: pane.label, endpoint: summary.endpoint,
+      state: summary.state, summary, deferredStart: false };
+  }
+  const summary = (await fetchPluginTerminalSessionSnapshot()).sessions.find((item) => item.sessionId === pane.sessionId);
+  if (!summary || summary.generation !== pane.generation || summary.state !== "running"
+    || summary.tabId !== tabId || summary.paneId !== pane.paneId) throw handoffError("session-changed");
+  // The IPC snapshot carries only the session fence. Resolve the persisted
+  // profile from Core so the next SQLite projection does not turn it into a
+  // launcher when this window becomes its owner.
+  return { kind: "plugin", paneId: pane.paneId, label: pane.label, profile: pluginProfile(summary), launch: null,
+    state: summary.state, summary, deferredStart: false };
+}
+
+async function importTabHandoff(input: TerminalTabHandoffSnapshot): Promise<void> {
+  const snapshot = parseTerminalTabHandoff(input);
+  if (!snapshot) throw handoffError("invalid-snapshot");
+  if (tabs.value.some((tab) => tab.tabId === snapshot.tabId)
+    || snapshot.panes.some((pane) => findWorkspacePane(pane.paneId))) throw handoffError("duplicate-tab-or-pane");
+  const panes = await Promise.all(snapshot.panes.map((pane) => restoreHandoffPane(pane, snapshot.tabId)));
+  for (const pane of snapshot.panes) {
+    if ("initialDimensions" in pane && pane.initialDimensions) {
+      incomingPaneDimensions.set(pane.paneId, pane.initialDimensions);
+    }
+    if ("outputGeometry" in pane && pane.outputGeometry) {
+      incomingPaneOutputGeometry.set(pane.paneId, pane.outputGeometry);
+    }
+  }
+  tabs.value.push({ tabId: snapshot.tabId, layout: snapshot.layout,
+    activePaneId: snapshot.activePaneId, panes });
+  importedHandoffs.set(snapshot.tabId, snapshot);
+  pendingImportedTabIds.value = new Set([...pendingImportedTabIds.value, snapshot.tabId]);
+  try {
+    await nextTick();
+    await waitForHandoffAttachments(snapshot, true);
+  } catch (error) {
+    await discardImportedTab(snapshot.tabId);
+    throw error;
+  }
+}
+
+function commitTabHandoff(tabId: string): void {
+  if (!preparedHandoffs.has(tabId) || !frozenTabIds.value.has(tabId)) throw handoffError("not-prepared");
+  ownedTabIds.delete(tabId);
+  removeTab(tabId);
+  frozenTabIds.value = new Set([...frozenTabIds.value].filter((id) => id !== tabId));
+  preparedHandoffs.delete(tabId);
+  snapshottedHandoffs.delete(tabId);
+  lastPersistedProjection = "";
+  queueWorkspaceSave(workspaceProjection.value);
+  notifyHandoffSnapshotListeners();
+}
+
+async function rollbackTabHandoff(tabId: string): Promise<void> {
+  const prepared = preparedHandoffs.get(tabId);
+  if (!prepared) return;
+  for (const pane of prepared.snapshot.panes) {
+    if ("initialDimensions" in pane && pane.initialDimensions) {
+      incomingPaneDimensions.set(pane.paneId, pane.initialDimensions);
+    }
+    if ("outputGeometry" in pane && pane.outputGeometry) {
+      incomingPaneOutputGeometry.set(pane.paneId, pane.outputGeometry);
+    }
+  }
+  frozenTabIds.value = new Set([...frozenTabIds.value].filter((id) => id !== tabId));
+  preparedHandoffs.delete(tabId);
+  snapshottedHandoffs.delete(tabId);
+  if (prepared.wasActive) activeTabId.value = tabId;
+  await nextTick();
+  try {
+    await waitForHandoffAttachments(prepared.snapshot, true);
+  } finally {
+    for (const pane of prepared.snapshot.panes) {
+      incomingPaneDimensions.delete(pane.paneId);
+      incomingPaneOutputGeometry.delete(pane.paneId);
+    }
+  }
+  if (prepared.wasActive) activateTab(tabId);
+  notifyHandoffSnapshotListeners();
+}
+
+async function discardImportedTab(tabId: string): Promise<void> {
+  const snapshot = importedHandoffs.get(tabId);
+  if (!snapshot) return;
+  ownedTabIds.delete(tabId);
+  committedImportedTabIds.delete(tabId);
+  importedHandoffs.delete(tabId);
+  for (const pane of snapshot.panes) incomingPaneDimensions.delete(pane.paneId);
+  for (const pane of snapshot.panes) incomingPaneOutputGeometry.delete(pane.paneId);
+  pendingImportedTabIds.value = new Set([...pendingImportedTabIds.value].filter((id) => id !== tabId));
+  removeTab(tabId);
+  await nextTick();
+  await waitForHandoffAttachments(snapshot, false);
+  lastPersistedProjection = "";
+  queueWorkspaceSave(workspaceProjection.value);
+}
+
+async function commitImportedTabHandoff(tabId: string): Promise<void> {
+  if (!importedHandoffs.has(tabId) || !tabs.value.some((tab) => tab.tabId === tabId)) {
+    throw handoffError("not-imported");
+  }
+  committedImportedTabIds.add(tabId);
+  ownedTabIds.add(tabId);
+  // The SQLite projection requires an active ID whenever it contains Tabs.
+  // The target may have been empty while the imported Tab was staged.
+  activeTabId.value = tabId;
+  notifyHandoffSnapshotListeners();
+  lastPersistedProjection = "";
+  try {
+    await flushTerminalWorkspaceLayout();
+  } finally {
+    // Core already owns this Tab here. Even a SQLite failure must not leave
+    // its only live view hidden behind the import fence.
+    pendingImportedTabIds.value = new Set([...pendingImportedTabIds.value].filter((id) => id !== tabId));
+    for (const pane of importedHandoffs.get(tabId)?.panes ?? []) {
+      incomingPaneDimensions.delete(pane.paneId);
+      incomingPaneOutputGeometry.delete(pane.paneId);
+    }
+    activateTab(tabId);
+  }
 }
 
 watch(
@@ -2347,6 +2846,14 @@ onMounted(async () => {
   try {
     await Promise.all([ensureTerminalWorkspaceInitialized(), refreshSavedHosts()]);
     unregisterTerminalHeaderController = workspaceTabs.registerTerminalController({
+      snapshotTabHandoff,
+      observeTabHandoffSnapshots,
+      freezeTabHandoff,
+      importTabHandoff,
+      commitImportedTabHandoff,
+      commitTabHandoff,
+      rollbackTabHandoff,
+      discardImportedTab,
       activate: activateTab,
       close: requestCloseTab,
       closeMany: requestCloseTabs,
@@ -2365,7 +2872,7 @@ onMounted(async () => {
     initialRouteReady = true;
     revealRoute();
   }
-  if (canUseDesktopCore()) {
+  if (canUseDesktopCore() && !childWorkspace) {
     unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => { void reconcilePluginProtocolLaunches(); });
     await reconcilePluginProtocolLaunches();
     unlistenPluginTerminalChannel = await listen<PluginApprovedTerminalChannelLaunch>("plugin-terminal-channel-approved", ({ payload }) => {
@@ -2430,7 +2937,7 @@ onMounted(async () => {
         />
       </div>
       <template
-        v-for="tab in tabs"
+        v-for="tab in tabs.filter((item) => !frozenTabIds.has(item.tabId))"
         :key="tab.tabId"
       >
         <section
@@ -2486,14 +2993,16 @@ onMounted(async () => {
                   :pane-id="pane.paneId"
                   :label="pane.label"
                   :target="pane.target"
+                  :initial-dimensions="incomingPaneDimensions.get(pane.paneId)"
+                  :initial-output-geometry="incomingPaneOutputGeometry.get(pane.paneId)"
                   :credential-ref-id="pane.credentialRefId"
                   :plugin-authorization-token="pane.pluginAuthorizationToken ?? null"
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
                   :deferred-recovery="pane.deferredRecovery"
                   :initial-directory="pane.initialDirectory ?? null"
-                  :active="route.path === '/terminal' && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
-                  :visible="route.path === '/terminal' && tab.tabId === activeTabId"
+                  :active="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :visible="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
                   :can-split-workspace-right="canSplitWorkspaceRight"
@@ -2513,10 +3022,12 @@ onMounted(async () => {
                   :ref="(value) => setPaneRef(pane.paneId, value)"
                   :pane-id="pane.paneId"
                   :label="pane.label"
+                  :initial-dimensions="incomingPaneDimensions.get(pane.paneId)"
+                  :initial-output-geometry="incomingPaneOutputGeometry.get(pane.paneId)"
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
-                  :active="route.path === '/terminal' && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
-                  :visible="route.path === '/terminal' && tab.tabId === activeTabId"
+                  :active="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :visible="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
                   :can-split-workspace-right="canSplitWorkspaceRight"
@@ -2533,11 +3044,13 @@ onMounted(async () => {
                   :pane-id="pane.paneId"
                   :tab-id="tab.tabId"
                   :label="pane.label"
+                  :initial-dimensions="incomingPaneDimensions.get(pane.paneId)"
+                  :initial-output-geometry="incomingPaneOutputGeometry.get(pane.paneId)"
                   :profile="pane.profile"
                   :launch="pane.launch"
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
-                  :active="route.path === '/terminal' && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :active="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
                   :can-split-workspace-right="canSplitWorkspaceRight"
@@ -2553,10 +3066,12 @@ onMounted(async () => {
                   :ref="(value) => setPaneRef(pane.paneId, value)"
                   :pane-id="pane.paneId"
                   :label="pane.label"
+                  :initial-dimensions="incomingPaneDimensions.get(pane.paneId)"
+                  :initial-output-geometry="incomingPaneOutputGeometry.get(pane.paneId)"
                   :endpoint="pane.endpoint"
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
-                  :active="tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :active="!pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
                   :can-split-workspace-right="canSplitWorkspaceRight"

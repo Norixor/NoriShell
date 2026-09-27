@@ -13,7 +13,7 @@ import {
 import { NvxIcon, NvxIconButton } from "../ui";
 
 const { t } = useI18n();
-const props = withDefaults(defineProps<{ standalone?: boolean }>(), { standalone: false });
+const props = withDefaults(defineProps<{ standalone?: boolean; workspace?: boolean }>(), { standalone: false, workspace: false });
 const controlsRoot = ref<HTMLElement | null>(null);
 const canMaximize = ref(!props.standalone);
 let resizeObserver: ResizeObserver | null = null;
@@ -23,6 +23,13 @@ let disposed = false;
 async function perform(action: "close" | "minimize" | "maximize") {
   if (action === "maximize" && !canMaximize.value) return;
   try {
+    if (props.workspace) {
+      const window = getCurrentWindow();
+      if (action === "close") await window.close();
+      else if (action === "minimize") await window.minimize();
+      else await window.toggleMaximize();
+      return;
+    }
     if (props.standalone) {
       await invoke("window_standalone_action", { action });
       return;

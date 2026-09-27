@@ -70,6 +70,9 @@ const TerminalViewStub = defineComponent({
       fit: vi.fn(),
       writeBytes: vi.fn(),
       writeGap: vi.fn(),
+      whenOutputParsed: async () => {},
+      finishReplay: async () => {},
+      outputGeometrySnapshot: () => [{ afterOutputSeq: "0", rows: 24, cols: 80 }],
     });
     return () => h("div", { class: "terminal-view-stub" });
   },

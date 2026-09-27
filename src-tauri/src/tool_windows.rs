@@ -104,6 +104,15 @@ impl ToolWindows {
             .ok_or_else(|| "unavailable".into())
     }
 }
+
+fn ordinary_owner_alive(app: &tauri::AppHandle, label: &str) -> bool {
+    app.get_webview_window(label).is_some()
+        && (label == "main"
+            || app
+                .state::<crate::workspace_windows::WorkspaceWindows>()
+                .contains(label))
+}
+
 #[tauri::command]
 pub(crate) async fn tool_window_open(
     app: tauri::AppHandle,
@@ -111,7 +120,7 @@ pub(crate) async fn tool_window_open(
     state: State<'_, ToolWindows>,
     target: ToolTarget,
 ) -> Result<(), String> {
-    if window.label() != "main"
+    if !ordinary_owner_alive(&app, window.label())
         || target.title().len() > 1024
         || app
             .state::<crate::tool_window_exit::ToolWindowExit>()
@@ -131,6 +140,9 @@ pub(crate) async fn tool_window_open(
         }
     };
     if existing {
+        if !ordinary_owner_alive(&app, window.label()) {
+            return Err("unavailable".into());
+        }
         if let Some(child) = app.get_webview_window(&label) {
             crate::window_first_show::show_if_revealed(&child).map_err(|_| "unavailable")?;
         }
@@ -167,9 +179,10 @@ pub(crate) async fn tool_window_open(
             return Err("unavailable".into());
         }
     };
-    if app
-        .state::<crate::tool_window_exit::ToolWindowExit>()
-        .is_preparing()
+    if !ordinary_owner_alive(&app, window.label())
+        || app
+            .state::<crate::tool_window_exit::ToolWindowExit>()
+            .is_preparing()
     {
         state.0.lock().map_err(|_| "unavailable")?.remove(&label);
         let _ = child.destroy();

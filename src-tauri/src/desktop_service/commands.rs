@@ -8,6 +8,13 @@ use tauri::{State, WebviewWindow, ipc::Response};
 use tokio::sync::oneshot;
 
 type CoreResult<T> = Result<T, Box<CoreApiError>>;
+
+fn ordinary_window(
+    window: &WebviewWindow,
+    workspaces: &State<'_, crate::workspace_windows::WorkspaceWindows>,
+) -> bool {
+    window.label() == "main" || workspaces.contains(window.label())
+}
 #[tauri::command]
 pub(crate) fn desktop_availability() -> Vec<DesktopAvailability> {
     vec![
@@ -347,13 +354,42 @@ pub(crate) fn desktop_frame_get(
 pub(crate) async fn desktop_focus_change(
     request: DesktopFocusRequest,
     window: WebviewWindow,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
     service: State<'_, DesktopService>,
     ssh: State<'_, crate::ssh_session_service::SshSessionService>,
 ) -> CoreResult<WireSequence> {
+    if !ordinary_window(&window, &workspaces) {
+        return Err(map_error(&request.meta, EngineError::StaleInput));
+    }
     let broker = ssh.focus_broker();
     broker
         .linearize(async {
             let mut focus = service.focus.lock().await;
+            if !ordinary_window(&window, &workspaces) {
+                return Err(map_error(&request.meta, EngineError::StaleInput));
+            }
+            // A blur from a former window cannot revoke a newer window's input lease.
+            if request.session_id.is_none()
+                && focus.session.is_some()
+                && focus.window_label.as_deref() != Some(window.label())
+            {
+                return Ok(WireSequence::new(focus.epoch));
+            }
+            if let Some(id) = &request.session_id {
+                let session = service
+                    .session(id, request.generation.map(|value| value.get()).unwrap_or(0))
+                    .map_err(|error| map_error(&request.meta, error))?;
+                let terminal = ssh
+                    .terminal_focus_snapshot_unserialized(request.meta.request_id.clone())
+                    .await?;
+                if !window.is_focused().unwrap_or(false)
+                    || terminal.target.is_some()
+                    || service.prompts.has_pending()
+                    || session.summary().state != DesktopSessionState::Running
+                {
+                    return Err(map_error(&request.meta, EngineError::StaleInput));
+                }
+            }
             let current = service
                 .sessions
                 .lock()
@@ -364,29 +400,20 @@ pub(crate) async fn desktop_focus_change(
                 .unwrap_or(0);
             focus.epoch = focus.epoch.max(current).saturating_add(1);
             focus.session = None;
+            focus.window_label = None;
             focus.sequence = 0;
             service.invalidate_input();
             if let Some(id) = &request.session_id {
                 let session = service
                     .session(id, request.generation.map(|value| value.get()).unwrap_or(0))
                     .map_err(|error| map_error(&request.meta, error))?;
-                let terminal = ssh
-                    .terminal_focus_snapshot_unserialized(request.meta.request_id.clone())
-                    .await?;
-                if window.label() != "main"
-                    || !window.is_focused().unwrap_or(false)
-                    || terminal.target.is_some()
-                    || service.prompts.has_pending()
-                    || session.summary().state != DesktopSessionState::Running
-                {
-                    return Err(map_error(&request.meta, EngineError::StaleInput));
-                }
                 focus.epoch = focus
                     .epoch
                     .max(*session.focus_epoch.borrow())
                     .saturating_add(1);
                 session.focus_epoch.send_replace(focus.epoch);
                 focus.session = Some(id.clone());
+                focus.window_label = Some(window.label().to_owned());
             }
             Ok(WireSequence::new(focus.epoch))
         })
@@ -397,24 +424,31 @@ pub(crate) async fn desktop_focus_change(
 pub(crate) async fn desktop_input(
     request: DesktopInputRequest,
     window: WebviewWindow,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
     service: State<'_, DesktopService>,
     ssh: State<'_, crate::ssh_session_service::SshSessionService>,
 ) -> CoreResult<()> {
+    if !ordinary_window(&window, &workspaces) {
+        return Err(map_error(&request.meta, EngineError::StaleInput));
+    }
     let broker = ssh.focus_broker();
     broker
         .linearize(async {
             let mut focus = service.focus.lock().await;
+            if !ordinary_window(&window, &workspaces) {
+                return Err(map_error(&request.meta, EngineError::StaleInput));
+            }
             let session = service
                 .session(&request.session_id, request.generation.get())
                 .map_err(|error| map_error(&request.meta, error))?;
             let terminal = ssh
                 .terminal_focus_snapshot_unserialized(request.meta.request_id.clone())
                 .await?;
-            if window.label() != "main"
-                || !window.is_focused().unwrap_or(false)
+            if !window.is_focused().unwrap_or(false)
                 || terminal.target.is_some()
                 || service.prompts.has_pending()
                 || focus.session.as_deref() != Some(&request.session_id)
+                || focus.window_label.as_deref() != Some(window.label())
                 || focus.epoch != request.focus_epoch.get()
                 || request.sequence.get() <= focus.sequence
                 || session.summary().state != DesktopSessionState::Running
@@ -514,12 +548,13 @@ pub(crate) async fn desktop_input(
 pub(crate) async fn desktop_resolution_set(
     request: DesktopResolutionRequest,
     window: WebviewWindow,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
     service: State<'_, DesktopService>,
 ) -> CoreResult<()> {
     let session = service
         .session(&request.session_id, request.generation.get())
         .map_err(|error| map_error(&request.meta, error))?;
-    if window.label() != "main" {
+    if !ordinary_window(&window, &workspaces) {
         return Err(map_error(&request.meta, EngineError::StaleInput));
     }
     let summary = session.summary();
@@ -579,12 +614,13 @@ pub(crate) async fn desktop_resolution_set(
 pub(crate) fn desktop_clipboard_get(
     request: DesktopSessionRequest,
     window: WebviewWindow,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
     service: State<'_, DesktopService>,
 ) -> CoreResult<Option<String>> {
     let session = service
         .session(&request.session_id, request.generation.get())
         .map_err(|error| map_error(&request.meta, error))?;
-    if window.label() != "main"
+    if !ordinary_window(&window, &workspaces)
         || !window.is_focused().unwrap_or(false)
         || !session.summary().profile.clipboard_enabled
     {

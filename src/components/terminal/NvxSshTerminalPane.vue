@@ -60,10 +60,14 @@ import { useNativeTerminalStore } from "../../stores/nativeTerminal";
 import { posixDirectoryCommand } from "../../views/sftpTerminalLaunch";
 import type { NativeTerminalSessionScope } from "../../core-api/generated/core-api";
 import type { ShortcutCommandId } from "../../shortcuts";
+import type { TerminalOutputGeometryMarker } from "../../terminal-output-geometry";
 
 interface TerminalViewExpose {
-  writeBytes(bytes: readonly number[]): void;
+  writeBytes(bytes: readonly number[], outputSeq?: string): void;
   writeGap(): void;
+  whenOutputParsed(): Promise<void>;
+  finishReplay(): Promise<void>;
+  outputGeometrySnapshot(): TerminalOutputGeometryMarker[];
   dimensions(): { rows: number; cols: number };
   focus(): void;
   findNext(term: string, incremental?: boolean): boolean;
@@ -89,6 +93,8 @@ const props = withDefaults(defineProps<{
   pluginAuthorizationToken?: string | null;
   existingSession: SshSessionSummary | null;
   deferredStart?: boolean;
+  initialDimensions?: { rows: number; cols: number };
+  initialOutputGeometry?: TerminalOutputGeometryMarker[];
   deferredRecovery?: "reconnect" | "credential" | "vaultUnlock";
   active: boolean;
   visible: boolean;
@@ -98,6 +104,8 @@ const props = withDefaults(defineProps<{
   canSplitWorkspaceRight: boolean;
 }>(), {
   deferredStart: false,
+  initialDimensions: undefined,
+  initialOutputGeometry: undefined,
   deferredRecovery: "reconnect",
   pluginAuthorizationToken: null,
   initialDirectory: null,
@@ -189,6 +197,7 @@ const PENDING_EVENT_MAX_COUNT = 256;
 const PENDING_EVENT_MAX_BYTES = 1024 * 1024;
 let pendingEventBytes = 0;
 let binding = false;
+let initialAttachmentReady: Promise<void> = Promise.resolve();
 let released = false;
 let lastAppliedEventSeq = 0n;
 let lastAppliedOutputSeq = 0n;
@@ -550,7 +559,7 @@ function applyOutputItem(item: SshSessionOutputItem) {
     if (outputSeq > lastAppliedOutputSeq + 1n && lastAppliedOutputSeq > 0n) {
       terminalView.value?.writeGap();
     }
-    terminalView.value?.writeBytes(frame.bytes);
+    terminalView.value?.writeBytes(frame.bytes, frame.outputSeq);
     lastAppliedOutputSeq = outputSeq;
     return;
   }
@@ -850,11 +859,13 @@ async function attachExistingSession(resumeRenderedOutput = false) {
     const snapshotEventSeq = BigInt(details.session.eventSeq);
     if (snapshotEventSeq > lastAppliedEventSeq) lastAppliedEventSeq = snapshotEventSeq;
     response.replay.forEach(applyOutputItem);
+    if (props.initialOutputGeometry?.length) await terminalView.value?.finishReplay();
     binding = false;
     replayPendingEvents(details.session.sessionId, details.session.generation);
     startAttachmentHeartbeat();
     if (details.session.state === "running" && props.active) activateFromTab();
     if (props.active) terminalView.value?.focus();
+    await terminalView.value?.whenOutputParsed();
   } catch {
     emit("state", "failed", session.value);
   } finally {
@@ -1309,6 +1320,14 @@ function handleBeforeUnload() {
   void releaseRendererBinding();
 }
 
+function terminalDimensions() { return terminalView.value?.dimensions() ?? null; }
+function terminalOutputGeometry() { return terminalView.value?.outputGeometrySnapshot() ?? null; }
+async function waitForHandoffReplay() {
+  await initialAttachmentReady;
+  if (!attachment.value) throw new Error("ssh-handoff:attachment-unavailable");
+  await terminalView.value?.whenOutputParsed();
+}
+
 defineExpose({
   runShortcut,
   disconnectForClose,
@@ -1317,6 +1336,9 @@ defineExpose({
   reconnectSavedCredential: () => reconnect(null, true, true),
   activateFromTab,
   deactivateFromTab,
+  terminalDimensions,
+  terminalOutputGeometry,
+  waitForHandoffReplay,
 });
 
 function registerInputTarget() {
@@ -1407,7 +1429,7 @@ function activateTerminalSurface(event: Event) {
 onMounted(() => {
   if (props.active) activateFromTab();
   window.addEventListener("beforeunload", handleBeforeUnload);
-  if (session.value) void attachExistingSession();
+  if (session.value) initialAttachmentReady = attachExistingSession();
   else if (!props.deferredStart) void open();
 });
 
@@ -1643,6 +1665,8 @@ onBeforeUnmount(() => {
       ref="terminalView"
       :pane-id="paneId"
       :host-id="target.kind === 'host' ? target.hostId : null"
+      :initial-dimensions="initialDimensions"
+      :initial-output-geometry="initialOutputGeometry"
       :ghost-suggestion="ghostSuggestion"
       :read-only="!writable"
       :reconnect-on-input="reconnectOnInput"
