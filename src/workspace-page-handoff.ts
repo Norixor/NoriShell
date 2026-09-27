@@ -13,7 +13,7 @@ function isPageTab(value: unknown): value is WorkspacePageTab {
   return typeof tab.groupId === "string"
     && typeof tab.route === "string"
     && typeof tab.label === "string"
-    && (tab.pageType === "knownHosts" || tab.pageType === "sshIdentities" || tab.pageType === "plugin")
+    && (tab.pageType === "newPage" || tab.pageType === "knownHosts" || tab.pageType === "sshIdentities" || tab.pageType === "plugin")
     && (tab.labelKey === null || typeof tab.labelKey === "string")
     && (tab.iconName === null || typeof tab.iconName === "string");
 }
