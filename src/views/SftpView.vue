@@ -5,19 +5,22 @@ import { takeNativeTransferNavigation, matchesNativeTransferNavigation } from ".
 import { homeDir, sep } from "@tauri-apps/api/path";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Activity, Archive, ArrowUp, Download, Eye, FileArchive, FilePlus2, FolderOpen, FolderPlus, HardDrive, Link2, ListFilter, Pause, Pencil, PlugZap, Radio, RefreshCw, RotateCcw, Save, Search, Server, ShieldCheck, Square, Terminal, Trash2, X } from "lucide-vue-next";
+import { Activity, Archive, ArrowUp, Download, Eye, FileArchive, FilePlus2, FolderOpen, FolderPlus, HardDrive, Link2, ListFilter, Pause, Pencil, PlugZap, Plus, Radio, RefreshCw, RotateCcw, Save, Search, Server, ShieldCheck, Square, Terminal, Trash2, X } from "lucide-vue-next";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { useRouteReveal } from "../routeReveal";
 import { onSavedConnectionsChanged } from "../saved-connections";
+import { recordRecentFileHost } from "../recent-file-hosts";
 
 import { sftpEntryIcon } from "../components/sftp/fileIcons";
 import NvxSftpPaneActionsMenu from "../components/sftp/NvxSftpPaneActionsMenu.vue";
 import { NvxPluginExtensionTarget } from "../components/plugins";
 import {
-  NvxTerminalSplitTree, closeTerminalPane, countTerminalPanes, createTerminalPane,
+  NvxTerminalPaneControls, NvxTerminalSplitTree, closeTerminalPane, countTerminalPanes, createTerminalPane,
   findTerminalPane, setTerminalForPane, setTerminalSplitRatio, splitTerminalPane,
+  splitTerminalWorkspaceToRight, terminalLayoutMinimumSpanAfterSplit,
+  terminalLayoutMinimumSpanAfterWorkspaceRightSplit,
   type TerminalLayoutNode, type TerminalPaneNode, type TerminalSplitDirection,
 } from "../components/terminal";
 import { NvxButton, NvxCheckbox, NvxCodeEditor, NvxDialog, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxProgress, NvxSelect, NvxStatusLabel } from "../components/ui";
@@ -35,6 +38,8 @@ import type {
   SftpSessionSummary, SftpTransferIntentSummary, SftpTransferState, SftpTransferSummary,
 } from "../core-api/generated/core-api";
 import { useSftpPreferencesStore } from "../stores/sftpPreferences";
+import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import type { ShortcutCommandId } from "../shortcuts";
 import { useTipsStore } from "../stores/tips";
 import {
   beginSftpPaneDirectoryLoad, captureSftpPaneDragIntent, cloneSftpPaneState,
@@ -124,15 +129,23 @@ interface TextPreviewTarget {
   precondition: SftpPaneEntry["precondition"];
 }
 const { t, locale } = useI18n();
+const props = withDefaults(defineProps<{
+  workspaceTabId?: string;
+  initialKind?: "legacy" | "local" | "remote";
+  initialHostId?: string | null;
+  active?: boolean;
+}>(), { workspaceTabId: "", initialKind: "legacy", initialHostId: null, active: true });
 const router = useRouter();
 const tips = useTipsStore();
+const workspaceTabs = useWorkspaceTabsStore();
 const browserPreferences = useSftpPreferencesStore();
 const operationFeedbackScope = "sftp-operation";
 const navigationFeedbackScope = "sftp-plugin-navigation";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const localPaneId = "sftp-local-pane";
-const remotePaneId = "sftp-remote-pane";
+const localPaneId = props.workspaceTabId ? `${props.workspaceTabId}:local` : "sftp-local-pane";
+const remotePaneId = props.workspaceTabId ? `${props.workspaceTabId}:remote` : "sftp-remote-pane";
+const transferActivityId = props.workspaceTabId ? `${props.workspaceTabId}-transfers` : "sftp-transfer-activity-panel";
 const maximumRecursiveCopyDepth = 32;
 const maximumRecursiveCopyEntries = 10_000;
 const maximumRecursiveCopyBytes = 20 * 1024 * 1024 * 1024;
@@ -162,6 +175,9 @@ let navigationReady = false;
 let navigationWorking = false;
 const transfersOpen = ref(false);
 const transferActivityRoot = ref<HTMLElement | null>(null);
+const sftpRoot = ref<HTMLElement | null>(null);
+const workspaceSize = ref({ width: 0, height: 0 });
+let workspaceResizeObserver: ResizeObserver | null = null;
 const mutationDialog = ref<"mkdir" | "touch" | "rename" | "delete" | null>(null);
 const mutationTargetPaneId = ref<string | null>(null);
 const mutationName = ref("");
@@ -173,11 +189,14 @@ const cleanupRetainTarget = ref<SftpTransferSummary | SftpTransferIntentSummary 
 const cleanupPendingTransferId = ref<string | null>(null);
 const retainedForExit = ref(new Set<string>());
 const closeRemotePaneTargetId = ref<string | null>(null);
+const closeFileTabConfirm = ref(false);
+const closeFileTabPending = ref(false);
+let settleFileTabClose: ((closed: boolean) => void) | null = null;
 const overwritePrompt = ref<OverwritePromptState | null>(null);
 const permissionsTarget = ref<PermissionsTarget | null>(null);
 const permissionMode = ref(0);
 const permissionsPending = ref(false);
-const activeSftpPaneId = ref(remotePaneId);
+const activeSftpPaneId = ref(props.initialKind === "local" ? localPaneId : remotePaneId);
 const dragIntent = ref<SftpPaneDragIntent | null>(null);
 const dropPaneId = ref<string | null>(null);
 const pointerDrag = ref<PointerDragState | null>(null);
@@ -225,12 +244,15 @@ const completedTransferRefreshes = new Set<string>();
 
 const paneStates = reactive<Record<string, SftpPaneState>>({
   [localPaneId]: createSftpPaneState(localPaneId, "local", browserPreferences.browser),
-  [remotePaneId]: createSftpPaneState(remotePaneId, "remote", browserPreferences.browser),
+  ...(props.initialKind === "local" ? {} : { [remotePaneId]: createSftpPaneState(remotePaneId, "remote", browserPreferences.browser) }),
 });
-const sftpLayout = ref<TerminalLayoutNode>({
+const sftpLayout = ref<TerminalLayoutNode>(props.initialKind === "local" ? createTerminalPane(localPaneId, "local") : {
   kind: "split", splitId: "sftp-initial-split", direction: "horizontal", ratio: 0.5,
   first: createTerminalPane(localPaneId, "local"), second: createTerminalPane(remotePaneId, "remote"),
 });
+watch(() => countTerminalPanes(sftpLayout.value), (count) => {
+  if (props.workspaceTabId) workspaceTabs.syncFilePaneCount(props.workspaceTabId, count);
+}, { immediate: true });
 
 const activePane = computed(() => paneStates[activeSftpPaneId.value] ?? null);
 const closeRemotePanePending = computed(() => {
@@ -416,12 +438,14 @@ function unclaimedSftpSessionForHost(hostId: string, includeFailed = false) {
     ?? null;
 }
 function attachSftpSessionToPane(pane: SftpPaneState, session: SftpSessionSummary) {
+  if (props.workspaceTabId && !workspaceTabs.claimFileSession(session.sessionId, props.workspaceTabId)) return false;
   replaceSftpPaneEndpoint(pane, {
     kind: "remote",
     hostId: session.hostId,
     sessionId: session.sessionId,
     generation: session.generation,
   }, "/", [47]);
+  return true;
 }
 function paneHost(pane: SftpPaneState) {
   const endpoint = pane.endpoint;
@@ -433,9 +457,12 @@ function paneRemoteLabel(pane: SftpPaneState) {
 }
 
 async function consumePluginNavigation() {
-  if (!pageObserversActive || !navigationReady || navigationWorking || loading.value || operationPending.value
+  if (!props.active || !pageObserversActive || !navigationReady || navigationWorking || loading.value || operationPending.value
     || previewOpen.value || previewSaving.value || mutationDialog.value || fileUtilityDialog.value || overwritePrompt.value
     || !pendingSftpPluginNavigations.value.length) return;
+  const pendingSessionId = pendingSftpPluginNavigations.value[0]?.sftpSession.sessionId;
+  if (props.workspaceTabId && pendingSessionId
+    && workspaceTabs.fileSessionOwner(pendingSessionId) !== props.workspaceTabId) return;
   navigationWorking = true;
   const intent = takeSftpPluginNavigation();
   if (!intent) { navigationWorking = false; return; }
@@ -476,7 +503,7 @@ async function consumePluginNavigation() {
     pendingPaneIds.add(targetPane.paneId);
     panePending = true;
     await cancelRemotePaneCursor(targetPane);
-    attachSftpSessionToPane(targetPane, session);
+    if (!attachSftpSessionToPane(targetPane, session)) throw new Error("sessionOwnedByAnotherFileTab");
     targetPane.search = "";
     activeSftpPaneId.value = targetPane.paneId;
     fence = beginSftpPaneDirectoryLoad(targetPane);
@@ -731,24 +758,129 @@ function onDocumentKeyDown(event: KeyboardEvent) {
 function splitSftpPane(paneId: string, direction: TerminalSplitDirection, targetKind?: "local" | "remote") {
   const sourceNode = findTerminalPane(sftpLayout.value, paneId);
   const sourceState = paneStates[paneId];
-  if (!sourceNode || !sourceState || paneInteractionPending(paneId)) return;
+  if (!sourceNode || !sourceState || paneInteractionPending(paneId) || !canSplitSftpPane(paneId, direction)) return;
   const kind = targetKind ?? sftpPaneKind(sourceNode);
   const newPaneId = crypto.randomUUID();
   sftpLayout.value = splitTerminalPane(sftpLayout.value, paneId, direction, newPaneId, crypto.randomUUID());
   sftpLayout.value = setTerminalForPane(sftpLayout.value, newPaneId, kind);
-  paneStates[newPaneId] = kind === sftpPaneKind(sourceNode)
+  registerSplitSftpPane(newPaneId, kind, targetKind ? undefined : sourceNode, targetKind ? undefined : sourceState);
+}
+function registerSplitSftpPane(newPaneId: string, kind: "local" | "remote", sourceNode?: TerminalPaneNode, sourceState?: SftpPaneState) {
+  paneStates[newPaneId] = sourceNode && sourceState && kind === sftpPaneKind(sourceNode)
     ? cloneSftpPaneState(sourceState, newPaneId)
     : createSftpPaneState(newPaneId, kind, browserPreferences.browser);
-  if (kind === "remote" && kind !== sftpPaneKind(sourceNode) && hosts.value[0]) {
+  if (kind === "remote" && (!sourceNode || kind !== sftpPaneKind(sourceNode)) && hosts.value[0]) {
     replaceSftpPaneEndpoint(paneStates[newPaneId]!, {
       kind: "remote", hostId: hosts.value[0].hostId, sessionId: null, generation: null,
     }, "/", [47]);
   }
   nextCursorByPane[newPaneId] = null;
   activeSftpPaneId.value = newPaneId;
-  if (paneStates[newPaneId]?.endpoint.kind === "local") {
-    void initializeDefaultLocalPaneSafely(paneStates[newPaneId]!);
+  void nextTick(() => focusFilePane(newPaneId));
+  if (kind === "local") void initializeDefaultLocalPaneSafely(paneStates[newPaneId]!);
+}
+function filePaneIds(node: TerminalLayoutNode): string[] {
+  return node.kind === "pane" ? [node.paneId] : [...filePaneIds(node.first), ...filePaneIds(node.second)];
+}
+function focusFilePane(paneId: string) {
+  const paneElement = Array.from(sftpRoot.value?.querySelectorAll<HTMLElement>(".sftp-view__workspace [data-pane-id]") ?? [])
+    .find((element) => element.dataset.paneId === paneId);
+  paneElement?.querySelector<HTMLElement>(".sftp-view__pane-header button:not(:disabled), .sftp-view__commandbar button:not(:disabled), .sftp-view__entries button:not(:disabled)")?.focus();
+}
+function canSplitSftpPane(paneId: string, direction: TerminalSplitDirection) {
+  const paneElement = Array.from(sftpRoot.value?.querySelectorAll<HTMLElement>(".sftp-view__workspace [data-pane-id]") ?? [])
+    .find((element) => element.dataset.paneId === paneId);
+  const bounds = paneElement?.closest<HTMLElement>(".nvx-terminal-split-tree")?.getBoundingClientRect();
+  const available = direction === "horizontal"
+    ? workspaceSize.value.width || bounds?.width || 0
+    : workspaceSize.value.height || bounds?.height || 0;
+  if (available <= 0) return true;
+  const minimum = terminalLayoutMinimumSpanAfterSplit(sftpLayout.value, paneId, direction);
+  return available >= (direction === "horizontal" ? minimum.widthUnits * 420 : minimum.heightUnits * 240);
+}
+function canSplitSftpWorkspaceRight() {
+  const tree = sftpRoot.value?.querySelector<HTMLElement>(".sftp-view__workspace");
+  const available = workspaceSize.value.width || tree?.getBoundingClientRect().width || 0;
+  if (available <= 0) return true;
+  return available >= terminalLayoutMinimumSpanAfterWorkspaceRightSplit(sftpLayout.value).widthUnits * 420;
+}
+function splitSftpWorkspaceRight() {
+  if (!paneStates[activeSftpPaneId.value] || paneInteractionPending(activeSftpPaneId.value) || !canSplitSftpWorkspaceRight()) return;
+  const newPaneId = crypto.randomUUID();
+  sftpLayout.value = splitTerminalWorkspaceToRight(sftpLayout.value, newPaneId, crypto.randomUUID());
+  sftpLayout.value = setTerminalForPane(sftpLayout.value, newPaneId, "remote");
+  registerSplitSftpPane(newPaneId, "remote");
+}
+function closeActiveSftpPane() {
+  if (countTerminalPanes(sftpLayout.value) > 1) void requestCloseSftpPane(activeSftpPaneId.value);
+  else void requestCloseFileTab();
+}
+function runFileShortcut(commandId: ShortcutCommandId) {
+  if (!props.active || !paneStates[activeSftpPaneId.value]) return;
+  switch (commandId) {
+    case "terminal.split-right": splitSftpPane(activeSftpPaneId.value, "horizontal", "remote"); break;
+    case "terminal.split-down": splitSftpPane(activeSftpPaneId.value, "vertical", "remote"); break;
+    case "terminal.close-pane": closeActiveSftpPane(); break;
+    case "terminal.focus-next-pane":
+    case "terminal.focus-previous-pane": {
+      const paneIds = filePaneIds(sftpLayout.value);
+      const index = paneIds.indexOf(activeSftpPaneId.value);
+      const offset = commandId === "terminal.focus-next-pane" ? 1 : -1;
+      activeSftpPaneId.value = paneIds[(index + offset + paneIds.length) % paneIds.length] ?? activeSftpPaneId.value;
+      void nextTick(() => focusFilePane(activeSftpPaneId.value));
+      break;
+    }
   }
+}
+
+function currentTabSessions() {
+  const seen = new Set<string>();
+  return Object.values(paneStates).flatMap((pane) => {
+    const session = sessionForPane(pane);
+    if (!session || session.state === "closed" || seen.has(session.sessionId)) return [];
+    seen.add(session.sessionId);
+    return [session];
+  });
+}
+
+async function requestCloseFileTab(): Promise<boolean> {
+  if (!props.workspaceTabId || closeFileTabConfirm.value || closeFileTabPending.value
+    || pendingPaneIds.size || operationPending.value || previewSaving.value) return false;
+  if (Object.values(paneStates).some((pane) => pane.endpoint.kind === "remote" && pane.endpoint.sessionId)) {
+    try { await refreshSnapshot(); }
+    catch { showOperationFailed(); return false; }
+  }
+  if (!currentTabSessions().length) {
+    workspaceTabs.finishCloseFileTab(props.workspaceTabId);
+    return true;
+  }
+  closeFileTabConfirm.value = true;
+  return new Promise<boolean>((resolve) => { settleFileTabClose = resolve; });
+}
+
+function cancelCloseFileTab() {
+  if (closeFileTabPending.value) return;
+  closeFileTabConfirm.value = false;
+  settleFileTabClose?.(false);
+  settleFileTabClose = null;
+}
+
+async function confirmCloseFileTab() {
+  if (!props.workspaceTabId || closeFileTabPending.value) return;
+  closeFileTabPending.value = true;
+  try {
+    for (const session of currentTabSessions()) {
+      await disconnectSftpSession({ sessionId: session.sessionId, expectedGeneration: session.generation });
+    }
+    closeFileTabConfirm.value = false;
+    const resolve = settleFileTabClose;
+    settleFileTabClose = null;
+    workspaceTabs.finishCloseFileTab(props.workspaceTabId);
+    resolve?.(true);
+  } catch {
+    showOperationFailed();
+    await refreshSnapshot().catch(() => undefined);
+  } finally { closeFileTabPending.value = false; }
 }
 function resizeSftpSplit(splitId: string, ratio: number) { sftpLayout.value = setTerminalSplitRatio(sftpLayout.value, splitId, ratio) }
 
@@ -823,6 +955,7 @@ async function disconnectAndCloseRemotePane() {
       sessionId: session.sessionId,
       expectedGeneration: session.generation,
     });
+    if (props.workspaceTabId) workspaceTabs.releaseFileSession(session.sessionId, props.workspaceTabId);
     closeRemotePaneTargetId.value = null;
     await finalizeCloseSftpPane(paneId, true);
     await refreshSnapshot();
@@ -834,6 +967,7 @@ async function disconnectAndCloseRemotePane() {
   }
 }
 
+const recordedReadySessionGenerations = new Set<string>();
 async function refreshSnapshot() {
   if (!canUseDesktopCore()) return;
   const [sessionSnapshot, intentSnapshot] = await Promise.all([fetchSftpSessionSnapshot(), fetchSftpTransferIntentSnapshot()]);
@@ -860,6 +994,17 @@ async function refreshSnapshot() {
       )) {
         pane.error = t("sftp.paneGenerationChanged");
       }
+    }
+    for (const pane of Object.values(paneStates)) {
+      const endpoint = pane.endpoint;
+      if (endpoint.kind !== "remote" || !endpoint.hostId || !endpoint.sessionId) continue;
+      const session = sessionSnapshot.sessions.find((item) => item.sessionId === endpoint.sessionId
+        && item.generation === endpoint.generation);
+      if (session?.state !== "ready") continue;
+      const key = `${session.sessionId}:${session.generation}`;
+      if (recordedReadySessionGenerations.has(key)) continue;
+      recordedReadySessionGenerations.add(key);
+      recordRecentFileHost(endpoint.hostId);
     }
   }
   if (!olderWireSequence(intentSnapshot.snapshotRevision, appliedIntentSnapshotRevision)) {
@@ -910,7 +1055,7 @@ async function connectRemotePane(pane: SftpPaneState) {
   activeSftpPaneId.value = pane.paneId;
   pendingPaneIds.add(pane.paneId);
   try {
-    const reusableSession = pane.endpoint.sessionId ? null : unclaimedSftpSessionForHost(host.hostId);
+    const reusableSession = pane.endpoint.sessionId || props.workspaceTabId ? null : unclaimedSftpSessionForHost(host.hostId);
     const endpointRevision = pane.endpointRevision;
     const sessionId = pane.endpoint.sessionId;
     const generation = pane.endpoint.generation;
@@ -924,7 +1069,7 @@ async function connectRemotePane(pane: SftpPaneState) {
     }
     const summary = reusableSession ?? await openSftpSession({ hostId: host.hostId, expectedHostStateVersion: host.stateVersion, ...(sessionId ? { sessionId } : {}) });
     if (!stillCurrent()) return;
-    attachSftpSessionToPane(pane, summary);
+    if (!attachSftpSessionToPane(pane, summary)) throw new Error("sessionOwnedByAnotherFileTab");
     await refreshSnapshot();
     if (summary.state === "ready") await loadInitialRemoteDirectory(pane, true);
   } catch {
@@ -940,6 +1085,7 @@ async function disconnectRemotePane(pane: SftpPaneState) {
   try {
     await cancelRemotePaneCursor(pane);
     await disconnectSftpSession({ sessionId: pane.endpoint.sessionId, expectedGeneration: pane.endpoint.generation });
+    if (props.workspaceTabId) workspaceTabs.releaseFileSession(pane.endpoint.sessionId, props.workspaceTabId);
     replaceSftpPaneEndpoint(pane, { kind: "remote", hostId: pane.endpoint.hostId, sessionId: null, generation: null }, "/", [47]);
     await refreshSnapshot();
   } catch { showOperationFailed(); } finally { pendingPaneIds.delete(pane.paneId) }
@@ -2438,10 +2584,13 @@ async function cancelIntentTransfer(transfer: SftpTransferIntentSummary) {
 
 let nativeFocusOperation = "";
 const focusedTransferId = ref<string | null>(null);
-watch([() => router.currentRoute.value.query.focusOperation, loading], async ([operation, isLoading]) => {
-  if (isLoading || !sftpViewMounted || typeof operation !== "string" || operation === nativeFocusOperation || router.currentRoute.value.path !== "/sftp") return;
-  nativeFocusOperation = operation;
+watch([() => router.currentRoute.value.query.focusOperation, loading, () => props.active], async ([operation, isLoading]) => {
+  if (!props.active || isLoading || !sftpViewMounted || typeof operation !== "string" || operation === nativeFocusOperation || router.currentRoute.value.path !== "/sftp") return;
   const query = { ...router.currentRoute.value.query };
+  if (props.workspaceTabId && typeof query.focusSessionId === "string"
+    && workspaceTabs.fileSessionOwner(query.focusSessionId) !== props.workspaceTabId) return;
+  nativeFocusOperation = operation;
+  if (props.workspaceTabId && !workspaceTabs.consumeFileFocusOperation(operation)) return;
   try {
     await refreshSnapshot();
     if (!sftpViewMounted || router.currentRoute.value.query.focusOperation !== operation) return;
@@ -2468,7 +2617,7 @@ watch([() => router.currentRoute.value.query.focusOperation, loading], async ([o
           paneStates[paneId] = createSftpPaneState(paneId, "remote", browserPreferences.browser);
           pane = paneStates[paneId]!;
         }
-        attachSftpSessionToPane(pane, session);
+        if (!attachSftpSessionToPane(pane, session)) throw new Error("sessionOwnedByAnotherFileTab");
       }
       if (paneInteractionPending(pane.paneId)) throw new Error("unavailable");
       activeSftpPaneId.value = pane.paneId;
@@ -2479,6 +2628,7 @@ watch([() => router.currentRoute.value.query.focusOperation, loading], async ([o
 
 let removeToolListener: (() => void) | undefined;
 let removeSavedConnectionsListener: (() => void) | undefined;
+let removeFileController: (() => void) | undefined;
 let hostsSequence = 0;
 async function refreshSavedHosts() {
   const sequence = ++hostsSequence;
@@ -2514,6 +2664,17 @@ function stopPageObservers() {
 }
 onMounted(async () => {
   sftpViewMounted = true;
+  const workspace = sftpRoot.value?.querySelector<HTMLElement>(".sftp-view__workspace");
+  if (workspace && typeof ResizeObserver !== "undefined") {
+    workspaceResizeObserver = new ResizeObserver(([entry]) => {
+      if (entry) workspaceSize.value = { width: entry.contentRect.width, height: entry.contentRect.height };
+    });
+    workspaceResizeObserver.observe(workspace);
+  }
+  if (props.workspaceTabId) removeFileController = workspaceTabs.registerFileController(props.workspaceTabId, {
+    requestClose: requestCloseFileTab,
+    runShortcut: runFileShortcut,
+  });
   if (canUseDesktopCore()) {
     try {
       const stop = await onToolWindowChanged((kind) => { if (kind === "sftpFile") for (const pane of Object.values(paneStates)) refreshPane(pane); });
@@ -2526,7 +2687,7 @@ onMounted(async () => {
     } catch { /* Activation still refreshes saved Hosts. */ }
   }
   if (!sftpViewMounted) return;
-  startPageObservers();
+  if (props.active) startPageObservers();
   try {
     await Promise.all([
       refreshSavedHosts(),
@@ -2535,7 +2696,13 @@ onMounted(async () => {
     ]);
     const hostList = hosts.value;
     const pane = paneStates[remotePaneId];
-    if (pane?.endpoint.kind === "remote" && !pane.endpoint.hostId && hostList[0] && !pendingSftpPluginNavigations.value.length) {
+    if (pane?.endpoint.kind === "remote" && props.initialHostId) {
+      const host = hostList.find((item) => item.hostId === props.initialHostId);
+      if (host) {
+        replaceSftpPaneEndpoint(pane, { kind: "remote", hostId: host.hostId, sessionId: null, generation: null }, "/", [47]);
+        await connectRemotePane(pane);
+      }
+    } else if (props.initialKind === "legacy" && pane?.endpoint.kind === "remote" && !pane.endpoint.hostId && hostList[0] && !pendingSftpPluginNavigations.value.length) {
       const existingSession = unclaimedSftpSessionForHost(hostList[0].hostId, true);
       if (existingSession) {
         attachSftpSessionToPane(pane, existingSession);
@@ -2551,7 +2718,7 @@ onMounted(async () => {
   } catch { showOperationFailed(); } finally { navigationReady = true; loading.value = false; revealRoute(); }
 });
 onActivated(() => {
-  if (!sftpViewMounted) return;
+  if (!sftpViewMounted || !props.active) return;
   startPageObservers();
   void refreshSavedHosts().catch(() => undefined);
   if (navigationReady) {
@@ -2577,7 +2744,35 @@ onDeactivated(() => {
   cleanupRetainTarget.value = null;
   closeRemotePaneTargetId.value = null;
 });
+watch(() => props.active, (active) => {
+  if (!sftpViewMounted) return;
+  if (active) {
+    startPageObservers();
+    revealRoute();
+    void refreshSnapshot().catch(() => undefined);
+    void consumePluginNavigation();
+  } else {
+    stopPageObservers();
+    transfersOpen.value = false;
+    contextMenu.value = null;
+    pointerDrag.value = null;
+    dragIntent.value = null;
+    dropPaneId.value = null;
+    settleOverwriteConfirmation("skip");
+    closeFilePreview();
+    mutationDialog.value = null;
+    fileUtilityDialog.value = null;
+    permissionsTarget.value = null;
+    cleanupRetainTarget.value = null;
+    closeRemotePaneTargetId.value = null;
+    cancelCloseFileTab();
+  }
+});
 onBeforeUnmount(() => {
+  workspaceResizeObserver?.disconnect();
+  removeFileController?.();
+  settleFileTabClose?.(false);
+  settleFileTabClose = null;
   removeToolListener?.();
   removeSavedConnectionsListener?.();
   sftpViewMounted = false;
@@ -2593,13 +2788,26 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="sftp-view">
+  <main
+    ref="sftpRoot"
+    class="sftp-view"
+  >
     <header class="sftp-view__topbar">
       <div class="sftp-view__title">
         <NvxIcon
           :icon="FolderOpen"
           :size="20"
         /><h1>{{ t("sftp.title") }}</h1>
+        <NvxButton
+          size="sm"
+          variant="ghost"
+          @click="workspaceTabs.showFileWelcome()"
+        >
+          <NvxIcon
+            :icon="Plus"
+            :size="16"
+          />{{ t("fileWorkspace.newFileTab") }}
+        </NvxButton>
       </div>
       <div
         ref="transferActivityRoot"
@@ -2607,7 +2815,7 @@ onBeforeUnmount(() => {
       >
         <NvxPluginExtensionTarget
           target-id="sftp.toolbar"
-          instance-key="global"
+          :instance-key="props.workspaceTabId || 'global'"
         />
         <NvxButton
           class="sftp-view__transfer-toggle"
@@ -2615,7 +2823,7 @@ onBeforeUnmount(() => {
           size="sm"
           variant="ghost"
           :aria-label="activeTransferProgress === null ? t('sftp.transferCount', { count: allTransferCount }) : t('sftp.transferButtonProgress', { count: allTransferCount, percent: activeTransferProgress })"
-          :aria-controls="transfersOpen ? 'sftp-transfer-activity-panel' : undefined"
+          :aria-controls="transfersOpen ? transferActivityId : undefined"
           :aria-expanded="transfersOpen"
           @click="toggleTransferActivity"
         >
@@ -2637,7 +2845,7 @@ onBeforeUnmount(() => {
 
         <section
           v-if="transfersOpen"
-          id="sftp-transfer-activity-panel"
+          :id="transferActivityId"
           class="sftp-view__transfers"
           :class="{ 'is-empty': allTransferCount === 0 }"
           :aria-label="t('sftp.transferActivity')"
@@ -2824,6 +3032,17 @@ onBeforeUnmount(() => {
           </article>
         </section>
       </div>
+      <NvxTerminalPaneControls
+        :show-layout-actions="true"
+        :show-plugin-slot="false"
+        :can-split-horizontal="!!paneStates[activeSftpPaneId] && !paneInteractionPending(activeSftpPaneId) && canSplitSftpPane(activeSftpPaneId, 'horizontal')"
+        :can-split-vertical="!!paneStates[activeSftpPaneId] && !paneInteractionPending(activeSftpPaneId) && canSplitSftpPane(activeSftpPaneId, 'vertical')"
+        :can-split-workspace-right="!!paneStates[activeSftpPaneId] && !paneInteractionPending(activeSftpPaneId) && canSplitSftpWorkspaceRight()"
+        :can-close="!!paneStates[activeSftpPaneId] && !paneInteractionPending(activeSftpPaneId) && (countTerminalPanes(sftpLayout) > 1 || !!props.workspaceTabId)"
+        @split="splitSftpPane(activeSftpPaneId, $event, 'remote')"
+        @split-workspace-right="splitSftpWorkspaceRight"
+        @close="closeActiveSftpPane"
+      />
     </header>
     <section class="sftp-view__browser">
       <NvxTerminalSplitTree
@@ -2847,14 +3066,14 @@ onBeforeUnmount(() => {
                 <NvxIcon
                   :icon="sftpPaneKind(pane) === 'local' ? HardDrive : Server"
                   :size="20"
-                /><strong>{{ sftpPaneKind(pane) === "local" ? t("sftp.localPane") : paneRemoteLabel(paneState(pane.paneId)) }}</strong>
+                /><strong>{{ sftpPaneKind(pane) === "local" ? t("sftp.localPane") : paneHasSession(paneState(pane.paneId)) ? paneRemoteLabel(paneState(pane.paneId)) : t("fileWorkspace.remotePane") }}</strong>
               </div>
               <div
-                v-if="sftpPaneKind(pane) === 'remote'"
+                v-if="sftpPaneKind(pane) === 'remote' && paneHasSession(paneState(pane.paneId))"
                 class="sftp-view__pane-endpoint"
               >
                 <NvxSelect
-                  v-if="!sessionForPane(paneState(pane.paneId))?.parentSshSession || paneHostId(paneState(pane.paneId))"
+                  v-if="paneHasSession(paneState(pane.paneId)) && (!sessionForPane(paneState(pane.paneId))?.parentSshSession || paneHostId(paneState(pane.paneId)))"
                   :model-value="paneHostId(paneState(pane.paneId))"
                   class="sftp-view__host-control"
                   :options="hostOptions"
@@ -2874,7 +3093,7 @@ onBeforeUnmount(() => {
                   {{ t(`sftp.states.${sessionForPane(paneState(pane.paneId))!.state}`) }}
                 </NvxStatusLabel>
                 <NvxButton
-                  v-if="!sessionForPane(paneState(pane.paneId)) || ['failed', 'closed'].includes(sessionForPane(paneState(pane.paneId))!.state)"
+                  v-if="paneHasSession(paneState(pane.paneId)) && (!sessionForPane(paneState(pane.paneId)) || ['failed', 'closed'].includes(sessionForPane(paneState(pane.paneId))!.state))"
                   size="sm"
                   :loading="paneInteractionPending(pane.paneId)"
                   :disabled="loading || !paneHostId(paneState(pane.paneId)) || paneInteractionPending(pane.paneId)"
@@ -2922,6 +3141,7 @@ onBeforeUnmount(() => {
                   @toggle-show-hidden="togglePaneShowHidden(paneState(pane.paneId))"
                   @toggle-folders-first="togglePaneFoldersFirst(paneState(pane.paneId))"
                   @split="splitSftpPane(pane.paneId, $event)"
+                  @add-local="splitSftpPane(pane.paneId, canSplitHorizontal ? 'horizontal' : 'vertical', 'local')"
                   @add-remote="splitSftpPane(pane.paneId, canSplitHorizontal ? 'horizontal' : 'vertical', 'remote')"
                   @close="requestCloseSftpPane(pane.paneId)"
                 />
@@ -3066,7 +3286,7 @@ onBeforeUnmount(() => {
                 <small>{{ entry.kind === "file" && entry.size !== null ? t("sftp.bytes", { count: entry.size }) : t(`sftp.entryKinds.${entry.kind}`) }}</small><small>{{ formatModified(entry.modifiedAtUnixMs) }}</small>
               </button>
               <div
-                v-if="paneState(pane.paneId).error"
+                v-if="paneState(pane.paneId).error && (sftpPaneKind(pane) === 'local' || sessionForPane(paneState(pane.paneId))?.state === 'ready')"
                 class="sftp-view__pane-error"
               >
                 <p>{{ paneState(pane.paneId).error }}</p>
@@ -3080,8 +3300,46 @@ onBeforeUnmount(() => {
                   {{ t("sftp.reopenRoot") }}
                 </NvxButton>
               </div>
+              <div
+                v-else-if="sftpPaneKind(pane) === 'remote' && !paneReady(paneState(pane.paneId))"
+                class="sftp-view__empty-remote"
+              >
+                <FolderOpen
+                  :size="44"
+                  aria-hidden="true"
+                />
+                <h2>{{ t("fileWorkspace.emptyRemoteTitle") }}</h2>
+                <p>{{ t("fileWorkspace.emptyRemoteDescription") }}</p>
+                <p
+                  v-if="paneState(pane.paneId).error"
+                  class="sftp-view__empty-remote-error"
+                  role="alert"
+                >
+                  {{ paneState(pane.paneId).error }}
+                </p>
+                <NvxSelect
+                  v-if="!paneHasSession(paneState(pane.paneId))"
+                  :model-value="paneHostId(paneState(pane.paneId))"
+                  :options="hostOptions"
+                  :disabled="paneInteractionPending(pane.paneId)"
+                  :aria-label="t('sftp.paneHost')"
+                  @update:model-value="setPaneHostId(paneState(pane.paneId), $event)"
+                />
+                <strong v-else>{{ paneRemoteLabel(paneState(pane.paneId)) }}</strong>
+                <NvxButton
+                  :loading="paneInteractionPending(pane.paneId)"
+                  :disabled="loading || !paneHostId(paneState(pane.paneId)) || paneInteractionPending(pane.paneId)"
+                  @click="recoverRemotePane(paneState(pane.paneId))"
+                >
+                  <NvxIcon
+                    :icon="PlugZap"
+                    :size="16"
+                  />{{ paneConnectionLabel(paneState(pane.paneId)) }}
+                </NvxButton>
+                <small>{{ t("fileWorkspace.emptyRemoteHint") }}</small>
+              </div>
               <p v-else-if="!paneReady(paneState(pane.paneId))">
-                {{ sftpPaneKind(pane) === "local" ? t("sftp.localPickerTitle") : t("sftp.paneNotConnected") }}
+                {{ t("sftp.localPickerTitle") }}
               </p>
               <p v-else-if="!paneState(pane.paneId).loading && !paneState(pane.paneId).entries.length">
                 {{ t("sftp.emptyDirectory") }}
@@ -3387,6 +3645,37 @@ onBeforeUnmount(() => {
 
     <NvxDialog
       plugin-protected
+      :model-value="closeFileTabConfirm"
+      :title="t('fileWorkspace.closeTabTitle')"
+      :description="t('fileWorkspace.closeTabDescription', { count: currentTabSessions().length })"
+      :close-label="t('fileWorkspace.closeDialog')"
+      :dismissible="!closeFileTabPending"
+      @update:model-value="(value) => { if (!value) cancelCloseFileTab() }"
+    >
+      <NvxInlineNotice
+        tone="warning"
+        :title="t('fileWorkspace.closeTabWarning')"
+      />
+      <template #actions>
+        <NvxButton
+          variant="secondary"
+          :disabled="closeFileTabPending"
+          @click="cancelCloseFileTab"
+        >
+          {{ t("fileWorkspace.cancel") }}
+        </NvxButton>
+        <NvxButton
+          variant="danger"
+          :loading="closeFileTabPending"
+          @click="confirmCloseFileTab"
+        >
+          {{ t("fileWorkspace.disconnectAndClose") }}
+        </NvxButton>
+      </template>
+    </NvxDialog>
+
+    <NvxDialog
+      plugin-protected
       :model-value="closeRemotePaneTargetId !== null"
       :title="t('sftp.closeRemotePaneDialog.title')"
       :description="t('sftp.closeRemotePaneDialog.description')"
@@ -3640,7 +3929,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .sftp-view { display:flex; flex-direction:column; width:100%; height:100%; min-width:0; min-height:0; overflow:hidden; background:var(--nvx-color-bg-surface); }
 .sftp-view__topbar,.sftp-view__title,.sftp-view__pane-header,.sftp-view__pane-header>div,.sftp-view__pane-controls,.sftp-view__commandbar,.sftp-view__command-path,.sftp-view__transfers>header,.sftp-view__transfers>header>div,.sftp-view__transfer-title,.sftp-view__transfer-actions { display:flex; gap:var(--nvx-space-2); align-items:center; }
-.sftp-view__topbar { position:relative; z-index:var(--nvx-z-sticky); display:grid; flex:0 0 auto; grid-template-columns:max-content max-content; justify-content:space-between; gap:var(--nvx-space-3); min-height:56px; padding:var(--nvx-space-2) var(--nvx-space-4); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); background:var(--nvx-color-bg-surface); }
+.sftp-view__topbar { position:relative; z-index:var(--nvx-z-sticky); display:grid; flex:0 0 auto; grid-template-columns:max-content 1fr max-content; align-items:center; gap:var(--nvx-space-3); min-height:56px; padding:var(--nvx-space-2) var(--nvx-space-4); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); background:var(--nvx-color-bg-surface); }
 .sftp-view__title { min-width:0; }.sftp-view__title h1 { margin:0; font-size:var(--nvx-font-size-md); white-space:nowrap; }.sftp-view__host-control { flex:1 1 220px; width:min(300px,100%); min-width:150px; }.sftp-view__transfer-toggle { position:relative; overflow:hidden; white-space:nowrap; }.sftp-view__transfer-toggle-percent { color:var(--nvx-color-accent); font-variant-numeric:tabular-nums; }.sftp-view__transfer-toggle-track { position:absolute; right:var(--nvx-space-2); bottom:2px; left:var(--nvx-space-2); height:2px; overflow:hidden; border-radius:var(--nvx-radius-sm); background:var(--nvx-color-border-subtle); }.sftp-view__transfer-toggle-track>span { display:block; height:100%; background:var(--nvx-color-accent); }
 .sftp-view__transfer-activity { position:relative; justify-self:end; }
 .sftp-view__browser { display:block; flex:1 1 auto; min-width:0; min-height:0; overflow:hidden; background:var(--nvx-color-bg-surface); }
@@ -3669,6 +3958,13 @@ onBeforeUnmount(() => {
 .sftp-view__selection-count { font:inherit; color:var(--nvx-color-accent); }
 .sftp-view__entry-name { display:flex; gap:var(--nvx-space-2); align-items:center; min-width:0; }.sftp-view__entry-name span,.sftp-view__entries small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__entries small { color:var(--nvx-color-text-secondary); font-variant-numeric:tabular-nums; }.sftp-view__entries>p { margin:0; padding:var(--nvx-space-4); color:var(--nvx-color-text-secondary); }
 .sftp-view__pane-error { display:grid; justify-items:start; gap:var(--nvx-space-2); padding:var(--nvx-space-4); color:var(--nvx-color-text-secondary); }.sftp-view__pane-error p { margin:0; }
+.sftp-view__empty-remote { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:var(--nvx-space-4); min-height:100%; padding:var(--nvx-space-6); color:var(--nvx-color-text-secondary); text-align:center; }
+.sftp-view__empty-remote>svg { color:var(--nvx-color-text-tertiary); }
+.sftp-view__empty-remote h2 { margin:0; color:var(--nvx-color-text-primary); font-size:var(--nvx-font-size-md); }
+.sftp-view__empty-remote p { max-width:430px; margin:0; line-height:1.6; }
+.sftp-view__empty-remote .sftp-view__empty-remote-error { color:var(--nvx-color-danger); }
+.sftp-view__empty-remote>:deep(.nvx-select) { width:min(100%,360px); }
+.sftp-view__empty-remote>small { color:var(--nvx-color-text-tertiary); }
 .sftp-view__context-menu { box-sizing:border-box; max-width:calc(100vw - 16px); max-height:calc(100dvh - 16px); overflow-y:auto; overscroll-behavior:contain; grid-auto-rows:max-content; position:fixed; z-index:var(--nvx-z-popover); display:grid; width:216px; padding:var(--nvx-space-1); border:var(--nvx-border-width) solid var(--nvx-color-border-strong); border-radius:var(--nvx-radius-md); background:var(--nvx-color-bg-surface); box-shadow:var(--nvx-shadow-overlay); }.sftp-view__context-menu button { display:flex; align-items:center; gap:var(--nvx-space-2); min-height:36px; padding:0 var(--nvx-space-3); border:0; border-radius:var(--nvx-radius-sm); background:transparent; color:var(--nvx-color-text-primary); font:inherit; text-align:start; }.sftp-view__context-menu button:hover,.sftp-view__context-menu button:focus-visible { background:var(--nvx-color-bg-hover); outline:none; }.sftp-view__context-menu span[role="separator"] { height:var(--nvx-border-width); margin:var(--nvx-space-1) var(--nvx-space-2); background:var(--nvx-color-border-subtle); }.sftp-view__context-menu button.sftp-view__context-menu-danger { color:var(--nvx-color-danger); }
 .sftp-view__context-menu button:disabled { cursor:not-allowed; opacity:.48; }.sftp-view__context-menu button:disabled:hover { background:transparent; }
 .sftp-view__permissions-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:var(--nvx-space-2); }

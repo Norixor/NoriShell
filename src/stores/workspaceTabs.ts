@@ -12,7 +12,7 @@ import type {
 } from "../core-api/generated/core-api";
 import type { ShortcutCommandId } from "../shortcuts";
 
-export type WorkspacePageType = "knownHosts" | "sshIdentities" | "plugin";
+export type WorkspacePageType = "newPage" | "knownHosts" | "sshIdentities" | "plugin";
 type BuiltinWorkspacePageType = Exclude<WorkspacePageType, "plugin">;
 
 export interface TerminalHeaderTabSnapshot {
@@ -59,6 +59,17 @@ export interface DesktopHeaderTabSnapshot {
   label: string;
   stateLabel: string;
 }
+export interface FileHeaderTab {
+  groupId: string;
+  kind: "local" | "remote";
+  hostId: string | null;
+  label: string;
+  paneCount: number;
+}
+export interface FileHeaderController {
+  requestClose(): Promise<boolean>;
+  runShortcut(commandId: ShortcutCommandId): void;
+}
 export interface DesktopHeaderController {
   activate(tabId: string): void;
   close(tabId: string): void;
@@ -67,6 +78,13 @@ export interface DesktopHeaderController {
 }
 
 const PAGE_DEFINITIONS: Readonly<Record<BuiltinWorkspacePageType, Omit<WorkspacePageTab, "groupId">>> = {
+  newPage: {
+    pageType: "newPage",
+    route: "/new",
+    labelKey: "newWorkspace.title",
+    label: "",
+    iconName: null,
+  },
   knownHosts: {
     pageType: "knownHosts",
     route: "/known-hosts",
@@ -91,11 +109,91 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
   const quickCommandsOpen = ref(false);
   const pageTabs = ref<WorkspacePageTab[]>([]);
   const terminalController = shallowRef<TerminalHeaderController | null>(null);
-  const createTerminalPending = ref(false);
+  const createTerminalPending = ref<"default" | "local" | null>(null);
   const desktopTabs = ref<DesktopHeaderTabSnapshot[]>([]);
   const activeDesktopTabId = ref("");
   const desktopBusy = ref(false);
   const desktopController = shallowRef<DesktopHeaderController | null>(null);
+  const fileTabs = ref<FileHeaderTab[]>([]);
+  const activeFileTabId = ref("");
+  const fileControllers = shallowRef(new Map<string, FileHeaderController>());
+  const fileSessionOwners = shallowRef(new Map<string, string>());
+  const consumedFileFocusOperations = new Set<string>();
+
+  function createFileTab(kind: FileHeaderTab["kind"], hostId: string | null = null, label = "") {
+    const groupId = `file:${crypto.randomUUID()}`;
+    fileTabs.value.push({ groupId, kind, hostId, label, paneCount: kind === "local" ? 1 : 2 });
+    activeFileTabId.value = groupId;
+    return groupId;
+  }
+
+  function syncFilePaneCount(groupId: string, paneCount: number) {
+    const tab = fileTabs.value.find((item) => item.groupId === groupId);
+    if (tab && tab.paneCount !== paneCount) tab.paneCount = paneCount;
+  }
+
+  function activateFileTab(groupId: string) {
+    if (!fileTabs.value.some((tab) => tab.groupId === groupId)) return false;
+    activeFileTabId.value = groupId;
+    return true;
+  }
+
+  function showFileWelcome() {
+    activeFileTabId.value = "";
+  }
+
+  function registerFileController(groupId: string, controller: FileHeaderController) {
+    fileControllers.value = new Map(fileControllers.value).set(groupId, controller);
+    return () => {
+      if (fileControllers.value.get(groupId) !== controller) return;
+      const next = new Map(fileControllers.value);
+      next.delete(groupId);
+      fileControllers.value = next;
+    };
+  }
+
+  function requestCloseFileTab(groupId: string) {
+    return fileControllers.value.get(groupId)?.requestClose() ?? Promise.resolve(false);
+  }
+
+  function fileSessionOwner(sessionId: string) {
+    return fileSessionOwners.value.get(sessionId) ?? null;
+  }
+
+  function consumeFileFocusOperation(operationId: string) {
+    if (consumedFileFocusOperations.has(operationId)) return false;
+    consumedFileFocusOperations.add(operationId);
+    return true;
+  }
+
+  function claimFileSession(sessionId: string, groupId: string) {
+    if (!fileTabs.value.some((tab) => tab.groupId === groupId)) return false;
+    const owner = fileSessionOwners.value.get(sessionId);
+    if (owner && owner !== groupId) return false;
+    fileSessionOwners.value = new Map(fileSessionOwners.value).set(sessionId, groupId);
+    return true;
+  }
+
+  function releaseFileSession(sessionId: string, groupId: string) {
+    if (fileSessionOwners.value.get(sessionId) !== groupId) return;
+    const next = new Map(fileSessionOwners.value);
+    next.delete(sessionId);
+    fileSessionOwners.value = next;
+  }
+
+  function finishCloseFileTab(groupId: string) {
+    const index = fileTabs.value.findIndex((tab) => tab.groupId === groupId);
+    if (index < 0) return;
+    fileTabs.value.splice(index, 1);
+    fileSessionOwners.value = new Map([...fileSessionOwners.value].filter(([, owner]) => owner !== groupId));
+    if (activeFileTabId.value === groupId) {
+      activeFileTabId.value = fileTabs.value[Math.min(index, fileTabs.value.length - 1)]?.groupId ?? "";
+    }
+  }
+
+  function runFileShortcut(commandId: ShortcutCommandId) {
+    fileControllers.value.get(activeFileTabId.value)?.runShortcut(commandId);
+  }
 
   function syncDesktopState(input: { tabs: readonly DesktopHeaderTabSnapshot[]; activeTabId: string; busy: boolean }) {
     desktopTabs.value = input.tabs.map((tab) => ({ ...tab }));
@@ -130,8 +228,10 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
   function registerTerminalController(controller: TerminalHeaderController) {
     terminalController.value = controller;
     if (createTerminalPending.value) {
-      createTerminalPending.value = false;
-      controller.create();
+      const pending = createTerminalPending.value;
+      createTerminalPending.value = null;
+      if (pending === "local") controller.createLocal();
+      else controller.create();
     }
     return () => {
       if (terminalController.value !== controller) return;
@@ -188,11 +288,25 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
     ));
   }
 
-  function queueTerminalCreation() {
-    createTerminalPending.value = true;
+  function queueTerminalCreation(kind: "default" | "local" = "default") {
+    createTerminalPending.value = kind;
   }
 
   return {
+    fileTabs,
+    activeFileTabId,
+    createFileTab,
+    syncFilePaneCount,
+    activateFileTab,
+    showFileWelcome,
+    registerFileController,
+    requestCloseFileTab,
+    fileSessionOwner,
+    consumeFileFocusOperation,
+    claimFileSession,
+    releaseFileSession,
+    finishCloseFileTab,
+    runFileShortcut,
     desktopTabs,
     activeDesktopTabId,
     desktopBusy,

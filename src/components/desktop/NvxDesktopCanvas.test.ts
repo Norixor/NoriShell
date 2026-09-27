@@ -31,6 +31,29 @@ describe("protected desktop display", () => {
     await flushPromises(); expect(put).not.toHaveBeenCalled();
     await wrapper.setProps({ active: false }); await vi.advanceTimersByTimeAsync(100); expect(mocks.frame).toHaveBeenCalledTimes(1); wrapper.unmount();
   });
+  it("stops frame requests while inactive or hidden and resumes on activation", async () => {
+    const hidden = vi.spyOn(document, "hidden", "get");
+    const wrapper = fixture(); await flushPromises();
+    expect(mocks.frame).toHaveBeenCalledTimes(1);
+
+    await wrapper.setProps({ active: false });
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(160);
+    expect(mocks.frame).toHaveBeenCalledTimes(1);
+    await wrapper.setProps({ active: true }); await flushPromises();
+    expect(mocks.frame).toHaveBeenCalledTimes(2);
+
+    hidden.mockReturnValue(true);
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(160);
+    expect(mocks.frame).toHaveBeenCalledTimes(2);
+    hidden.mockReturnValue(false);
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+    expect(mocks.frame).toHaveBeenCalledTimes(3);
+    wrapper.unmount();
+  });
   it("draws a continuous patch without resetting the canvas size", async () => {
     vi.stubGlobal("ImageData", class { constructor(readonly rgba: Uint8ClampedArray, readonly width: number, readonly height: number) {} });
     const put = vi.fn(); vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ putImageData: put, clearRect: vi.fn() } as unknown as CanvasRenderingContext2D);

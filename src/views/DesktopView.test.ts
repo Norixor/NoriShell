@@ -87,6 +87,40 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe("desktop workspace layout", () => {
+  it("clears a session snapshot error after the next successful snapshot", async () => {
+    const wrapper = await fixture();
+    mocks.snapshot.mockRejectedValueOnce(new Error("snapshot unavailable"));
+    await vi.advanceTimersByTimeAsync(750);
+    await flushPromises();
+    expect(wrapper.find(".desktop-profiles .nvx-inline-notice--error").exists()).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(750);
+    await flushPromises();
+    expect(wrapper.find(".desktop-profiles .nvx-inline-notice--error").exists()).toBe(false);
+    expect(wrapper.get(".desktop-toolbar__identity").text()).toContain("Desktop one");
+  });
+  it.each(["profiles", "availability"] as const)("keeps a %s load failure visible when session snapshots succeed", async (source) => {
+    mocks[source].mockRejectedValue(new Error(`${source} unavailable`));
+    const wrapper = await fixture();
+    expect(wrapper.find(".desktop-profiles .nvx-inline-notice--error").exists()).toBe(true);
+    await vi.advanceTimersByTimeAsync(750);
+    await flushPromises();
+    expect(wrapper.find(".desktop-profiles .nvx-inline-notice--error").exists()).toBe(true);
+  });
+  it.each(["connecting", "needsInteraction", "disconnecting"] as const)("polls %s sooner and returns to the normal interval when running", async (state) => {
+    mocks.snapshot.mockResolvedValue([{ ...session(), state }]);
+    await fixture();
+    const calls = mocks.snapshot.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(249);
+    expect(mocks.snapshot).toHaveBeenCalledTimes(calls);
+    mocks.snapshot.mockResolvedValue([session()]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.snapshot).toHaveBeenCalledTimes(calls + 1);
+    await vi.advanceTimersByTimeAsync(749);
+    expect(mocks.snapshot).toHaveBeenCalledTimes(calls + 1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.snapshot).toHaveBeenCalledTimes(calls + 2);
+  });
   it("refreshes saved profile names without remounting or reconnecting the active desktop", async () => {
     const wrapper = await fixture();
     const originalCanvas = wrapper.get("canvas").element;
@@ -248,6 +282,7 @@ describe("desktop display settings", () => {
     mocks.snapshot.mockResolvedValue([{ ...session(), rdpTransportActual: "tcp", rdpGraphicsActual: "remoteFxProgressive" }]);
     const wrapper = await settingsFixture();
     expect(wrapper.get(".desktop-settings-current").text()).toContain("RemoteFX Progressive");
+    expect(wrapper.text()).toContain(desktopEn.displaySettingsHint);
     const fields = wrapper.getComponent(NvxDesktopDisplaySettings);
     fields.vm.$emit("update:modelValue", { ...fields.props("modelValue"), width: 1920, height: 1080, rdpTransportMode: "tcpOnly" });
     await apply(wrapper);

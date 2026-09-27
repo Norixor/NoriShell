@@ -768,7 +768,7 @@ mod tests {
         let output = collect_output(&process);
         write_input(
             &process,
-            b"set +m; nohup sleep 30 >/dev/null 2>&1 & printf '__NVX_CHILD__:%s\\n' $!; exec /usr/bin/true\r",
+            b"set +m; nohup sleep 30 >/dev/null 2>&1 & eval 'printf \"__NVX_CHILD__:%s\\n\" $!'; exec /usr/bin/true\r",
         )
         .expect("start background child and exit root");
         assert_eq!(

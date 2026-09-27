@@ -591,6 +591,7 @@ impl<H: Handler> Handle<H> {
                         prompts,
                     });
                 }
+                // A closed reply channel is transport loss, not a server auth rejection.
                 None => return Err(crate::Error::RecvError),
                 _ => {}
             }
@@ -610,12 +611,7 @@ impl<H: Handler> Handle<H> {
                         partial_success,
                     });
                 }
-                None => {
-                    return Ok(AuthResult::Failure {
-                        remaining_methods: MethodSet::empty(),
-                        partial_success: false,
-                    });
-                }
+                None => return Err(crate::Error::RecvError),
                 _ => {}
             }
         }
@@ -707,12 +703,8 @@ impl<H: Handler> Handle<H> {
                         return Err((crate::SendError {}).into());
                     }
                 }
-                None => {
-                    return Ok(AuthResult::Failure {
-                        remaining_methods: MethodSet::empty(),
-                        partial_success: false,
-                    });
-                }
+                // Signer errors can represent transport loss through SendError.
+                None => return Err((crate::SendError {}).into()),
                 _ => {}
             }
         }
@@ -773,12 +765,7 @@ impl<H: Handler> Handle<H> {
                 Some(Reply::AuthGssapiError { error }) => {
                     authenticator.gssapi_error(error).await;
                 }
-                None => {
-                    return Ok(AuthResult::Failure {
-                        remaining_methods: MethodSet::empty(),
-                        partial_success: false,
-                    });
-                }
+                None => return Err((crate::SendError {}).into()),
                 _ => {}
             }
         }
@@ -852,12 +839,7 @@ impl<H: Handler> Handle<H> {
                         return Err((crate::SendError {}).into());
                     }
                 }
-                None => {
-                    return Ok(AuthResult::Failure {
-                        remaining_methods: MethodSet::empty(),
-                        partial_success: false,
-                    });
-                }
+                None => return Err((crate::SendError {}).into()),
                 _ => {}
             }
         }

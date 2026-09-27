@@ -400,6 +400,7 @@ async function mountShell(initialLocation = "/terminal") {
     history: createMemoryHistory(),
     routes: [
       { path: "/terminal", component: SshTerminalView },
+      { path: "/new", component: { template: "<div />" } },
       { path: "/hosts", component: HostsStub },
     ],
   });
@@ -675,6 +676,7 @@ describe("SshTerminalView route and Header behavior", () => {
     vi.clearAllMocks();
     nativeEvents.clear();
     localStorage.clear();
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ newTerminalBehavior: "terminalWelcome" }));
     resetTerminalInputFocusForTests();
     paneControls.clear();
     i18n.global.locale.value = "zh-CN";
@@ -805,7 +807,7 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(document.querySelector('.quick-commands')).toBeNull();
     expect(document.querySelectorAll("#nvx-workspace-tab-bar")).toHaveLength(1);
     expect(document.querySelectorAll(".nvx-terminal-tab-bar")).toHaveLength(1);
-    expect(document.querySelectorAll('button[aria-label="新建连接"]')).toHaveLength(1);
+    expect(document.querySelectorAll('button[aria-label="新建页面"]')).toHaveLength(1);
     expect(document.querySelectorAll('button[aria-label="显示快捷命令"]')).toHaveLength(1);
     expect(document.body.textContent).toContain("最近连接");
     expect(document.body.textContent).toContain(host.label);
@@ -833,7 +835,7 @@ describe("SshTerminalView route and Header behavior", () => {
   it("debounces a secret-free workspace projection into the SQLite command", async () => {
     const { wrapper } = await mountShell();
     vi.useFakeTimers();
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
 
     await vi.advanceTimersByTimeAsync(399);
@@ -865,12 +867,12 @@ describe("SshTerminalView route and Header behavior", () => {
     const { wrapper } = await mountShell();
     vi.useFakeTimers();
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
     await vi.advanceTimersByTimeAsync(400);
     expect(client.replaceTerminalWorkspaceLayout).toHaveBeenCalledTimes(1);
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
     let exitBarrierResolved = false;
     const exitBarrier = flushTerminalWorkspaceBeforeExit().then(() => {
@@ -896,7 +898,7 @@ describe("SshTerminalView route and Header behavior", () => {
     const { wrapper } = await mountShell();
     vi.useFakeTimers();
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
 
     await expect(flushTerminalWorkspaceBeforeExit()).rejects.toThrow(
@@ -1006,6 +1008,7 @@ describe("SshTerminalView route and Header behavior", () => {
   it("restores an active Core session even when startup prefers the welcome page", async () => {
     localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({
       terminalStartupBehavior: "welcome",
+      newTerminalBehavior: "terminalWelcome",
     }));
     client.fetchSshSessionSnapshot.mockResolvedValue({
       snapshotRevision: "9",
@@ -1175,6 +1178,7 @@ describe("SshTerminalView route and Header behavior", () => {
   it("shows the welcome page without overwriting history until the user creates a terminal", async () => {
     localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({
       terminalStartupBehavior: "welcome",
+      newTerminalBehavior: "terminalWelcome",
     }));
     client.fetchTerminalWorkspaceLayout.mockResolvedValue({
       revision: "7",
@@ -1202,7 +1206,7 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(client.replaceTerminalWorkspaceLayout).not.toHaveBeenCalled();
 
     vi.useFakeTimers();
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
     await vi.advanceTimersByTimeAsync(400);
     await flushPromises();
@@ -1245,7 +1249,7 @@ describe("SshTerminalView route and Header behavior", () => {
     }));
     const { wrapper } = await mountShell();
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
 
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
@@ -1569,7 +1573,7 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(focusedTerminalLabel.value).toBe(secondLabel);
 
     document.querySelector<HTMLButtonElement>(
-      `button[aria-label="${i18n.global.t("sshTerminal.newConnection")}"]`,
+      `button[aria-label="${i18n.global.t("newWorkspace.title")}"]`,
     )?.click();
     await flushPromises();
     expect(focusedTerminalLabel.value).toBeNull();
@@ -1664,7 +1668,7 @@ describe("SshTerminalView route and Header behavior", () => {
     });
     const { wrapper } = await mountShell();
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
     await openLauncherQuickConnect(".terminal-pane-launcher", "dialog.example.test");
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
@@ -1688,7 +1692,7 @@ describe("SshTerminalView route and Header behavior", () => {
   it("renders every Telnet risk acknowledgement as visible checkbox text", async () => {
     const { wrapper } = await mountShell();
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
     Array.from(document.querySelectorAll<HTMLButtonElement>(".terminal-pane-launcher button"))
       .find((button) => button.textContent?.includes(i18n.global.t("sshTerminal.telnetAction")))
@@ -1969,7 +1973,7 @@ describe("SshTerminalView route and Header behavior", () => {
     const { wrapper } = await mountShell();
     const body = new DOMWrapper(document.body);
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(document.body.textContent).toContain(host.label);
@@ -2121,7 +2125,7 @@ describe("SshTerminalView route and Header behavior", () => {
     });
     const { wrapper } = await mountShell();
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
     document.querySelector<HTMLButtonElement>(".ssh-terminal-recent__item")?.click();
     await flushPromises();
@@ -2170,7 +2174,7 @@ describe("SshTerminalView route and Header behavior", () => {
     const { wrapper } = await mountShell();
     const body = new DOMWrapper(document.body);
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建连接"]')?.click();
+    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
     await flushPromises();
     document.querySelector<HTMLButtonElement>(".ssh-terminal-recent__item")?.click();
     await flushPromises();

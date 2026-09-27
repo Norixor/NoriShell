@@ -20,7 +20,7 @@ export interface ApplicationPreferences {
   locale: LocalePreference;
   uiZoom: UiZoom;
   terminalStartupBehavior: "welcome" | "restoreHistory";
-  newTerminalBehavior: "welcome" | "localTerminal";
+  newTerminalBehavior: "welcome" | "terminalWelcome" | "sftpWelcome" | "localTerminal";
   singlePaneTabCloseBehavior: "confirm" | "closeDirectly";
 }
 export interface AppearancePreferences {
@@ -62,7 +62,7 @@ export function validateApplicationPreferences(value: unknown): value is Applica
   return ["light", "dark", "system"].includes(value.themePreference as string)
     && ["system", "zh-CN", "en"].includes(value.locale as string) && isUiZoom(value.uiZoom)
     && ["welcome", "restoreHistory"].includes(value.terminalStartupBehavior as string)
-    && ["welcome", "localTerminal"].includes(value.newTerminalBehavior as string)
+    && ["welcome", "terminalWelcome", "sftpWelcome", "localTerminal"].includes(value.newTerminalBehavior as string)
     && ["confirm", "closeDirectly"].includes(value.singlePaneTabCloseBehavior as string);
 }
 export function validateAppearancePreferences(value: unknown): value is AppearancePreferences {

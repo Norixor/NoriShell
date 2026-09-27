@@ -54,6 +54,7 @@ export const usePluginExtensionsStore = defineStore("pluginExtensions", () => {
   const latestRequests = new Map<string, number>();
   let definitionsTask: Promise<void> | null = null;
   let navigationTask: Promise<void> | null = null;
+  let navigationRevision = 0;
 
   const definitionById = computed(() => new Map(
     definitions.value.map((definition) => [definition.targetId, definition]),
@@ -74,18 +75,32 @@ export const usePluginExtensionsStore = defineStore("pluginExtensions", () => {
   }
 
   async function loadNavigation() {
+    navigationRevision += 1;
     if (navigationTask) return navigationTask;
-    navigationTask = listPluginNavigation()
-      .then((next) => {
-        const keys = new Set(next.map((item) => (
-          `${item.pluginId}\u0000${item.navigation.navigationId}`
-        )));
-        if (keys.size !== next.length) throw new Error("duplicate plugin navigation item");
-        navigation.value = next;
-      })
-      .finally(() => {
+    navigationTask = Promise.resolve().then(async () => {
+      try {
+        while (true) {
+          const revision = navigationRevision;
+          let next: PluginNavigationItem[];
+          try {
+            next = await listPluginNavigation();
+          } catch (error) {
+            if (revision !== navigationRevision) continue;
+            throw error;
+          }
+          // A runtime event can make an in-flight snapshot stale.
+          if (revision !== navigationRevision) continue;
+          const keys = new Set(next.map((item) => (
+            `${item.pluginId}\u0000${item.navigation.navigationId}`
+          )));
+          if (keys.size !== next.length) throw new Error("duplicate plugin navigation item");
+          navigation.value = next;
+          return;
+        }
+      } finally {
         navigationTask = null;
-      });
+      }
+    });
     return navigationTask;
   }
 

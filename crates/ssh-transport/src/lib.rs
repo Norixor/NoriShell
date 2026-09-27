@@ -1562,6 +1562,8 @@ where
             session: self.session,
             disconnect_timeout: self.timeouts.disconnect,
             poisoned: false,
+            disconnect_requested: false,
+            disconnect_completed: false,
         }
     }
 
@@ -2062,6 +2064,8 @@ where
     session: client::Handle<ClientHandler<V>>,
     disconnect_timeout: Duration,
     poisoned: bool,
+    disconnect_requested: bool,
+    disconnect_completed: bool,
 }
 
 impl<V> fmt::Debug for RemoteExecTransport<V>
@@ -2185,16 +2189,27 @@ where
     }
 
     pub async fn disconnect(mut self) -> Result<()> {
-        if self.poisoned {
+        self.disconnect_retryable().await
+    }
+
+    /// A timeout leaves the SSH handle owned by the caller so cleanup can be retried.
+    pub async fn disconnect_retryable(&mut self) -> Result<()> {
+        if self.disconnect_completed {
             return Ok(());
         }
         let disconnect_timeout = self.disconnect_timeout;
-        complete_disconnect_within(disconnect_timeout, async move {
-            self.session
-                .disconnect(Disconnect::ByApplication, "", "")
-                .await
-                .map_err(map_protocol_error)?;
+        complete_disconnect_within(disconnect_timeout, async {
+            if !self.disconnect_requested
+                && self
+                    .session
+                    .disconnect(Disconnect::ByApplication, "", "")
+                    .await
+                    .is_ok()
+            {
+                self.disconnect_requested = true;
+            }
             let _completion = (&mut self.session).await;
+            self.disconnect_completed = true;
             Ok(())
         })
         .await
@@ -2202,13 +2217,17 @@ where
 
     async fn poison(&mut self) {
         self.poisoned = true;
-        if self
-            .session
-            .disconnect(Disconnect::ByApplication, "", "")
-            .await
-            .is_ok()
+        if timeout(
+            self.disconnect_timeout,
+            self.session.disconnect(Disconnect::ByApplication, "", ""),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
         {
-            let _ = timeout(self.disconnect_timeout, &mut self.session).await;
+            self.disconnect_requested = true;
+            self.disconnect_completed = timeout(self.disconnect_timeout, &mut self.session)
+                .await
+                .is_ok();
         }
     }
 }
@@ -2785,7 +2804,7 @@ mod tests {
         future::pending,
         sync::{
             Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -3029,6 +3048,7 @@ mod tests {
     struct ServerEvidence {
         tcp_connections: AtomicUsize,
         auth_attempts: AtomicUsize,
+        disconnect_during_auth: AtomicBool,
         shell_requests: AtomicUsize,
         exec_requests: Mutex<Vec<Vec<u8>>>,
         pty_requests: Mutex<Vec<(String, u32, u32)>>,
@@ -3060,6 +3080,9 @@ mod tests {
 
         async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
             self.evidence.auth_attempts.fetch_add(1, Ordering::SeqCst);
+            if self.evidence.disconnect_during_auth.load(Ordering::SeqCst) {
+                return Err(russh::Error::Inconsistent);
+            }
             Ok(if user == TEST_USER && password == TEST_PASSWORD {
                 Auth::Accept
             } else {
@@ -4429,6 +4452,26 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn disconnection_during_authentication_is_not_a_credential_rejection() {
+        let server = IsolatedServer::start(None, false).await;
+        server
+            .evidence
+            .disconnect_during_auth
+            .store(true, Ordering::SeqCst);
+        let verifier = Arc::new(RecordingVerifier::new(HostKeyDecision::Trusted));
+        let error = verified_transport(&server, verifier)
+            .await
+            .authenticate(
+                TEST_USER,
+                Authentication::password(TEST_PASSWORD.as_bytes().to_vec()),
+            )
+            .await
+            .expect_err("connection must close before an authentication reply");
+        assert!(matches!(error, TransportError::Protocol));
+        assert_eq!(server.evidence.auth_attempts.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(target_os = "macos")]
