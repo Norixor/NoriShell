@@ -44,9 +44,12 @@ function createWindowHandoff() {
   const store = useWorkspaceTabsStore(createPinia());
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: "/terminal", component: { template: "<div />" } }],
+    routes: [
+      { path: "/terminal", component: { template: "<div />" } },
+      ...pageTabs.map((tab) => ({ path: tab.route, component: { template: "<div />" } })),
+    ],
   });
-  return { store, handoff: createPageHandoff(store, router) };
+  return { store, router, handoff: createPageHandoff(store, router) };
 }
 
 describe("Page Tab handoff", () => {
@@ -54,17 +57,21 @@ describe("Page Tab handoff", () => {
     const source = createWindowHandoff();
     const target = createWindowHandoff();
     expect(source.store.importPageTab(tab)).toBe(true);
+    await source.router.push(tab.route);
 
     const outgoing = await source.handoff.snapshot(tab.groupId);
     await source.handoff.freeze(tab.groupId);
     expect(source.store.pageTabs).toEqual([]);
+    expect(source.router.currentRoute.value.path).toBe("/terminal");
     await target.handoff.import(tab.groupId, outgoing);
     source.handoff.commit(tab.groupId);
     expect(target.store.pageTabs).toEqual([tab]);
+    await target.router.push(tab.route);
 
     const incoming = await target.handoff.snapshot(tab.groupId);
     await target.handoff.freeze(tab.groupId);
     expect(target.store.pageTabs).toEqual([]);
+    expect(target.router.currentRoute.value.path).toBe("/terminal");
     await source.handoff.import(tab.groupId, incoming);
     target.handoff.commit(tab.groupId);
     expect(source.store.pageTabs).toEqual([tab]);
