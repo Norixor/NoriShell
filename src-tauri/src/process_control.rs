@@ -168,7 +168,32 @@ impl ManagedProcessGroup {
         if self.wait_until_stopped(policy.kill_wait)? {
             return Ok(TerminationOutcome::Killed);
         }
+        #[cfg(test)]
+        self.log_unstopped_group();
         Ok(TerminationOutcome::Unknown)
+    }
+
+    #[cfg(test)]
+    fn log_unstopped_group(&self) {
+        eprintln!(
+            "PTY cleanup timeout: root_pid={} pgid={} root_exit={:?}",
+            self.child.id(),
+            self.process_group_id,
+            self.exit_status
+        );
+        if let Ok(output) = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,pgid=,stat=,comm="])
+            .output()
+        {
+            let pgid = self.process_group_id.to_string();
+            for line in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.split_whitespace().nth(2) == Some(pgid.as_str()))
+                .take(16)
+            {
+                eprintln!("PTY cleanup group member: {line}");
+            }
+        }
     }
 
     fn signal_group(&mut self, signal: i32) -> io::Result<()> {
