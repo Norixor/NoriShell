@@ -127,6 +127,7 @@ onBeforeUnmount(() => {
         :workspace-tab-id="tab.groupId"
         :initial-kind="tab.kind"
         :initial-host-id="tab.hostId"
+        :handoff-snapshot="workspaceTabs.importedFileSnapshots.get(tab.groupId) ?? null"
         :active="tab.groupId === activeFileTabId"
       />
     </template>

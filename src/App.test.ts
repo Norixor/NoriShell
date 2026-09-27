@@ -21,6 +21,9 @@ const hooks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
+vi.mock("./workspace-tab-window-ui", () => ({
+  startWorkspaceTabWindowUi: vi.fn(async () => () => undefined),
+}));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, callback: never) => {
     if (event === "application-exit-requested") hooks.applicationExit = callback;

@@ -89,6 +89,12 @@ export const zhCN = {
     },
     workspaceTabs: {
       label: "工作区标签页",
+      emptyWindow: "将标签页拖到此窗口",
+      movingIn: "正在移入标签页…",
+      moveToNewWindow: "移到新窗口",
+      moveToMainWindow: "移回主窗口",
+      moveFailed: "无法移动标签页；它仍在原窗口中。",
+      unavailable: "标签页窗口暂不可用，请重新打开 NoriShell。",
       pageState: "页面",
       close: "关闭标签页",
       actions: "标签页操作",

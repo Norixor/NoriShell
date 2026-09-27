@@ -351,10 +351,10 @@
           "markdownDescription": "Allows only desktop authentication prompts to get and answer their own challenge."
         },
         {
-          "description": "Allows the trusted main NoriShell WebView to call the application command surface.",
+          "description": "Allows trusted ordinary NoriShell WebViews to call the application command surface; sensitive commands still validate the caller in Core.",
           "type": "string",
           "const": "main-window-commands",
-          "markdownDescription": "Allows the trusted main NoriShell WebView to call the application command surface."
+          "markdownDescription": "Allows trusted ordinary NoriShell WebViews to call the application command surface; sensitive commands still validate the caller in Core."
         },
         {
           "description": "Allows a nonce-bound trusted wrapper to broker only its assigned isolated surface.",

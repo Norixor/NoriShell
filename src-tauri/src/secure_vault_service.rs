@@ -157,11 +157,22 @@ fn require_window(window: &WebviewWindow, id: &str) -> Result<(), String> {
 fn allowed_caller(app: &AppHandle, label: &str) -> bool {
     label == "main"
         || app
+            .state::<crate::workspace_windows::WorkspaceWindows>()
+            .contains(label)
+        || app
             .state::<crate::tool_windows::ToolWindows>()
             .is_editor(label)
         || app
             .state::<crate::secure_credential_service::SecureCredentialService>()
             .is_prompt_window(label)
+}
+
+fn ordinary_owner_alive(app: &AppHandle, label: &str) -> bool {
+    app.get_webview_window(label).is_some()
+        && (label == "main"
+            || app
+                .state::<crate::workspace_windows::WorkspaceWindows>()
+                .contains(label))
 }
 struct PromptGuard {
     app: AppHandle,
@@ -201,8 +212,9 @@ fn kind_for(
 }
 
 /// Resolves the current saved-Host authentication plan before an explicit
-/// foreground Vault prompt. Only main may request this continuation: resource
-/// factories must report VaultLocked instead of opening an interactive window.
+/// foreground Vault prompt. Only a live ordinary window may request this
+/// continuation: resource factories must report VaultLocked instead of opening
+/// an interactive window.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn secure_vault_ensure_for_host(
@@ -216,7 +228,7 @@ pub async fn secure_vault_ensure_for_host(
     ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
     hosts: State<'_, HostService>,
 ) -> Result<bool, SecureVaultCommandError> {
-    if window.label() != "main" {
+    if !ordinary_owner_alive(&app, window.label()) {
         return Err("secureVaultDenied".into());
     }
     let initial =
@@ -259,7 +271,7 @@ pub async fn secure_vault_open(
     vault: State<'_, VaultService>,
     ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
 ) -> Result<bool, SecureVaultCommandError> {
-    if !allowed_caller(&app, window.label()) {
+    if app.get_webview_window(window.label()).is_none() || !allowed_caller(&app, window.label()) {
         return Err("secureVaultDenied".into());
     }
     let mode = if matches!(mode, SecureVaultMode::UnlockSavedLocal) {

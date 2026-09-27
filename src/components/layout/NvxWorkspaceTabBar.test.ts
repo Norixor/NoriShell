@@ -268,7 +268,15 @@ describe("NvxWorkspaceTabBar", () => {
     const groupId = workspaceTabs.createFileTab("local");
     const requestClose = vi.fn(async () => true);
     const runShortcut = vi.fn();
-    workspaceTabs.registerFileController(groupId, { requestClose, runShortcut });
+    workspaceTabs.registerFileController(groupId, {
+      requestClose,
+      runShortcut,
+      snapshotHandoff: vi.fn(() => { throw new Error("not used in this test"); }),
+      freezeHandoff: vi.fn(),
+      rollbackHandoff: vi.fn(),
+      commitHandoff: vi.fn(),
+      observeHandoffSnapshot: vi.fn(() => () => {}),
+    });
     try {
       await flushPromises();
       expect(wrapper.findAll("[role='tab']")).toHaveLength(4);

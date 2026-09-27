@@ -45,11 +45,15 @@ import NvxTerminalView from "./NvxTerminalView.vue";
 import { createFencedTerminalResize } from "./fencedTerminalResize";
 import NvxTerminalTools from "./NvxTerminalTools.vue";
 import type { ShortcutCommandId } from "../../shortcuts";
+import type { TerminalOutputGeometryMarker } from "../../terminal-output-geometry";
 import { useTipsStore } from "../../stores/tips";
 
 interface TerminalViewExpose {
-  writeBytes(bytes: readonly number[]): void;
+  writeBytes(bytes: readonly number[], outputSeq?: string): void;
   writeGap(): void;
+  whenOutputParsed(): Promise<void>;
+  finishReplay(): Promise<void>;
+  outputGeometrySnapshot(): TerminalOutputGeometryMarker[];
   dimensions(): { rows: number; cols: number };
   focus(): void;
   fit(): void;
@@ -69,11 +73,13 @@ const props = withDefaults(defineProps<{
   tabId: string;
   existingSession: PluginTerminalSessionSummary | null;
   deferredStart?: boolean;
+  initialDimensions?: { rows: number; cols: number };
+  initialOutputGeometry?: TerminalOutputGeometryMarker[];
   active: boolean;
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
   canSplitWorkspaceRight: boolean;
-}>(), { deferredStart: false, launch: null });
+}>(), { deferredStart: false, launch: null, initialDimensions: undefined, initialOutputGeometry: undefined });
 
 const emit = defineEmits<{
   activate: [paneId: string];
@@ -98,6 +104,7 @@ let closeOwnsCleanup = false;
 let closeWork: Promise<void> | null = null;
 const pendingEvents: PluginTerminalSessionEvent[] = [];
 let binding = false;
+let initialAttachmentReady: Promise<void> = Promise.resolve();
 let pendingEventsDropped = false;
 let released = false;
 let clientSequence = 0n;
@@ -218,7 +225,7 @@ function applyOutput(item: PluginTerminalSessionOutputItem) {
     if (sequence > lastOutputSequence + 1n) {
       terminalView.value?.writeGap();
     }
-    terminalView.value?.writeBytes(frame.bytes);
+    terminalView.value?.writeBytes(frame.bytes, frame.outputSeq);
     lastOutputSequence = sequence;
     return;
   }
@@ -382,10 +389,12 @@ async function performAttach() {
       return;
     }
     response.replay.forEach(applyOutput);
+    if (props.initialOutputGeometry?.length) await terminalView.value?.finishReplay();
     binding = false;
     replayPendingEvents();
     startTimers();
     if (props.active) activateFromTab();
+    await terminalView.value?.whenOutputParsed();
   } catch {
     binding = false;
     openFailed.value = true;
@@ -643,12 +652,20 @@ function runShortcut(commandId: ShortcutCommandId) {
   else if (commandId === "terminal.disconnect" && !["closed", "failed"].includes(state.value)) void disconnectForClose(true);
   else if (commandId === "terminal.history-suggestions") tips.show({ tone: "info", title: t("nativeTerminal.unsupportedSession") });
 }
-defineExpose({ disconnectForClose, activateFromTab, deactivateFromTab, runShortcut, reconcileAfterForeground });
+function terminalDimensions() { return terminalView.value?.dimensions() ?? null; }
+function terminalOutputGeometry() { return terminalView.value?.outputGeometrySnapshot() ?? null; }
+async function waitForHandoffReplay() {
+  await initialAttachmentReady;
+  if (!attachment.value) throw new Error("plugin-handoff:attachment-unavailable");
+  await terminalView.value?.whenOutputParsed();
+}
+defineExpose({ disconnectForClose, activateFromTab, deactivateFromTab, runShortcut, reconcileAfterForeground,
+  terminalDimensions, terminalOutputGeometry, waitForHandoffReplay });
 
-onMounted(async () => {
+onMounted(() => {
   if (props.active) registerInputTarget();
-  if (session.value) await attachExisting();
-  else await open();
+  if (session.value) initialAttachmentReady = attachExisting();
+  else void open();
 });
 
 watch(() => props.active, (active) => {
@@ -729,6 +746,8 @@ onBeforeUnmount(() => {
     <NvxTerminalView
       ref="terminalView"
       :pane-id="paneId"
+      :initial-dimensions="initialDimensions"
+      :initial-output-geometry="initialOutputGeometry"
       class="plugin-terminal-pane__terminal"
       :read-only="!writable"
       :terminal-label="label"

@@ -28,7 +28,9 @@ const attachment: PluginTerminalSessionAttachment = {
 };
 const launch = { launchId: "launch", pluginId: profile.pluginId, providerId: profile.providerId,
   label: "Device", tabId: "tab", paneId: "pane", revision: "1", claimed: false, expiresAtUnixMs: Date.now() + 60_000 };
-const view = { writeBytes: vi.fn(), writeGap: vi.fn(), focus: vi.fn(), fit: vi.fn(), dimensions: () => ({ rows: 24, cols: 80 }) };
+const view = { writeBytes: vi.fn(), writeGap: vi.fn(), whenOutputParsed: async () => {},
+  finishReplay: async () => {}, outputGeometrySnapshot: () => [{ afterOutputSeq: "0", rows: 24, cols: 80 }],
+  focus: vi.fn(), fit: vi.fn(), dimensions: () => ({ rows: 24, cols: 80 }) };
 const TerminalStub = defineComponent({
   name: "NvxTerminalView", props: { readOnly: Boolean }, emits: ["input", "resize"],
   setup(_, { expose }) { expose(view); return () => h("div", { class: "nvx-terminal-view" }); },
@@ -88,7 +90,7 @@ describe("provider terminal Pane", () => {
     });
     const wrapper = render({ existingSession: session }); await flushPromises();
     onEvent(event("1", [27, 91, 109])); onEvent(event("99", [88], "0")); onEvent(event("2", [65]));
-    expect(view.writeBytes.mock.calls).toEqual([[[27, 91, 109]], [[65]]]);
+    expect(view.writeBytes.mock.calls).toEqual([[[27, 91, 109], "1"], [[65], "2"]]);
     wrapper.unmount();
   });
   it("sends input and resize only with the canonical plugin focus and complete lease fence", async () => {
@@ -175,7 +177,7 @@ describe("provider terminal Pane", () => {
     onEvent({ session, sessionId: "session", generation: "1", stateRevision: "2", eventSeq: "2",
       payload: { kind: "outputGap", gap: { sessionId: "session", generation: "1", streamId: "stream", droppedFromOutputSeq: "1", resumesAtOutputSeq: "8", reason: "ringBufferOverflow" } } });
     onEvent(event("8", [65]));
-    expect(view.writeGap).toHaveBeenCalledTimes(1); expect(view.writeBytes).toHaveBeenCalledWith([65]);
+    expect(view.writeGap).toHaveBeenCalledTimes(1); expect(view.writeBytes).toHaveBeenCalledWith([65], "8");
     wrapper.unmount();
   });
   it("recovers channel overruns with a fenced replay from the last rendered output", async () => {

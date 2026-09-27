@@ -41,6 +41,7 @@ pub(crate) struct DesktopService {
 #[derive(Default)]
 struct Focus {
     session: Option<String>,
+    window_label: Option<String>,
     epoch: u64,
     sequence: u64,
 }

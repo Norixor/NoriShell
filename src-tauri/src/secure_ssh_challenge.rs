@@ -73,6 +73,14 @@ fn require_window(window: &WebviewWindow, id: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+fn ordinary_owner_alive(app: &AppHandle, label: &str) -> bool {
+    app.get_webview_window(label).is_some()
+        && (label == "main"
+            || app
+                .state::<crate::workspace_windows::WorkspaceWindows>()
+                .contains(label))
+}
 impl ChallengeTarget {
     fn key(&self) -> String {
         match self {
@@ -453,11 +461,12 @@ fn open_challenge_window(app: &AppHandle, id: &str) -> Result<WebviewWindow, Str
 
 pub(crate) async fn prompt_sftp_host_key(
     app: &AppHandle,
+    owner_label: &str,
     operation_id: &str,
     endpoint: &Endpoint,
     observed: &ObservedHostKey,
 ) -> bool {
-    if app.get_webview_window("main").is_none() {
+    if !ordinary_owner_alive(app, owner_label) {
         return false;
     }
     let id = uuid::Uuid::now_v7().to_string();
@@ -501,10 +510,10 @@ pub(crate) async fn prompt_sftp_host_key(
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     loop {
         tokio::select! {
-            value = &mut receiver => break value.is_ok_and(|answer| answer.approved && answer.answers.is_empty() && app.get_webview_window("main").is_some()),
+            value = &mut receiver => break value.is_ok_and(|answer| answer.approved && answer.answers.is_empty() && ordinary_owner_alive(app, owner_label)),
             _ = &mut deadline => break false,
             _ = tick.tick() => {
-                if app.get_webview_window("main").is_none() || app.get_webview_window(&label(&id)).is_none() {
+                if !ordinary_owner_alive(app, owner_label) || app.get_webview_window(&label(&id)).is_none() {
                     break false;
                 }
             }
@@ -519,10 +528,13 @@ pub async fn secure_ssh_challenge_open(
     app: AppHandle,
     service: State<'_, SecureSshChallengeService>,
 ) -> Result<bool, String> {
-    if window.label() != "main" {
+    if !ordinary_owner_alive(&app, window.label()) {
         return Err("secureChallengeDenied".into());
     }
     let projection = content(&app, &target).await?;
+    if !ordinary_owner_alive(&app, window.label()) {
+        return Err("secureChallengeDenied".into());
+    }
     let id = uuid::Uuid::now_v7().to_string();
     let (sender, mut receiver) = oneshot::channel();
     {
@@ -558,11 +570,11 @@ pub async fn secure_ssh_challenge_open(
         tokio::select! {
             value = &mut receiver => break value.ok(),
             _ = &mut deadline => break None,
-            _ = tick.tick() => { if app.get_webview_window(window.label()).is_none() || content(&app, &target).await.is_err() { break None; } }
+            _ = tick.tick() => { if !ordinary_owner_alive(&app, window.label()) || content(&app, &target).await.is_err() { break None; } }
         }
     };
     let Some(answer) =
-        answer.filter(|answer| answer.approved && app.get_webview_window(window.label()).is_some())
+        answer.filter(|answer| answer.approved && ordinary_owner_alive(&app, window.label()))
     else {
         cancel_target(&app, target).await?;
         guard.target = None;
