@@ -176,6 +176,14 @@ const newTerminalBehaviorOptions = computed(() => [
     label: t("sshSettings.applicationPreferences.newTerminalBehaviors.welcome"),
   },
   {
+    value: "terminalWelcome",
+    label: t("sshSettings.applicationPreferences.newTerminalBehaviors.terminalWelcome"),
+  },
+  {
+    value: "sftpWelcome",
+    label: t("sshSettings.applicationPreferences.newTerminalBehaviors.sftpWelcome"),
+  },
+  {
     value: "localTerminal",
     label: t("sshSettings.applicationPreferences.newTerminalBehaviors.localTerminal"),
   },

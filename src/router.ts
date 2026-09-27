@@ -7,8 +7,9 @@ export const router = createRouter({
     { path: "/overview", component: () => import("./views/OverviewView.vue") },
     { path: "/hosts", component: () => import("./views/HostsView.vue") },
     { path: "/terminal", component: () => import("./views/SshTerminalView.vue") },
+    { path: "/new", component: () => import("./views/NewWorkspacePageView.vue") },
     { path: "/desktop", component: () => import("./views/DesktopView.vue") },
-    { path: "/sftp", component: () => import("./views/SftpView.vue") },
+    { path: "/sftp", component: () => import("./views/FileWorkspaceView.vue") },
     { path: "/tunnels", component: () => import("./views/TunnelsView.vue") },
     { path: "/settings", component: () => import("./views/SettingsView.vue") },
     {

@@ -10,6 +10,7 @@ import { openToolWindow } from "../tool-windows";
 import { i18n } from "../locales";
 import { SFTP_PREFERENCES_KEY } from "../stores/sftpPreferences";
 import { useTipsStore } from "../stores/tips";
+import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./sftpPluginNavigation";
 import { takeSftpTerminalLaunch } from "./sftpTerminalLaunch";
 
@@ -114,7 +115,13 @@ async function mountView(
     modifiedAtUnixMs: number;
     permissionBits: number | null;
   }> = "release.bin",
-  options: { keepAlive?: boolean; hosts?: Array<typeof host> } = {},
+  options: {
+    keepAlive?: boolean;
+    hosts?: Array<typeof host>;
+    workspaceTab?: "local" | "remote";
+    routeQuery?: Record<string, string>;
+    setupStore?: (store: ReturnType<typeof useWorkspaceTabsStore>) => void;
+  } = {},
 ) {
   let currentSnapshot = snapshot;
   let currentIntentSnapshot = intentSnapshot;
@@ -178,13 +185,17 @@ async function mountView(
       { path: "/terminal", component: { template: "<div>Terminal</div>" } },
     ],
   });
-  await router.push("/sftp");
+  await router.push({ path: "/sftp", query: options.routeQuery });
   await router.isReady();
   const pinia = createPinia();
+  const workspaceTabs = useWorkspaceTabsStore(pinia);
+  options.setupStore?.(workspaceTabs);
+  const workspaceTabId = options.workspaceTab ? workspaceTabs.createFileTab(options.workspaceTab) : undefined;
   const cachedRoute = defineComponent({
     template: '<RouterView v-slot="{ Component, route }"><KeepAlive include="SftpView"><component :is="Component" :key="route.path" /></KeepAlive></RouterView>',
   });
   const wrapper = mount(options.keepAlive ? cachedRoute : SftpView, {
+    props: workspaceTabId ? { workspaceTabId, initialKind: options.workspaceTab, active: true } : {},
     global: {
       plugins: [pinia, router, i18n],
       stubs: {
@@ -200,6 +211,7 @@ async function mountView(
   return {
     wrapper,
     router,
+    workspaceTabs,
     tips: useTipsStore(pinia),
     setSnapshot: (next: SftpSessionSnapshot) => { currentSnapshot = next; },
     setIntentSnapshot: (next: SftpTransferIntentSnapshot) => { currentIntentSnapshot = next; },
@@ -454,6 +466,106 @@ describe("SftpView production boundaries", () => {
     connect?.click();
     await flushPromises();
     expect(client.openSftpSession).toHaveBeenCalledWith({ hostId: host.hostId, expectedHostStateVersion: "7" });
+    wrapper.unmount();
+  });
+
+  it("connects from the empty remote Pane and displays files in that same Pane", async () => {
+    const { wrapper, router } = await mountView();
+    const remotePane = wrapper.get('[data-pane-id="sftp-remote-pane"]');
+    expect(remotePane.get(".sftp-view__empty-remote").text()).toContain("Choose a server");
+    expect(remotePane.text()).not.toContain("This Pane is not connected");
+    expect(remotePane.text()).not.toContain("Disconnect");
+
+    await remotePane.get('[aria-label="SFTP Host for this Pane"]').trigger("click");
+    const option = Array.from(document.body.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find((item) => item.textContent?.includes(host.label));
+    expect(option).toBeDefined();
+    option?.click();
+    await flushPromises();
+    await remotePane.findAll("button").find((button) => button.text().includes("Connect SFTP"))?.trigger("click");
+    await flushPromises();
+
+    expect(client.openSftpSession).toHaveBeenCalledWith({
+      hostId: host.hostId,
+      expectedHostStateVersion: host.stateVersion,
+    });
+    expect(remotePane.text()).toContain("release.bin");
+    expect(router.currentRoute.value.path).toBe("/sftp");
+    wrapper.unmount();
+  });
+
+  it("does not replay another File Tab's consumed tray focus into a new local Tab", async () => {
+    const session = readySnapshot().sessions[0]!;
+    const { wrapper, tips } = await mountView(readySnapshot(), undefined, "release.bin", {
+      workspaceTab: "local",
+      routeQuery: {
+        focusOperation: "tray-focus-a",
+        focusSessionId: session.sessionId,
+        focusGeneration: session.generation,
+      },
+      setupStore: (store) => {
+        const owner = store.createFileTab("remote");
+        expect(store.claimFileSession(session.sessionId, owner)).toBe(true);
+        expect(store.consumeFileFocusOperation("tray-focus-a")).toBe(true);
+      },
+    });
+
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(1);
+    expect(wrapper.find(".sftp-view__empty-remote").exists()).toBe(false);
+    expect(tips.items).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  it("keeps the right-side split controls within the split tree minimum size", async () => {
+    const { wrapper } = await mountView();
+    const tree = wrapper.get(".nvx-terminal-split-tree").element as HTMLElement;
+    tree.getBoundingClientRect = () => ({
+      x: 0, y: 0, top: 0, left: 0, right: 500, bottom: 300, width: 500, height: 300, toJSON: () => ({}),
+    });
+    const before = wrapper.findAll(".nvx-terminal-split-tree__pane").length;
+    const splitRight = wrapper.get<HTMLButtonElement>('.sftp-view__topbar button[aria-label="Split Pane to the right"]');
+    await splitRight.trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(before);
+    wrapper.unmount();
+  });
+
+  it("opens remote panes from the local file tab using the terminal-style controls", async () => {
+    const { wrapper } = await mountView({ snapshotRevision: "0", sessions: [], transfers: [] }, undefined, "notes.txt", { workspaceTab: "local" });
+    const controls = wrapper.get(".sftp-view__topbar");
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(1);
+    await controls.get('button[aria-label="Split Pane to the right"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(2);
+    expect(wrapper.get(".sftp-view__empty-remote").text()).toContain("Choose a server");
+    await controls.get('button[aria-label="Add full-height Pane on the right"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(3);
+    wrapper.unmount();
+  });
+
+  it("uses terminal Pane shortcuts for the active file tab", async () => {
+    const { wrapper, workspaceTabs } = await mountView({ snapshotRevision: "0", sessions: [], transfers: [] }, undefined, "notes.txt", { workspaceTab: "local" });
+    expect(workspaceTabs.fileTabs[0]?.paneCount).toBe(1);
+    workspaceTabs.runFileShortcut("terminal.split-right");
+    await flushPromises();
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(2);
+    expect(workspaceTabs.fileTabs[0]?.paneCount).toBe(2);
+    expect(wrapper.get(".sftp-view__empty-remote").text()).toContain("Choose a server");
+    workspaceTabs.runFileShortcut("terminal.close-pane");
+    await flushPromises();
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(1);
+    expect(workspaceTabs.fileTabs[0]?.paneCount).toBe(1);
+    wrapper.unmount();
+  });
+
+  it("keeps a toolbar-created remote Pane disconnected until its own server is chosen", async () => {
+    const { wrapper } = await mountView(readySnapshot());
+    await wrapper.get('.sftp-view__topbar button[aria-label="Split Pane to the right"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".sftp-view__empty-remote")).toHaveLength(1);
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(3);
+    expect(client.openSftpSession).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

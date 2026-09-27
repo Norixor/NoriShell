@@ -263,47 +263,63 @@ function wheel(event: WheelEvent) {
   });
 }
 
+function canPull() {
+  return mounted && canRun.value && !document.hidden;
+}
+
+function syncFramePolling() {
+  if (!canPull()) {
+    clearTimeout(timer);
+    timer = undefined;
+  } else if (!frameBusy && timer === undefined) {
+    void pull();
+  }
+}
+
 async function pull() {
-  if (!mounted) return;
-  timer = setTimeout(() => void pull(), 16);
-  if (!frameBusy && canRun.value && !document.hidden) {
-    frameBusy = true;
-    const key = identity.value;
-    const session = props.session;
-    try {
-      const data = await desktopClient.frame(session, String(after));
-      if (!mounted || !canRun.value || document.hidden || key !== identity.value) return;
-      const frame = decodeDesktopFrame(data, after);
-      if (frame && canvas.value) {
-        reportedFrameError = false;
-        const context = canvas.value.getContext("2d");
-        if (!context) return;
-        if (frame.base !== 0n && (frame.base !== after || canvas.value.width !== frame.width || canvas.value.height !== frame.height)) {
-          after = 0n;
-          return;
-        }
-        if (canvas.value.width !== frame.width || canvas.value.height !== frame.height) {
-          canvas.value.width = frame.width;
-          canvas.value.height = frame.height;
-        }
-        if (frameSize.value.width !== frame.width || frameSize.value.height !== frame.height) {
-          frameSize.value = { width: frame.width, height: frame.height };
-        }
-        context.putImageData(new ImageData(frame.rgba, frame.rectWidth, frame.rectHeight), frame.x, frame.y);
-        after = frame.sequence;
+  if (!canPull() || frameBusy) return;
+  frameBusy = true;
+  const started = performance.now();
+  const key = identity.value;
+  const session = props.session;
+  try {
+    const data = await desktopClient.frame(session, String(after));
+    if (!mounted || !canRun.value || document.hidden || key !== identity.value) return;
+    const frame = decodeDesktopFrame(data, after);
+    if (frame && canvas.value) {
+      reportedFrameError = false;
+      const context = canvas.value.getContext("2d");
+      if (!context) return;
+      if (frame.base !== 0n && (frame.base !== after || canvas.value.width !== frame.width || canvas.value.height !== frame.height)) {
+        after = 0n;
+        return;
       }
-    } catch {
-      if (key === identity.value && canRun.value && !reportedFrameError) {
-        reportedFrameError = true;
-        emit("error");
+      if (canvas.value.width !== frame.width || canvas.value.height !== frame.height) {
+        canvas.value.width = frame.width;
+        canvas.value.height = frame.height;
       }
-    } finally {
-      frameBusy = false;
+      if (frameSize.value.width !== frame.width || frameSize.value.height !== frame.height) {
+        frameSize.value = { width: frame.width, height: frame.height };
+      }
+      context.putImageData(new ImageData(frame.rgba, frame.rectWidth, frame.rectHeight), frame.x, frame.y);
+      after = frame.sequence;
+    }
+  } catch {
+    if (key === identity.value && canRun.value && !reportedFrameError) {
+      reportedFrameError = true;
+      emit("error");
+    }
+  } finally {
+    frameBusy = false;
+    if (canPull()) {
+      const delay = Math.max(0, 16 - (performance.now() - started));
+      timer = setTimeout(() => { timer = undefined; void pull(); }, delay);
     }
   }
 }
 
 function visibility() {
+  syncFramePolling();
   scheduleResolution();
   if (
     canRun.value
@@ -381,6 +397,7 @@ watch([() => props.fit, () => props.panning, () => props.active], () => {
   void invalidate();
 });
 watch(canRun, (value) => {
+  syncFramePolling();
   if (!value) {
     stopPanning();
     void invalidate();
@@ -399,7 +416,7 @@ onMounted(async () => {
     resizeObserver.observe(viewport.value);
   }
   window.addEventListener("resize", measureViewport);
-  void pull();
+  syncFramePolling();
   window.addEventListener("blur", visibility);
   document.addEventListener("visibilitychange", visibility);
   observer = new MutationObserver(visibility);

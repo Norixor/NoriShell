@@ -68,6 +68,7 @@ const routePath = computed(() => router.currentRoute.value.path);
 // New ordinary routes opt in here. Settings also contains Vault management.
 const contentRouteLabels: Record<string, string> = {
   "/terminal": "navigation.terminal",
+  "/new": "newWorkspace.title",
   "/overview": "navigation.overview",
   "/hosts": "navigation.hosts",
   "/sftp": "navigation.sftp",
@@ -241,7 +242,7 @@ onMounted(async () => {
           },
         });
       } else if (payload.kind === "sftp") {
-        void router.push({ path: "/sftp", query: { hostId: payload.hostId } });
+        void router.push({ path: "/sftp", query: { hostId: payload.hostId, fileOperationId: payload.operationId } });
       } else {
         void router.push({ path: "/tunnels", query: { hostId: payload.hostId } });
       }
@@ -296,6 +297,7 @@ onMounted(async () => {
       void pluginExtensions.refreshPluginContributions(payload.pluginId);
     },
   );
+  void pluginExtensions.loadNavigation().catch(() => undefined);
   await completePluginSafeModeStartup().catch(() => undefined);
 });
 
@@ -360,7 +362,7 @@ onBeforeUnmount(() => {
               class="app-route-content"
             >
               <RouterView v-slot="{ Component, route }">
-                <KeepAlive include="SshTerminalView,DesktopView,SftpView">
+                <KeepAlive include="SshTerminalView,DesktopView,FileWorkspaceView">
                   <component
                     :is="Component"
                     :key="route.path"

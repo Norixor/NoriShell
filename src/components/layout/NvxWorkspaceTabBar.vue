@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {
   Fingerprint,
+  FilePlus2,
+  FolderOpen,
   Monitor,
   KeyRound,
   Plug,
@@ -30,11 +32,13 @@ import { detectDesktopPlatform } from "../../platform";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { useShortcutsStore } from "../../stores/shortcuts";
 import { useWorkspaceTabsStore, type WorkspacePageType } from "../../stores/workspaceTabs";
+import { useUiStore } from "../../stores/ui";
 
 const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const workspaceTabs = useWorkspaceTabsStore();
+const ui = useUiStore();
 const shortcuts = useShortcutsStore();
 const hostMarkers = useHostMarkersStore();
 const {
@@ -49,9 +53,19 @@ const {
   activeDesktopTabId,
   desktopBusy,
   desktopController,
+  fileTabs,
+  activeFileTabId,
 } = storeToRefs(workspaceTabs);
 
+const filePaneShortcutIds = new Set([
+  "terminal.split-right", "terminal.split-down", "terminal.focus-next-pane",
+  "terminal.focus-previous-pane", "terminal.close-pane",
+]);
+const createDisabled = computed(() => terminalBusy.value
+  && (ui.newTerminalBehavior === "terminalWelcome" || ui.newTerminalBehavior === "localTerminal"));
+
 const pageIcons = {
+  newPage: FilePlus2,
   knownHosts: Fingerprint,
   sshIdentities: KeyRound,
   plugin: Plug,
@@ -65,6 +79,12 @@ const items = computed<TerminalTabItem[]>(() => [
     bellAttentionLabel: tab.bellAttention ? t("terminalInteraction.bellAttention") : undefined,
     disabled: terminalBusy.value,
   })),
+  ...fileTabs.value.map((tab) => ({
+    groupId: tab.groupId,
+    label: tab.label || t(tab.kind === "remote" ? "fileWorkspace.remoteTab" : "fileWorkspace.localTab"),
+    stateLabel: `${t("fileWorkspace.tabState")} · ${t("sshTerminal.paneCount", { count: tab.paneCount })}`,
+    icon: FolderOpen,
+  })),
   ...pageTabs.value.map((tab) => ({
     groupId: tab.groupId,
     label: tab.labelKey ? t(tab.labelKey) : tab.label,
@@ -76,6 +96,7 @@ const items = computed<TerminalTabItem[]>(() => [
 
 const activeGroupId = computed(() => {
   if (route.path === "/desktop") return activeDesktopTabId.value;
+  if (route.path === "/sftp") return activeFileTabId.value;
   const page = pageTabs.value.find((tab) => tab.route === route.path);
   if (page) return page.groupId;
   return route.path === "/terminal" ? activeTerminalTabId.value : "";
@@ -86,6 +107,13 @@ function deactivateTerminalWorkspace() {
 }
 
 function activateGroup(groupId: string) {
+  if (fileTabs.value.some((tab) => tab.groupId === groupId)) {
+    deactivateTerminalWorkspace();
+    desktopController.value?.deactivate();
+    workspaceTabs.activateFileTab(groupId);
+    void router.push("/sftp");
+    return;
+  }
   if (desktopTabs.value.some((tab) => tab.groupId === groupId)) {
     deactivateTerminalWorkspace();
     desktopController.value?.activate(groupId);
@@ -102,6 +130,11 @@ function activateGroup(groupId: string) {
 }
 
 function closeGroup(groupId: string) {
+  if (fileTabs.value.some((tab) => tab.groupId === groupId)) {
+    activateGroup(groupId);
+    void workspaceTabs.requestCloseFileTab(groupId);
+    return;
+  }
   if (desktopTabs.value.some((tab) => tab.groupId === groupId)) {
     desktopController.value?.close(groupId);
     return;
@@ -122,9 +155,16 @@ function closeGroup(groupId: string) {
   void router.push(fallbackPage?.route ?? "/settings");
 }
 
-function closeGroups(groupIds: string[]) {
+async function closeGroups(groupIds: string[]) {
   const targetIds = new Set(groupIds);
   if (!targetIds.size) return;
+  const fileIds = fileTabs.value.filter((tab) => targetIds.has(tab.groupId)).map((tab) => tab.groupId);
+  if (fileIds.length) {
+    for (const groupId of fileIds) {
+      activateGroup(groupId);
+      if (!await workspaceTabs.requestCloseFileTab(groupId)) return;
+    }
+  }
   const desktopIds = desktopTabs.value.filter((tab) => targetIds.has(tab.groupId)).map((tab) => tab.groupId);
   if (desktopIds.length) desktopController.value?.closeMany(desktopIds);
   const terminalIds = terminalTabs.value
@@ -151,6 +191,18 @@ function closeGroups(groupIds: string[]) {
 
 function createTerminal() {
   desktopController.value?.deactivate();
+  if (ui.newTerminalBehavior === "welcome") {
+    deactivateTerminalWorkspace();
+    workspaceTabs.ensurePageTabForRoute("/new");
+    void router.push("/new");
+    return;
+  }
+  if (ui.newTerminalBehavior === "sftpWelcome") {
+    deactivateTerminalWorkspace();
+    workspaceTabs.showFileWelcome();
+    void router.push("/sftp");
+    return;
+  }
   if (terminalController.value) {
     terminalController.value.create();
     return;
@@ -200,7 +252,7 @@ function executeShortcut(command: ShortcutCommand) {
     case "navigation.known-hosts": void router.push("/settings?section=knownHosts"); break;
     case "navigation.ssh-identities": void router.push("/settings?section=identities"); break;
     case "workspace.new":
-      if (!terminalBusy.value) createTerminal();
+      if (!createDisabled.value) createTerminal();
       break;
     case "workspace.close": {
       const active = items.value.find((item) => item.groupId === activeGroupId.value);
@@ -210,6 +262,14 @@ function executeShortcut(command: ShortcutCommand) {
     case "workspace.next": activateRelativeWorkspaceTab(1); break;
     case "workspace.previous": activateRelativeWorkspaceTab(-1); break;
     case "workspace.new-local": terminalController.value?.runShortcut?.(command.id); break;
+    case "terminal.split-right":
+    case "terminal.split-down":
+    case "terminal.focus-next-pane":
+    case "terminal.focus-previous-pane":
+    case "terminal.close-pane":
+      if (route.path === "/sftp") workspaceTabs.runFileShortcut(command.id);
+      else terminalController.value?.runShortcut?.(command.id);
+      break;
     case "terminal.toggle-quick-commands": terminalController.value?.toggleQuickCommands(); break;
     default: {
       const tabMatch = command.id.match(/^workspace\.tab\.([1-9])$/);
@@ -232,7 +292,8 @@ function handleWorkspaceShortcut(event: KeyboardEvent) {
   const platform = shortcutPlatform();
   const command = matchShortcut(event, platform, shortcuts.bindingsFor(platform));
   const context = {
-    terminalActive: route.path === "/terminal" && Boolean(terminalController.value),
+    terminalActive: (route.path === "/terminal" && Boolean(terminalController.value))
+      || (route.path === "/sftp" && Boolean(activeFileTabId.value) && Boolean(command && filePaneShortcutIds.has(command.id))),
     modalOpen,
     shortcutRecording: recording,
   };
@@ -257,7 +318,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleWorkspaceShort
     :items="items"
     :model-value="activeGroupId"
     :label="t('workspaceTabs.label')"
-    :new-label="t('sshTerminal.newConnection')"
+    :new-label="t('newWorkspace.title')"
     :close-label="t('workspaceTabs.close')"
     :close-all-label="t('workspaceTabs.closeAll')"
     :close-left-label="t('workspaceTabs.closeLeft')"
@@ -265,7 +326,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleWorkspaceShort
     :context-menu-label="t('workspaceTabs.actions')"
     :scroll-backward-label="t('sshTerminal.scrollTabsBackward')"
     :scroll-forward-label="t('sshTerminal.scrollTabsForward')"
-    :create-disabled="terminalBusy"
+    :create-disabled="createDisabled"
     @update:model-value="activateGroup"
     @create="createTerminal"
     @close="closeGroup"

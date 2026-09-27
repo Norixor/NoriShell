@@ -292,8 +292,8 @@ describe("Settings", () => {
     welcomeStartup?.click();
     await flushPromises();
 
-    const newTerminal = wrapper.get('[aria-label="When creating a terminal"]');
-    expect(newTerminal.text()).toContain("Show welcome page");
+    const newTerminal = wrapper.get('[aria-label="When creating a page"]');
+    expect(newTerminal.text()).toContain("Show New Page");
     await newTerminal.trigger("click");
     const localTerminal = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
       .find((option) => option.textContent?.includes("Open local terminal"));

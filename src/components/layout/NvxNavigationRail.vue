@@ -8,7 +8,6 @@ import {
   Copy,
   Download,
   Folder,
-  FolderSync,
   Info,
   LayoutDashboard,
   Link,
@@ -32,12 +31,14 @@ import {
 } from "lucide-vue-next";
 import { computed, onMounted, type Component } from "vue";
 import { useI18n } from "vue-i18n";
+import { useRoute } from "vue-router";
 
 import { usePluginExtensionsStore } from "../../stores/pluginExtensions";
 import { useAppUpdateStore } from "../../stores/appUpdate";
 import { NvxIcon } from "../ui";
 
 const { t } = useI18n();
+const route = useRoute();
 const extensions = usePluginExtensionsStore();
 const appUpdate = useAppUpdateStore();
 
@@ -46,7 +47,7 @@ const fixedItems = [
   { to: "/terminal", labelKey: "navigation.terminal", icon: SquareTerminal },
   { to: "/desktop", labelKey: "desktop.navigation", icon: Monitor },
   { to: "/hosts", labelKey: "navigation.hosts", icon: Server },
-  { to: "/sftp", labelKey: "navigation.sftp", icon: FolderSync },
+  { to: "/sftp", labelKey: "navigation.sftp", icon: Folder },
   { to: "/tunnels", labelKey: "navigation.tunnels", icon: Waypoints },
   { to: "/plugins", labelKey: "navigation.plugins", icon: Package },
 ] as const;
@@ -99,6 +100,8 @@ onMounted(() => {
       :key="item.to"
       :to="item.to"
       class="nvx-navigation-rail__item"
+      :class="{ 'router-link-active': item.to === '/terminal' && route.path === '/new' }"
+      :aria-current="item.to === '/terminal' && route.path === '/new' ? 'page' : undefined"
       :aria-label="item.to === '/settings' && appUpdate.hasUpdate ? `${item.label}, ${t('releases.newBadgeAccessible')}` : item.label"
     >
       <NvxIcon

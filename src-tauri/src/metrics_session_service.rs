@@ -30,7 +30,10 @@ use zeroize::Zeroizing;
 
 mod metrics_probe;
 
-use self::metrics_probe::{MetricsProbeOutcome, MetricsProbeRuntime, run_metrics_probe};
+use self::metrics_probe::{
+    MetricsConnectOutcome, MetricsExecTransport, MetricsProbeOutcome, MetricsProbeRuntime,
+    connect_metrics_transport, run_metrics_probe,
+};
 use crate::{
     connection_profile::{
         ConnectionProfileError, ResolvedMetricsConnectionProfile, connection_has_vault_credentials,
@@ -44,7 +47,7 @@ use crate::{
     },
     time::unix_time_ms,
     transient_credential_service::TransientCredentialService,
-    vault_service::VaultService,
+    vault_service::{VaultAvailability, VaultService},
 };
 
 type CoreResult<T> = Result<T, Box<CoreApiError>>;
@@ -218,6 +221,19 @@ impl MetricsSessionService {
         })
         .await
     }
+
+    pub(crate) async fn connectivity_hint(&self) {
+        let _ = self.tx.send(Message::ConnectivityHint).await;
+    }
+
+    pub(crate) fn availability_hint(&self, availability: VaultAvailability) {
+        let tx = self.tx.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = tx
+                .send(Message::VaultAvailabilityChanged { availability })
+                .await;
+        });
+    }
 }
 
 #[tauri::command]
@@ -280,6 +296,7 @@ struct Actor {
     ssh_agent: SshAgentService,
     sessions: BTreeMap<String, SessionRecord>,
     connect_limit: Arc<Semaphore>,
+    shutting_down: bool,
 }
 
 struct SessionRecord {
@@ -288,20 +305,25 @@ struct SessionRecord {
     profile_revision_token: Option<String>,
     connection_revision_token: Option<String>,
     has_vault_credentials: bool,
+    vault_availability_epoch: u64,
+    cleanup_uncertain: bool,
     monitoring_policy: MonitoringPolicy,
     route_stages: BTreeMap<String, SshSessionRouteStage>,
+    observed_host_keys: BTreeMap<String, (Endpoint, ObservedHostKey)>,
     task: Option<ConnectTask>,
     stop: Option<watch::Sender<bool>>,
     policy_updates: Option<watch::Sender<MonitoringPolicy>>,
+    connectivity_hints: Option<watch::Sender<u64>>,
     active_host_key_challenge: Option<ActiveHostKeyChallenge>,
     active_keyboard_challenge: Option<ActiveKeyboardChallenge>,
     prepared_answers: BTreeMap<String, PreparedAnswer>,
     consecutive_failures: u32,
+    last_connectivity_retry: Option<tokio::time::Instant>,
 }
 
 struct ConnectTask {
     generation: u64,
-    handle: tauri::async_runtime::JoinHandle<()>,
+    handle: tauri::async_runtime::JoinHandle<bool>,
 }
 
 struct ActiveHostKeyChallenge {
@@ -403,6 +425,22 @@ enum Message {
         host_id: String,
         generation: u64,
         failure: WorkerFailure,
+        cleanup_confirmed: bool,
+    },
+    SampleFailed {
+        host_id: String,
+        generation: u64,
+        failure: WorkerFailure,
+        next_retry_at_unix_ms: i64,
+    },
+    ValidateTrust {
+        host_id: String,
+        generation: u64,
+        reply: oneshot::Sender<Result<(), WorkerFailure>>,
+    },
+    ConnectivityHint,
+    VaultAvailabilityChanged {
+        availability: VaultAvailability,
     },
     RetryDue {
         host_id: String,
@@ -432,6 +470,7 @@ impl Actor {
             ssh_agent,
             sessions: BTreeMap::new(),
             connect_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTS)),
+            shutting_down: false,
         }
     }
 
@@ -528,6 +567,9 @@ impl Actor {
         monitoring_policy: MonitoringPolicy,
         force: bool,
     ) -> ActorResult<MetricsSessionSummary> {
+        if self.shutting_down {
+            return Err(unavailable_error(request_id));
+        }
         if !monitoring_policy.enabled || validate_supported_selection(&monitoring_policy).is_err() {
             return Err(validation_error(request_id));
         }
@@ -563,6 +605,12 @@ impl Actor {
                         monitoring_policy.clone(),
                     )
                 });
+                if !stop_record_and_wait(record).await {
+                    return Err(unavailable_error(request_id));
+                }
+                record.active_host_key_challenge = None;
+                record.summary.host_key_challenge = None;
+                mark_snapshot_stale(record);
                 record.host_state_version = host_state_version;
                 record.monitoring_policy = monitoring_policy;
                 if let Some(reason) = authentication_reason {
@@ -592,6 +640,9 @@ impl Actor {
             if !stop_record_and_wait(record).await {
                 return Err(unavailable_error(request_id));
             }
+            record.active_host_key_challenge = None;
+            record.summary.host_key_challenge = None;
+            mark_snapshot_stale(record);
             record.host_state_version = host_state_version;
             record.monitoring_policy = monitoring_policy;
             transition(
@@ -605,6 +656,7 @@ impl Actor {
         if !force
             && let Some(record) = self.sessions.get_mut(&key)
             && record.task.is_some()
+            && !record.cleanup_uncertain
             && record.connection_revision_token.as_deref()
                 == Some(profile.connection.revision_token.as_str())
         {
@@ -619,6 +671,7 @@ impl Actor {
             && !force
             && record.profile_revision_token.as_deref() == Some(profile.revision_token.as_str())
             && record.task.is_some()
+            && !record.cleanup_uncertain
         {
             return Ok(record.summary.clone());
         }
@@ -649,7 +702,12 @@ impl Actor {
         record.profile_revision_token = Some(profile.revision_token.clone());
         record.connection_revision_token = Some(profile.connection.revision_token.clone());
         record.has_vault_credentials = profile_has_any_vault_credentials(&profile);
+        record.vault_availability_epoch = self
+            .vault
+            .with_vault_availability(|availability, _| availability.epoch);
         record.route_stages = route_stage_map(&profile);
+        record.observed_host_keys.clear();
+        record.cleanup_uncertain = false;
         record.summary.generation =
             WireSequence::new(record.summary.generation.get().saturating_add(1).max(1));
         record.summary.host_key_challenge = None;
@@ -660,8 +718,10 @@ impl Actor {
         let generation = record.summary.generation.get();
         let (stop, stop_rx) = watch::channel(false);
         let (policy_updates, policy_rx) = watch::channel(record.monitoring_policy.clone());
+        let (connectivity_hints, hint_rx) = watch::channel(0_u64);
         record.stop = Some(stop);
         record.policy_updates = Some(policy_updates);
+        record.connectivity_hints = Some(connectivity_hints);
 
         let worker_tx = self.tx.clone();
         let vault = self.vault.clone();
@@ -687,9 +747,10 @@ impl Actor {
                     connect_limit,
                 },
                 policy_rx,
+                hint_rx,
                 stop_rx,
             )
-            .await;
+            .await
         });
         record.task = Some(ConnectTask {
             generation,
@@ -1008,8 +1069,11 @@ impl Actor {
         );
         match observation {
             Ok(KnownHostObservation::Trusted(_)) => {
-                // Each probe checks current trust; sampling does not need a
-                // persistent last-verified timestamp or a metadata write.
+                // Monitoring verifies trust without changing the user-facing
+                // last-verified timestamp or the persisted host revision.
+                record
+                    .observed_host_keys
+                    .insert(endpoint_key(&endpoint), (endpoint, observed));
                 let _ = reply.send(Ok(HostKeyDecision::Trusted));
             }
             Ok(KnownHostObservation::Unknown(_)) => {
@@ -1112,18 +1176,41 @@ impl Actor {
         );
     }
 
-    fn worker_failed(&mut self, host_id: &str, generation: u64, failure: WorkerFailure) {
+    fn worker_failed(
+        &mut self,
+        host_id: &str,
+        generation: u64,
+        mut failure: WorkerFailure,
+        cleanup_confirmed: bool,
+    ) {
         let Some(record) = self.sessions.get_mut(host_id) else {
             return;
         };
         if !is_current(record, generation) {
             return;
         }
+        let stop_requested = record.stop.as_ref().is_some_and(|stop| *stop.borrow());
         mark_snapshot_stale(record);
         if let Some(task) = record.task.take() {
             task.handle.abort();
         }
+        record.cleanup_uncertain = !cleanup_confirmed;
         record.stop = None;
+        record.policy_updates = None;
+        record.connectivity_hints = None;
+        if stop_requested {
+            if cleanup_confirmed {
+                transition(record, MetricsSessionState::Closed, None, None);
+            } else {
+                transition(
+                    record,
+                    MetricsSessionState::Failed,
+                    None,
+                    Some(MetricsSessionFailureCode::ConnectionUnavailable),
+                );
+            }
+            return;
+        }
         if record.active_host_key_challenge.is_some()
             && failure.code == MetricsSessionFailureCode::ConnectionUnavailable
         {
@@ -1131,6 +1218,20 @@ impl Actor {
             return;
         }
         clear_keyboard_challenge(record, TransportError::AuthenticationRejected);
+        let vault_changed_during_connect = record.has_vault_credentials
+            && self.vault.with_vault_availability(|availability, _| {
+                availability.epoch > record.vault_availability_epoch
+            });
+        if failure.code == MetricsSessionFailureCode::AuthenticationRejected
+            && vault_changed_during_connect
+            && self.vault.is_unlocked()
+        {
+            // The Vault may have locked and reopened while an old authentication result was in flight.
+            failure = WorkerFailure {
+                code: MetricsSessionFailureCode::ConnectionUnavailable,
+                recoverable: true,
+            };
+        }
         if failure.code == MetricsSessionFailureCode::AuthenticationRejected {
             let reason = if record.has_vault_credentials && !self.vault.is_unlocked() {
                 MetricsAuthenticationReason::VaultLocked
@@ -1192,8 +1293,11 @@ impl Actor {
             return;
         }
         let host_id = record.summary.host_id.clone();
-        let version = record.host_state_version;
-        let policy = record.monitoring_policy.clone();
+        let Ok(snapshot) = self.hosts.get_connection_snapshot(&host_id) else {
+            return;
+        };
+        let version = snapshot.host.state_version;
+        let policy = snapshot.config.monitoring_policy.policy;
         if policy.enabled {
             let _ = self
                 .ensure_started(RequestId::new(), host_id, version, policy, true)
@@ -1229,22 +1333,203 @@ impl Actor {
         transition(record, MetricsSessionState::Ready, None, None);
     }
 
-    async fn shutdown_all(&mut self, request_id: RequestId) -> ActorResult<()> {
-        let tasks = self
-            .sessions
-            .iter_mut()
-            .filter_map(|(host_id, record)| {
-                take_record_task(record).map(|task| (host_id.clone(), task))
-            })
+    fn sample_failed(
+        &mut self,
+        host_id: &str,
+        generation: u64,
+        failure: WorkerFailure,
+        next_retry_at_unix_ms: i64,
+    ) {
+        let Some(record) = self.sessions.get_mut(host_id) else {
+            return;
+        };
+        if !is_current(record, generation) {
+            return;
+        }
+        mark_snapshot_stale(record);
+        transition(
+            record,
+            MetricsSessionState::Backoff,
+            None,
+            Some(failure.code),
+        );
+        record.summary.next_retry_at_unix_ms = Some(next_retry_at_unix_ms);
+    }
+
+    fn validate_trust(&mut self, host_id: &str, generation: u64) -> Result<(), WorkerFailure> {
+        let Some(record) = self.sessions.get(host_id) else {
+            return Err(WorkerFailure {
+                code: MetricsSessionFailureCode::ConnectionUnavailable,
+                recoverable: true,
+            });
+        };
+        if !is_current(record, generation) || record.observed_host_keys.is_empty() {
+            return Err(WorkerFailure {
+                code: MetricsSessionFailureCode::ConnectionUnavailable,
+                recoverable: true,
+            });
+        }
+        let keys = record
+            .observed_host_keys
+            .values()
+            .cloned()
             .collect::<Vec<_>>();
+        for (endpoint, observed) in keys {
+            let (reply, mut response) = oneshot::channel();
+            self.host_key_observed(host_id, generation, endpoint, observed, reply);
+            match response.try_recv() {
+                Ok(Ok(HostKeyDecision::Trusted)) => {}
+                Ok(Ok(HostKeyDecision::Mismatch { .. })) => {
+                    return Err(WorkerFailure {
+                        code: MetricsSessionFailureCode::HostKeyMismatch,
+                        recoverable: false,
+                    });
+                }
+                _ => {
+                    return Err(WorkerFailure {
+                        code: MetricsSessionFailureCode::ConnectionUnavailable,
+                        recoverable: false,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn connectivity_hint(&mut self) {
+        if self.shutting_down {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let now_unix_ms = unix_time_ms();
+        let mut retry = Vec::new();
+        for record in self.sessions.values_mut() {
+            if record
+                .summary
+                .latest_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| {
+                    now_unix_ms.saturating_sub(snapshot.sample_completed_at_unix_ms)
+                        > i64::from(record.monitoring_policy.sample_interval_millis)
+                            .saturating_mul(2)
+                })
+            {
+                mark_snapshot_stale(record);
+            }
+            if record
+                .last_connectivity_retry
+                .is_some_and(|last| now.duration_since(last) < Duration::from_secs(5))
+            {
+                continue;
+            }
+            if let Some(hints) = &record.connectivity_hints {
+                record.last_connectivity_retry = Some(now);
+                hints.send_modify(|sequence| *sequence = sequence.saturating_add(1));
+            } else if record.summary.state == MetricsSessionState::Backoff {
+                record.last_connectivity_retry = Some(now);
+                retry.push(record.summary.host_id.clone());
+            }
+        }
+        for host_id in retry {
+            let Ok(snapshot) = self.hosts.get_connection_snapshot(&host_id) else {
+                continue;
+            };
+            let policy = snapshot.config.monitoring_policy.policy;
+            if policy.enabled {
+                let _ = self
+                    .ensure_started(
+                        RequestId::new(),
+                        host_id,
+                        snapshot.host.state_version,
+                        policy,
+                        true,
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn vault_availability_changed(&mut self, availability: VaultAvailability) {
+        if self.shutting_down {
+            return;
+        }
+        let unlocked_now = self.vault.is_unlocked();
+        for record in self.sessions.values_mut() {
+            if record.has_vault_credentials
+                && record.task.is_some()
+                && (!unlocked_now
+                    || !availability.available
+                        && availability.epoch > record.vault_availability_epoch)
+            {
+                if !stop_record_and_wait(record).await {
+                    transition(
+                        record,
+                        MetricsSessionState::Failed,
+                        None,
+                        Some(MetricsSessionFailureCode::ConnectionUnavailable),
+                    );
+                    continue;
+                }
+                record.active_host_key_challenge = None;
+                record.summary.host_key_challenge = None;
+                mark_snapshot_stale(record);
+                transition(
+                    record,
+                    MetricsSessionState::NeedsAuthentication,
+                    Some(MetricsAuthenticationReason::VaultLocked),
+                    None,
+                );
+            }
+        }
+        if !unlocked_now {
+            return;
+        }
+        let pending = self
+            .sessions
+            .values()
+            .filter(|record| {
+                record.summary.state == MetricsSessionState::NeedsAuthentication
+                    && record.summary.authentication_reason
+                        == Some(MetricsAuthenticationReason::VaultLocked)
+            })
+            .map(|record| record.summary.host_id.clone())
+            .collect::<Vec<_>>();
+        for host_id in pending {
+            let Ok(snapshot) = self.hosts.get_connection_snapshot(&host_id) else {
+                continue;
+            };
+            let policy = snapshot.config.monitoring_policy.policy;
+            if policy.enabled {
+                let _ = self
+                    .ensure_started(
+                        RequestId::new(),
+                        host_id,
+                        snapshot.host.state_version,
+                        policy,
+                        true,
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn shutdown_all(&mut self, request_id: RequestId) -> ActorResult<()> {
+        self.shutting_down = true;
         let deadline = tokio::time::Instant::now() + WORKER_STOP_TIMEOUT;
+        for record in self.sessions.values() {
+            if let Some(stop) = &record.stop {
+                let _ = stop.send(true);
+            }
+        }
         let mut failed_hosts = BTreeSet::new();
-        for (host_id, task) in tasks {
-            if !wait_record_task_until(task, deadline).await {
-                failed_hosts.insert(host_id);
+        for (host_id, record) in &mut self.sessions {
+            if !stop_record_and_wait_until(record, deadline).await {
+                failed_hosts.insert(host_id.clone());
             }
         }
         for (host_id, record) in &mut self.sessions {
+            record.active_host_key_challenge = None;
+            record.summary.host_key_challenge = None;
             if failed_hosts.contains(host_id) {
                 transition(
                     record,
@@ -1257,8 +1542,10 @@ impl Actor {
             }
         }
         if failed_hosts.is_empty() {
+            self.shutting_down = false;
             Ok(())
         } else {
+            self.shutting_down = false;
             Err(unavailable_error(request_id))
         }
     }
@@ -1353,7 +1640,25 @@ impl Actor {
                 host_id,
                 generation,
                 failure,
-            } => self.worker_failed(&host_id, generation, failure),
+                cleanup_confirmed,
+            } => self.worker_failed(&host_id, generation, failure, cleanup_confirmed),
+            Message::SampleFailed {
+                host_id,
+                generation,
+                failure,
+                next_retry_at_unix_ms,
+            } => self.sample_failed(&host_id, generation, failure, next_retry_at_unix_ms),
+            Message::ValidateTrust {
+                host_id,
+                generation,
+                reply,
+            } => {
+                let _ = reply.send(self.validate_trust(&host_id, generation));
+            }
+            Message::ConnectivityHint => self.connectivity_hint().await,
+            Message::VaultAvailabilityChanged { availability } => {
+                self.vault_availability_changed(availability).await
+            }
             Message::RetryDue {
                 host_id,
                 generation,
@@ -1461,18 +1766,59 @@ async fn run_metrics_worker(
     identity: MetricsWorkerIdentity,
     runtime: MetricsProbeRuntime,
     policy_updates: watch::Receiver<MonitoringPolicy>,
+    mut connectivity_hints: watch::Receiver<u64>,
     mut stop: watch::Receiver<bool>,
-) {
+) -> bool {
     let started = tokio::time::Instant::now();
     let mut provider = LinuxMetricsProvider::new();
     let mut sample_sequence = 0_u64;
+    let mut sample_failures = 0_u32;
+    let mut transport = match connect_metrics_transport(&identity, &runtime, &mut stop).await {
+        MetricsConnectOutcome::Connected(transport) => transport,
+        MetricsConnectOutcome::Stopped => return true,
+        MetricsConnectOutcome::Failed(failure) => {
+            let _ = identity
+                .tx
+                .send(Message::WorkerFailed {
+                    host_id: identity.host_key,
+                    generation: identity.generation,
+                    failure,
+                    cleanup_confirmed: true,
+                })
+                .await;
+            return true;
+        }
+    };
     loop {
+        if connection_requires_vault(&runtime.connection) && !runtime.vault.is_unlocked() {
+            let disconnected = close_metrics_transport(transport).await;
+            let _ = identity
+                .tx
+                .send(Message::WorkerFailed {
+                    host_id: identity.host_key,
+                    generation: identity.generation,
+                    failure: if disconnected {
+                        WorkerFailure {
+                            code: MetricsSessionFailureCode::AuthenticationRejected,
+                            recoverable: false,
+                        }
+                    } else {
+                        WorkerFailure {
+                            code: MetricsSessionFailureCode::ConnectionUnavailable,
+                            recoverable: false,
+                        }
+                    },
+                    cleanup_confirmed: disconnected,
+                })
+                .await;
+            return disconnected;
+        }
         let cycle_started = tokio::time::Instant::now();
         let policy = policy_updates.borrow().clone();
         let sample_started_at_unix_ms = unix_time_ms();
         let sample = match run_metrics_probe(
             &identity,
-            &runtime,
+            &mut transport,
             &policy,
             &mut provider,
             started,
@@ -1480,18 +1826,66 @@ async fn run_metrics_worker(
         )
         .await
         {
-            MetricsProbeOutcome::Sample(sample) => sample,
-            MetricsProbeOutcome::Stopped => return,
+            MetricsProbeOutcome::Sample(sample) => {
+                sample_failures = 0;
+                sample
+            }
+            MetricsProbeOutcome::Stopped => {
+                return close_metrics_transport(transport).await;
+            }
             MetricsProbeOutcome::Failed(failure) => {
+                if failure.recoverable
+                    && matches!(
+                        failure.code,
+                        MetricsSessionFailureCode::PermissionDenied
+                            | MetricsSessionFailureCode::MalformedOutput
+                    )
+                {
+                    sample_failures = sample_failures.saturating_add(1);
+                    let delay = backoff_delay(sample_failures, policy.sample_interval_millis);
+                    let next_retry_at_unix_ms = unix_time_ms()
+                        .saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX));
+                    if identity
+                        .tx
+                        .send(Message::SampleFailed {
+                            host_id: identity.host_key.clone(),
+                            generation: identity.generation,
+                            failure,
+                            next_retry_at_unix_ms,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return close_metrics_transport(transport).await;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = wait_for_stop(&mut stop) => {
+                            return close_metrics_transport(transport).await;
+                        },
+                        _ = tokio::time::sleep(delay) => {},
+                        _ = connectivity_hints.changed() => {},
+                    }
+                    continue;
+                }
+                let disconnected = close_metrics_transport(transport).await;
                 let _ = identity
                     .tx
                     .send(Message::WorkerFailed {
                         host_id: identity.host_key,
                         generation: identity.generation,
-                        failure,
+                        failure: if disconnected {
+                            failure
+                        } else {
+                            WorkerFailure {
+                                code: MetricsSessionFailureCode::ConnectionUnavailable,
+                                recoverable: false,
+                            }
+                        },
+                        cleanup_confirmed: disconnected,
                     })
                     .await;
-                return;
+                return disconnected;
             }
         };
         sample_sequence = sample_sequence.saturating_add(1);
@@ -1514,15 +1908,27 @@ async fn run_metrics_worker(
             .await
             .is_err()
         {
-            return;
+            return close_metrics_transport(transport).await;
         }
         let interval = Duration::from_millis(u64::from(policy.sample_interval_millis));
         let next_due = cycle_started + interval;
         tokio::select! {
             biased;
-            _ = wait_for_stop(&mut stop) => return,
-            _ = tokio::time::sleep_until(next_due) => {}
+            _ = wait_for_stop(&mut stop) => {
+                return close_metrics_transport(transport).await;
+            },
+            _ = tokio::time::sleep_until(next_due) => {},
+            _ = connectivity_hints.changed() => {},
         }
+    }
+}
+
+async fn close_metrics_transport(mut transport: MetricsExecTransport) -> bool {
+    loop {
+        if transport.disconnect_retryable().await.is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -1658,13 +2064,17 @@ fn map_connection_failure(error: TransportError) -> WorkerFailure {
             code: MetricsSessionFailureCode::ConnectionUnavailable,
             recoverable: false,
         },
+        TransportError::AuthenticationTimeout | TransportError::SshAgentUnavailable => {
+            WorkerFailure {
+                code: MetricsSessionFailureCode::ConnectionUnavailable,
+                recoverable: true,
+            }
+        }
         TransportError::AuthenticationRejected
         | TransportError::AuthenticationIncomplete
         | TransportError::InvalidKeyboardInteractiveResponse
-        | TransportError::AuthenticationTimeout
         | TransportError::InvalidPrivateKey
         | TransportError::SshAgentKeyUnavailable
-        | TransportError::SshAgentUnavailable
         | TransportError::InsecureRsaSignatureOnly => WorkerFailure {
             code: MetricsSessionFailureCode::AuthenticationRejected,
             recoverable: false,
@@ -1715,15 +2125,20 @@ fn new_record(
         profile_revision_token: None,
         connection_revision_token: None,
         has_vault_credentials: false,
+        vault_availability_epoch: 0,
+        cleanup_uncertain: false,
         monitoring_policy,
         route_stages: BTreeMap::new(),
+        observed_host_keys: BTreeMap::new(),
         task: None,
         stop: None,
         policy_updates: None,
+        connectivity_hints: None,
         active_host_key_challenge: None,
         active_keyboard_challenge: None,
         prepared_answers: BTreeMap::new(),
         consecutive_failures: 0,
+        last_connectivity_retry: None,
     }
 }
 
@@ -1747,26 +2162,45 @@ fn take_record_task(record: &mut SessionRecord) -> Option<ConnectTask> {
     }
     let task = record.task.take();
     record.policy_updates = None;
+    record.connectivity_hints = None;
     clear_keyboard_challenge(record, TransportError::AuthenticationRejected);
     record.prepared_answers.clear();
     task
 }
 
 async fn stop_record_and_wait(record: &mut SessionRecord) -> bool {
-    let Some(task) = take_record_task(record) else {
-        return true;
-    };
-    wait_record_task_until(task, tokio::time::Instant::now() + WORKER_STOP_TIMEOUT).await
+    stop_record_and_wait_until(record, tokio::time::Instant::now() + WORKER_STOP_TIMEOUT).await
 }
 
-async fn wait_record_task_until(task: ConnectTask, deadline: tokio::time::Instant) -> bool {
-    let mut handle = task.handle;
-    match tokio::time::timeout_at(deadline, &mut handle).await {
-        Ok(Ok(())) => true,
-        Ok(Err(_)) => false,
+async fn stop_record_and_wait_until(
+    record: &mut SessionRecord,
+    deadline: tokio::time::Instant,
+) -> bool {
+    if let Some(stop) = &record.stop {
+        let _ = stop.send(true);
+    }
+    record.policy_updates = None;
+    record.connectivity_hints = None;
+    clear_keyboard_challenge(record, TransportError::AuthenticationRejected);
+    let Some(task) = record.task.as_mut() else {
+        return !record.cleanup_uncertain;
+    };
+    match tokio::time::timeout_at(deadline, &mut task.handle).await {
+        Ok(Ok(disconnected)) => {
+            record.task = None;
+            record.stop = None;
+            record.cleanup_uncertain = !disconnected;
+            disconnected
+        }
+        Ok(Err(_)) => {
+            record.task = None;
+            record.stop = None;
+            record.cleanup_uncertain = true;
+            false
+        }
         Err(_) => {
-            handle.abort();
-            let _ = handle.await;
+            // Keep the worker and its SSH handle for a later bounded cleanup attempt.
+            record.cleanup_uncertain = true;
             false
         }
     }
@@ -1981,15 +2415,17 @@ mod tests {
     use norishell_ssh_domain::Endpoint;
     use norishell_ssh_transport::{
         HostKeyDecision, KeyboardInteractiveChallenge, KeyboardInteractivePrompt, ObservedHostKey,
+        TransportError,
     };
     use tempfile::TempDir;
     use tokio::sync::{mpsc, oneshot, watch};
 
     use super::{
         Actor, ConnectTask, KEYBOARD_INTERACTIVE_ANSWER_MAX_BYTES, KeyboardInteractiveRequest,
-        MAX_BACKOFF_SECONDS, WorkerFailure, backoff_delay, generation_matches, mark_snapshot_stale,
-        metric_snapshot_from, new_record, paused_host_key_now_trusted,
-        paused_session_can_be_reused, validate_supported_selection, wait_for_stop,
+        MAX_BACKOFF_SECONDS, WORKER_STOP_TIMEOUT, WorkerFailure, backoff_delay, generation_matches,
+        map_connection_failure, mark_snapshot_stale, metric_snapshot_from, new_record,
+        paused_host_key_now_trusted, paused_session_can_be_reused, validate_supported_selection,
+        wait_for_stop,
     };
     use crate::{
         host_service::HostService, ssh_agent_service::SshAgentService,
@@ -2004,6 +2440,27 @@ mod tests {
             disk_mount_ids: vec![DiskResourceId::Root],
             network_interface_ids: vec![NetworkResourceId::AggregateNonLoopback],
         }
+    }
+
+    #[test]
+    fn interrupted_authentication_can_retry_but_server_rejection_stops() {
+        let lost = map_connection_failure(TransportError::Protocol);
+        assert!(lost.recoverable);
+        assert_eq!(lost.code, MetricsSessionFailureCode::ConnectionUnavailable);
+
+        let agent_unavailable = map_connection_failure(TransportError::SshAgentUnavailable);
+        assert!(agent_unavailable.recoverable);
+        assert_eq!(
+            agent_unavailable.code,
+            MetricsSessionFailureCode::ConnectionUnavailable
+        );
+
+        let rejected = map_connection_failure(TransportError::AuthenticationRejected);
+        assert!(!rejected.recoverable);
+        assert_eq!(
+            rejected.code,
+            MetricsSessionFailureCode::AuthenticationRejected
+        );
     }
 
     fn available_sample() -> LinuxMetricSample {
@@ -2057,6 +2514,7 @@ mod tests {
             generation: 1,
             handle: tauri::async_runtime::spawn(async move {
                 wait_for_stop(&mut stop_rx).await;
+                true
             }),
         });
         actor.sessions.insert(host_id.as_str().to_owned(), record);
@@ -2120,6 +2578,7 @@ mod tests {
             handle: tauri::async_runtime::spawn(async move {
                 let _probe = probe;
                 wait_for_stop(&mut stop_rx).await;
+                true
             }),
         });
         actor.sessions.insert(host_id.as_str().to_owned(), record);
@@ -2331,6 +2790,7 @@ mod tests {
                 code: MetricsSessionFailureCode::AuthenticationRejected,
                 recoverable: false,
             },
+            true,
         );
 
         let record = &actor.sessions[host_id.as_str()];
@@ -2348,7 +2808,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_probes_check_current_trust_without_updating_known_hosts() {
+    async fn persistent_metrics_transport_rechecks_trust_without_metadata_writes() {
         let (_directory, mut actor) = actor();
         let host_id = HostId::new();
         install_active_record(&mut actor, host_id.clone());
@@ -2386,6 +2846,9 @@ mod tests {
             after.last_verified_at_unix_ms,
             trusted.last_verified_at_unix_ms
         );
+        actor
+            .validate_trust(host_id.as_str(), 1)
+            .expect("trusted transport may sample");
 
         actor
             .hosts
@@ -2393,22 +2856,118 @@ mod tests {
                 repository.delete_known_host(&trusted.known_host_id, trusted.state_version)
             })
             .expect("revoke trust");
-        let (decision, response) = oneshot::channel();
-        actor.host_key_observed(
+        assert!(actor.validate_trust(host_id.as_str(), 1).is_err());
+        assert_eq!(
+            actor.sessions[host_id.as_str()].summary.state,
+            MetricsSessionState::NeedsHostKeyReview
+        );
+    }
+
+    #[tokio::test]
+    async fn wake_hint_marks_old_sample_stale_and_wakes_existing_worker() {
+        let (_directory, mut actor) = actor();
+        let host_id = HostId::new();
+        install_active_record(&mut actor, host_id.clone());
+        let (hints, mut hint_rx) = watch::channel(0_u64);
+        let record = actor.sessions.get_mut(host_id.as_str()).expect("record");
+        record.connectivity_hints = Some(hints);
+        record.summary.latest_snapshot = Some(metric_snapshot_from(
+            host_id.clone(),
+            record.summary.metrics_session_id.clone(),
+            1,
+            1,
+            1,
+            2,
+            available_sample(),
+        ));
+
+        actor.connectivity_hint().await;
+
+        assert!(hint_rx.changed().await.is_ok());
+        assert_eq!(*hint_rx.borrow(), 1);
+        assert!(
+            actor.sessions[host_id.as_str()]
+                .summary
+                .latest_snapshot
+                .as_ref()
+                .is_some_and(|sample| sample.stale)
+        );
+        assert!(actor.sessions[host_id.as_str()].task.is_some());
+        actor.shutdown_all(RequestId::new()).await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn delayed_lock_event_closes_transport_after_fast_reunlock() {
+        let (_directory, mut actor) = actor();
+        let password = b"correct horse battery staple";
+        actor.vault.create(password).expect("create Vault");
+        let host_id = HostId::new();
+        install_active_record(&mut actor, host_id.clone());
+        let record = actor.sessions.get_mut(host_id.as_str()).expect("record");
+        record.has_vault_credentials = true;
+        record.vault_availability_epoch = actor
+            .vault
+            .with_vault_availability(|availability, _| availability.epoch);
+
+        actor.vault.lock_for_tests().expect("lock Vault");
+        let locked = actor
+            .vault
+            .with_vault_availability(|availability, _| availability);
+        actor
+            .vault
+            .unlock_for_protected_operation(password)
+            .expect("unlock before actor handles lock event");
+        assert!(actor.vault.is_unlocked());
+
+        actor.vault_availability_changed(locked).await;
+
+        let record = &actor.sessions[host_id.as_str()];
+        assert!(record.task.is_none());
+        assert_eq!(
+            record.summary.state,
+            MetricsSessionState::NeedsAuthentication
+        );
+        assert_eq!(
+            record.summary.authentication_reason,
+            Some(super::MetricsAuthenticationReason::VaultLocked)
+        );
+    }
+
+    #[tokio::test]
+    async fn authentication_failure_from_an_old_vault_epoch_retries_after_reunlock() {
+        let (_directory, mut actor) = actor();
+        let password = b"correct horse battery staple";
+        actor.vault.create(password).expect("create Vault");
+        let host_id = HostId::new();
+        install_active_record(&mut actor, host_id.clone());
+        let record = actor.sessions.get_mut(host_id.as_str()).expect("record");
+        record.has_vault_credentials = true;
+        record.vault_availability_epoch = actor
+            .vault
+            .with_vault_availability(|availability, _| availability.epoch);
+
+        actor.vault.lock_for_tests().expect("lock Vault");
+        actor
+            .vault
+            .unlock_for_protected_operation(password)
+            .expect("unlock before the old failure arrives");
+        actor.worker_failed(
             host_id.as_str(),
             1,
-            Endpoint::parse("metrics.example", 22).expect("endpoint"),
-            ObservedHostKey {
-                algorithm: "ssh-ed25519".to_owned(),
-                public_key_blob: vec![1, 2, 3],
-                fingerprint_sha256: "SHA256:test".to_owned(),
+            WorkerFailure {
+                code: MetricsSessionFailureCode::AuthenticationRejected,
+                recoverable: false,
             },
-            decision,
+            true,
         );
-        assert!(matches!(
-            response.await.expect("decision"),
-            Ok(HostKeyDecision::Rejected)
-        ));
+
+        let record = &actor.sessions[host_id.as_str()];
+        assert_eq!(record.summary.state, MetricsSessionState::Backoff);
+        assert_eq!(
+            record.summary.failure_code,
+            Some(MetricsSessionFailureCode::ConnectionUnavailable)
+        );
+        assert!(record.summary.next_retry_at_unix_ms.is_some());
     }
 
     #[tokio::test]
@@ -2661,5 +3220,61 @@ mod tests {
             assert!(record.task.is_none());
             assert!(record.stop.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_failed_when_worker_cannot_confirm_disconnect() {
+        let (_directory, mut actor) = actor();
+        let host_id = HostId::new();
+        let mut record = new_record(host_id.clone(), WireSequence::new(1), policy(true));
+        record.summary.generation = WireSequence::new(1);
+        let (stop, mut stop_rx) = watch::channel(false);
+        record.stop = Some(stop);
+        record.task = Some(ConnectTask {
+            generation: 1,
+            handle: tauri::async_runtime::spawn(async move {
+                wait_for_stop(&mut stop_rx).await;
+                false
+            }),
+        });
+        actor.sessions.insert(host_id.as_str().to_owned(), record);
+
+        assert!(actor.shutdown_all(RequestId::new()).await.is_err());
+        assert_eq!(
+            actor.sessions[host_id.as_str()].summary.state,
+            MetricsSessionState::Failed
+        );
+        assert!(actor.shutdown_all(RequestId::new()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_can_retry_a_worker_that_outlives_first_cleanup_deadline() {
+        let (_directory, mut actor) = actor();
+        let host_id = HostId::new();
+        let mut record = new_record(host_id.clone(), WireSequence::new(1), policy(true));
+        record.summary.generation = WireSequence::new(1);
+        let (stop, mut stop_rx) = watch::channel(false);
+        record.stop = Some(stop);
+        record.task = Some(ConnectTask {
+            generation: 1,
+            handle: tauri::async_runtime::spawn(async move {
+                wait_for_stop(&mut stop_rx).await;
+                tokio::time::sleep(WORKER_STOP_TIMEOUT + Duration::from_millis(100)).await;
+                true
+            }),
+        });
+        actor.sessions.insert(host_id.as_str().to_owned(), record);
+
+        assert!(actor.shutdown_all(RequestId::new()).await.is_err());
+        assert!(actor.sessions[host_id.as_str()].task.is_some());
+        actor
+            .shutdown_all(RequestId::new())
+            .await
+            .expect("repeat shutdown observes completed cleanup");
+        assert!(actor.sessions[host_id.as_str()].task.is_none());
+        assert_eq!(
+            actor.sessions[host_id.as_str()].summary.state,
+            MetricsSessionState::Closed
+        );
     }
 }

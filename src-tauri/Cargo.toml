@@ -85,7 +85,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger"] }
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain", "protected"] }
 keyring-core = "1.0.0"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSButton", "NSControl", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSButton", "NSControl", "NSView", "NSWindow", "NSWorkspace"] }
 
 [target.'cfg(windows)'.dependencies]
 cap-fs-ext.workspace = true
@@ -93,12 +93,16 @@ windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "UI_No
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
   "Win32_Storage_FileSystem",
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_System_Console",
   "Win32_System_JobObjects",
   "Win32_System_Pipes",
+  "Win32_System_Power",
   "Win32_System_Threading",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

@@ -23,6 +23,7 @@ const availability = ref<DesktopAvailability[]>([]);
 const profiles = ref<DesktopProfile[]>([]), sessions = ref<DesktopSessionSummary[]>([]);
 const activeId = ref(""), active = ref(true), loading = ref(true), busy = ref(false), failed = ref(false), deleteTarget = ref<DesktopProfile | null>(null), fit = ref(true), panning = ref(false);
 const failureText = ref("");
+let failureSource: "load" | "snapshot" | null = null;
 const sidebarCollapsed = ref(false), fullscreen = ref(false), fullscreenBusy = ref(false);
 const fullscreenTarget = ref<HTMLElement | null>(null);
 const fullscreenButton = ref<InstanceType<typeof NvxIconButton> | null>(null);
@@ -126,21 +127,39 @@ function noticeFailure(error: unknown) {
     message: failure?.diagnosticId ? t("diagnostics.id", { id: failure.diagnosticId }) : undefined,
   });
 }
-function pageFailure(error: unknown) {
+function pageFailure(error: unknown, source: "load" | "snapshot") {
+  if (source === "snapshot" && failureSource === "load") return;
   const failure = parseCoreApiError(error);
   const key = failure?.messageKey;
   failureText.value = (key && te(key) ? t(key) : t("desktop.error"))
     + (failure?.diagnosticId ? ` ${t("diagnostics.id", { id: failure.diagnosticId })}` : "");
   failed.value = true;
+  failureSource = source;
 }
 async function refresh() {
   if (snapshotBusy || disposed) return;
   snapshotBusy = true;
-  try { const result = await desktopClient.snapshot(); if (!disposed) { sessions.value = result; if (!result.some((item) => item.id === activeId.value)) activeId.value = result[0]?.id ?? ""; } }
-  catch (error) { pageFailure(error); }
+  try {
+    const result = await desktopClient.snapshot();
+    if (!disposed) {
+      sessions.value = result;
+      if (!result.some((item) => item.id === activeId.value)) activeId.value = result[0]?.id ?? "";
+      if (failureSource === "snapshot") {
+        failed.value = false;
+        failureText.value = "";
+        failureSource = null;
+      }
+    }
+  }
+  catch (error) { pageFailure(error, "snapshot"); }
   finally { snapshotBusy = false; }
 }
-async function poll() { if (disposed) return; if (active.value && !document.hidden) await refresh(); if (!disposed) timer = setTimeout(() => void poll(), 750); }
+async function poll() {
+  if (disposed) return;
+  const visible = active.value && !document.hidden;
+  if (visible) await refresh();
+  if (!disposed) timer = setTimeout(() => void poll(), visible && sessions.value.some(item => ["connecting", "needsInteraction", "disconnecting"].includes(item.state)) ? 250 : 750);
+}
 let profilesSequence = 0;
 async function refreshProfiles() {
   const sequence = ++profilesSequence;
@@ -152,9 +171,9 @@ async function refreshProfiles() {
   }
 }
 async function load() {
-  loading.value = true; failed.value = false; failureText.value = "";
+  loading.value = true; failed.value = false; failureText.value = ""; failureSource = null;
   try { const [, available] = await Promise.all([refreshProfiles(), desktopClient.availability()]); availability.value = available; await refresh(); }
-  catch (error) { pageFailure(error); }
+  catch (error) { pageFailure(error, "load"); }
   finally { loading.value = false; }
 }
 async function edit(profile?: DesktopProfile) {

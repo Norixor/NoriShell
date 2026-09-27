@@ -7,11 +7,12 @@ use norishell_server_metrics::{
     MetricUnavailableReason, MetricValue,
 };
 use norishell_ssh_transport::RemoteExecTransport;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, oneshot, watch};
 
 use super::{
-    ActorMetricsHostKeyVerifier, ActorMetricsInteraction, MetricsWorkerIdentity, WorkerFailure,
-    map_connection_failure, map_exec_failure, map_parse_failure, send_worker_state, wait_for_stop,
+    ActorMetricsHostKeyVerifier, ActorMetricsInteraction, Message, MetricsWorkerIdentity,
+    WorkerFailure, map_connection_failure, map_exec_failure, map_parse_failure, send_worker_state,
+    wait_for_stop,
 };
 use crate::{
     connection_profile::ResolvedSshConnectionBase, ssh_agent_service::SshAgentService,
@@ -19,7 +20,7 @@ use crate::{
     transient_credential_service::TransientCredentialService, vault_service::VaultService,
 };
 
-type MetricsExecTransport = RemoteExecTransport<ActorMetricsHostKeyVerifier>;
+pub(super) type MetricsExecTransport = RemoteExecTransport<ActorMetricsHostKeyVerifier>;
 
 const INITIAL_CPU_WINDOW: Duration = Duration::from_millis(250);
 
@@ -37,23 +38,24 @@ pub(super) enum MetricsProbeOutcome {
     Failed(WorkerFailure),
 }
 
-/// Runs exactly one bounded metrics probe. Once authentication succeeds, every
-/// success, failure, and cooperative-cancellation path converges on an explicit
-/// transport disconnect before returning to the scheduler.
-pub(super) async fn run_metrics_probe(
+pub(super) enum MetricsConnectOutcome {
+    Connected(MetricsExecTransport),
+    Stopped,
+    Failed(WorkerFailure),
+}
+
+/// The permit limits simultaneous handshakes, not the number of monitored hosts.
+pub(super) async fn connect_metrics_transport(
     identity: &MetricsWorkerIdentity,
     runtime: &MetricsProbeRuntime,
-    policy: &MonitoringPolicy,
-    provider: &mut LinuxMetricsProvider,
-    started: tokio::time::Instant,
     stop: &mut watch::Receiver<bool>,
-) -> MetricsProbeOutcome {
+) -> MetricsConnectOutcome {
     let _permit = tokio::select! {
         biased;
-        _ = wait_for_stop(stop) => return MetricsProbeOutcome::Stopped,
+        _ = wait_for_stop(stop) => return MetricsConnectOutcome::Stopped,
         permit = runtime.connect_limit.clone().acquire_owned() => match permit {
             Ok(permit) => permit,
-            Err(_) => return MetricsProbeOutcome::Failed(WorkerFailure {
+            Err(_) => return MetricsConnectOutcome::Failed(WorkerFailure {
                 code: MetricsSessionFailureCode::ConnectionUnavailable,
                 recoverable: true,
             }),
@@ -76,7 +78,7 @@ pub(super) async fn run_metrics_probe(
     );
     let connection = tokio::select! {
         biased;
-        _ = wait_for_stop(stop) => return MetricsProbeOutcome::Stopped,
+        _ = wait_for_stop(stop) => return MetricsConnectOutcome::Stopped,
         connection = orchestrator.connect(
             runtime.connection.clone(),
             verifier,
@@ -86,16 +88,28 @@ pub(super) async fn run_metrics_probe(
             match connection {
                 Ok(connection) => connection,
                 Err(failure) => {
-                    return MetricsProbeOutcome::Failed(map_connection_failure(failure.error));
+                    return MetricsConnectOutcome::Failed(map_connection_failure(failure.error));
                 }
             }
         }
     };
-    let mut transport = connection.transport.into_exec_transport();
+    MetricsConnectOutcome::Connected(connection.transport.into_exec_transport())
+}
+
+/// One fixed-command sample opens and closes exec channels on the worker's SSH transport.
+pub(super) async fn run_metrics_probe(
+    identity: &MetricsWorkerIdentity,
+    transport: &mut MetricsExecTransport,
+    policy: &MonitoringPolicy,
+    provider: &mut LinuxMetricsProvider,
+    started: tokio::time::Instant,
+    stop: &mut watch::Receiver<bool>,
+) -> MetricsProbeOutcome {
     let result = tokio::select! {
         biased;
         _ = wait_for_stop(stop) => None,
         result = async {
+            validate_current_trust(identity).await?;
             send_worker_state(
                 &identity.tx,
                 &identity.host_key,
@@ -120,19 +134,18 @@ pub(super) async fn run_metrics_probe(
             })?;
             let deadline = tokio::time::Instant::now()
                 + Duration::from_millis(u64::from(policy.sample_timeout_millis));
-            collect_linux_sample(&mut transport, policy, provider, started, deadline).await
+            collect_linux_sample(identity, transport, policy, provider, started, deadline).await
         } => Some(result),
     };
-    let cleanup = transport.disconnect().await.map_err(map_exec_failure);
-    match (result, cleanup) {
-        (None, _) => MetricsProbeOutcome::Stopped,
-        (Some(Err(failure)), _) => MetricsProbeOutcome::Failed(failure),
-        (Some(Ok(_)), Err(failure)) => MetricsProbeOutcome::Failed(failure),
-        (Some(Ok(sample)), Ok(())) => MetricsProbeOutcome::Sample(sample),
+    match result {
+        None => MetricsProbeOutcome::Stopped,
+        Some(Err(failure)) => MetricsProbeOutcome::Failed(failure),
+        Some(Ok(sample)) => MetricsProbeOutcome::Sample(sample),
     }
 }
 
 async fn collect_linux_sample(
+    identity: &MetricsWorkerIdentity,
     transport: &mut MetricsExecTransport,
     policy: &MonitoringPolicy,
     provider: &mut LinuxMetricsProvider,
@@ -179,6 +192,7 @@ async fn collect_linux_sample(
         MetricValue::Unavailable(MetricUnavailableReason::InitialBaseline)
     ) {
         tokio::time::sleep(INITIAL_CPU_WINDOW).await;
+        validate_current_trust(identity).await?;
         let follow_up = transport
             .execute_capture(
                 LINUX_CPU_FOLLOW_UP_COMMAND,
@@ -198,6 +212,26 @@ async fn collect_linux_sample(
             .map_err(map_parse_failure)?;
     }
     Ok(sample)
+}
+
+async fn validate_current_trust(identity: &MetricsWorkerIdentity) -> Result<(), WorkerFailure> {
+    let (reply, response) = oneshot::channel();
+    identity
+        .tx
+        .send(Message::ValidateTrust {
+            host_id: identity.host_key.clone(),
+            generation: identity.generation,
+            reply,
+        })
+        .await
+        .map_err(|_| WorkerFailure {
+            code: MetricsSessionFailureCode::ConnectionUnavailable,
+            recoverable: true,
+        })?;
+    response.await.unwrap_or(Err(WorkerFailure {
+        code: MetricsSessionFailureCode::ConnectionUnavailable,
+        recoverable: true,
+    }))
 }
 
 struct LinuxProbeOutput<'a> {

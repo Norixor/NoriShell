@@ -9,9 +9,11 @@ withDefaults(defineProps<{
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
   canSplitWorkspaceRight: boolean;
+  canClose?: boolean;
   showLayoutActions: boolean;
+  showPluginSlot?: boolean;
   pluginContextKey?: string;
-}>(), { pluginContextKey: "global-terminal" });
+}>(), { canClose: true, showPluginSlot: true, pluginContextKey: "global-terminal" });
 
 const emit = defineEmits<{
   split: [direction: "horizontal" | "vertical"];
@@ -25,6 +27,7 @@ const { t } = useI18n();
 <template>
   <div class="terminal-pane-controls">
     <NvxPluginContributionSlot
+      v-if="showPluginSlot"
       extension-slot="terminalToolbar"
       toolbar-menu
       :instance-key="pluginContextKey"
@@ -88,6 +91,7 @@ const { t } = useI18n();
         class="terminal-pane-controls__close"
         size="sm"
         :label="t('sshTerminal.closePane')"
+        :disabled="!canClose"
         @click="emit('close')"
       >
         <NvxIcon

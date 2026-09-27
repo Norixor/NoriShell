@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18n } from "../../locales";
 import { useShortcutsStore } from "../../stores/shortcuts";
+import { useUiStore } from "../../stores/ui";
 import { type TerminalHeaderController, useWorkspaceTabsStore } from "../../stores/workspaceTabs";
 import { NvxPluginExtensionTarget } from "../plugins";
 import NvxWorkspaceTabBar from "./NvxWorkspaceTabBar.vue";
@@ -19,6 +20,7 @@ function routerForTests() {
     history: createMemoryHistory(),
     routes: [
       { path: "/terminal", component: { template: "<div />" } },
+      { path: "/new", component: { template: "<div />" } },
       { path: "/desktop", component: { template: "<div />" } },
       { path: "/sftp", component: { template: "<div />" } },
       { path: "/settings", component: { template: "<div />" } },
@@ -74,6 +76,7 @@ function terminalControllerStub(overrides: Partial<TerminalHeaderController> = {
     focusLocalSession: vi.fn(() => true),
     deactivate: vi.fn(),
     toggleQuickCommands: vi.fn(),
+    runShortcut: vi.fn(),
     focusTelnetSession: vi.fn(() => true),
     ...overrides,
   } satisfies TerminalHeaderController;
@@ -212,6 +215,7 @@ describe("NvxWorkspaceTabBar", () => {
     await router.push("/settings");
     await router.isReady();
     const workspaceTabs = useWorkspaceTabsStore();
+    useUiStore().newTerminalBehavior = "terminalWelcome";
     const wrapper = mount(NvxWorkspaceTabBar, {
       global: { plugins: [pinia, router, i18n] },
     });
@@ -224,6 +228,83 @@ describe("NvxWorkspaceTabBar", () => {
     workspaceTabs.registerTerminalController(terminalControllerStub({ create }));
     expect(create).toHaveBeenCalledOnce();
     wrapper.unmount();
+  });
+
+  it("opens the independent new page by default and keeps SFTP welcome without a File tab", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = routerForTests();
+    await router.push("/terminal");
+    await router.isReady();
+    const workspaceTabs = useWorkspaceTabsStore();
+    const ui = useUiStore();
+    ui.newTerminalBehavior = "welcome";
+    const terminal = terminalControllerStub();
+    workspaceTabs.registerTerminalController(terminal);
+    const wrapper = mount(NvxWorkspaceTabBar, {
+      global: { plugins: [pinia, router, i18n] },
+    });
+    try {
+      await wrapper.get(".nvx-terminal-tab-bar__create").trigger("click");
+      await flushPromises();
+      expect(router.currentRoute.value.path).toBe("/new");
+      expect(wrapper.text()).toContain("新建页面");
+      expect(terminal.create).not.toHaveBeenCalled();
+
+      ui.newTerminalBehavior = "sftpWelcome";
+      await wrapper.get(".nvx-terminal-tab-bar__create").trigger("click");
+      await flushPromises();
+      expect(router.currentRoute.value.path).toBe("/sftp");
+      expect(workspaceTabs.fileTabs).toHaveLength(0);
+      expect(workspaceTabs.activeFileTabId).toBe("");
+      expect(terminal.create).not.toHaveBeenCalled();
+    } finally { wrapper.unmount(); }
+  });
+
+  it("includes File tabs in the numbered order and routes pane shortcuts to the active File workspace", async () => {
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+    const { wrapper, router, terminal } = await mountMixedWorkspaceTabs();
+    const workspaceTabs = useWorkspaceTabsStore();
+    const groupId = workspaceTabs.createFileTab("local");
+    const requestClose = vi.fn(async () => true);
+    const runShortcut = vi.fn();
+    workspaceTabs.registerFileController(groupId, { requestClose, runShortcut });
+    try {
+      await flushPromises();
+      expect(wrapper.findAll("[role='tab']")).toHaveLength(4);
+      const switchToFile = new KeyboardEvent("keydown", { code: "Digit2", metaKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(switchToFile);
+      await flushPromises();
+      expect(switchToFile.defaultPrevented).toBe(true);
+      expect(router.currentRoute.value.path).toBe("/sftp");
+      expect(workspaceTabs.activeFileTabId).toBe(groupId);
+
+      const split = new KeyboardEvent("keydown", { code: "KeyD", metaKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(split);
+      expect(split.defaultPrevented).toBe(true);
+      expect(runShortcut).toHaveBeenCalledWith("terminal.split-right");
+      expect(terminal.runShortcut).not.toHaveBeenCalled();
+
+      const close = new KeyboardEvent("keydown", { code: "KeyW", metaKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(close);
+      await flushPromises();
+      expect(requestClose).toHaveBeenCalledOnce();
+      expect(terminal.close).not.toHaveBeenCalled();
+    } finally { wrapper.unmount(); }
+  });
+
+  it("shows the current Pane count on File tabs", async () => {
+    const { wrapper } = await mountMixedWorkspaceTabs();
+    const workspaceTabs = useWorkspaceTabsStore();
+    const groupId = workspaceTabs.createFileTab("remote");
+    try {
+      await flushPromises();
+      expect(wrapper.text()).toContain("SFTP 文件");
+      expect(wrapper.text()).toContain("文件工作区 · 2 个 Pane");
+      workspaceTabs.syncFilePaneCount(groupId, 3);
+      await flushPromises();
+      expect(wrapper.text()).toContain("文件工作区 · 3 个 Pane");
+    } finally { wrapper.unmount(); }
   });
 
   it.each([
@@ -241,6 +322,7 @@ describe("NvxWorkspaceTabBar", () => {
     await router.push("/terminal");
     await router.isReady();
     const workspaceTabs = useWorkspaceTabsStore();
+    useUiStore().newTerminalBehavior = "terminalWelcome";
     const controller = terminalControllerStub();
     workspaceTabs.registerTerminalController(controller);
     workspaceTabs.syncTerminalState({

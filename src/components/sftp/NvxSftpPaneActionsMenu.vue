@@ -31,6 +31,7 @@ const emit = defineEmits<{
   toggleFoldersFirst: [];
   split: [direction: "horizontal" | "vertical"];
   addRemote: [];
+  addLocal: [];
   close: [];
 }>();
 
@@ -55,6 +56,10 @@ function runSplit(direction: "horizontal" | "vertical") {
 
 function addRemote() {
   emit("addRemote");
+  closeMenu(true);
+}
+function addLocal() {
+  emit("addLocal");
   closeMenu(true);
 }
 
@@ -146,7 +151,18 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
           />{{ t("sftp.changeLocalFolder") }}
         </button>
         <button
-          v-if="kind === 'local'"
+          class="sftp-pane-actions-menu__item"
+          type="button"
+          role="menuitem"
+          :disabled="pending || (!canSplitHorizontal && !canSplitVertical)"
+          @click="addLocal"
+        >
+          <NvxIcon
+            :icon="FolderOpen"
+            :size="16"
+          />{{ t("fileWorkspace.addLocalPane") }}
+        </button>
+        <button
           class="sftp-pane-actions-menu__item"
           type="button"
           role="menuitem"
@@ -158,7 +174,7 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
             :size="16"
           />{{ t("sftp.addRemotePane") }}
         </button>
-        <template v-else>
+        <template v-if="kind === 'remote'">
           <button
             class="sftp-pane-actions-menu__item"
             type="button"

@@ -42,7 +42,7 @@ import {
 export type Theme = "light" | "dark";
 export type { ThemePreference } from "../ui-preferences";
 export type TerminalStartupBehavior = "welcome" | "restoreHistory";
-export type NewTerminalBehavior = "welcome" | "localTerminal";
+export type NewTerminalBehavior = "welcome" | "terminalWelcome" | "sftpWelcome" | "localTerminal";
 export type SinglePaneTabCloseBehavior = "confirm" | "closeDirectly";
 
 
@@ -117,7 +117,8 @@ export const useUiStore = defineStore("ui", () => {
     stored.terminalStartupBehavior === "welcome" ? "welcome" : "restoreHistory",
   );
   const newTerminalBehavior = ref<NewTerminalBehavior>(
-    stored.newTerminalBehavior === "localTerminal" ? "localTerminal" : "welcome",
+    stored.newTerminalBehavior === "terminalWelcome" || stored.newTerminalBehavior === "sftpWelcome"
+      || stored.newTerminalBehavior === "localTerminal" ? stored.newTerminalBehavior : "welcome",
   );
   const singlePaneTabCloseBehavior = ref<SinglePaneTabCloseBehavior>(
     stored.singlePaneTabCloseBehavior === "closeDirectly" ? "closeDirectly" : "confirm",

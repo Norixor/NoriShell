@@ -2,6 +2,7 @@ mod algorithm_policy;
 mod application_preferences;
 mod connection_profile;
 mod connection_test_service;
+mod connectivity_hints;
 mod core_api_error;
 mod desktop_preferences;
 mod desktop_service;
@@ -455,18 +456,6 @@ pub fn run() {
             plugin_credential_service
                 .recover_startup()
                 .map_err(std::io::Error::other)?;
-            let terminal_availability = native_terminal_service.availability_observer();
-            let credential_cleanup = plugin_credential_service.clone();
-            vault_service.set_availability_observer(std::sync::Arc::new(move |availability| {
-                terminal_availability(availability);
-                if availability.available {
-                    let service = credential_cleanup.clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        // Tombstones remain durable if Vault cleanup cannot finish now.
-                        let _ = service.cleanup_pending();
-                    });
-                }
-            }));
             let ssh_session_service =
                 ssh_session_service::SshSessionService::start_with_agent_and_native(
                     host_service.clone(),
@@ -535,6 +524,23 @@ pub fn run() {
                 transient_credential_service.clone(),
                 ssh_agent_service.clone(),
             );
+            let terminal_availability = native_terminal_service.availability_observer();
+            let credential_cleanup = plugin_credential_service.clone();
+            let metrics_availability = metrics_session_service.clone();
+            vault_service.set_availability_observer(std::sync::Arc::new(move |availability| {
+                terminal_availability(availability);
+                metrics_availability.availability_hint(availability);
+                if availability.available {
+                    let service = credential_cleanup.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        // Tombstones remain durable if Vault cleanup cannot finish now.
+                        let _ = service.cleanup_pending();
+                    });
+                }
+            }));
+            app.manage(connectivity_hints::ConnectivityHints::start(
+                metrics_session_service.clone(),
+            ));
             let telnet_session_service = telnet_session_service::TelnetSessionService::start();
             let protocol_terminal =
                 plugin_terminal_session_service::PluginTerminalSessionService::start();
@@ -642,6 +648,12 @@ pub fn run() {
             {
                 service.invalidate_input();
             }
+            if window.label() == "main"
+                && matches!(event, tauri::WindowEvent::Focused(true))
+                && let Some(hints) = window.try_state::<connectivity_hints::ConnectivityHints>()
+            {
+                hints.notify();
+            }
             hide_window_on_close(window, event);
         });
     let context = tauri::generate_context!();
@@ -667,6 +679,9 @@ pub fn run() {
 
     app.run(|app, event| match event {
         tauri::RunEvent::Exit => {
+            if let Some(hints) = app.try_state::<connectivity_hints::ConnectivityHints>() {
+                hints.stop();
+            }
             #[cfg(windows)]
             eprintln!("NoriShell event loop exited");
             #[cfg(target_os = "macos")]
@@ -690,6 +705,11 @@ pub fn run() {
             if !lifecycle.is_exit_authorized() {
                 api.prevent_exit();
                 lifecycle::request_application_exit(app);
+            }
+        }
+        tauri::RunEvent::Resumed => {
+            if let Some(hints) = app.try_state::<connectivity_hints::ConnectivityHints>() {
+                hints.notify();
             }
         }
         #[cfg(target_os = "macos")]

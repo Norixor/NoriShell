@@ -1,1 +1,2 @@
 src/core-api/generated/core-api.ts text eol=lf
+*.rs text eol=lf

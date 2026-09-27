@@ -156,7 +156,10 @@ fn validate_application(value: &Value) -> bool {
             &value["terminalStartupBehavior"],
             &["welcome", "restoreHistory"],
         )
-        && choice(&value["newTerminalBehavior"], &["welcome", "localTerminal"])
+        && choice(
+            &value["newTerminalBehavior"],
+            &["welcome", "terminalWelcome", "sftpWelcome", "localTerminal"],
+        )
         && choice(
             &value["singlePaneTabCloseBehavior"],
             &["confirm", "closeDirectly"],
@@ -609,6 +612,17 @@ mod tests {
             )
             .is_ok()
         );
+        for behavior in ["welcome", "terminalWelcome", "sftpWelcome", "localTerminal"] {
+            let mut option = application.clone();
+            option["newTerminalBehavior"] = json!(behavior);
+            assert!(
+                validate_application_preference_value(
+                    ApplicationPreferenceGroupId::Application,
+                    &option
+                )
+                .is_ok()
+            );
+        }
         let mut invalid = application.clone();
         invalid["hostId"] = json!("private-host");
         assert!(
