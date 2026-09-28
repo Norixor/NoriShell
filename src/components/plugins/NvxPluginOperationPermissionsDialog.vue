@@ -212,7 +212,7 @@ onMounted(() => void refresh());
 .plugin-operation-permissions { min-width: 0; display: grid; gap: var(--nvx-space-3); }
 .plugin-operation-permissions__table-wrap { min-width: 0; overflow: auto; border: var(--nvx-border-width) solid var(--nvx-color-border); border-radius: var(--nvx-radius-md); }
 .plugin-operation-permissions__table { width: 100%; min-width: 600px; table-layout: fixed; border-collapse: collapse; font-size: var(--nvx-font-size-sm); }
-.plugin-operation-permissions__table th, .plugin-operation-permissions__table td { padding: var(--nvx-space-2) var(--nvx-space-3); border-bottom: var(--nvx-border-width) solid var(--nvx-color-border-subtle); text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+.plugin-operation-permissions__table th, .plugin-operation-permissions__table td { padding: var(--nvx-space-2) var(--nvx-space-3); border-bottom: var(--nvx-border-width) solid var(--nvx-color-border); text-align: start; vertical-align: top; overflow-wrap: anywhere; }
 .plugin-operation-permissions__table th { color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-xs); font-weight: var(--nvx-font-weight-medium); }
 .plugin-operation-permissions__table tbody tr:last-child td { border-bottom: 0; }
 .plugin-operation-permissions__operation-column { width: 30%; }
@@ -222,5 +222,5 @@ onMounted(() => void refresh());
 .plugin-operation-permissions__operation { display: grid; gap: var(--nvx-space-1); }
 .plugin-operation-permissions__table td:first-child span { color: var(--nvx-color-text-secondary); }
 .plugin-operation-permissions__table td:last-child { white-space: nowrap; }
-.plugin-operation-permissions__expiry--expired { color: var(--nvx-color-text-danger); font-weight: var(--nvx-font-weight-medium); }
+.plugin-operation-permissions__expiry--expired { color: var(--nvx-color-danger); font-weight: var(--nvx-font-weight-medium); }
 </style>

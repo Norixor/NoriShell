@@ -43,7 +43,7 @@ defineEmits<{ "update:modelValue": [value: boolean] }>();
   gap: var(--nvx-space-3);
   align-items: flex-start;
   padding: var(--nvx-space-3);
-  border: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border: var(--nvx-border-width) solid var(--nvx-color-border);
   border-radius: var(--nvx-radius-md);
   color: var(--nvx-color-text-primary);
   cursor: pointer;

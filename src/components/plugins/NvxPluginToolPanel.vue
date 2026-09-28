@@ -282,7 +282,7 @@ onBeforeUnmount(() => { resizing = null; if (activePluginPanel.value === panelId
 .plugin-tool-panel__resize { position: absolute; z-index: 2; inset: 0 auto 0 -4px; display: flex; width: 8px; align-items: center; justify-content: center; cursor: col-resize; touch-action: none; color: var(--nvx-color-text-tertiary); }
 .plugin-tool-panel__resize:hover, .plugin-tool-panel__resize:focus-visible { background: var(--nvx-color-bg-hover); color: var(--nvx-color-accent); }
 .plugin-tool-panel__scrim { display: none; }
-.plugin-tool-panel.is-floating { position: absolute; inset: 12px 12px 12px auto; width: min(600px, calc(100% - 24px)); height: auto; max-height: calc(100% - 24px); border: 1px solid var(--nvx-color-border-strong); border-radius: var(--nvx-radius-lg); box-shadow: var(--nvx-shadow-overlay); pointer-events: auto; }
+.plugin-tool-panel.is-floating { position: absolute; inset: 12px 12px 12px auto; width: min(600px, calc(100% - 24px)); height: auto; max-height: calc(100% - 24px); border: 1px solid var(--nvx-color-border-strong); border-radius: var(--nvx-radius-md); box-shadow: var(--nvx-shadow-overlay); pointer-events: auto; }
 .plugin-tool-panel__scrim.is-floating { display: block; position: absolute; inset: 0; z-index: var(--nvx-z-popover); pointer-events: auto; background: rgb(0 0 0 / 12%); }
 button:focus-visible { outline: var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring); outline-offset: 2px; }
 @media (max-width: 1100px) {

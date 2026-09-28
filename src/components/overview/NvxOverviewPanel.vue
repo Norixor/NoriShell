@@ -467,7 +467,7 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
   min-height: 64px;
   margin-bottom: var(--nvx-space-3);
   padding: var(--nvx-space-2) 0;
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .nvx-overview-panel__heading {
@@ -620,7 +620,7 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
   display: flex;
   align-items: center;
   min-height: 28px;
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .nvx-overview-panel__section-header h2 {
