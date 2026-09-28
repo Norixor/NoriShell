@@ -4,9 +4,11 @@ import { initializeSecureWindowAppearance, initializeSecondaryWindowZoom } from 
 import { i18n } from "./locales";
 import ToolWindow from "./views/ToolWindow.vue";
 import { revealWindowAfterMount } from "./window-first-show";
+import { startNativeBackgroundSync } from "./native-window-background";
 import "./styles/tokens.css";
 import "./styles/base.css";
 initializeSecureWindowAppearance();
+startNativeBackgroundSync("window-and-webview");
 initializeSecondaryWindowZoom();
 createApp(ToolWindow).use(createPinia()).use(i18n).mount("#tool-app");
 void revealWindowAfterMount();

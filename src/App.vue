@@ -45,7 +45,9 @@ import { routeRevealKey } from "./routeReveal";
 import { useRouteMotion } from "./route-motion";
 import { startWorkspaceTabWindowUi } from "./workspace-tab-window-ui";
 import { showWorkspaceTabFailure } from "./workspace-tab-errors";
-import { createManagedApprovedPluginChannel, createManagedFileTab, createManagedPluginProtocolLaunch, createManagedTerminalForHost, setWorkspaceTabViewContentBounds } from "./workspace-tab-view-shell";
+import { createManagedApprovedPluginChannel, createManagedFileTab, createManagedPluginProtocolLaunch, createManagedTerminalForHost, registerWorkspaceShellRouteSettled, setWorkspaceTabViewContentBounds } from "./workspace-tab-view-shell";
+import { afterNextPaint } from "./workspace-tab-paint";
+import { startNativeBackgroundSync } from "./native-window-background";
 
 function isToolWindowExitCancelled(error: unknown) { return typeof error === "object" && error !== null && "code" in error && error.code === "app.tool_window_exit_cancelled"; }
 
@@ -126,6 +128,22 @@ provide(routeRevealKey, (path) => {
       if (routePath.value === path && contentInstanceKey.value === instanceKey) routeReady.value = true;
     });
   };
+});
+
+// Leaving a Tab hides its native view only after the shell page revealed and painted.
+// The shell bounds this wait; a watcher left behind resolves on the next reveal.
+const stopShellRouteSettled = registerWorkspaceShellRouteSettled(async () => {
+  if (!routeReady.value) {
+    await new Promise<void>((resolve) => {
+      const stop = watch(routeReady, (ready) => {
+        if (!ready) return;
+        stop();
+        resolve();
+      });
+    });
+  }
+  await nextTick();
+  await afterNextPaint();
 });
 
 function updateContentAvailability(region: ContentRegion, instanceKey: string, count: number) {
@@ -226,8 +244,10 @@ async function confirmResourceCleanupAndExit() {
 }
 
 let disposeStartupVaultTip: (() => void) | undefined;
+let stopNativeBackground: (() => void) | null = null;
 onMounted(async () => {
   if (!isTauri()) return;
+  stopNativeBackground = startNativeBackgroundSync("window-and-webview");
   workspaceContentObserver = new ResizeObserver(syncWorkspaceContentBounds);
   if (workspaceContent.value) workspaceContentObserver.observe(workspaceContent.value);
   window.addEventListener("resize", syncWorkspaceContentBounds);
@@ -346,6 +366,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  stopShellRouteSettled();
+  stopNativeBackground?.();
   workspaceContentObserver?.disconnect();
   window.removeEventListener("resize", syncWorkspaceContentBounds);
   setWorkspaceTabViewContentBounds(null);

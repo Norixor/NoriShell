@@ -4,7 +4,7 @@ import { createMemoryHistory, createRouter } from "vue-router";
 
 const shell = vi.hoisted(() => ({
   terminal: vi.fn(async () => "tab"), host: vi.fn(async () => "tab"), quickConnect: vi.fn(async () => undefined),
-  deactivate: vi.fn(async () => undefined), focusTerminal: vi.fn(async () => undefined),
+  showShellRoute: vi.fn(async (navigate?: () => unknown) => { await navigate?.(); }), focusTerminal: vi.fn(async () => undefined),
   focusDesktop: vi.fn(async () => undefined), focusFile: vi.fn(async () => undefined),
   transfer: vi.fn(async () => undefined),
 }));
@@ -13,11 +13,11 @@ vi.mock("./workspace-tab-view-shell", () => ({
   createManagedTerminalTab: shell.terminal,
   createManagedTerminalForHost: shell.host,
   createManagedQuickConnect: shell.quickConnect,
-  deactivateWorkspaceTabView: shell.deactivate,
   focusManagedTerminalSession: shell.focusTerminal,
   focusManagedDesktopSession: shell.focusDesktop,
   focusManagedFileSession: shell.focusFile,
   openManagedTransferTarget: shell.transfer,
+  showWorkspaceShellRoute: shell.showShellRoute,
 }));
 
 import { useWorkspaceTabsStore } from "./stores/workspaceTabs";
@@ -65,10 +65,10 @@ describe("native tray navigation", () => {
       { kind: "intent", transferId: "transfer", minimumRevision: "9007199254740993", source: sourceFence, target: targetFence });
   });
 
-  it("releases the active Tab before showing a shell page", async () => {
+  it("shows shell pages through the paint-ordered Tab release", async () => {
     const { workspace, router } = setup();
     await navigateNativeTrayAction({ kind: "settings" }, router, workspace);
-    expect(shell.deactivate).toHaveBeenCalledOnce();
+    expect(shell.showShellRoute).toHaveBeenCalledOnce();
     expect(router.currentRoute.value.fullPath).toBe("/settings?section=desktop");
   });
 });

@@ -7,11 +7,11 @@ import {
   createManagedTerminalTab,
   createManagedTerminalForHost,
   createManagedQuickConnect,
-  deactivateWorkspaceTabView,
   focusManagedTerminalSession,
   focusManagedDesktopSession,
   focusManagedFileSession,
   openManagedTransferTarget,
+  showWorkspaceShellRoute,
 } from "./workspace-tab-view-shell";
 
 /** Dispatches only one-time actions already consumed by Core; resource pages still verify the exact generation. */
@@ -50,11 +50,11 @@ export async function navigateNativeTrayAction(
       await openManagedTransferTarget(query, target); return;
     }
   }
-  // Settings and Tunnels are shell pages, not managed Tab content.
-  await deactivateWorkspaceTabView();
-  switch (action.kind) {
-    case "settings": await router.push({ path: "/settings", query: { section: "desktop" } }); return;
-    case "vault": await router.push({ path: "/settings", query: { section: "vault" } }); return;
-    case "openTunnels": await router.push({ path: "/tunnels", query: action.sessionId ? { focusSessionId: action.sessionId, focusGeneration: action.generation, focusOperation: operation } : {} }); return;
-  }
+  // Settings and Tunnels are shell pages; the Tab view stays until the page has painted.
+  const location = action.kind === "settings" ? { path: "/settings", query: { section: "desktop" } }
+    : action.kind === "vault" ? { path: "/settings", query: { section: "vault" } }
+      : action.kind === "openTunnels" ? { path: "/tunnels", query: action.sessionId
+        ? { focusSessionId: action.sessionId, focusGeneration: action.generation, focusOperation: operation } : {} }
+        : null;
+  if (location) await showWorkspaceShellRoute(() => router.push(location));
 }

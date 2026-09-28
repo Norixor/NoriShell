@@ -17,6 +17,7 @@ import type { WorkspaceTabShellAction, WorkspaceTabShellActionEvent } from "./wo
 import { closeChildWorkspaceWindowIfEmpty } from "./workspace-tab-transfer";
 import { requestReply, SHELL_ACTION_TIMEOUT_MS, VIEW_REPLY_TIMEOUT_MS } from "./workspace-tab-reply";
 import { markTabBoot } from "./workspace-tab-boot-trace";
+import { afterNextPaint } from "./workspace-tab-paint";
 import {
   closeWorkspaceTabView,
   createWorkspaceTabView,
@@ -69,6 +70,7 @@ let contentBounds: WorkspaceTabViewBounds | null = null;
 let visibilityWrite = Promise.resolve();
 let activationWrite = Promise.resolve();
 let refreshRevision = 0;
+let shellRouteSettled: (() => Promise<void>) | null = null;
 let shellReady: (() => void) | null = null;
 const shellStarted = new Promise<void>((resolve) => { shellReady = resolve; });
 
@@ -318,6 +320,56 @@ export function activateWorkspaceTabView(id: string): Promise<void> {
   return queueActivation(() => activateWorkspaceTabViewNow(id));
 }
 
+// A shell page that loads data may take a moment to reveal; the leaving Tab covers it
+// meanwhile, but never longer than this before the pending placeholder takes over.
+const SHELL_ROUTE_SETTLE_TIMEOUT_MS = 300;
+
+/**
+ * The window shell reports when its current route has revealed and painted its page.
+ * Without a registration, leaving a Tab waits one painted frame.
+ */
+export function registerWorkspaceShellRouteSettled(settled: () => Promise<void>): () => void {
+  shellRouteSettled = settled;
+  return () => { if (shellRouteSettled === settled) shellRouteSettled = null; };
+}
+
+async function awaitShellRouteSettled(): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    (shellRouteSettled ?? (() => afterNextPaint()))().catch(() => undefined),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, SHELL_ROUTE_SETTLE_TIMEOUT_MS); }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+}
+
+/**
+ * Shows a shell page in place of the active Tab. The Tab releases input first and is
+ * deselected at once, but its native view keeps covering the content area while the
+ * shell navigates and paints the target page; only then is it hidden. Hiding first
+ * would expose the stale shell page and then the blank pending route for a few frames.
+ * If input release fails the Tab stays active and nothing navigates.
+ */
+export function showWorkspaceShellRoute(navigate?: () => unknown): Promise<void> {
+  return queueActivation(async () => {
+    const previous = activeWorkspaceTabViewId.value;
+    if (previous) {
+      await releaseActiveWorkspaceTabView();
+      markTabBoot(previous, "shell", "leave_released");
+      setActiveWorkspaceTabView(null);
+    }
+    try {
+      if (navigate) await navigate();
+    } finally {
+      if (previous) {
+        await awaitShellRouteSettled();
+        markTabBoot(previous, "shell", "leave_route_painted");
+        await applyVisibility();
+        markTabBoot(previous, "shell", "leave_hidden");
+      }
+    }
+  });
+}
+
 export function deactivateWorkspaceTabView(): Promise<void> {
   return queueActivation(async () => {
     if (!activeWorkspaceTabViewId.value) return;
@@ -429,6 +481,10 @@ export async function createManagedWorkspaceTab(
         // Revoke the old view's input before the placeholder replaces it.
         await deactivateView(previousActiveId);
         released = true;
+        // The opaque placeholder renders under the old view; hide that view only once
+        // the placeholder has painted so the shell page never shows in between.
+        await afterNextPaint();
+        markTabBoot(id, "shell", "placeholder_painted");
       }
       await applyVisibility();
       if (replaced) await setWorkspaceTabViewVisible(replaced.id, false).catch(() => undefined);
@@ -797,8 +853,7 @@ export async function startWorkspaceTabViewShell(router: Router): Promise<() => 
       void (async () => {
         let code: string | undefined;
         try {
-          await deactivateWorkspaceTabView();
-          await router.push({ path: "/hosts", query: payload.create ? { create: "1" } : {} });
+          await showWorkspaceShellRoute(() => router.push({ path: "/hosts", query: payload.create ? { create: "1" } : {} }));
           await focusWorkspaceWindowTarget("main");
         } catch {
           code = "workspace_tab.main_navigation_failed";
@@ -907,7 +962,8 @@ export async function startWorkspaceTabViewShell(router: Router): Promise<() => 
       }).catch(() => undefined);
     });
   }));
-  const stopRoute = watch(() => router.currentRoute.value.fullPath, () => { void deactivateWorkspaceTabView().catch(() => undefined); });
+  // Any other shell navigation leaves the active Tab only after the new page painted.
+  const stopRoute = watch(() => router.currentRoute.value.fullPath, () => { void showWorkspaceShellRoute().catch(() => undefined); });
   await refreshOwnedViews();
   shellReady?.();
   return () => {

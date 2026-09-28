@@ -268,6 +268,7 @@ pub(crate) async fn create_tab_view(
     route: String,
     payload: Value,
     bootstrap: Option<Value>,
+    background: Option<[u8; 3]>,
 ) -> Result<TabViewInfo, String> {
     if !valid_id(&id) || !valid_route(&route) {
         return Err("workspace_tab.invalid_identity".into());
@@ -334,6 +335,15 @@ pub(crate) async fn create_tab_view(
                     && url.query() == Some(expected_query.as_str()))
         })
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+    // Until its first document frame a new view would paint the platform default
+    // (white on WebView2) over the shell's placeholder. With a colour, WKWebView stops
+    // drawing its own background, so the placeholder below stays visible until then.
+    let builder = match background {
+        Some([red, green, blue]) => {
+            builder.background_color(tauri::webview::Color(red, green, blue, 255))
+        }
+        None => builder,
+    };
     // The shell supplies the final content rectangle after its first layout.
     // A hidden 1x1 child avoids drawing over the Header in the meantime.
     let webview = match parent.add_child(

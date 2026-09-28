@@ -36,6 +36,8 @@ import { terminalRecovery, whenAvailable, type WorkspaceTabRecovery } from "../w
 import type { TerminalRestoreSeed } from "../workspace-tab-terminal-restore";
 import { createSftpTerminalLaunch } from "./sftpTerminalLaunch";
 import { markTabBoot } from "../workspace-tab-boot-trace";
+import { afterNextPaint } from "../workspace-tab-paint";
+import { startNativeBackgroundSync } from "../native-window-background";
 import { acceptSftpPluginNavigation } from "./sftpPluginNavigation";
 import {
   closeOwnWorkspaceTabView,
@@ -939,11 +941,13 @@ function handleShortcut(event: KeyboardEvent): void {
   })).catch(() => undefined);
 }
 
+let stopNativeBackground: (() => void) | null = null;
 onMounted(async () => {
   if (!tabId || viewLabel !== workspaceTabViewLabel(tabId)) {
     errorCode.value = "workspace_tab.invalid_view";
     return;
   }
+  stopNativeBackground = startNativeBackgroundSync("webview");
   window.addEventListener("keydown", handleShortcut, true);
   window.addEventListener("norishell:terminal-tab-close-committed", terminalTabCloseCommitted);
   window.addEventListener("norishell:terminal-tab-close-cancelled", terminalTabCloseCancelled);
@@ -969,7 +973,9 @@ onMounted(async () => {
       }),
       await listen<ContextEvent>("workspace-tab-context-changed", ({ payload }) => { contextChanged(payload); }),
       await listen<{ id: string; visible: boolean }>("workspace-tab-view-visibility", ({ payload }) => {
-        if (payload.id === tabId) void syncOwner().then(() => {
+        if (payload.id !== tabId) return;
+        if (payload.visible) void afterNextPaint().then(() => markTabBoot(tabId, "tab", "shown_painted"));
+        void syncOwner().then(() => {
           window.dispatchEvent(new CustomEvent("norishell:workspace-tab-visibility", { detail: payload.visible }));
         }).catch(() => undefined);
       }),
@@ -1023,6 +1029,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  stopNativeBackground?.();
   removeRouteGuard();
   window.removeEventListener("keydown", handleShortcut, true);
   window.removeEventListener("norishell:terminal-tab-close-committed", terminalTabCloseCommitted);

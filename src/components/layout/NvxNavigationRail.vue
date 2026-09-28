@@ -37,7 +37,7 @@ import type { PluginNavigationItem } from "../../core-api/generated/core-api";
 import { usePluginExtensionsStore } from "../../stores/pluginExtensions";
 import { useAppUpdateStore } from "../../stores/appUpdate";
 import { showWorkspaceTabFailure } from "../../workspace-tab-errors";
-import { deactivateWorkspaceTabView, openManagedPluginPage } from "../../workspace-tab-view-shell";
+import { openManagedPluginPage, showWorkspaceShellRoute } from "../../workspace-tab-view-shell";
 import { activeWorkspaceTabViewId, workspaceTabViewSummary } from "../../workspace-tab-view-state";
 import { NvxIcon } from "../ui";
 
@@ -126,7 +126,10 @@ function openItem(item: Pick<RailItem, "plugin">, event: MouseEvent, navigate: (
     return;
   }
   // Leaving the active Tab shows the shell page even when the shell route is unchanged.
-  void deactivateWorkspaceTabView().catch(() => undefined).then(() => navigate());
+  // The Tab stays on screen until that page painted; a failed input release still navigates.
+  let navigated = false;
+  void showWorkspaceShellRoute(() => { navigated = true; return navigate(); })
+    .catch(() => { if (!navigated) void navigate(); });
 }
 onMounted(() => {
   if (!isTauri()) return;

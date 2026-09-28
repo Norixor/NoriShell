@@ -61,8 +61,9 @@ const recentRows = [0, 1, 2];
 
 <template>
   <!--
-    Covers the shell page while a new Tab renders. The native Tab WebView is
-    shown on top of this element before it is removed, so it never fades out.
+    Covers the shell page while a new Tab renders. It appears opaque at once and
+    the native Tab WebView is shown on top of it before it is removed, so it never
+    fades in or out.
   -->
   <div
     v-if="pending"
@@ -398,8 +399,9 @@ const recentRows = [0, 1, 2];
   z-index: 20;
   inset: 0;
   overflow: hidden;
+  /* Opaque from its first frame: the shell hides the previous Tab view right after
+     this paints, so an entrance fade would let the shell page show through. */
   background: var(--nvx-color-bg-canvas);
-  animation: nvx-workspace-tab-placeholder-enter var(--nvx-motion-normal) ease-out both;
 }
 
 .nvx-workspace-tab-placeholder--file,
@@ -778,11 +780,6 @@ const recentRows = [0, 1, 2];
   opacity: 1;
 }
 
-@keyframes nvx-workspace-tab-placeholder-enter {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
 @keyframes nvx-workspace-tab-placeholder-breathe {
   from { opacity: 1; }
   to { opacity: 0.6; }
@@ -793,7 +790,7 @@ const recentRows = [0, 1, 2];
   50% { opacity: 0; }
 }
 
-/* Static skeleton only: base.css shortens the remaining entrance to near-instant. */
+/* Static skeleton only. */
 @media (prefers-reduced-motion: reduce) {
   .nvx-workspace-tab-placeholder__skeleton,
   .nvx-tab-skeleton__cursor {
