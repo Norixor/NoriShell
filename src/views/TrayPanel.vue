@@ -1,20 +1,36 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ArrowUpRight, ArrowUpDown, Bell, ChevronRight, Folder, LockKeyhole, MessageSquare, Network, Plus, Power, Server, Settings2, Terminal, X, Zap } from "lucide-vue-next";
 import { NvxButton, NvxIcon } from "../components/ui";
-import { executeTrayPanel, hideTrayPanel, readTrayPanel } from "../core-api/tray-panel";
+import { executeTrayPanel, hideTrayPanel, readTrayPanel, TRAY_PANEL_VISIBILITY_EVENT, type TrayPanelVisibility } from "../core-api/tray-panel";
 import type { NativeTrayPanelRow, NativeTrayPanelSnapshot } from "../core-api/generated/core-api";
 import brandIcon from "../assets/branding/norishell-app-icon.png";
+import { revealWindowAfterMount } from "../window-first-show";
+
+// A status read that neither resolves nor rejects must surface a code instead of an endless loading notice.
+const READ_TIMEOUT_MS = 5_000;
+const READ_TIMEOUT_CODE = "tray.panel_read_timeout";
+const UNKNOWN_ERROR_CODE = "tray.panel_unknown_error";
+// Core refuses reads while the panel is hidden; that is the idle state, not a failure to show.
+const HIDDEN_CODE = "tray.panel_hidden";
 
 const { t, locale } = useI18n();
 const snapshot = ref<NativeTrayPanelSnapshot | null>(null);
-const error = ref<"unavailable" | "actionFailed" | null>(null);
+const error = ref<{ kind: "unavailable" | "actionFailed"; code: string } | null>(null);
 const busy = ref(false);
 let alive = true;
+// View generation: bumped by Core visibility changes and DOM blur so late results never repopulate a closed view.
 let epoch = 0;
-let reading = false;
+// Only the most recently started read may write; a newer trigger never waits behind an in-flight one.
+let readSeq = 0;
+let inFlight = false;
+// Core-owned visibility, independent of DOM focus (WebView2 may re-show without a DOM focus event).
+let open = false;
+let visibilitySequence = 0;
 let timer: ReturnType<typeof setInterval> | undefined;
+let unlisten: UnlistenFn | undefined;
 const rows = computed(() => snapshot.value?.rows ?? []);
 const show = computed(() => rows.value.find((row) => row.kind === "show"));
 const quick = computed(() => rows.value.filter((row) => ["newTerminal", "newLocalTerminal", "quickConnect"].includes(row.kind)));
@@ -39,25 +55,68 @@ function toggleGroup(role: string | null) {
   if (!busy.value) expanded.value = expanded.value === role ? null : role;
 }
 
+function errorCode(reason: unknown): string {
+  const code = typeof reason === "object" && reason !== null ? (reason as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.length > 0 && code.length <= 128 ? code : UNKNOWN_ERROR_CODE;
+}
+
+function withTimeout<T>(promise: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const handle = setTimeout(() => reject({ code: READ_TIMEOUT_CODE }), READ_TIMEOUT_MS);
+    promise.then(
+      (value) => { clearTimeout(handle); resolve(value); },
+      (reason: unknown) => { clearTimeout(handle); reject(reason); },
+    );
+  });
+}
+
+/** Clear every private label and token; used whenever the panel stops being the user's current view. */
+function resetView() {
+  expanded.value = null;
+  epoch += 1;
+  snapshot.value = null;
+  error.value = null;
+}
+
 async function refresh() {
-  if (!alive || reading || busy.value || !document.hasFocus()) return;
+  if (!alive || busy.value) return;
   const current = epoch;
-  reading = true;
+  const sequence = ++readSeq;
+  inFlight = true;
   try {
-    const next = await readTrayPanel();
-    if (!alive || current !== epoch || !document.hasFocus()) return;
+    const next = await withTimeout(readTrayPanel());
+    if (!alive || current !== epoch || sequence !== readSeq) return;
+    open = true;
     snapshot.value = next;
     locale.value = next.locale;
     document.documentElement.lang = next.locale;
     error.value = null;
-  } catch {
-    if (!alive || current !== epoch) return;
+  } catch (reason) {
+    if (!alive || current !== epoch || sequence !== readSeq) return;
+    const code = errorCode(reason);
     // Failure retains no clickable stale token and never wakes the main window from the tray panel.
     snapshot.value = null;
-    error.value = "unavailable";
+    if (code === HIDDEN_CODE) {
+      // Hidden panel: wait for Core's next visibility event instead of showing an error nobody can see.
+      open = false;
+      error.value = null;
+      return;
+    }
+    // Any refusal other than "hidden" comes from a shown panel; keep the timer retrying behind the explicit error.
+    open = true;
+    error.value = { kind: "unavailable", code };
   } finally {
-    reading = false;
+    if (sequence === readSeq) inFlight = false;
   }
+}
+
+function visibilityChanged(event: TrayPanelVisibility) {
+  // Drop reordered notifications: an older hide must not close a newer show, and vice versa.
+  if (!Number.isSafeInteger(event.sequence) || event.sequence <= visibilitySequence) return;
+  visibilitySequence = event.sequence;
+  open = event.visible;
+  resetView();
+  if (open) void refresh();
 }
 
 async function execute(row: NativeTrayPanelRow) {
@@ -67,10 +126,10 @@ async function execute(row: NativeTrayPanelRow) {
   error.value = null;
   try {
     await executeTrayPanel(row.id);
-  } catch {
+  } catch (reason) {
     if (alive && current === epoch) {
       snapshot.value = null;
-      error.value = "actionFailed";
+      error.value = { kind: "actionFailed", code: errorCode(reason) };
     }
   } finally {
     busy.value = false;
@@ -80,16 +139,18 @@ async function execute(row: NativeTrayPanelRow) {
 async function dismiss() {
   try {
     await hideTrayPanel();
-  } catch {
-    if (alive) error.value = "actionFailed";
+  } catch (reason) {
+    if (alive) error.value = { kind: "actionFailed", code: errorCode(reason) };
   }
 }
 
 function blur() {
-  expanded.value = null;
-  epoch += 1;
-  snapshot.value = null;
-  error.value = null;
+  // Privacy: labels leave the DOM as soon as focus leaves. Core hides the panel on native blur; if the window is
+  // in fact still shown, the open-state timer rereads instead of leaving a permanent loading notice.
+  resetView();
+}
+function focus() {
+  if (open && !snapshot.value && !inFlight) void refresh();
 }
 function keydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
@@ -97,21 +158,35 @@ function keydown(event: KeyboardEvent) {
     void dismiss();
   }
 }
-onMounted(() => {
-  window.addEventListener("focus", refresh);
+onMounted(async () => {
+  window.addEventListener("focus", focus);
   window.addEventListener("blur", blur);
   window.addEventListener("keydown", keydown);
-  // Keep the target stable while a keyboard action operates a button; explicit refresh may still reread it.
+  // Keep the target stable while a keyboard action operates a button; an empty or failed view always rereads.
   timer = setInterval(() => {
-    if (!(document.activeElement instanceof HTMLButtonElement)) void refresh();
+    if (!open || inFlight || busy.value) return;
+    if (!snapshot.value || !(document.activeElement instanceof HTMLButtonElement)) void refresh();
   }, 2_000);
-  void refresh();
+  try {
+    const stop = await listen<TrayPanelVisibility>(TRAY_PANEL_VISIBILITY_EVENT, ({ payload }) => visibilityChanged(payload));
+    if (alive) unlisten = stop;
+    else stop();
+  } catch {
+    // Without the event, the first reveal read below and the retry button still work; the error is not hidden.
+  }
+  if (!alive) return;
+  // Reveal only after the listener exists so the first Core "shown" notification cannot be missed.
+  await revealWindowAfterMount();
+  // Lazily created panel: Core revealed it from the renderer-ready signal without a visibility event.
+  // A prewarmed hidden panel gets tray.panel_hidden here and waits for the event.
+  if (alive && !open && !snapshot.value && !inFlight) void refresh();
 });
 onBeforeUnmount(() => {
   alive = false;
   epoch += 1;
   clearInterval(timer);
-  window.removeEventListener("focus", refresh);
+  unlisten?.();
+  window.removeEventListener("focus", focus);
   window.removeEventListener("blur", blur);
   window.removeEventListener("keydown", keydown);
 });
@@ -163,7 +238,10 @@ onBeforeUnmount(() => {
         class="tray-panel__notice"
         role="alert"
       >
-        <p>{{ t(`trayPanel.${error}`) }}</p>
+        <p>{{ t(`trayPanel.${error.kind}`) }}</p>
+        <p class="tray-panel__code">
+          {{ t('trayPanel.errorCode', { code: error.code }) }}
+        </p>
         <NvxButton
           variant="secondary"
           size="sm"
@@ -663,6 +741,12 @@ onBeforeUnmount(() => {
 .tray-panel__footer .nvx-button {
   padding: 0 6px;
   font-weight: var(--nvx-font-weight-regular);
+}
+
+.tray-panel__code {
+  margin: 2px 0 8px;
+  font-family: var(--nvx-font-mono);
+  color: var(--nvx-color-text-tertiary);
 }
 
 .tray-panel__notice {

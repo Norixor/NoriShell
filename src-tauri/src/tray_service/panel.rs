@@ -4,10 +4,30 @@ use tauri::{PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, Wi
 
 const LABEL: &str = "tray-panel";
 const MAX_PANEL_BINDINGS: usize = 8192;
+/// Core-owned visibility transitions. The panel renderer must not infer "opened" from DOM focus: on Windows a
+/// re-shown WebView2 does not reliably receive a DOM focus event, which previously left the panel loading forever.
+const VISIBILITY_EVENT: &str = "tray-panel-visibility";
 #[derive(Default)]
 pub(super) struct PanelState {
     pub bindings: HashMap<String, PanelBinding>,
     blurred_at: Option<Instant>,
+    visibility_sequence: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PanelVisibility {
+    sequence: u64,
+    visible: bool,
+}
+impl PanelState {
+    /// Sequence numbers let the renderer drop a hide/show notification that arrives after a newer one.
+    fn next_visibility(&mut self, visible: bool) -> PanelVisibility {
+        self.visibility_sequence += 1;
+        PanelVisibility {
+            sequence: self.visibility_sequence,
+            visible,
+        }
+    }
 }
 pub(super) struct PanelBinding {
     action: Action,
@@ -95,21 +115,66 @@ fn rows(
         })
         .collect()
 }
+/// Distinct, machine-readable reasons a status read was refused; the renderer shows the code instead of loading forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotError {
+    /// The panel is hidden (or being hidden); the renderer waits for the next Core visibility event.
+    Hidden,
+    /// The tray service stopped for application exit.
+    Stopped,
+    /// The tray state lock was poisoned by a panic elsewhere.
+    StateUnavailable,
+    /// Outstanding one-shot tokens reached the bound; they expire after CLICK_TTL.
+    BindingLimit,
+}
+impl SnapshotError {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Hidden => "tray.panel_hidden",
+            Self::Stopped => "tray.panel_stopped",
+            Self::StateUnavailable => "tray.panel_state_unavailable",
+            Self::BindingLimit => "tray.panel_binding_limit",
+        }
+    }
+}
+fn snapshot_error(request_id: RequestId, reason: SnapshotError) -> Box<CoreApiError> {
+    crate::core_api_error::core_error(
+        request_id,
+        reason.code(),
+        ErrorCategory::Unavailable,
+        match reason {
+            SnapshotError::Stopped | SnapshotError::StateUnavailable => RetryStrategy::WaitForUser,
+            SnapshotError::Hidden | SnapshotError::BindingLimit => RetryStrategy::RefreshSnapshot,
+        },
+        "errors.tray.actionUnavailable",
+    )
+}
 #[tauri::command]
 pub(crate) fn tray_panel_snapshot<R: Runtime>(
     window: WebviewWindow<R>,
     request: NativeTrayPanelSnapshotRequest,
     service: State<'_, NativeTrayService>,
 ) -> CoreResult<NativeTrayPanelSnapshot> {
-    if window.label() != LABEL || !window.is_visible().unwrap_or(false) {
+    if window.label() != LABEL {
         return Err(failure(request.meta.request_id));
     }
-    let mut state = service
-        .inner
-        .lock()
-        .map_err(|_| failure(request.meta.request_id.clone()))?;
+    if !window.is_visible().unwrap_or(false) {
+        return Err(snapshot_error(
+            request.meta.request_id,
+            SnapshotError::Hidden,
+        ));
+    }
+    let mut state = service.inner.lock().map_err(|_| {
+        snapshot_error(
+            request.meta.request_id.clone(),
+            SnapshotError::StateUnavailable,
+        )
+    })?;
     if state.stopped {
-        return Err(failure(request.meta.request_id));
+        return Err(snapshot_error(
+            request.meta.request_id,
+            SnapshotError::Stopped,
+        ));
     }
     let projection = current_projection(window.app_handle(), &state);
     state
@@ -117,7 +182,10 @@ pub(crate) fn tray_panel_snapshot<R: Runtime>(
         .bindings
         .retain(|_, entry| entry.created.elapsed() < CLICK_TTL);
     if state.panel.bindings.len() + projection.item_count() > MAX_PANEL_BINDINGS {
-        return Err(failure(request.meta.request_id));
+        return Err(snapshot_error(
+            request.meta.request_id,
+            SnapshotError::BindingLimit,
+        ));
     }
     Ok(NativeTrayPanelSnapshot {
         locale: projection.locale,
@@ -173,18 +241,41 @@ pub(crate) fn tray_panel_hide<R: Runtime>(
     Ok(())
 }
 pub(super) fn hide<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(service) = app.try_state::<NativeTrayService>() {
-        service
+    let Some(window) = app.get_webview_window(LABEL) else {
+        if let Some(service) = app.try_state::<NativeTrayService>() {
+            service
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .panel
+                .bindings
+                .clear();
+        }
+        return;
+    };
+    let visibility = app.try_state::<NativeTrayService>().map(|service| {
+        let mut state = service
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .panel
-            .bindings
-            .clear();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.panel.bindings.clear();
+        state.panel.next_visibility(false)
+    });
+    let _ = window.hide();
+    if let Some(visibility) = visibility {
+        let _ = window.emit_to(LABEL, VISIBILITY_EVENT, visibility);
     }
-    if let Some(window) = app.get_webview_window(LABEL) {
-        let _ = window.hide();
-    }
+}
+fn announce_shown<R: Runtime>(window: &WebviewWindow<R>) {
+    let visibility = window
+        .app_handle()
+        .state::<NativeTrayService>()
+        .inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .panel
+        .next_visibility(true);
+    let _ = window.emit_to(LABEL, VISIBILITY_EVENT, visibility);
 }
 pub(super) fn close(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(LABEL) {
@@ -229,6 +320,81 @@ pub(super) fn toggle(app: &AppHandle, rect: tauri::Rect, clicked_at: Instant) {
         });
     });
 }
+/// Create the hidden panel once and reuse it; hiding never destroys the WebView (only application stop does).
+fn ensure_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        return Ok(window);
+    }
+    let expected = app
+        .config()
+        .build
+        .dev_url
+        .as_ref()
+        .and_then(|url| url.join("tray-panel.html").ok());
+    let builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("tray-panel.html".into()))
+        .title("NoriShell")
+        .inner_size(380.0, 560.0)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .focused(false)
+        .on_navigation(move |url| {
+            (cfg!(debug_assertions) && expected.as_ref().is_some_and(|expected| expected == url))
+                || (((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+                    || (matches!(url.scheme(), "http" | "https")
+                        && url.host_str() == Some("tauri.localhost")
+                        && url.port().is_none()))
+                    && url.path() == "/tray-panel.html"
+                    && url.query().is_none())
+        })
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+    #[cfg(windows)]
+    let builder = builder.background_color(crate::secure_window_frame::WINDOWS_INITIAL_CANVAS);
+    #[cfg(any(windows, target_os = "macos"))]
+    crate::window_first_show::schedule_fallback(app, LABEL, false);
+    let window = builder.build()?;
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            hide(&handle);
+        }
+        if matches!(event, WindowEvent::Focused(false)) {
+            handle
+                .state::<NativeTrayService>()
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .panel
+                .blurred_at = Some(Instant::now());
+            hide(&handle);
+        }
+    });
+    Ok(window)
+}
+/// Create the hidden panel after the main renderer is ready so the first tray click does not pay
+/// for WebView2 environment/controller creation and the Vue mount. Costs one idle WebView2 renderer process.
+/// The window stays hidden until a click positions it (window_first_show requires both placement and readiness).
+pub(super) fn prewarm<R: Runtime>(app: &AppHandle<R>) {
+    let handle = app.clone();
+    // Leave the invoking command before creating a WebView2 controller, which pumps nested native messages.
+    tauri::async_runtime::spawn(async move {
+        let main = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let stopped = main
+                .state::<NativeTrayService>()
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stopped;
+            if !stopped && let Err(error) = ensure_window(&main) {
+                eprintln!("tray panel prewarm failed: {error}");
+            }
+        });
+    });
+}
 fn show_or_hide(app: &AppHandle, rect: tauri::Rect, clicked_at: Instant) -> tauri::Result<()> {
     {
         let service = app.state::<NativeTrayService>();
@@ -253,60 +419,7 @@ fn show_or_hide(app: &AppHandle, rect: tauri::Rect, clicked_at: Instant) -> taur
         hide(app);
         return Ok(());
     }
-    let window = if let Some(window) = app.get_webview_window(LABEL) {
-        window
-    } else {
-        let expected = app
-            .config()
-            .build
-            .dev_url
-            .as_ref()
-            .and_then(|url| url.join("tray-panel.html").ok());
-        let builder =
-            WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("tray-panel.html".into()))
-                .title("NoriShell")
-                .inner_size(380.0, 560.0)
-                .resizable(false)
-                .decorations(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .visible(false)
-                .focused(false)
-                .on_navigation(move |url| {
-                    (cfg!(debug_assertions)
-                        && expected.as_ref().is_some_and(|expected| expected == url))
-                        || (((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
-                            || (matches!(url.scheme(), "http" | "https")
-                                && url.host_str() == Some("tauri.localhost")
-                                && url.port().is_none()))
-                            && url.path() == "/tray-panel.html"
-                            && url.query().is_none())
-                })
-                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
-        #[cfg(windows)]
-        let builder = builder.background_color(crate::secure_window_frame::WINDOWS_INITIAL_CANVAS);
-        #[cfg(any(windows, target_os = "macos"))]
-        crate::window_first_show::schedule_fallback(app, LABEL, false);
-        let window = builder.build()?;
-        let handle = app.clone();
-        window.on_window_event(move |event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                hide(&handle);
-            }
-            if matches!(event, WindowEvent::Focused(false)) {
-                handle
-                    .state::<NativeTrayService>()
-                    .inner
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .panel
-                    .blurred_at = Some(Instant::now());
-                hide(&handle);
-            }
-        });
-        window
-    };
+    let window = ensure_window(app)?;
     let initial_scale = window.scale_factor()?;
     let anchor = rect.position.to_physical::<f64>(initial_scale);
     let monitor = window
@@ -339,7 +452,9 @@ fn show_or_hide(app: &AppHandle, rect: tauri::Rect, clicked_at: Instant) -> taur
     if !crate::window_first_show::was_revealed(app, LABEL) {
         return Ok(());
     }
-    crate::window_first_show::show_if_revealed(&window)?;
+    if crate::window_first_show::show_if_revealed(&window)? {
+        announce_shown(&window);
+    }
     Ok(())
 }
 
@@ -375,6 +490,38 @@ mod tests {
             assert!(panel.take(token, &changed, time).is_none());
             assert!(panel.take(token, &projection, now).is_none());
         }
+    }
+    #[test]
+    fn visibility_notifications_are_strictly_ordered() {
+        let mut panel = PanelState::default();
+        let shown = panel.next_visibility(true);
+        let hidden = panel.next_visibility(false);
+        let reshown = panel.next_visibility(true);
+        assert!(shown.visible && !hidden.visible && reshown.visible);
+        assert!(shown.sequence < hidden.sequence && hidden.sequence < reshown.sequence);
+        assert_eq!(
+            serde_json::to_value(reshown).unwrap(),
+            serde_json::json!({"sequence": 3, "visible": true})
+        );
+    }
+    #[test]
+    fn snapshot_refusals_have_distinct_codes() {
+        let codes = [
+            SnapshotError::Hidden,
+            SnapshotError::Stopped,
+            SnapshotError::StateUnavailable,
+            SnapshotError::BindingLimit,
+        ]
+        .map(SnapshotError::code);
+        assert_eq!(
+            codes,
+            [
+                "tray.panel_hidden",
+                "tray.panel_stopped",
+                "tray.panel_state_unavailable",
+                "tray.panel_binding_limit"
+            ]
+        );
     }
     #[test]
     fn other_windows_cannot_hide_panel() {

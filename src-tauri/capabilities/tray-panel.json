@@ -1,7 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "tray-panel",
-  "description": "Restricted tray panel; no general Core, window or network permissions.",
+  "description": "Restricted tray panel; no general Core, window or network permissions. Event listen only receives Core panel visibility transitions.",
   "windows": ["tray-panel"],
-  "permissions": ["tray-panel-commands"]
+  "permissions": [
+    "tray-panel-commands",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
 }
