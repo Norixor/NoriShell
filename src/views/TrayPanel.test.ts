@@ -3,8 +3,26 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { i18n } from "../locales";
 import TrayPanel from "./TrayPanel.vue";
 
-const api = vi.hoisted(() => ({ readTrayPanel: vi.fn(), executeTrayPanel: vi.fn(), hideTrayPanel: vi.fn() }));
+const api = vi.hoisted(() => ({
+  readTrayPanel: vi.fn(),
+  executeTrayPanel: vi.fn(),
+  hideTrayPanel: vi.fn(),
+  TRAY_PANEL_VISIBILITY_EVENT: "tray-panel-visibility",
+}));
 vi.mock("../core-api/tray-panel", () => api);
+const events = vi.hoisted(() => ({
+  handler: null as null | ((event: { payload: { sequence: number; visible: boolean } }) => void),
+  unlisten: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (name: string, handler: typeof events.handler) => {
+    if (name === "tray-panel-visibility") events.handler = handler;
+    return events.unlisten;
+  }),
+}));
+const reveal = vi.hoisted(() => ({ revealWindowAfterMount: vi.fn(async () => undefined) }));
+vi.mock("../window-first-show", () => reveal);
+const visibility = (sequence: number, visible: boolean) => events.handler!({ payload: { sequence, visible } });
 
 const snapshot = {
   locale: "en",
@@ -22,6 +40,7 @@ describe("TrayPanel", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    events.handler = null;
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     api.readTrayPanel.mockResolvedValue(snapshot);
     api.executeTrayPanel.mockResolvedValue(undefined);
@@ -44,6 +63,8 @@ describe("TrayPanel", () => {
     let resolve!: (value: typeof snapshot) => void;
     api.readTrayPanel.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
     const wrapper = mount(TrayPanel, { global: { plugins: [i18n] } });
+    await flushPromises();
+    expect(api.readTrayPanel).toHaveBeenCalledOnce();
     window.dispatchEvent(new Event("blur"));
     resolve(snapshot);
     await flushPromises();
@@ -118,6 +139,90 @@ describe("TrayPanel", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await flushPromises();
     expect(api.hideTrayPanel).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
+
+  it("reopens from the Core visibility event even when the re-shown WebView never gains DOM focus", async () => {
+    const wrapper = mount(TrayPanel, { global: { plugins: [i18n] } });
+    await flushPromises();
+    expect(reveal.revealWindowAfterMount).toHaveBeenCalledOnce();
+    // Dismissing with the close button leaves it as document.activeElement across hide/show.
+    (wrapper.get(".tray-panel__close").element as HTMLButtonElement).focus();
+    window.dispatchEvent(new Event("blur"));
+    visibility(1, false);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Reading status");
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    api.readTrayPanel.mockClear();
+    visibility(2, true);
+    await flushPromises();
+    expect(api.readTrayPanel).toHaveBeenCalledOnce();
+    expect(wrapper.text()).toContain("1 terminal");
+    expect(wrapper.text()).not.toContain("Reading status");
+    wrapper.unmount();
+    expect(events.unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("rereads after a spurious blur discards the in-flight read of a still-open panel", async () => {
+    const wrapper = mount(TrayPanel, { global: { plugins: [i18n] } });
+    await flushPromises();
+    let resolve!: (value: typeof snapshot) => void;
+    api.readTrayPanel.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    visibility(1, true);
+    window.dispatchEvent(new Event("blur"));
+    resolve(snapshot);
+    await flushPromises();
+    expect(wrapper.text()).toContain("Reading status");
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushPromises();
+    expect(wrapper.text()).toContain("1 terminal");
+    wrapper.unmount();
+  });
+
+  it("ignores reordered visibility notifications", async () => {
+    const wrapper = mount(TrayPanel, { global: { plugins: [i18n] } });
+    await flushPromises();
+    visibility(3, true);
+    await flushPromises();
+    visibility(2, false);
+    await flushPromises();
+    expect(wrapper.text()).toContain("1 terminal");
+    wrapper.unmount();
+  });
+
+  it("waits silently while a prewarmed panel is hidden and reads when Core shows it", async () => {
+    api.readTrayPanel.mockRejectedValueOnce({ code: "tray.panel_hidden" });
+    const wrapper = mount(TrayPanel, { global: { plugins: [i18n] } });
+    await flushPromises();
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(api.readTrayPanel).toHaveBeenCalledOnce();
+    visibility(1, true);
+    await flushPromises();
+    expect(wrapper.text()).toContain("1 terminal");
+    wrapper.unmount();
+  });
+
+  it("replaces an unanswered read with a timeout code instead of loading forever", async () => {
+    api.readTrayPanel.mockReturnValueOnce(new Promise(() => undefined));
+    const wrapper = mount(TrayPanel, { global: { plugins: [i18n] } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("Reading status");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain("tray.panel_read_timeout");
+    await wrapper.get('[role="alert"] button').trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("1 terminal");
+    wrapper.unmount();
+  });
+
+  it("shows the Core refusal code for a failed read", async () => {
+    api.readTrayPanel.mockRejectedValueOnce({ code: "tray.panel_binding_limit" });
+    const wrapper = mount(TrayPanel, { global: { plugins: [i18n] } });
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain("Status is temporarily unavailable.");
+    expect(wrapper.get('[role="alert"]').text()).toContain("tray.panel_binding_limit");
     wrapper.unmount();
   });
 });

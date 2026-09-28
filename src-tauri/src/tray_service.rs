@@ -159,6 +159,9 @@ pub(crate) fn tray_actions_ready<R: Runtime>(
     }
     if pending_quit {
         lifecycle::request_application_exit(window.app_handle());
+    } else if cfg!(windows) {
+        // Only Windows opens the custom panel from the tray icon; compiled everywhere so non-Windows CI checks it.
+        panel::prewarm(window.app_handle());
     }
     Ok(tokens)
 }

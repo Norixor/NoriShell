@@ -20,6 +20,7 @@ export const trayPanelZhCN = {
   unavailable: "暂时无法读取状态。",
   actionFailed: "操作未完成，请刷新状态后重试。",
   retry: "刷新状态",
+  errorCode: "状态码：{code}",
   quickActions: "快速操作",
 };
 
@@ -45,5 +46,6 @@ export const trayPanelEn = {
   unavailable: "Status is temporarily unavailable.",
   actionFailed: "The action did not complete. Refresh the status and try again.",
   retry: "Refresh status",
+  errorCode: "Code: {code}",
   quickActions: "Quick actions",
 };
