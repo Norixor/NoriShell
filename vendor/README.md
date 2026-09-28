@@ -13,6 +13,7 @@
 - `ironrdp-session/src/fast_path.rs`：上游已经按 bitmap 源 stride 与行 padding 解码并包含对应测试，沿用这一实现；`src/active_stage.rs` 让纯 UDP DVC 的 EGFX EndFrame 同步 drain/composite，向调用方返回 `GraphicsUpdate` 和帧确认；`src/image.rs` 在重设帧缓冲区分配前施加应用相同的单维 8192、总像素 16,777,216 上限。
 - `ironrdp-egfx/src/decode.rs`：OpenH264 解出位流尺寸后、分配 RGBA 输出前施加相同的单维和像素上限，并检查 RGBA 字节长度溢出；拒绝过大帧的定向测试不分配大缓冲区。
 - `ironrdp-rdpsnd/src/client.rs` 与 `src/client/tests.rs`、该 crate `Cargo.toml`：保留 NoriShell 严格的分包 WaveInfo/Wave 长度与状态校验、错误时仅关闭声音通道、样本与调试信息脱敏；启用 lib 回归测试。
+- `ironrdp-dvc/src/client.rs`：Soft-Sync 请求中出现客户端未打开的通道 ID 时只跳过该 ID，其余已知通道照常切到所选隧道；原实现整组丢弃会让服务端已改走 UDP 的 EGFX 数据无人接收而黑屏。服务端仍经隧道发来的未打开通道数据直接丢弃；已打开但未被选择的通道数据仍被拒绝。Windows 在 Soft-Sync 后也会经隧道发送通道 Create/Close 请求：按 TCP 同样逻辑处理，创建成功的通道绑定到该隧道，拒绝创建的回复走通道默认 TCP 路径，关闭时解除隧道绑定。附定向测试（含实测 Create 请求字节）。
 - `ironrdp-tls/src/rustls_verifier.rs`：禁用 `SSLKEYLOGFILE` 流量密钥输出；仅 UnknownIssuer 可交由审批回调，过期等其他证书错误直接拒绝。
 - `ironrdp-rdpeudp-tokio/src/transport.rs`：可选的 `expected_leaf_der` 在 UDP TLS 握手后、RDPEMT 协商前精确匹配主 TCP TLS 的叶证书；失败即中断，字段不输出证书内容。调用方必须显式选择严格证书校验；此补丁没有放宽 UDP TLS 默认信任策略。
 
