@@ -326,7 +326,7 @@ onBeforeUnmount(() => {
   display: grid;
   overflow: hidden;
   border: var(--nvx-border-width) solid var(--nvx-color-border);
-  border-radius: var(--nvx-radius-lg);
+  border-radius: var(--nvx-radius-md);
   background: var(--nvx-color-bg-surface);
 }
 

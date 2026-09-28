@@ -67,7 +67,7 @@ function changeMarkers(value: string) { report(markers.setEnabled(value === "sho
 .enhancement-settings h2 { margin: 0; font-size: var(--nvx-font-size-lg); }
 .enhancement-settings p { margin: 5px 0 0; color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-sm); }
 .enhancement-settings__rows { display: grid; }
-.enhancement-settings__row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 260px); gap: var(--nvx-space-4); align-items: center; padding: var(--nvx-space-3) 0; border-bottom: 1px solid var(--nvx-color-border-subtle); }
+.enhancement-settings__row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 260px); gap: var(--nvx-space-4); align-items: center; padding: var(--nvx-space-3) 0; border-bottom: 1px solid var(--nvx-color-border); }
 .enhancement-settings__row strong { display: block; font-size: var(--nvx-font-size-sm); font-weight: 500; }
 .enhancement-settings__row small { display: block; margin-top: 3px; color: var(--nvx-color-text-secondary); line-height: 1.5; }
 @media (max-width: 760px) { .enhancement-settings__row { grid-template-columns: minmax(0, 1fr); gap: var(--nvx-space-2); } }

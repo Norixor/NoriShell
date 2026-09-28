@@ -76,10 +76,10 @@ onBeforeUnmount(() => { alive = false; if (timer) clearInterval(timer); });
   </section>
 </template>
 <style scoped>
-.plugin-app-integrations { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--nvx-color-border-subtle); border-radius: 8px; }
+.plugin-app-integrations { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--nvx-color-border); border-radius: 8px; }
 header, .command { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
 article { display: grid; gap: 6px; padding-block: 6px; }
 p { margin: 0; }
-.hint, small, kbd { color: var(--nvx-color-text-muted); font-size: 12px; }
+.hint, small, kbd { color: var(--nvx-color-text-secondary); font-size: 12px; }
 .command > span { flex: 1; }
 </style>

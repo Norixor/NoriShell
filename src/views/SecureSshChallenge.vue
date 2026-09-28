@@ -113,5 +113,5 @@ onBeforeUnmount(clear);
 <style scoped>
 .secure-challenge-fields { display: grid; gap: var(--nvx-space-4); }
 .secure-challenge-details dd { margin: 0 0 var(--nvx-space-3); overflow-wrap: anywhere; }
-.secure-challenge-details dt { color: var(--nvx-color-text-muted); }
+.secure-challenge-details dt { color: var(--nvx-color-text-secondary); }
 </style>

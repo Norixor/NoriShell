@@ -2820,7 +2820,7 @@ onMounted(async () => {
   align-content: start;
   gap: var(--nvx-space-1);
   padding: var(--nvx-space-4) var(--nvx-space-3);
-  border-right: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-right: var(--nvx-border-width) solid var(--nvx-color-border);
   background: var(--nvx-color-bg-subtle);
 }
 
@@ -2852,7 +2852,7 @@ onMounted(async () => {
 }
 
 .hosts-editor__nav-item--active {
-  background: var(--nvx-color-accent-subtle);
+  background: var(--nvx-color-accent-soft);
   color: var(--nvx-color-accent);
 }
 
@@ -2897,7 +2897,7 @@ onMounted(async () => {
   display: grid;
   gap: var(--nvx-space-4);
   padding-top: var(--nvx-space-5);
-  border-top: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .hosts-health__resource-grid {
@@ -2979,7 +2979,7 @@ onMounted(async () => {
 
 .hosts-route__section + .hosts-route__section {
   padding-top: var(--nvx-space-4);
-  border-top: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .hosts-route__control-grid {
@@ -3047,7 +3047,7 @@ onMounted(async () => {
   display: grid;
   gap: var(--nvx-space-3);
   padding-top: var(--nvx-space-4);
-  border-top: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .hosts-algorithms__category h3,
@@ -3237,7 +3237,7 @@ onMounted(async () => {
     grid-auto-columns: max-content;
     overflow-x: auto;
     border-right: 0;
-    border-bottom: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+    border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
   }
 
   .hosts-editor__content {

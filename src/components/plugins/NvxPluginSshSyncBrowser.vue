@@ -542,7 +542,7 @@ onBeforeUnmount(() => {
 .ssh-sync-browser__header p { margin: var(--nvx-space-1) 0 0; color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-xs); }
 .ssh-sync-browser__search { position: relative; display: flex; align-items: center; flex: 1 1 260px; max-width: 100%; }
 .ssh-sync-browser__search-icon { position: absolute; left: var(--nvx-space-3); color: var(--nvx-color-text-tertiary); pointer-events: none; }
-.ssh-sync-browser__search :deep(input) { height: var(--nvx-control-height-md); min-height: 36px; padding-inline-start: var(--nvx-space-9, 36px); font-size: var(--nvx-font-size-sm); }
+.ssh-sync-browser__search :deep(input) { height: var(--nvx-control-height-md); min-height: 36px; padding-inline-start: calc(var(--nvx-space-3) + 20px + var(--nvx-space-1)); font-size: var(--nvx-font-size-sm); }
 .ssh-sync-browser__data { min-width: 0; overflow: hidden; border: var(--nvx-border-width) solid var(--nvx-color-border); border-radius: var(--nvx-radius-md) var(--nvx-radius-md) 0 0; background: var(--nvx-color-bg-surface); }
 .ssh-sync-browser__list { overflow-x: auto; }
 .ssh-sync-browser__data--selected { display: grid; grid-template-columns: minmax(0, 1fr) 260px; }
