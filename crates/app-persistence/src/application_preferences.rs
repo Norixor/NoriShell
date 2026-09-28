@@ -31,6 +31,11 @@ impl AppRepository {
         let json = serde_json::to_string(value).map_err(|_| {
             AppPersistenceError::InvalidInput("application_preferences.invalid_input")
         })?;
+        if json.len() > 64 * 1024 {
+            return Err(AppPersistenceError::InvalidInput(
+                "application_preferences.too_large",
+            ));
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -162,5 +167,24 @@ mod tests {
                 .revision,
             None
         );
+    }
+
+    #[test]
+    fn application_row_is_readable_after_v50_migration_cleanup() {
+        let (_directory, repository) = repository();
+        let value = json!({
+            "themePreference":"light", "locale":"zh-CN", "uiZoom":100,
+            "terminalStartupBehavior":"restoreHistory", "newTerminalBehavior":"welcome",
+            "singlePaneTabCloseBehavior":"confirm"
+        });
+        repository.connection.execute(
+            "INSERT INTO application_preferences (group_id, revision, value_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4)",
+            params!["application", 15, value.to_string(), 1],
+        ).unwrap();
+        let snapshot = repository
+            .get_application_preferences(ApplicationPreferenceGroupId::Application)
+            .unwrap();
+        assert_eq!(snapshot.revision, Some(WireSequence::new(15)));
+        assert_eq!(snapshot.value, Some(value));
     }
 }
