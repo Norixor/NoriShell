@@ -185,6 +185,6 @@ defineExpose({ requestPaste, pasteFromClipboard });
 <style scoped>
 .paste-review { display: grid; gap: var(--nvx-space-3); min-width: 0; }
 .paste-review__summary { display: flex; flex-wrap: wrap; gap: var(--nvx-space-3); font-size: var(--nvx-font-size-sm); color: var(--nvx-color-text-secondary); }
-.paste-review__preview { margin: 0; padding: var(--nvx-space-3); max-height: min(360px, 45vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--nvx-color-border-subtle); border-radius: var(--nvx-radius-sm); background: var(--nvx-color-bg-canvas); color: var(--nvx-color-text-primary); font: 12px/1.6 var(--nvx-font-family-mono); }
+.paste-review__preview { margin: 0; padding: var(--nvx-space-3); max-height: min(360px, 45vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--nvx-color-border); border-radius: var(--nvx-radius-sm); background: var(--nvx-color-bg-canvas); color: var(--nvx-color-text-primary); font: 12px/1.6 var(--nvx-font-mono); }
 .paste-review p { margin: 0; color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-sm); }
 </style>

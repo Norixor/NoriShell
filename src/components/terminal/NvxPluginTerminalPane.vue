@@ -786,8 +786,8 @@ onBeforeUnmount(() => {
   gap: 12px;
   min-height: 42px;
   padding: 0 8px 0 12px;
-  border-bottom: 1px solid var(--nvx-color-border-subtle);
-  background: var(--nvx-color-surface-raised);
+  border-bottom: 1px solid var(--nvx-color-border);
+  background: var(--nvx-color-terminal-bg);
 }
 
 .plugin-terminal-pane__identity,
@@ -795,7 +795,7 @@ onBeforeUnmount(() => {
 .plugin-terminal-pane__identity { min-width: 0; }
 .plugin-terminal-pane__identity strong,
 .plugin-terminal-pane__identity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.plugin-terminal-pane__identity small { color: var(--nvx-color-text-muted); }
+.plugin-terminal-pane__identity small { color: var(--nvx-color-text-secondary); }
 .plugin-terminal-pane__risk { margin: 8px 8px 0; }
 .plugin-terminal-pane__terminal { min-height: 0; }
 </style>

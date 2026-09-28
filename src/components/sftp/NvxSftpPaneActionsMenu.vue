@@ -292,5 +292,5 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
 .sftp-pane-actions-menu__item:hover:not(:disabled),.sftp-pane-actions-menu__item:focus-visible { background:var(--nvx-color-bg-hover); outline:none; }
 .sftp-pane-actions-menu__item--danger { color:var(--nvx-color-danger); }
 .sftp-pane-actions-menu__item:disabled { opacity:.45; }
-.sftp-pane-actions-menu__separator { height:1px; margin:2px var(--nvx-space-2); background:var(--nvx-color-border-subtle); }
+.sftp-pane-actions-menu__separator { height:1px; margin:2px var(--nvx-space-2); background:var(--nvx-color-border); }
 </style>

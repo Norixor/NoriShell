@@ -1577,7 +1577,7 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
 
 .hosts-agent__keys {
   padding-top: var(--nvx-space-3);
-  border-top: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .hosts-agent__section-heading {
@@ -1671,7 +1671,7 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
   max-height: 320px;
   padding-top: var(--nvx-space-3);
   overflow-y: auto;
-  border-top: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .hosts-openssh__candidate {
@@ -1700,7 +1700,7 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
 
 .hosts-classification-editor {
   padding-bottom: var(--nvx-space-4);
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .hosts-classification-editor__actions {
@@ -1731,7 +1731,7 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
   gap: var(--nvx-space-2);
   align-items: center;
   min-height: 40px;
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border-subtle);
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 @media (max-width: 860px) {

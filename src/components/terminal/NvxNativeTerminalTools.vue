@@ -358,7 +358,7 @@ defineExpose({ openHistory, acceptSuggestion });
 .native-terminal-tools__dialog small { color: var(--nvx-color-text-secondary); line-height: 1.5; }
 .native-terminal-tools__filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 220px); gap: var(--nvx-space-2); }
 .native-terminal-tools__history { list-style: none; padding: 0; margin: 0; max-height: min(380px, 44vh); overflow: auto; }
-.native-terminal-tools__history li { display: flex; align-items: center; gap: var(--nvx-space-2); padding: 8px 0; border-bottom: 1px solid var(--nvx-color-border-subtle); }
+.native-terminal-tools__history li { display: flex; align-items: center; gap: var(--nvx-space-2); padding: 8px 0; border-bottom: 1px solid var(--nvx-color-border); }
 .native-terminal-tools__entry { min-width: 0; flex: 1; display: grid; gap: 3px; }
 .native-terminal-tools__entry code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .native-terminal-tools__entry-actions { display: flex; align-items: center; flex-shrink: 0; }
