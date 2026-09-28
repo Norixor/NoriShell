@@ -102,7 +102,7 @@ import { clearTerminalInputFocus } from "../terminal-input-target";
 import { registerTerminalWorkspaceFlush } from "../terminal-workspace-persistence";
 import { useUiStore } from "../stores/ui";
 import type { NativeTerminalSessionScope } from "../core-api/generated/core-api";
-import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { useWorkspaceTabsStore, type TerminalHostOpenRequest } from "../stores/workspaceTabs";
 import { useTipsStore } from "../stores/tips";
 import { applicationPreferenceFailure } from "../core-api/application-preferences";
 import { createManagedQuickConnect, createManagedTelnet, createManagedTerminalForHost, createManagedTerminalTab } from "../workspace-tab-view-shell";
@@ -275,6 +275,7 @@ const childWorkspace = isWorkspaceChildWindow();
 // A Tab WebView is hidden until its owner shell activates it; a hidden or background
 // Tab must never mark a Pane active, which would take the global input focus.
 const viewActive = ref(!isWorkspaceTabView());
+let vaultUnlockAwaitingDisplay = false;
 // BEL attention is renderer-only projection state: it never changes the session or workspace layout.
 const bellAttentionPaneIds = ref<Set<string>>(new Set());
 const requestedHost = ref<HostSummary | null>(null);
@@ -1117,7 +1118,10 @@ function openVaultPrompt(
   vaultErrorVisible.value = false;
   launcherOpen.value = false;
   vaultDialogOpen.value = true;
-  void saveVaultAndConnect();
+  // A Tab view still being prepared shows the prompt first; the protected unlock window
+  // opens only once the Tab is on screen, so it is not buried under the Tab's window.
+  if (isWorkspaceTabView() && !viewActive.value) vaultUnlockAwaitingDisplay = true;
+  else void saveVaultAndConnect();
   return true;
 }
 
@@ -2480,16 +2484,28 @@ async function consumeRequestedHostRoute() {
   if (route.path !== "/terminal") return;
   const hostId = typeof route.query.hostId === "string" ? route.query.hostId : null;
   if (!hostId) return;
-  const operationId = typeof route.query.connectOperationId === "string"
-    ? route.query.connectOperationId
-    : undefined;
-  const sftpDirectoryLaunch = route.query.source === "sftpDirectory";
+  await openHostRequest({
+    hostId,
+    operationId: typeof route.query.connectOperationId === "string" ? route.query.connectOperationId : undefined,
+    source: typeof route.query.source === "string" ? route.query.source : undefined,
+    pluginAuthorizationToken: typeof route.query.pluginAuthorizationToken === "string"
+      ? route.query.pluginAuthorizationToken
+      : undefined,
+  });
+}
+
+/**
+ * Opens a saved Host from a route query or from a new Tab's bootstrap intent. It
+ * resolves once the Pane shows the Host's connecting, Vault or authentication step;
+ * any user interaction continues afterwards. An operation id is consumed once.
+ */
+async function openHostRequest(request: TerminalHostOpenRequest) {
+  const { hostId } = request;
+  const operationId = request.operationId;
+  const sftpDirectoryLaunch = request.source === "sftpDirectory";
   const forceNewTab = !isWorkspaceTabView()
-    && (route.query.source === "overview" || route.query.source === "plugin" || sftpDirectoryLaunch);
-  const pluginAuthorizationToken = route.query.source === "plugin"
-    && typeof route.query.pluginAuthorizationToken === "string"
-    ? route.query.pluginAuthorizationToken
-    : undefined;
+    && (request.source === "overview" || request.source === "plugin" || sftpDirectoryLaunch);
+  const pluginAuthorizationToken = request.source === "plugin" ? request.pluginAuthorizationToken : undefined;
   if (operationId !== undefined && consumedHostOperationIds.has(operationId)) {
     await router.replace({ path: "/terminal" });
     return;
@@ -2605,11 +2621,16 @@ onMounted(async () => {
       activate: (tabId: string) => {
         viewActive.value = true;
         activateTab(tabId);
+        if (vaultUnlockAwaitingDisplay) {
+          vaultUnlockAwaitingDisplay = false;
+          if (vaultDialogOpen.value) void saveVaultAndConnect();
+        }
       },
       close: requestCloseTab,
       closeMany: requestCloseTabs,
       quickConnect: quickConnectFromHeader,
       openTelnet: openTelnetFromHeader,
+      openHost: openHostRequest,
       deactivate: deactivateTerminalWorkspace,
       toggleQuickCommands: () => { quickCommandsOpen.value = !quickCommandsOpen.value; },
       runShortcut: runTerminalShortcut,

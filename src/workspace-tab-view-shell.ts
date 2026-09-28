@@ -4,6 +4,7 @@ import type { Router } from "vue-router";
 
 import { pluginPageTab, workspacePageTabForRoute, type WorkspacePageTab } from "./stores/workspaceTabs";
 import { desktopClient } from "./core-api/desktop-client";
+import { listHosts } from "./core-api/client";
 import type {
   NativeTrayAction, PluginApprovedTerminalChannelLaunch, PluginNavigationItem, PluginProtocolLaunchSummary,
 } from "./core-api/generated/core-api";
@@ -47,7 +48,17 @@ import {
   type WorkspaceTabViewSummary,
 } from "./workspace-tab-view-state";
 
-type ViewSignal = { id: string; viewLabel: string; code?: string };
+type ViewSignal = { id: string; viewLabel: string; code?: string; intentCode?: string };
+/**
+ * What a new Terminal Tab opens during its bootstrap, before it is first shown, so it
+ * never passes through its welcome page. Carried only in the one-time bootstrap, never
+ * in the Core Tab record: it may hold a one-time plugin authorization token.
+ */
+export type TerminalOpenIntent =
+  | { type: "open-host"; hostId: string; connectOperationId: string; source?: string;
+    pluginAuthorizationToken?: string; directoryPathBytes?: number[] }
+  | { type: "quick-connect"; target?: string }
+  | { type: "telnet" };
 type SignalName = "ready" | "bootstrapped" | "bootstrap-failed";
 type MainHostNavigation = { operationId: string; sourceWindow: string; create: boolean };
 type ViewReply = ViewSignal & { operationId?: string };
@@ -60,6 +71,8 @@ const signals = new Map<string, ViewSignal>();
 const waiters = new Map<string, (signal: ViewSignal) => void>();
 const viewLabels = new Map<string, string>();
 const creatingTabIds = new Set<string>();
+// A bootstrap intent that could not be applied; the created Tab stays and the creator reports it.
+const intentFailures = new Map<string, string>();
 const recoveringTabIds = new Set<string>();
 const pendingCloseRequests = new Map<string, Promise<boolean>>();
 // Tabs already swapped out of the Header while their native view closes.
@@ -535,7 +548,8 @@ export async function createManagedWorkspaceTab(
       // xterm measures its first layout from these bounds while the view is still hidden.
       if (contentBounds) await setWorkspaceTabViewBounds(id, contentBounds);
       if (view.created) {
-        await waitForBootstrap(id, view.label);
+        const ready = await waitForBootstrap(id, view.label);
+        if (ready.intentCode) intentFailures.set(id, ready.intentCode);
         markTabBoot(id, "shell", "bootstrapped_received");
       }
       // Shown on top of the placeholder before the placeholder is removed.
@@ -572,6 +586,7 @@ export async function createManagedWorkspaceTab(
 
 export async function createManagedTerminalTab(
   behavior: "welcome" | "local" = "welcome", placement: WorkspaceTabPlacement = {},
+  intent: TerminalOpenIntent | null = null, initialSummary: InitialSummary | null = null,
 ): Promise<string> {
   const id = createUuidV7();
   const seed = behavior === "local" ? { behavior, initialLocalOpen: {
@@ -579,32 +594,45 @@ export async function createManagedTerminalTab(
     attachAttemptId: createUuidV7(), initialRows: 24, initialCols: 80,
   } } : { behavior };
   // Match the first summary the Terminal View publishes for this seed.
-  const initial = behavior === "local"
+  const initial = initialSummary ?? (behavior === "local"
     ? { label: t("localSession.defaultShell"), stateLabel: paneState(t("localSession.states.starting"), 1) }
-    : { label: t("sshTerminal.newTabLabel"), stateLabel: paneState(t("sshTerminal.newTabState"), 1) };
-  await createManagedWorkspaceTab(id, "terminal", "/terminal", seed, seed, initial, placement);
+    : { label: t("sshTerminal.newTabLabel"), stateLabel: paneState(t("sshTerminal.newTabState"), 1) });
+  intentFailures.delete(id);
+  // The intent rides only in the bootstrap; Core keeps the plain seed for recovery.
+  await createManagedWorkspaceTab(id, "terminal", "/terminal", intent ? { ...seed, intent } : seed, seed, initial, placement);
+  const failure = intentFailures.get(id);
+  intentFailures.delete(id);
+  if (failure) throw new Error(failure);
   return id;
+}
+
+/**
+ * The Header title a new Terminal for a saved Host starts with. A Host with a ready
+ * credential connects at once under its own label; otherwise the Tab asks first.
+ */
+async function hostTerminalSummary(hostId: string): Promise<InitialSummary | null> {
+  const host = (await listHosts().catch(() => [])).find((item) => item.hostId === hostId);
+  if (!host?.hasReadyCredential) return null;
+  return { label: host.label, stateLabel: paneState(t("sshSession.states.resolving"), 1), hostId };
 }
 
 export async function createManagedTerminalForHost(
   query: { hostId: string; source?: string; connectOperationId?: string; pluginAuthorizationToken?: string },
   placement: WorkspaceTabPlacement = {},
 ): Promise<string> {
-  const id = await createManagedTerminalTab("welcome", placement);
-  await activateOwnedTab(id, workspaceWindowLabel(), { type: "open-route", path: "/terminal", query: {
-    ...query, connectOperationId: query.connectOperationId ?? createUuidV7(),
-  } });
-  return id;
+  return createManagedTerminalTab("welcome", placement, {
+    type: "open-host", hostId: query.hostId, source: query.source,
+    connectOperationId: query.connectOperationId ?? createUuidV7(),
+    pluginAuthorizationToken: query.pluginAuthorizationToken,
+  }, await hostTerminalSummary(query.hostId));
 }
 
 export async function createManagedTerminalForDirectory(
   hostId: string, pathBytes: number[], placement: WorkspaceTabPlacement = {},
 ): Promise<string> {
-  const id = await createManagedTerminalTab("welcome", placement);
-  await activateOwnedTab(id, workspaceWindowLabel(), { type: "open-route",
-    path: "/terminal", query: { hostId, source: "sftpDirectory" }, directoryPathBytes: pathBytes,
-  });
-  return id;
+  return createManagedTerminalTab("welcome", placement, {
+    type: "open-host", hostId, source: "sftpDirectory", connectOperationId: createUuidV7(), directoryPathBytes: pathBytes,
+  }, await hostTerminalSummary(hostId));
 }
 
 export async function createManagedFileTab(
@@ -795,13 +823,11 @@ export async function openManagedTransferTarget(query: Record<string, string>, t
 }
 
 export async function createManagedQuickConnect(target = ""): Promise<void> {
-  const id = await createManagedTerminalTab();
-  await activateOwnedTab(id, workspaceWindowLabel(), { type: "quick-connect", target });
+  await createManagedTerminalTab("welcome", {}, { type: "quick-connect", target });
 }
 
 export async function createManagedTelnet(): Promise<void> {
-  const id = await createManagedTerminalTab();
-  await activateOwnedTab(id, workspaceWindowLabel(), { type: "telnet" });
+  await createManagedTerminalTab("welcome", {}, { type: "telnet" });
 }
 
 /** Performs a shell action in this shell window and returns the created Tab, if any. */

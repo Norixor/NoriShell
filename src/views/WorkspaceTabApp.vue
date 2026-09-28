@@ -40,6 +40,7 @@ import { afterNextPaint } from "../workspace-tab-paint";
 import { startNativeBackgroundSync } from "../native-window-background";
 import { acceptSftpPluginNavigation } from "./sftpPluginNavigation";
 import { registerWorkspaceTabCloseHandoff } from "../workspace-tab-close-handoff";
+import type { TerminalOpenIntent } from "../workspace-tab-view-shell";
 import { requestReply } from "../workspace-tab-reply";
 import {
   closeOwnWorkspaceTabView as closeOwnNativeTabView,
@@ -71,7 +72,7 @@ interface InitialLocalOpen {
   initialRows: number;
   initialCols: number;
 }
-type TerminalSeed = { behavior: "welcome" } | { behavior: "local"; initialLocalOpen: InitialLocalOpen }
+type TerminalSeed = { behavior: "welcome"; intent?: TerminalOpenIntent } | { behavior: "local"; initialLocalOpen: InitialLocalOpen }
   | { behavior: "pluginProtocol"; launchId: string; revision: string; paneId: string }
   | { behavior: "pluginApprovedChannel"; payload: PluginApprovedTerminalChannelLaunch }
   | TerminalRestoreSeed;
@@ -369,6 +370,41 @@ async function createInitialTab(input: Bootstrap): Promise<void> {
   recovery = desktop;
 }
 
+/**
+ * Applies a new Terminal Tab's opening intent before its first display, so it starts in
+ * the Host's connecting (or Vault/authentication) step instead of its welcome page.
+ * User interaction never blocks this: it continues after the Tab is shown. Returns the
+ * stable code of an intent that could not be applied; the Tab itself stays usable.
+ */
+async function applyTerminalIntent(intent: TerminalOpenIntent | undefined): Promise<string | undefined> {
+  if (!intent) return undefined;
+  const controller = tabs.terminalController;
+  try {
+    if (!controller) throw new Error("workspace_tab.terminal_unavailable");
+    if (intent.type === "quick-connect") {
+      if (!controller.quickConnect(intent.target)) throw new Error("workspace_tab.terminal_unavailable");
+    } else if (intent.type === "telnet") {
+      if (!controller.openTelnet()) throw new Error("workspace_tab.terminal_unavailable");
+    } else if (intent.type === "open-host") {
+      if (typeof intent.hostId !== "string" || !intent.hostId || typeof intent.connectOperationId !== "string"
+        || !controller.openHost) throw new Error("workspace_tab.open_route_failed");
+      let operationId = intent.connectOperationId;
+      if (intent.directoryPathBytes !== undefined) {
+        if (intent.source !== "sftpDirectory") throw new Error("workspace_tab.invalid_directory");
+        const launch = createSftpTerminalLaunch(intent.hostId, intent.directoryPathBytes);
+        if (!launch) throw new Error("workspace_tab.invalid_directory");
+        operationId = launch;
+      }
+      await controller.openHost({ hostId: intent.hostId, operationId, source: intent.source,
+        pluginAuthorizationToken: intent.pluginAuthorizationToken });
+    } else throw new Error("workspace_tab.invalid_action");
+    markTabBoot(tabId, "tab", "intent_applied");
+    return undefined;
+  } catch (error) {
+    return failureCode(error, "workspace_tab.open_route_failed");
+  }
+}
+
 function recoveryFor(kind: WorkspaceTabKind): WorkspaceTabRecovery {
   if (kind === "terminal") return terminalRecovery(tabs, router);
   if (kind === "file") return createFileRecovery(tabs, router) as WorkspaceTabRecovery;
@@ -391,6 +427,7 @@ async function bootstrap(input: Bootstrap): Promise<void> {
   ownerWindow.value = input.ownerWindow;
   setWorkspaceTabOwnerWindow(input.ownerWindow);
   bootstrapPromise = (async () => {
+    let intentCode: string | undefined;
     try {
       kind = input.kind;
       mode = input.mode;
@@ -424,12 +461,16 @@ async function bootstrap(input: Bootstrap): Promise<void> {
           const controller = tabs.terminalController;
           if (!controller?.snapshotTabHandoff) throw new Error("workspace_tab.terminal_unavailable");
           await updateOwnWorkspaceTabProjection(await controller.snapshotTabHandoff(tabId));
+          intentCode = await applyTerminalIntent((input.seed as { intent?: TerminalOpenIntent }).intent);
         }
       }
       if (pluginInvalidated && input.kind === "page") throw new Error("workspace_tab.plugin_unavailable");
       bootstrapped.value = true;
       errorCode.value = "";
-      await emitTo(ownerWindow.value, "workspace-tab-view-bootstrapped", { id: tabId, viewLabel });
+      // The Header shows this Tab's own title before its first display, not after.
+      const summary = currentSummary(true);
+      if (summary) await emitTo(ownerWindow.value, "workspace-tab-view-summary", summary);
+      await emitTo(ownerWindow.value, "workspace-tab-view-bootstrapped", { id: tabId, viewLabel, intentCode });
       markTabBoot(tabId, "tab", "bootstrapped_sent");
     } catch (error) {
       errorCode.value = failureCode(error);
@@ -582,8 +623,9 @@ async function runOwnedAction(event: { id: string; action: OwnedAction }): Promi
   if (!focused) throw new Error("workspace_tab.session_unavailable");
 }
 
-function currentSummary() {
-  if (!activated.value || !kind) return null;
+/** `beforeDisplay` projects a bootstrapped but not yet activated Tab for its first Header title. */
+function currentSummary(beforeDisplay = false) {
+  if ((!activated.value && !beforeDisplay) || !kind) return null;
   const terminal = tabs.terminalTabs.find((tab) => tab.groupId === tabId);
   if (kind === "terminal" && terminal) return {
     id: tabId, viewLabel, kind, route: permittedRoute, label: terminal.label, stateLabel: terminal.stateLabel,

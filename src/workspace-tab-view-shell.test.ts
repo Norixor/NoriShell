@@ -38,6 +38,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("./workspace-tab-boot-trace", () => ({ markTabBoot: vi.fn() }));
+const hosts = vi.hoisted(() => ({ list: vi.fn(async () => [] as Array<{ hostId: string; label: string; hasReadyCredential: boolean }>) }));
+vi.mock("./core-api/client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./core-api/client")>(), listHosts: hosts.list,
+}));
 vi.mock("./workspace-tab-windows", () => ({
   getWorkspaceTabView: native.getView,
   createWorkspaceTabView: native.create,
@@ -56,6 +60,8 @@ import type { Router } from "vue-router";
 
 import {
   activateWorkspaceTabView,
+  createManagedTerminalForDirectory,
+  createManagedTerminalForHost,
   createManagedWorkspaceTab,
   registerWorkspaceShellRouteSettled,
   requestCloseWorkspaceTabView,
@@ -558,14 +564,48 @@ describe("managed Tab creation", () => {
     await vi.waitFor(() => expect(native.create).toHaveBeenCalled());
     const targetId = native.create.mock.calls[0]![0];
     native.autoAcknowledge = true;
-    signal("workspace-tab-view-bootstrapped", targetId);
-    await vi.waitFor(() => expect(native.emitted.some((item) => item.event === "workspace-tab-activate-owned")).toBe(true));
-    const request = native.emitted.find((item) => item.event === "workspace-tab-activate-owned")!.payload;
-    native.handlers.get("workspace-tab-activate-owned-result")?.({ payload: {
-      id: targetId, operationId: request.operationId, code: "workspace_tab.activation_failed",
+    // The target applied its Host intent during bootstrap and reports why it could not.
+    native.handlers.get("workspace-tab-view-bootstrapped")?.({ payload: {
+      id: targetId, viewLabel: targetId, intentCode: "workspace_tab.open_route_failed",
     } });
     await vi.waitFor(() => expect(native.close).toHaveBeenCalledWith("page:newPage:source"));
     expect(workspaceTabViewSummaries.value.some((item) => item.id === "page:newPage:source")).toBe(false);
+    expect(native.emitted.some((item) => item.event === "workspace-tab-activate-owned")).toBe(false);
+  });
+
+  it("opens a Host inside the new Tab's bootstrap and never sends a later open action", async () => {
+    hosts.list.mockResolvedValueOnce([{ hostId: "host-1", label: "prod-db", hasReadyCredential: true }]);
+    const creating = createManagedTerminalForHost({ hostId: "host-1", source: "plugin", connectOperationId: "op-1",
+      pluginAuthorizationToken: "token-1" });
+    await vi.waitFor(() => expect(native.create).toHaveBeenCalled());
+    const [id, kind, route, payload, bootstrap] = native.create.mock.calls[0]! as unknown as
+      [string, string, string, unknown, { seed: unknown }];
+    expect([kind, route]).toEqual(["terminal", "/terminal"]);
+    expect(bootstrap.seed).toEqual({ behavior: "welcome", intent: { type: "open-host", hostId: "host-1", source: "plugin",
+      connectOperationId: "op-1", pluginAuthorizationToken: "token-1" } });
+    // The Core record keeps no intent or token.
+    expect(payload).toEqual({ behavior: "welcome" });
+    // The Header starts with the Host's own title rather than "New connection".
+    expect(workspaceTabViewSummaries.value.find((item) => item.id === id)?.label).toBe("prod-db");
+    native.autoAcknowledge = true;
+    signal("workspace-tab-view-bootstrapped", id);
+    expect(await creating).toBe(id);
+    expect(native.emitted.some((item) => item.event === "workspace-tab-activate-owned")).toBe(false);
+    expect(native.emitted.some((item) => item.event === "workspace-tab-view-open-route")).toBe(false);
+  });
+
+  it("reports an intent the new Terminal could not apply after keeping the Tab", async () => {
+    const creating = createManagedTerminalForDirectory("host-1", [47, 116, 109, 112]);
+    const failed = expect(creating).rejects.toThrow("workspace_tab.invalid_directory");
+    await vi.waitFor(() => expect(native.create).toHaveBeenCalled());
+    const [id, , , , bootstrap] = native.create.mock.calls[0]! as unknown as [string, string, string, unknown, { seed: { intent: unknown } }];
+    expect(bootstrap.seed.intent).toMatchObject({ type: "open-host", hostId: "host-1", source: "sftpDirectory",
+      directoryPathBytes: [47, 116, 109, 112] });
+    native.autoAcknowledge = true;
+    native.handlers.get("workspace-tab-view-bootstrapped")?.({ payload: { id, viewLabel: id, intentCode: "workspace_tab.invalid_directory" } });
+    await failed;
+    expect(workspaceTabViewSummaries.value.some((item) => item.id === id)).toBe(true);
+    expect(pendingWorkspaceTabViewId.value).toBeNull();
   });
 });
 

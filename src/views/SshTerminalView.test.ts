@@ -1035,6 +1035,49 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
+  it("opens a saved Host in a new Tab before its first display, and consumes the operation once", async () => {
+    workspaceView.tab = true;
+    const readyHost = { ...host, hasReadyCredential: true };
+    client.listHosts.mockResolvedValue([readyHost]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked", vaultId: "vault", revision: "2", entryCount: 1 });
+    const { wrapper, pinia } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    const controller = tabs.terminalController!;
+    const id = createUuidV7();
+    await controller.createInitialTab!(id, "welcome");
+    // Not activated: the shell shows the view only after this resolves.
+    await controller.openHost!({ hostId: readyHost.hostId, operationId: "019d0000-0000-7000-8000-000000000301" });
+    await flushPromises();
+    expect(tabs.terminalTabs.find((tab) => tab.groupId === id)?.label).toBe(readyHost.label);
+    expect(tabs.terminalTabs.find((tab) => tab.groupId === id)?.hostId).toBe(readyHost.hostId);
+    expect(wrapper.findAllComponents(SshPaneContractStub)).toHaveLength(1);
+    await controller.openHost!({ hostId: readyHost.hostId, operationId: "019d0000-0000-7000-8000-000000000301" });
+    await flushPromises();
+    expect(wrapper.findAllComponents(SshPaneContractStub)).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("does not wait for the Vault unlock before a new Host Tab can be shown", async () => {
+    workspaceView.tab = true;
+    const readyHost = { ...host, hasReadyCredential: true };
+    client.listHosts.mockResolvedValue([readyHost]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "locked", vaultId: "vault-1", revision: "1", entryCount: 1 });
+    const { wrapper, pinia } = await mountShell();
+    const controller = useWorkspaceTabsStore(pinia).terminalController!;
+    await controller.createInitialTab!(createUuidV7(), "welcome");
+    await expect(controller.openHost!({ hostId: readyHost.hostId, operationId: "019d0000-0000-7000-8000-000000000302" }))
+      .resolves.toBeUndefined();
+    await flushPromises();
+    // The protected unlock window waits until the Tab is on screen.
+    expect(secureVault).not.toHaveBeenCalled();
+    expect(wrapper.findAllComponents(SshPaneContractStub)).toHaveLength(0);
+    controller.activate(useWorkspaceTabsStore(pinia).terminalTabs[0]!.groupId);
+    await flushPromises();
+    expect(secureVault).toHaveBeenCalledWith("ensureUnlocked");
+    expect(secureVault).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it("consumes a Host connection request after the cached Terminal route is activated", async () => {
     const { router, wrapper } = await mountShell();
     await router.push("/hosts");
