@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "core:webview:allow-set-webview-zoom",
+    "core:webview:allow-set-webview-background-color",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:event:allow-emit-to",

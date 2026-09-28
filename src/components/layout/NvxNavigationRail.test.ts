@@ -11,12 +11,12 @@ import NvxNavigationRail from "./NvxNavigationRail.vue";
 
 const native = vi.hoisted(() => ({
   tauri: false,
-  deactivate: vi.fn(async () => undefined),
+  showShellRoute: vi.fn(async (navigate?: () => unknown) => { await navigate?.(); }),
   openPluginPage: vi.fn(async () => undefined),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => native.tauri }));
 vi.mock("../../workspace-tab-view-shell", () => ({
-  deactivateWorkspaceTabView: native.deactivate,
+  showWorkspaceShellRoute: native.showShellRoute,
   openManagedPluginPage: native.openPluginPage,
 }));
 
@@ -52,7 +52,7 @@ const selected = (wrapper: Awaited<ReturnType<typeof mountRail>>["wrapper"]) =>
 describe("NvxNavigationRail", () => {
   beforeEach(() => {
     native.tauri = false;
-    native.deactivate.mockClear();
+    native.showShellRoute.mockReset().mockImplementation(async (navigate?: () => unknown) => { await navigate?.(); });
     native.openPluginPage.mockClear();
     retainWorkspaceTabViewSummaries(new Set());
     setActiveWorkspaceTabView(null);
@@ -91,7 +91,30 @@ describe("NvxNavigationRail", () => {
     setActiveWorkspaceTabView("terminal-1");
     await wrapper.get('a[href="/hosts"]').trigger("click");
     await flushPromises();
-    expect(native.deactivate).toHaveBeenCalledOnce();
+    expect(native.showShellRoute).toHaveBeenCalledOnce();
+    await wrapper.get('a[href="/tunnels"]').trigger("click");
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/tunnels");
+  });
+
+  it("hands navigation to the shell so the Tab covers the page until it painted", async () => {
+    native.tauri = true;
+    const { wrapper, router } = await mountRail("/hosts");
+    let navigate: (() => unknown) | undefined;
+    native.showShellRoute.mockImplementationOnce(async (callback?: () => unknown) => { navigate = callback; });
+    await wrapper.get('a[href="/tunnels"]').trigger("click");
+    await flushPromises();
+    // The Rail does not navigate on its own; the shell decides when.
+    expect(router.currentRoute.value.path).toBe("/hosts");
+    await navigate?.();
+    await flushPromises();
+    expect(router.currentRoute.value.path).toBe("/tunnels");
+  });
+
+  it("still navigates when the active Tab cannot release input", async () => {
+    native.tauri = true;
+    const { wrapper, router } = await mountRail("/hosts");
+    native.showShellRoute.mockRejectedValueOnce(new Error("workspace_tab.input_focus_release_failed"));
     await wrapper.get('a[href="/tunnels"]').trigger("click");
     await flushPromises();
     expect(router.currentRoute.value.path).toBe("/tunnels");

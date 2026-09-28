@@ -8,6 +8,8 @@
   "permissions": [
     "core:window:allow-start-dragging",
     "core:webview:allow-set-webview-zoom",
+    "core:window:allow-set-background-color",
+    "core:webview:allow-set-webview-background-color",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "tool-window-lifecycle",

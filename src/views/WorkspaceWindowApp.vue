@@ -10,6 +10,7 @@ import { i18n } from "../locales";
 import { startWorkspaceTabWindowUi } from "../workspace-tab-window-ui";
 import { setWorkspaceTabViewContentBounds } from "../workspace-tab-view-shell";
 import { useRouteMotion } from "../route-motion";
+import { startNativeBackgroundSync } from "../native-window-background";
 
 const ui = useUiStore();
 const router = useRouter();
@@ -35,11 +36,13 @@ function syncWorkspaceContentBounds() {
 }
 watch(() => ui.appliedUiZoom, () => { void Promise.resolve().then(syncWorkspaceContentBounds); });
 let stopWorkspaceTabWindows: (() => void) | null = null;
+let stopNativeBackground: (() => void) | null = null;
 let disposed = false;
 
 ui.applyPreferences();
 void ui.setUiZoom(ui.uiZoom, false);
 onMounted(() => {
+  stopNativeBackground = startNativeBackgroundSync("window-and-webview");
   workspaceContentObserver = new ResizeObserver(syncWorkspaceContentBounds);
   if (workspaceContent.value) workspaceContentObserver.observe(workspaceContent.value);
   window.addEventListener("resize", syncWorkspaceContentBounds);
@@ -55,6 +58,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", syncWorkspaceContentBounds);
   setWorkspaceTabViewContentBounds(null);
   disposed = true;
+  stopNativeBackground?.();
   stopWorkspaceTabWindows?.();
 });
 </script>

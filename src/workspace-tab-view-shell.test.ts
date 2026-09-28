@@ -57,7 +57,9 @@ import type { Router } from "vue-router";
 import {
   activateWorkspaceTabView,
   createManagedWorkspaceTab,
+  registerWorkspaceShellRouteSettled,
   requestCloseWorkspaceTabView,
+  showWorkspaceShellRoute,
   startWorkspaceTabViewShell,
 } from "./workspace-tab-view-shell";
 import { pendingWorkspaceTabViewId, workspaceTabViewSummaries } from "./workspace-tab-view-state";
@@ -335,6 +337,84 @@ describe("native Workspace Tab selection", () => {
   });
 });
 
+describe("leaving a Tab for a shell page", () => {
+  let unregister: (() => void) | null = null;
+
+  beforeEach(() => {
+    native.visible.mockReset().mockImplementation(async () => undefined);
+    native.handlers.clear();
+    native.emitted.length = 0;
+    native.autoAcknowledge = false;
+    native.autoDeactivate = true;
+    retainWorkspaceTabViewSummaries(new Set());
+    for (const id of ["A", "B"]) setWorkspaceTabViewSummary({ id, viewLabel: id, kind: "terminal", label: id, stateLabel: "" });
+    setActiveWorkspaceTabView("A");
+  });
+  afterEach(() => {
+    unregister?.();
+    unregister = null;
+    vi.useRealTimers();
+  });
+
+  it("releases input, navigates, and hides the Tab only after the shell page painted", async () => {
+    const order: string[] = [];
+    let painted!: () => void;
+    unregister = registerWorkspaceShellRouteSettled(() => new Promise((resolve) => {
+      order.push("settle");
+      painted = () => { order.push("painted"); resolve(); };
+    }));
+    native.visible.mockImplementation(async (id: string, visible: boolean) => { order.push(`${id}:${visible}`); });
+    const leaving = showWorkspaceShellRoute(() => { order.push(`navigate:${String(activeWorkspaceTabViewId.value)}`); });
+    await vi.waitFor(() => expect(order).toContain("settle"));
+    // Released and deselected before navigation; still on screen while the page renders.
+    expect(native.emitted.find((item) => item.event === "workspace-tab-view-deactivate")?.payload.id).toBe("A");
+    expect(order).toEqual(["navigate:null", "settle"]);
+    painted();
+    await leaving;
+    expect(order.slice(0, 3)).toEqual(["navigate:null", "settle", "painted"]);
+    expect(order).toContain("A:false");
+    expect(order).not.toContain("A:true");
+    expect(activeWorkspaceTabViewId.value).toBeNull();
+  });
+
+  it("keeps the Tab active and does not navigate when input release fails", async () => {
+    native.autoDeactivate = false;
+    const navigate = vi.fn();
+    const leaving = showWorkspaceShellRoute(navigate);
+    const failed = expect(leaving).rejects.toThrow("workspace_tab.input_focus_release_failed");
+    await vi.waitFor(() => expect(native.emitted.some((item) => item.event === "workspace-tab-view-deactivate")).toBe(true));
+    const request = native.emitted.find((item) => item.event === "workspace-tab-view-deactivate")!.payload;
+    native.handlers.get("workspace-tab-view-deactivated")?.({ payload: {
+      id: "A", viewLabel: "A", operationId: request.operationId, code: "workspace_tab.input_focus_release_failed",
+    } });
+    await failed;
+    expect(navigate).not.toHaveBeenCalled();
+    expect(activeWorkspaceTabViewId.value).toBe("A");
+    expect(native.visible).not.toHaveBeenCalledWith("A", false);
+  });
+
+  it("hides the Tab after a bounded wait when the shell page never reveals", async () => {
+    vi.useFakeTimers();
+    unregister = registerWorkspaceShellRouteSettled(() => new Promise(() => undefined));
+    const leaving = showWorkspaceShellRoute(() => undefined);
+    for (let attempt = 0; attempt < 10 && !native.emitted.some((item) => item.event === "workspace-tab-view-deactivate"); attempt += 1) {
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    await vi.advanceTimersByTimeAsync(100);
+    expect(native.visible).not.toHaveBeenCalledWith("A", false);
+    await vi.advanceTimersByTimeAsync(300);
+    await leaving;
+    expect(native.visible).toHaveBeenCalledWith("A", false);
+  });
+
+  it("still hides the Tab when navigation itself fails", async () => {
+    unregister = registerWorkspaceShellRouteSettled(async () => undefined);
+    await expect(showWorkspaceShellRoute(() => { throw new Error("navigation_failed"); })).rejects.toThrow("navigation_failed");
+    expect(native.visible).toHaveBeenCalledWith("A", false);
+    expect(activeWorkspaceTabViewId.value).toBeNull();
+  });
+});
+
 describe("managed Tab creation", () => {
   const router = { currentRoute: ref({ path: "/terminal", fullPath: "/terminal" }), push: vi.fn() } as unknown as Router;
   let stopShell: () => void;
@@ -380,6 +460,33 @@ describe("managed Tab creation", () => {
     expect(native.visible).toHaveBeenCalledWith("B", true);
     expect(pendingWorkspaceTabViewId.value).toBeNull();
     expect(activeWorkspaceTabViewId.value).toBe("B");
+  });
+
+  it("hides the previous Tab only after the opaque placeholder painted", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+    try {
+      setWorkspaceTabViewSummary({ id: "A", viewLabel: "A", kind: "terminal", label: "A", stateLabel: "" });
+      setActiveWorkspaceTabView("A");
+      const creating = createManagedWorkspaceTab("B", "terminal", "/terminal", { behavior: "welcome" }, {},
+        { label: "B", stateLabel: "" });
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
+      expect(pendingWorkspaceTabViewId.value).toBe("B");
+      expect(native.visible).not.toHaveBeenCalledWith("A", false);
+      frames.shift()!(0);
+      expect(native.visible).not.toHaveBeenCalledWith("A", false);
+      frames.shift()!(16);
+      await vi.waitFor(() => expect(native.visible).toHaveBeenCalledWith("A", false));
+      native.autoAcknowledge = true;
+      await vi.waitFor(() => expect(native.create).toHaveBeenCalled());
+      signal("workspace-tab-view-bootstrapped", "B");
+      await creating;
+      // The new view is shown before the placeholder that it covers is removed.
+      expect(native.visible).toHaveBeenCalledWith("B", true);
+      expect(pendingWorkspaceTabViewId.value).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("does not activate a Tab it created a second time when a late state refresh sees it", async () => {

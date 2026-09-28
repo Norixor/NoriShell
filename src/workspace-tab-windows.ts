@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { canvasBackgroundRgb } from "./workspace-tab-paint";
+
 export type WorkspaceTabKind = "terminal" | "file" | "desktop" | "page";
 
 /** Tauri WebView labels have a narrower alphabet than business Tab IDs. */
@@ -56,7 +58,7 @@ export interface WorkspaceTabViewBounds {
 
 /** `bootstrap`, when given, is taken once by the new view itself so it starts without a round trip. */
 export const createWorkspaceTabView = (id: string, kind: WorkspaceTabKind, route: string, payload: unknown, bootstrap: unknown = null) =>
-  invoke<WorkspaceTabView>("create_tab_view", { id, kind, route, payload, bootstrap });
+  invoke<WorkspaceTabView>("create_tab_view", { id, kind, route, payload, bootstrap, background: canvasBackgroundRgb() });
 export const takeWorkspaceTabBootstrap = () => invoke<unknown>("workspace_tab_bootstrap_take");
 export const getWorkspaceTabView = (id: string) =>
   invoke<WorkspaceTabView | null>("workspace_tab_view_get", { id });
