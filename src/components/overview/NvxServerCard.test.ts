@@ -9,6 +9,7 @@ import type {
 } from "../../core-api/generated/core-api";
 import { i18n } from "../../locales";
 import NvxServerCard from "./NvxServerCard.vue";
+import { METRIC_HISTORY_LIMIT, nextMetricHistory } from "./overview-metrics";
 
 const card: ServerOverviewCard = {
   catalogEntry: {
@@ -310,5 +311,71 @@ describe("NvxServerCard", () => {
     expect(freshNetwork.text().match(/0B/g)).toHaveLength(2);
     expect(freshNetwork.attributes("aria-label")?.match(/0\.0 B\/s/g)).toHaveLength(2);
     expect(freshWrapper.text()).not.toContain("linux-procfs v1 · Linux");
+  });
+
+  it("draws CPU, memory and disk trends and keeps field-only reasons inside the cell", () => {
+    const snapshot = metricSnapshot("available");
+    snapshot.disks = [{ ...snapshot.disks[0]!, state: "permissionDenied" }];
+    const wrapper = mount(NvxServerCard, {
+      props: {
+        card: monitoredCard(snapshot),
+        history: { cpu: [10, 20, 30], memory: [40, 50], disk: [] },
+      },
+      global: { plugins: [i18n] },
+    });
+
+    expect(wrapper.findAll(".nvx-sparkline")).toHaveLength(2);
+    expect(wrapper.find(".nvx-sparkline--muted").exists()).toBe(false);
+    const disk = wrapper.get('.nvx-server-card__metric[data-status="permissionDenied"]');
+    expect(disk.find(".nvx-sparkline").exists()).toBe(false);
+    expect(disk.text()).toContain("权限不足");
+  });
+
+  it("dims a stale trend and never repeats a card-wide reason in every metric cell", () => {
+    const stale = mount(NvxServerCard, {
+      props: {
+        card: monitoredCard(metricSnapshot("available", true)),
+        history: { cpu: [10, 20], memory: [10, 20], disk: [10, 20] },
+      },
+      global: { plugins: [i18n] },
+    });
+    expect(stale.findAll(".nvx-sparkline--muted")).toHaveLength(3);
+
+    const disabled = mount(NvxServerCard, { props: { card }, global: { plugins: [i18n] } });
+    expect(disabled.findAll(".nvx-server-card__metric-caption")).toHaveLength(0);
+    expect(disabled.text().match(/监控未启用/g)).toHaveLength(1);
+  });
+});
+
+describe("nextMetricHistory", () => {
+  function sample(sequence: string, basisPoints: number, generation = "1", stale = false) {
+    const snapshot = metricSnapshot("available", stale);
+    return monitoredCard({ ...snapshot, generation, sampleSequence: sequence, cpu: { state: "available", basisPoints } });
+  }
+
+  it("appends each new sample once and drops stale readings", () => {
+    let history = nextMetricHistory(new Map(), [sample("1", 1_000)]);
+    history = nextMetricHistory(history, [sample("1", 1_000)]);
+    history = nextMetricHistory(history, [sample("2", 2_500)]);
+    history = nextMetricHistory(history, [sample("3", 9_000, "1", true)]);
+
+    expect(history.get(card.catalogEntry.host.hostId)?.cpu).toEqual([10, 25]);
+  });
+
+  it("starts a new window for a new generation and bounds its length", () => {
+    let history = nextMetricHistory(new Map(), [sample("1", 1_000)]);
+    history = nextMetricHistory(history, [sample("1", 4_000, "2")]);
+    expect(history.get(card.catalogEntry.host.hostId)?.cpu).toEqual([40]);
+
+    for (let index = 2; index < METRIC_HISTORY_LIMIT + 10; index += 1) {
+      history = nextMetricHistory(history, [sample(String(index), index * 100, "2")]);
+    }
+    expect(history.get(card.catalogEntry.host.hostId)?.cpu).toHaveLength(METRIC_HISTORY_LIMIT);
+  });
+
+  it("forgets Hosts whose monitoring is disabled or removed", () => {
+    const history = nextMetricHistory(new Map(), [sample("1", 1_000)]);
+    expect(nextMetricHistory(history, [card]).size).toBe(0);
+    expect(nextMetricHistory(history, []).size).toBe(0);
   });
 });

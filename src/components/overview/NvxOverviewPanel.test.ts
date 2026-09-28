@@ -145,7 +145,16 @@ describe("NvxOverviewPanel", () => {
       { value: stagingGroup.groupId, label: "Staging（1）" },
       { value: "ungrouped", label: "未分组（1）" },
     ]);
-    expect(wrapper.text()).toContain("3 台主机 · 1 台在线 · 1 台异常");
+    expect(wrapper.findAll(".nvx-overview-panel__kpi[role='status']")
+      .map((tile) => tile.attributes("aria-label"))).toEqual([
+      "主机总数: 3",
+      "在线: 1 / 3",
+      "异常: 1",
+      "离线: 1",
+    ]);
+    // Monitoring is disabled for every Host, so averages must not fabricate a 0% load.
+    expect(wrapper.get(".nvx-overview-panel__kpi--load").text()).toContain("暂无数据");
+    expect(wrapper.get(".nvx-overview-panel__kpi--load").text()).not.toContain("0%");
     expect(wrapper.findAll(".nvx-overview-panel__section")).toHaveLength(3);
     expect(wrapper.text()).toContain("Production · 1 台");
     expect(wrapper.text()).toContain("Staging · 1 台");
