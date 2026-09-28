@@ -205,6 +205,6 @@ function run(action: "details" | "permissions" | "operationPermissions" | "unins
 .plugin-manage-actions__separator {
   height: 1px;
   margin: 2px var(--nvx-space-2);
-  background: var(--nvx-color-border-subtle);
+  background: var(--nvx-color-border);
 }
 </style>

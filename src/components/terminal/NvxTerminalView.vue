@@ -1232,7 +1232,7 @@ onBeforeUnmount(() => {
 }
 
 .nvx-terminal-view__context-menu-item:disabled {
-  color: var(--nvx-color-text-disabled);
+  color: var(--nvx-color-text-tertiary);
 }
 
 .nvx-terminal-view__highlight-error {
@@ -1241,7 +1241,7 @@ onBeforeUnmount(() => {
   right: 8px;
   max-width: calc(100% - 16px);
   padding: 2px 6px;
-  border: 1px solid var(--nvx-color-border-subtle);
+  border: 1px solid var(--nvx-color-border);
   border-radius: var(--nvx-radius-sm);
   background: var(--nvx-color-bg-surface);
   color: var(--nvx-color-text-secondary);
