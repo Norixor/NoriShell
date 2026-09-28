@@ -19,6 +19,8 @@ import type {
 } from "../core-api/generated/core-api";
 import { useTipsStore } from "../stores/tips";
 import { useRouteReveal } from "../routeReveal";
+import { openWorkspaceTerminalHost } from "../workspace-tab-shell-action";
+import { showWorkspaceTabFailure } from "../workspace-tab-errors";
 import { buildForwardRule, ruleListener, ruleTarget, ruleToDraft, type ForwardKind, type ForwardRuleDraft } from "../tunnels/forward-rule";
 import {
   createTunnelVisualFixtureSession,
@@ -361,7 +363,8 @@ async function refresh() {
   if (!draft.hostId || !nextHosts.some((host) => host.hostId === draft.hostId)) draft.hostId = nextHosts[0]?.hostId ?? "";
 }
 async function openHostInTerminal(session: ForwardSessionSummary) {
-  await router.push({ path: "/terminal", query: { hostId: session.hostId, source: "tunnels", connectOperationId: crypto.randomUUID() } });
+  await openWorkspaceTerminalHost({ hostId: session.hostId, source: "tunnels", connectOperationId: crypto.randomUUID() })
+    .catch((error: unknown) => showWorkspaceTabFailure(error, "tunnels-open-terminal"));
 }
 
 let focusOperation = "";

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createMemoryHistory, createRouter } from "vue-router";
 
 import { useWorkspaceTabsStore, type WorkspacePageTab } from "./stores/workspaceTabs";
-import { createPageHandoff } from "./workspace-page-handoff";
+import { createPageRecovery } from "./workspace-page-handoff";
 
 const pageTabs: WorkspacePageTab[] = [
   {
@@ -40,7 +40,7 @@ const pageTabs: WorkspacePageTab[] = [
   },
 ];
 
-function createWindowHandoff() {
+function createWindowRecovery() {
   const store = useWorkspaceTabsStore(createPinia());
   const router = createRouter({
     history: createMemoryHistory(),
@@ -49,31 +49,37 @@ function createWindowHandoff() {
       ...pageTabs.map((tab) => ({ path: tab.route, component: { template: "<div />" } })),
     ],
   });
-  return { store, router, handoff: createPageHandoff(store, router) };
+  return { store, router, recovery: createPageRecovery(store, router) };
 }
 
-describe("Page Tab handoff", () => {
-  it.each(pageTabs)("moves $pageType out and back without losing the Page Tab", async (tab) => {
-    const source = createWindowHandoff();
-    const target = createWindowHandoff();
-    expect(source.store.importPageTab(tab)).toBe(true);
-    await source.router.push(tab.route);
+describe("Page Tab recovery", () => {
+  it("accepts a distinct managed New Page identity while rejecting malformed identities", () => {
+    const { store } = createWindowRecovery();
+    const managed = {
+      ...pageTabs[0]!,
+      groupId: "page:newPage:019a0000-0000-7000-8000-000000000001",
+    };
+    expect(store.importPageTab(managed)).toBe(true);
+    expect(store.importPageTab({ ...managed, groupId: "page:newPage:other" })).toBe(false);
+    expect(store.importPageTab({ ...managed, route: "/known-hosts" })).toBe(false);
+    expect(store.pageTabs).toEqual([managed]);
+  });
 
-    const outgoing = await source.handoff.snapshot(tab.groupId);
-    await source.handoff.freeze(tab.groupId);
-    expect(source.store.pageTabs).toEqual([]);
-    expect(source.router.currentRoute.value.path).toBe("/terminal");
-    await target.handoff.import(tab.groupId, outgoing);
-    source.handoff.commit(tab.groupId);
-    expect(target.store.pageTabs).toEqual([tab]);
-    await target.router.push(tab.route);
+  it.each(pageTabs)("rebinds $pageType from its Core record and routes on first activation", async (tab) => {
+    const { store, router, recovery } = createWindowRecovery();
+    await router.push("/terminal");
+    await recovery.import(tab.groupId, { ...tab });
+    expect(store.pageTabs).toEqual([tab]);
+    expect(router.currentRoute.value.path).toBe("/terminal");
+    await recovery.activate(tab.groupId);
+    expect(router.currentRoute.value.path).toBe(tab.route);
+  });
 
-    const incoming = await target.handoff.snapshot(tab.groupId);
-    await target.handoff.freeze(tab.groupId);
-    expect(target.store.pageTabs).toEqual([]);
-    expect(target.router.currentRoute.value.path).toBe("/terminal");
-    await source.handoff.import(tab.groupId, incoming);
-    target.handoff.commit(tab.groupId);
-    expect(source.store.pageTabs).toEqual([tab]);
+  it("rejects a record for another identity and discards a failed import", async () => {
+    const { store, recovery } = createWindowRecovery();
+    await expect(recovery.import("page:knownHosts", pageTabs[0]!)).rejects.toThrow("workspace_tab.invalid_page");
+    await recovery.import(pageTabs[1]!.groupId, pageTabs[1]!);
+    await recovery.discard(pageTabs[1]!.groupId);
+    expect(store.pageTabs).toEqual([]);
   });
 });

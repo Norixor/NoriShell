@@ -100,7 +100,7 @@ async function loadContributions(current: PluginTargetLease) {
 }
 
 async function open() {
-  if (!isTauri()) return;
+  if (!isTauri() || disposed) return;
   const generation = ++openGeneration;
   ++loadGeneration;
   opening.value = true;
@@ -295,11 +295,12 @@ const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const refreshPaused = ref(new Set<string>());
 const visiblePluginIds = ref(new Set<string>());
 const pageVisible = ref(document.visibilityState !== "hidden");
+const tabVisible = ref(true);
 const observedElements = new Map<Element, string>();
 let visibilityObserver: IntersectionObserver | null = null;
 let refreshActivation = "";
 const refreshActivationKey = computed(() => JSON.stringify([
-  props.disabled, pageVisible.value, lease.value?.context.contextHandle,
+  props.disabled, pageVisible.value, tabVisible.value, lease.value?.context.contextHandle,
   visibleContributions.value.map((item) => [item.pluginId, item.packageSha256,
     item.instanceGeneration, item.target.targetRevision, item.autoRefresh]),
 ]));
@@ -334,7 +335,7 @@ function synchronizeRefreshTimers() {
     }
   }
   const eligible = visibleContributions.value.filter((item) => !disposed && !props.disabled
-    && pageVisible.value && visiblePluginIds.value.has(item.pluginId)
+    && pageVisible.value && tabVisible.value && visiblePluginIds.value.has(item.pluginId)
     && item.autoRefresh && !refreshPaused.value.has(item.pluginId));
   const eligibleIds = new Set(eligible.map((item) => item.pluginId));
   for (const [pluginId, timer] of refreshTimers) {
@@ -347,7 +348,7 @@ function synchronizeRefreshTimers() {
     const isCurrent = () => refreshTimers.get(item.pluginId) === timer && activation === refreshActivation;
     const timer = setTimeout(async () => {
       if (!isCurrent() || disposed || props.disabled
-        || !pageVisible.value || !visiblePluginIds.value.has(item.pluginId)) return;
+        || !pageVisible.value || !tabVisible.value || !visiblePluginIds.value.has(item.pluginId)) return;
       // Keep the timer entry while awaiting so a reactive update cannot overlap.
       if (extensions.busyActionKey === null) {
         const current = visibleContributions.value.find((candidate) => candidate.pluginId === item.pluginId);
@@ -370,6 +371,10 @@ function synchronizeRefreshTimers() {
 
 function handlePageVisibility() {
   pageVisible.value = document.visibilityState !== "hidden";
+}
+
+function handleWorkspaceTabVisibility(event: Event) {
+  tabVisible.value = (event as CustomEvent<boolean>).detail === true;
 }
 
 watch([refreshActivationKey, visiblePluginIds], synchronizeRefreshTimers, { flush: "post" });
@@ -403,6 +408,7 @@ onMounted(() => {
     for (const element of observedElements.keys()) visibilityObserver.observe(element);
   }
   document.addEventListener("visibilitychange", handlePageVisibility);
+  window.addEventListener("norishell:workspace-tab-visibility", handleWorkspaceTabVisibility);
   for (const event of runtimeProjectionEvents) {
     window.addEventListener(event, handleRuntimeProjectionChanged);
   }
@@ -413,10 +419,14 @@ onBeforeUnmount(() => {
   clearRefreshTimers();
   visibilityObserver?.disconnect();
   document.removeEventListener("visibilitychange", handlePageVisibility);
+  window.removeEventListener("norishell:workspace-tab-visibility", handleWorkspaceTabVisibility);
   openGeneration += 1;
+  loadGeneration += 1;
   for (const event of runtimeProjectionEvents) {
     window.removeEventListener(event, handleRuntimeProjectionChanged);
   }
+  // Best effort: an in-flight acquire releases its own lease after `disposed`,
+  // and Core closes every remaining target context when the WebView is destroyed.
   const current = lease.value;
   lease.value = null;
   if (current) void extensions.releaseTarget(current).catch(() => undefined);

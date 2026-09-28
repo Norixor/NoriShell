@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_TERMINAL_WORKSPACE_TABS,
   parseTerminalWorkspaceLayout,
   projectTerminalWorkspaceLayout,
 } from "./terminalWorkspaceLayout";
@@ -42,6 +43,19 @@ function validLayout(): TestWorkspaceLayout {
 describe("terminalWorkspaceLayout", () => {
   it("restores only the bounded non-secret workspace projection", () => {
     expect(parseTerminalWorkspaceLayout(validLayout())).toEqual(validLayout());
+  });
+
+  it("accepts a new Tab after a saved layout already contains 32 Tabs", () => {
+    const layout: TestWorkspaceLayout = { schemaVersion: 1, activeTabId: "tab-33", tabs: [] };
+    for (let index = 1; index <= 33; index += 1) {
+      layout.tabs.push({
+        tabId: `tab-${index}`,
+        activePaneId: `pane-${index}`,
+        layout: { kind: "pane", paneId: `pane-${index}`, terminalId: `pane-${index}` },
+        panes: [{ kind: "launcher", paneId: `pane-${index}`, label: "New" }],
+      });
+    }
+    expect(parseTerminalWorkspaceLayout(layout)).toEqual(layout);
   });
 
   it("projects session panes without session, credential, or connection state", () => {
@@ -148,7 +162,7 @@ describe("terminalWorkspaceLayout", () => {
     expect(parseTerminalWorkspaceLayout({ ...validLayout(), schemaVersion: 2 })).toBeNull();
 
     const oversized = validLayout();
-    oversized.tabs = Array.from({ length: 33 }, (_, index) => ({
+    oversized.tabs = Array.from({ length: MAX_TERMINAL_WORKSPACE_TABS + 1 }, (_, index) => ({
       ...validLayout().tabs[0]!,
       tabId: `tab-${index}`,
       activePaneId: `pane-${index}`,

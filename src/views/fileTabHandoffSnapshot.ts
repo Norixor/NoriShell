@@ -56,7 +56,11 @@ export function isFileTabHandoffSnapshot(value: unknown, id: string): value is F
   if (tab.groupId !== id || !/^file:[0-9a-f-]{36}$/i.test(id)
     || (tab.kind !== "local" && tab.kind !== "remote")
     || (tab.hostId !== null && typeof tab.hostId !== "string") || typeof tab.label !== "string"
-    || !Number.isSafeInteger(tab.paneCount) || tab.paneCount !== value.panes.length) return false;
+    || !Number.isSafeInteger(tab.paneCount) || tab.paneCount !== value.panes.length
+    || (tab.initialSessionId != null && (tab.kind !== "remote" || (!tab.hostId && !tab.initialGeneration)
+      || typeof tab.initialSessionId !== "string" || !/^[0-9a-f-]{36}$/i.test(tab.initialSessionId)))
+    || (tab.initialGeneration != null && (!tab.initialSessionId || typeof tab.initialGeneration !== "string"
+      || !/^[0-9]{1,20}$/u.test(tab.initialGeneration)))) return false;
   const kinds = layoutPaneKinds(value.layout);
   if (!kinds || kinds.size !== value.panes.length || !kinds.has(value.activePaneId as string)) return false;
   const seen = new Set<string>();

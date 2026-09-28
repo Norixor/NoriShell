@@ -62,7 +62,7 @@ describe("Core preference startup migration", () => {
     expect(localStorage.getItem(APP_THEME_PREFERENCES_KEY)).toBe(originalTheme);
     expect(localStorage.getItem(TERMINAL_PREFERENCES_KEY)).toBe(originalTerminal);
     expect(localStorage.getItem(SFTP_PREFERENCES_KEY)).toBe(originalFiles);
-    expect(JSON.parse(localStorage.getItem(SECURE_WINDOW_APPEARANCE_KEY) ?? "{}")).toEqual({ locale: "en", themePreference: "dark" });
+    expect(JSON.parse(localStorage.getItem(SECURE_WINDOW_APPEARANCE_KEY) ?? "{}")).toEqual({ locale: "en", themePreference: "dark", uiZoom: 90 });
     expect(useTerminalPreferencesStore(pinia).resolvedKeyboard("host-a").optionAsMetaLeft).toBe(true);
     expect(useSftpPreferencesStore(pinia).rememberedLocalDirectory()).toBe("/Users/test");
     expect(useAppThemeStore(pinia).profile).toEqual(appTheme);

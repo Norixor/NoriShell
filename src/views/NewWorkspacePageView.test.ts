@@ -4,14 +4,17 @@ import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18n } from "../locales";
-import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { useTipsStore } from "../stores/tips";
 import NewWorkspacePageView from "./NewWorkspacePageView.vue";
 
 const client = vi.hoisted(() => ({
   canUseDesktopCore: vi.fn(() => true),
   listHostCatalog: vi.fn(),
+  parseCoreApiError: vi.fn(() => null),
 }));
+const shell = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("../core-api/client", () => client);
+vi.mock("../workspace-tab-shell-action", () => ({ requestWorkspaceTabShellAction: shell.request }));
 vi.mock("../saved-connections", () => ({
   onSavedConnectionsChanged: vi.fn(async () => vi.fn()),
 }));
@@ -48,25 +51,29 @@ async function mountPage() {
     global: { plugins: [pinia, router, i18n] },
   });
   await flushPromises();
-  return { wrapper, router, workspaceTabs: useWorkspaceTabsStore(pinia) };
+  return { wrapper, router };
 }
 
 describe("NewWorkspacePageView", () => {
   beforeEach(() => {
     localStorage.clear();
     i18n.global.locale.value = "zh-CN";
+    client.canUseDesktopCore.mockReturnValue(true);
     client.listHostCatalog.mockResolvedValue([{
       host, group: null, tags: [],
       recentConnection: { hostId: host.hostId, connectedAtUnixMs: Date.now() - 60_000, recencySequence: "1", successfulConnectionCount: "1" },
     }]);
+    shell.request.mockResolvedValue(undefined);
   });
   afterEach(() => {
     document.body.innerHTML = "";
     vi.clearAllMocks();
   });
 
-  it("uses real recent Host data and opens distinct Terminal and File tabs", async () => {
-    const { wrapper, router, workspaceTabs } = await mountPage();
+  const replaceSource = { closeSourceOnSuccess: true };
+
+  it("uses real recent Host data and asks the owner shell to replace this Page with the target", async () => {
+    const { wrapper, router } = await mountPage();
     try {
       expect(wrapper.text()).toContain("QA server");
       expect(wrapper.text()).toContain("上次使用 · 终端");
@@ -74,31 +81,49 @@ describe("NewWorkspacePageView", () => {
 
       await wrapper.get(".new-workspace__recent-row .new-workspace__row-actions button:last-child").trigger("click");
       await flushPromises();
-      expect(router.currentRoute.value.path).toBe("/sftp");
-      expect(router.currentRoute.value.query.hostId).toBe(host.hostId);
+      expect(router.currentRoute.value.path).toBe("/new");
+      expect(shell.request).toHaveBeenLastCalledWith({ type: "navigate", path: "/sftp",
+        query: { hostId: host.hostId, fileOperationId: expect.stringMatching(/^[0-9a-f-]{36}$/) } }, replaceSource);
 
-      await wrapper.get(".new-workspace__card:nth-child(2) .new-workspace__actions button:last-child").trigger("click");
+      await wrapper.get(".new-workspace__tile:nth-child(2) .new-workspace__tile-link").trigger("click");
       await flushPromises();
-      expect(workspaceTabs.fileTabs).toHaveLength(1);
-      expect(workspaceTabs.fileTabs[0]?.kind).toBe("local");
+      expect(shell.request).toHaveBeenLastCalledWith({ type: "new-file", kind: "local" }, replaceSource);
+
+      await wrapper.get(".new-workspace__tile:first-child .new-workspace__tile-link").trigger("click");
+      await flushPromises();
+      expect(shell.request).toHaveBeenLastCalledWith({ type: "new-terminal", behavior: "local" }, replaceSource);
 
       await wrapper.get(".new-workspace__recent-row .new-workspace__row-actions button:first-child").trigger("click");
       await flushPromises();
-      expect(router.currentRoute.value.path).toBe("/terminal");
-      expect(router.currentRoute.value.query.hostId).toBe(host.hostId);
-      expect(router.currentRoute.value.query.source).toBe("overview");
+      expect(shell.request).toHaveBeenLastCalledWith({ type: "navigate", path: "/terminal", query: { hostId: host.hostId,
+        source: "overview", connectOperationId: expect.stringMatching(/^[0-9a-f-]{36}$/) } }, replaceSource);
     } finally { wrapper.unmount(); }
   });
 
   it("opens a Host picker from the terminal card without inventing a connection", async () => {
-    const { wrapper, router } = await mountPage();
+    const { wrapper } = await mountPage();
     try {
-      await wrapper.get(".new-workspace__actions button:first-child").trigger("click");
+      await wrapper.get(".new-workspace__tile:first-child .new-workspace__tile-actions button:last-child").trigger("click");
+      expect(shell.request).not.toHaveBeenCalled();
       expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("QA server");
       document.body.querySelector<HTMLButtonElement>(".new-workspace__picker-list button")?.click();
       await flushPromises();
-      expect(router.currentRoute.value.path).toBe("/terminal");
-      expect(router.currentRoute.value.query.hostId).toBe(host.hostId);
+      expect(shell.request).toHaveBeenCalledWith(expect.objectContaining({ type: "navigate", path: "/terminal" }), replaceSource);
+    } finally { wrapper.unmount(); }
+  });
+
+  it("keeps the Page usable and reports a localized failure when the target is not created", async () => {
+    shell.request.mockRejectedValueOnce(new Error("workspace_tab.view_create_failed"));
+    const { wrapper } = await mountPage();
+    try {
+      const localFiles = wrapper.get(".new-workspace__tile:nth-child(2) .new-workspace__tile-link");
+      await localFiles.trigger("click");
+      await flushPromises();
+      expect(useTipsStore().items.at(-1)).toMatchObject({ tone: "error", message: i18n.global.t("workspaceTabError.action") });
+      expect(localFiles.attributes("disabled")).toBeUndefined();
+      await localFiles.trigger("click");
+      await flushPromises();
+      expect(shell.request).toHaveBeenCalledTimes(2);
     } finally { wrapper.unmount(); }
   });
 });

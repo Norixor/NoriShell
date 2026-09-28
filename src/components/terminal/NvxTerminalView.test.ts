@@ -12,6 +12,7 @@ const terminalMocks = vi.hoisted(() => ({
     dataHandler: ((value: string) => void) | null;
     writeParsedHandler: (() => void) | null;
     selectAll: ReturnType<typeof vi.fn>;
+    refresh: ReturnType<typeof vi.fn>;
     customKeyHandler: ((event: KeyboardEvent) => boolean) | null;
     bellHandler: (() => void) | null;
     linkProvider: { provideLinks: (line: number, callback: (links: unknown[] | undefined) => void) => void } | null;
@@ -73,6 +74,7 @@ vi.mock("@xterm/xterm", () => ({
     getSelection() { return terminalMocks.selection; }
     hasSelection() { return Boolean(terminalMocks.selection); }
     selectAll = vi.fn();
+    refresh = vi.fn();
     dispose() {}
   },
 }));
@@ -124,6 +126,27 @@ describe("NvxTerminalView interaction preferences", () => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
   });
   afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("repaints on the first visible fit and when a native Tab becomes visible again", async () => {
+    const wrapper = mount(NvxTerminalView, {
+      props: { readOnly: false, terminalLabel: "Terminal", gapLabel: "Gap" },
+      global: { plugins: [createPinia(), createI18n({ legacy: false, locale: "en", messages: { en: { terminalEnhancements: { highlightSuspended: "" }, terminalInteraction: terminalInteractionEn } } })] },
+    });
+    await flushPromises();
+    Object.defineProperty(wrapper.find(".nvx-terminal-view__host").element, "clientWidth", { value: 800 });
+    const renderer = terminalMocks.instances[0]!;
+    window.dispatchEvent(new CustomEvent("norishell:workspace-tab-visibility", { detail: false }));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(renderer.refresh).not.toHaveBeenCalled();
+    wrapper.vm.fit();
+    expect(renderer.refresh).toHaveBeenCalledWith(0, 23);
+    renderer.refresh.mockClear();
+    window.dispatchEvent(new CustomEvent("norishell:workspace-tab-visibility", { detail: true }));
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(renderer.refresh.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(renderer.refresh).toHaveBeenLastCalledWith(0, 23);
+    wrapper.unmount();
+  });
 
   it("rejects residual input or an unknown Shell prompt", async () => {
     const wrapper = mount(NvxTerminalView, {
@@ -507,6 +530,36 @@ describe("NvxTerminalView interaction preferences", () => {
     useTerminalPreferencesStore(pinia).setInteraction({ ...DEFAULT_TERMINAL_INTERACTION, smoothScrollDuration: 200 });
     await flushPromises();
     expect(terminalMocks.instances[0]!.options.smoothScrollDuration).toBe(0);
+    expect(terminalMocks.instances[0]!.options.cursorBlink).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps cursor blink in sync with the system motion preference", async () => {
+    const media = { matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    vi.stubGlobal("matchMedia", vi.fn(() => media));
+    const pinia = createPinia();
+    const wrapper = mount(NvxTerminalView, {
+      props: { readOnly: false, terminalLabel: "Terminal", gapLabel: "Gap" },
+      global: { plugins: [pinia, createI18n({ legacy: false, locale: "en", messages: { en: { terminalEnhancements: { highlightSuspended: "" }, terminalInteraction: terminalInteractionEn } } })] },
+    });
+    await flushPromises();
+    const ui = useUiStore(pinia);
+    const terminal = terminalMocks.instances[0]!;
+    expect(terminal.options.cursorBlink).toBe(true);
+
+    media.matches = true;
+    const onSystemChange = media.addEventListener.mock.calls.find(([event]) => event === "change")?.[1] as (() => void) | undefined;
+    expect(onSystemChange).toBeDefined();
+    onSystemChange?.();
+    expect(terminal.options.cursorBlink).toBe(false);
+
+    media.matches = false;
+    onSystemChange?.();
+    expect(terminal.options.cursorBlink).toBe(true);
+    ui.terminalCursorBlink = false;
+    await flushPromises();
+    expect(terminal.options.cursorBlink).toBe(false);
+    expect(terminalMocks.instances).toHaveLength(1);
     wrapper.unmount();
   });
 

@@ -54,11 +54,14 @@
   --nvx-z-popover: 30;
   --nvx-z-dialog: 40;
   --nvx-z-toast: 50;
-  --nvx-layout-header-height: 56px;
   --nvx-layout-navigation-rail-width: 72px;
   --nvx-layout-inspector-width: 280px;
   --nvx-layout-chat-composer-min-height: 56px;
   --nvx-layout-action-bar-height: 64px;
+}
+
+:root {
+  --nvx-layout-header-height: 60px;
 }
 
 :root,

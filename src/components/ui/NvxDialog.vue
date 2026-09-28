@@ -15,6 +15,7 @@ const props = withDefaults(
     description?: string;
     dismissible?: boolean;
     size?: "md" | "lg" | "xl";
+    layout?: "default" | "split";
     pluginProtected?: boolean;
     themeProtected?: boolean;
   }>(),
@@ -22,6 +23,7 @@ const props = withDefaults(
     description: undefined,
     dismissible: true,
     size: "md",
+    layout: "default",
     pluginProtected: false,
     themeProtected: undefined,
   },
@@ -34,6 +36,7 @@ const emit = defineEmits<{
 
 defineSlots<{
   default(): unknown;
+  sidebar(): unknown;
   actions(): unknown;
 }>();
 
@@ -131,7 +134,7 @@ onBeforeUnmount(restoreFocus);
       <section
         ref="panel"
         class="nvx-dialog"
-        :class="`nvx-dialog--${size}`"
+        :class="layout === 'split' ? 'nvx-dialog--split' : `nvx-dialog--${size}`"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"
@@ -139,32 +142,41 @@ onBeforeUnmount(restoreFocus);
         tabindex="-1"
         @keydown="handleKeydown"
       >
-        <header class="nvx-dialog__header">
-          <h2
-            :id="titleId"
-            class="nvx-dialog__title"
+        <div class="nvx-dialog__aside">
+          <header class="nvx-dialog__header">
+            <h2
+              :id="titleId"
+              class="nvx-dialog__title"
+            >
+              {{ title }}
+            </h2>
+            <NvxIconButton
+              v-if="dismissible"
+              class="nvx-dialog__close"
+              :label="closeLabel"
+              size="sm"
+              @click="requestClose"
+            >
+              <NvxIcon
+                :icon="X"
+                :size="16"
+              />
+            </NvxIconButton>
+          </header>
+          <p
+            v-if="description"
+            :id="descriptionId"
+            class="nvx-dialog__description"
           >
-            {{ title }}
-          </h2>
-          <NvxIconButton
-            v-if="dismissible"
-            :label="closeLabel"
-            size="sm"
-            @click="requestClose"
+            {{ description }}
+          </p>
+          <div
+            v-if="layout === 'split'"
+            class="nvx-dialog__sidebar"
           >
-            <NvxIcon
-              :icon="X"
-              :size="16"
-            />
-          </NvxIconButton>
-        </header>
-        <p
-          v-if="description"
-          :id="descriptionId"
-          class="nvx-dialog__description"
-        >
-          {{ description }}
-        </p>
+            <slot name="sidebar" />
+          </div>
+        </div>
         <div class="nvx-dialog__body">
           <slot />
         </div>
@@ -195,6 +207,56 @@ onBeforeUnmount(restoreFocus);
   background: var(--nvx-color-bg-surface);
   color: var(--nvx-color-text-primary);
   box-shadow: var(--nvx-shadow-overlay);
+}
+
+.nvx-dialog__aside { display: contents; }
+
+.nvx-dialog--split {
+  position: relative;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  width: min(100%, 1000px);
+  height: min(620px, calc(100vh - 48px));
+  overflow: hidden;
+}
+
+.nvx-dialog--split .nvx-dialog__aside {
+  display: flex;
+  flex-direction: column;
+  grid-column: 1;
+  grid-row: 1 / -1;
+  min-height: 0;
+  background: var(--nvx-color-bg-canvas);
+  border-right: var(--nvx-border-width) solid var(--nvx-color-border);
+}
+
+.nvx-dialog--split .nvx-dialog__header { padding: var(--nvx-space-6) var(--nvx-space-5) 0; }
+.nvx-dialog--split .nvx-dialog__close { position: absolute; top: var(--nvx-space-5); right: var(--nvx-space-5); }
+.nvx-dialog--split .nvx-dialog__description { padding: var(--nvx-space-2) var(--nvx-space-5) 0; }
+.nvx-dialog--split .nvx-dialog__sidebar { min-height: 0; padding: var(--nvx-space-4) var(--nvx-space-5); }
+.nvx-dialog--split .nvx-dialog__body {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 64px var(--nvx-space-6) var(--nvx-space-4);
+}
+.nvx-dialog--split .nvx-dialog__actions {
+  grid-column: 2;
+  grid-row: 2;
+  align-items: center;
+  padding: var(--nvx-space-4) var(--nvx-space-6);
+}
+
+@media (max-width: 700px) {
+  .nvx-dialog--split { display: flex; flex-direction: column; height: min(620px, calc(100vh - 48px)); }
+  .nvx-dialog--split .nvx-dialog__aside { flex: none; border-right: 0; border-bottom: var(--nvx-border-width) solid var(--nvx-color-border); }
+  .nvx-dialog--split .nvx-dialog__header { padding: var(--nvx-space-4) var(--nvx-space-4) 0; }
+  .nvx-dialog--split .nvx-dialog__description { padding: var(--nvx-space-1) var(--nvx-space-4) 0; }
+  .nvx-dialog--split .nvx-dialog__sidebar { padding: var(--nvx-space-2) var(--nvx-space-4) var(--nvx-space-3); }
+  .nvx-dialog--split .nvx-dialog__body { flex: 1; padding: var(--nvx-space-4); }
+  .nvx-dialog--split .nvx-dialog__actions { flex: none; padding: var(--nvx-space-3) var(--nvx-space-4); }
 }
 
 .nvx-dialog--md {

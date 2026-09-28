@@ -1,4 +1,9 @@
 /** The secondary entry point has no authority to restore or replace the global Terminal workspace. */
 export function isWorkspaceChildWindow(): boolean {
-  return window.location.pathname.endsWith("/workspace-window.html");
+  return window.location.pathname.endsWith("/workspace-window.html")
+    || window.location.pathname.endsWith("/workspace-tab.html");
+}
+
+export function isWorkspaceTabView(): boolean {
+  return window.location.pathname.endsWith("/workspace-tab.html");
 }

@@ -48,6 +48,7 @@ let inputSequence = 0n;
 let pending = 0;
 let chain = Promise.resolve();
 let focusChain = Promise.resolve();
+let keyboardAcquire: Promise<void> | null = null;
 let pan: {
   pointerId: number;
   x: number;
@@ -242,12 +243,24 @@ function key(event: KeyboardEvent, down: boolean) {
   if (event.isComposing || event.key === "Process") return;
   event.preventDefault();
   const input = desktopKey(event, down);
-  if (input) void send(input);
+  if (!input) return;
+  if (epoch) { void send(input); return; }
+  if (!available() || document.activeElement !== inputSink.value) return;
+  // A moved WebView may keep DOM focus after its old Core input lease is revoked.
+  keyboardAcquire ??= acquire().finally(() => { keyboardAcquire = null; });
+  void keyboardAcquire.then(() => send(input));
 }
 
 function composed(event: CompositionEvent) {
   if (props.panning) return;
-  if (event.data) void send({ kind: "text", text: event.data });
+  if (event.data) {
+    const input: DesktopInputEvent = { kind: "text", text: event.data };
+    if (epoch) void send(input);
+    else if (available() && document.activeElement === inputSink.value) {
+      keyboardAcquire ??= acquire().finally(() => { keyboardAcquire = null; });
+      void keyboardAcquire.then(() => send(input));
+    }
+  }
   if (inputSink.value) inputSink.value.value = "";
 }
 

@@ -1551,18 +1551,18 @@ export async function openLocalSession(
   input: Omit<
     LocalSessionOpenRequest,
     "meta" | "operationId" | "idempotencyKey" | "openAttemptId" | "attachAttemptId"
-  >,
+  > & Partial<Pick<LocalSessionOpenRequest, "operationId" | "openAttemptId" | "attachAttemptId">>,
   onEvent: (event: LocalSessionEvent) => void,
 ): Promise<LocalSessionOpenResponse> {
-  const operationId = createUuidV7();
+  const { operationId = createUuidV7(), openAttemptId = createUuidV7(), attachAttemptId = createUuidV7(), ...open } = input;
   return invoke(coreApiCommands.localTerminalOpen, {
     request: {
       meta: requestMeta(),
       operationId,
       idempotencyKey: `local-open-${operationId}`,
-      openAttemptId: createUuidV7(),
-      attachAttemptId: createUuidV7(),
-      ...input,
+      openAttemptId,
+      attachAttemptId,
+      ...open,
     } satisfies LocalSessionOpenRequest,
     onEvent: localEventChannel(onEvent),
   });

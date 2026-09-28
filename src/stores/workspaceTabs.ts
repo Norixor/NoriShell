@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, shallowRef } from "vue";
 
 import type {
+  PluginApprovedTerminalChannelLaunch,
   NativeTerminalSessionScope,
   LocalSessionId,
   PluginNavigationItem,
@@ -12,6 +13,7 @@ import type {
 } from "../core-api/generated/core-api";
 import type { ShortcutCommandId } from "../shortcuts";
 import type { TerminalTabHandoffSnapshot } from "../terminal-workspace-handoff";
+import type { TerminalRestoreSeed } from "../workspace-tab-terminal-restore";
 import type { FileTabHandoffSnapshot } from "../views/fileTabHandoffSnapshot";
 
 export type WorkspacePageType = "newPage" | "knownHosts" | "sshIdentities" | "plugin";
@@ -21,6 +23,7 @@ export interface TerminalHeaderTabSnapshot {
   groupId: string;
   label: string;
   stateLabel: string;
+  paneCount?: number;
   hostId?: string | null;
   completionCount?: number;
   bellAttention?: boolean;
@@ -36,21 +39,28 @@ export interface WorkspacePageTab {
 }
 
 export interface TerminalHeaderController {
-  /** Read and validate only layout plus live Session identities; does not freeze the source. */
+  /** Create this child WebView's first Tab with the id reserved by the native manager. */
+  createInitialTab?(id: string, behavior: "welcome" | "local", initialLocalOpen?: {
+    paneId: string;
+    openAttemptId: string;
+    operationId: string;
+    attachAttemptId: string;
+    initialRows: number;
+    initialCols: number;
+  }): Promise<void>;
+  createInitialPluginProtocolTab?(id: string, request: { launchId: string; revision: string; paneId: string }): Promise<void>;
+  createInitialApprovedPluginChannel?(id: string, payload: PluginApprovedTerminalChannelLaunch): Promise<void>;
+  /** Restore this child WebView's first Tab from a startup seed planned by the main shell. */
+  restoreInitialTab?(id: string, seed: TerminalRestoreSeed): Promise<void>;
+  /** Read the Tab's bounded recovery projection: layout plus live Session identities. */
   snapshotTabHandoff?(tabId: string): Promise<TerminalTabHandoffSnapshot>;
   /** Observe safe per-Tab recovery snapshots for the current Core owner registry. */
   observeTabHandoffSnapshots?(listener: (snapshots: readonly TerminalTabHandoffSnapshot[]) => void): () => void;
-  /** Freeze the previously snapshotted Tab after Core has prepared a transfer ticket. */
-  freezeTabHandoff?(tabId: string): Promise<void>;
-  /** Rebind the exact existing Sessions in this WebView; never restore the global SQLite layout. */
+  /** Crash recovery: rebind the exact existing Sessions in this WebView. */
   importTabHandoff?(snapshot: TerminalTabHandoffSnapshot): Promise<void>;
-  /** Admit an already imported Tab to this window's CAS persistence ownership after Core commits. */
+  /** Admit an imported Tab to this renderer's persistence ownership. */
   commitImportedTabHandoff?(tabId: string): Promise<void>;
-  /** Remove a frozen source Tab after the owner transfer commits. */
-  commitTabHandoff?(tabId: string): void;
-  /** Restore a frozen source Tab when owner transfer or target import fails. */
-  rollbackTabHandoff?(tabId: string): Promise<void>;
-  /** Remove an imported target Tab when owner transfer fails. */
+  /** Remove an imported Tab whose recovery failed. */
   discardImportedTab?(tabId: string): Promise<void>;
   /** Activate only an existing exactly matching SSH or local Pane; return false when blocked or missing. */
   /** A failed resource may have no Channel; focus only the existing SSH session and generation. */
@@ -59,13 +69,11 @@ export interface TerminalHeaderController {
   /** A failed resource may have no PTY; focus only the existing local session and generation. */
   focusLocalSession(sessionId: LocalSessionId, generation: WireSequence): boolean;
   activate(tabId: string): void;
-  close(tabId: string): void;
-  closeMany(tabIds: readonly string[]): void;
-  create(): void;
-  /** Controlled entry point: return false while a blocking dialog is open; never create and discard a default PTY. */
-  createLocal(): boolean;
-  quickConnect(): boolean;
-  deactivate(): void;
+  close(tabId: string): boolean;
+  closeMany(tabIds: readonly string[], confirmed?: boolean): boolean;
+  quickConnect(target?: string): boolean;
+  openTelnet(): boolean;
+  deactivate(): Promise<boolean> | void;
   toggleQuickCommands(): void;
   runShortcut?(commandId: ShortcutCommandId): void;
   /** Activate only an existing Telnet Pane with exactly matching session, generation, and socket; never reconnect. */
@@ -83,26 +91,24 @@ export interface FileHeaderTab {
   hostId: string | null;
   label: string;
   paneCount: number;
+  initialSessionId?: string | null;
+  initialGeneration?: string | null;
 }
 export interface FileHeaderController {
-  requestClose(): Promise<boolean>;
+  requestClose(confirmed?: boolean): Promise<boolean>;
   runShortcut(commandId: ShortcutCommandId): void;
   snapshotHandoff(): FileTabHandoffSnapshot;
-  freezeHandoff(): void;
-  rollbackHandoff(): void;
-  commitHandoff(): void;
   observeHandoffSnapshot(listener: (snapshot: FileTabHandoffSnapshot) => void): () => void;
 }
 export interface DesktopHeaderController {
   activate(tabId: string): void;
-  close(tabId: string): void;
-  closeMany(tabIds: readonly string[]): void;
+  beginOpenProfile(profileId: string): Promise<void>;
+  close(tabId: string): Promise<void>;
   deactivate(): void;
+  isBusy(): boolean;
   snapshotHandoff?(tabId: string): import("../workspace-desktop-handoff").DesktopTabHandoffSnapshot;
-  freezeHandoff?(tabId: string): Promise<void>;
+  importIdle?(tabId: string, profileId: string): void | Promise<void>;
   importHandoff?(session: import("../core-api/generated/core-api").DesktopSessionSummary): Promise<void>;
-  commitHandoff?(tabId: string): void;
-  rollbackHandoff?(tabId: string): Promise<void>;
   discardHandoff?(tabId: string): Promise<void>;
   admitHandoff?(tabId: string): Promise<void>;
 }
@@ -131,6 +137,23 @@ const PAGE_DEFINITIONS: Readonly<Record<BuiltinWorkspacePageType, Omit<Workspace
   },
 };
 
+export function workspacePageTabForRoute(route: string): WorkspacePageTab | null {
+  const definition = Object.values(PAGE_DEFINITIONS).find((page) => page.route === route);
+  return definition ? { groupId: `page:${definition.pageType}`, ...definition } : null;
+}
+
+/** The Page Tab identity and route of one plugin navigation page. */
+export function pluginPageTab(item: PluginNavigationItem): WorkspacePageTab {
+  return {
+    groupId: `page:plugin:${item.pluginId}:${item.navigation.pageId}`,
+    pageType: "plugin",
+    route: `/plugin/${encodeURIComponent(item.pluginId)}/${encodeURIComponent(item.navigation.pageId)}`,
+    labelKey: null,
+    label: item.navigation.label,
+    iconName: item.navigation.icon,
+  };
+}
+
 export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
   const terminalTabs = ref<TerminalHeaderTabSnapshot[]>([]);
   const activeTerminalTabId = ref("");
@@ -139,7 +162,6 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
   const quickCommandsOpen = ref(false);
   const pageTabs = ref<WorkspacePageTab[]>([]);
   const terminalController = shallowRef<TerminalHeaderController | null>(null);
-  const createTerminalPending = ref<"default" | "local" | null>(null);
   const desktopTabs = ref<DesktopHeaderTabSnapshot[]>([]);
   const activeDesktopTabId = ref("");
   const desktopBusy = ref(false);
@@ -151,17 +173,26 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
   const importedFileSnapshots = shallowRef(new Map<string, FileTabHandoffSnapshot>());
   const consumedFileFocusOperations = new Set<string>();
 
-  function createFileTab(kind: FileHeaderTab["kind"], hostId: string | null = null, label = "") {
-    const groupId = `file:${crypto.randomUUID()}`;
-    fileTabs.value.push({ groupId, kind, hostId, label, paneCount: kind === "local" ? 1 : 2 });
-    activeFileTabId.value = groupId;
-    return groupId;
+  function createInitialFileTab(id: string, kind: FileHeaderTab["kind"], hostId: string | null, label: string,
+    initialSessionId?: string | null, initialGeneration?: string | null): boolean {
+    if (!/^file:[0-9a-f-]{36}$/i.test(id) || fileTabs.value.some((tab) => tab.groupId === id)
+      || (kind !== "local" && kind !== "remote") || (hostId !== null && typeof hostId !== "string")
+      || (initialSessionId != null && (kind !== "remote" || (!hostId && !initialGeneration)
+        || !/^[0-9a-f-]{36}$/i.test(initialSessionId)))
+      || (initialGeneration != null && (!initialSessionId || !/^[0-9]{1,20}$/u.test(initialGeneration)))) return false;
+    fileTabs.value.push({ groupId: id, kind, hostId, label, paneCount: kind === "local" ? 1 : 2,
+      ...(initialSessionId ? { initialSessionId } : {}), ...(initialGeneration ? { initialGeneration } : {}) });
+    activeFileTabId.value = id;
+    return true;
   }
 
   function importFileTab(tab: FileHeaderTab) {
     if (!/^file:[0-9a-f-]{36}$/i.test(tab.groupId) || (tab.kind !== "local" && tab.kind !== "remote")
       || (tab.hostId !== null && typeof tab.hostId !== "string") || typeof tab.label !== "string"
-      || !Number.isSafeInteger(tab.paneCount) || tab.paneCount < 1) return false;
+      || !Number.isSafeInteger(tab.paneCount) || tab.paneCount < 1
+      || (tab.initialSessionId != null && (tab.kind !== "remote" || (!tab.hostId && !tab.initialGeneration)
+        || !/^[0-9a-f-]{36}$/i.test(tab.initialSessionId)))
+      || (tab.initialGeneration != null && (!tab.initialSessionId || !/^[0-9]{1,20}$/u.test(tab.initialGeneration)))) return false;
     if (fileTabs.value.some((existing) => existing.groupId === tab.groupId)) return false;
     fileTabs.value.push({ ...tab });
     return true;
@@ -191,8 +222,8 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
     };
   }
 
-  function requestCloseFileTab(groupId: string) {
-    return fileControllers.value.get(groupId)?.requestClose() ?? Promise.resolve(false);
+  function requestCloseFileTab(groupId: string, confirmed = false) {
+    return fileControllers.value.get(groupId)?.requestClose(confirmed) ?? Promise.resolve(false);
   }
 
   function fileController(groupId: string) { return fileControllers.value.get(groupId) ?? null; }
@@ -304,12 +335,6 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
 
   function registerTerminalController(controller: TerminalHeaderController) {
     terminalController.value = controller;
-    if (createTerminalPending.value) {
-      const pending = createTerminalPending.value;
-      createTerminalPending.value = null;
-      if (pending === "local") controller.createLocal();
-      else controller.create();
-    }
     return () => {
       if (terminalController.value !== controller) return;
       terminalController.value = null;
@@ -319,16 +344,6 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
       terminalActivationBlocked.value = false;
       quickCommandsOpen.value = false;
     };
-  }
-
-  function ensurePageTabForRoute(route: string) {
-    const definition = Object.values(PAGE_DEFINITIONS).find((page) => page.route === route);
-    if (!definition) return null;
-    const groupId = `page:${definition.pageType}`;
-    if (!pageTabs.value.some((tab) => tab.groupId === groupId)) {
-      pageTabs.value.push({ groupId, ...definition });
-    }
-    return groupId;
   }
 
   function closePageTab(groupId: string) {
@@ -341,7 +356,10 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
   function importPageTab(tab: WorkspacePageTab) {
     const builtin = tab.pageType !== "plugin" ? PAGE_DEFINITIONS[tab.pageType] : null;
     if (builtin) {
-      if (tab.groupId !== `page:${tab.pageType}` || tab.route !== builtin.route) return false;
+      const expectedId = `page:${tab.pageType}`;
+      const managedNewPage = tab.pageType === "newPage"
+        && /^page:newPage:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tab.groupId);
+      if ((tab.groupId !== expectedId && !managedNewPage) || tab.route !== builtin.route) return false;
     } else if (tab.pageType === "plugin") {
       const route = /^\/plugin\/([^/]+)\/([^/]+)$/.exec(tab.route);
       if (!route) return false;
@@ -355,34 +373,17 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
   }
 
   function ensurePluginPageTab(item: PluginNavigationItem) {
-    const groupId = `page:plugin:${item.pluginId}:${item.navigation.pageId}`;
-    const route = `/plugin/${encodeURIComponent(item.pluginId)}/${encodeURIComponent(item.navigation.pageId)}`;
-    const existing = pageTabs.value.find((tab) => tab.groupId === groupId);
-    if (existing) {
-      existing.label = item.navigation.label;
-      existing.iconName = item.navigation.icon;
-      existing.route = route;
-      return groupId;
-    }
-    pageTabs.value.push({
-      groupId,
-      pageType: "plugin",
-      route,
-      labelKey: null,
-      label: item.navigation.label,
-      iconName: item.navigation.icon,
-    });
-    return groupId;
+    const tab = pluginPageTab(item);
+    const existing = pageTabs.value.find((candidate) => candidate.groupId === tab.groupId);
+    if (existing) Object.assign(existing, { label: tab.label, iconName: tab.iconName, route: tab.route });
+    else pageTabs.value.push(tab);
+    return tab.groupId;
   }
 
   function closePluginPageTabs(pluginId: string) {
     pageTabs.value = pageTabs.value.filter((tab) => (
       tab.pageType !== "plugin" || !tab.groupId.startsWith(`page:plugin:${pluginId}:`)
     ));
-  }
-
-  function queueTerminalCreation(kind: "default" | "local" = "default") {
-    createTerminalPending.value = kind;
   }
 
   return {
@@ -392,7 +393,7 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
     desktopController,
     fileTabs,
     activeFileTabId,
-    createFileTab,
+    createInitialFileTab,
     importFileTab,
     syncFilePaneCount,
     activateFileTab,
@@ -421,11 +422,9 @@ export const useWorkspaceTabsStore = defineStore("workspaceTabs", () => {
     terminalController,
     syncTerminalState,
     registerTerminalController,
-    ensurePageTabForRoute,
     ensurePluginPageTab,
     closePluginPageTabs,
     closePageTab,
     importPageTab,
-    queueTerminalCreation,
   };
 });

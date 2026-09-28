@@ -1,37 +1,40 @@
 <script setup lang="ts">
-import { ArrowRight, Clock3, FilePlus2, Folder, FolderOpen, Menu, Monitor, Plus, Server, SquareTerminal } from "lucide-vue-next";
+import { ArrowRight, Clock3, FolderOpen, Plus, Server, SquareTerminal, Star } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
 
-import { NvxButton, NvxDialog, NvxIcon } from "../components/ui";
+import { NvxButton, NvxDialog, NvxIcon, NvxInlineNotice } from "../components/ui";
 import { canUseDesktopCore, listHostCatalog } from "../core-api/client";
 import type { HostCatalogEntry } from "../core-api/generated/core-api";
 import { createUuidV7 } from "../core-api/ids";
 import { RECENT_FILE_HOSTS_CHANGED, readRecentFileHosts } from "../recent-file-hosts";
 import { useRouteReveal } from "../routeReveal";
 import { onSavedConnectionsChanged } from "../saved-connections";
-import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { showWorkspaceTabFailure } from "../workspace-tab-errors";
+import { requestWorkspaceTabShellAction, type WorkspaceTabShellAction } from "../workspace-tab-shell-action";
 
 defineOptions({ name: "NewWorkspacePageView" });
 const { t, locale } = useI18n();
-const router = useRouter();
 const revealRoute = useRouteReveal();
-const workspaceTabs = useWorkspaceTabsStore();
 const catalog = ref<HostCatalogEntry[]>([]);
 const fileHistory = ref<Record<string, number>>({});
 const loading = ref(true);
 const loadFailed = ref(false);
 const picker = ref<"terminal" | "sftp" | null>(null);
+const actionBusy = ref(false);
 let stopSavedConnections: (() => void) | undefined;
 let disposed = false;
 let requestVersion = 0;
 
+/** Favorited hosts surface first; ties within each group fall back to the most recent activity. */
 const recentHosts = computed(() => catalog.value
   .filter((entry) => entry.recentConnection || fileHistory.value[entry.host.hostId])
-  .sort((a, b) => Math.max(b.recentConnection?.connectedAtUnixMs ?? 0, fileHistory.value[b.host.hostId] ?? 0)
-    - Math.max(a.recentConnection?.connectedAtUnixMs ?? 0, fileHistory.value[a.host.hostId] ?? 0))
-  .slice(0, 3));
+  .sort((a, b) => {
+    if (a.host.favorite !== b.host.favorite) return a.host.favorite ? -1 : 1;
+    return Math.max(b.recentConnection?.connectedAtUnixMs ?? 0, fileHistory.value[b.host.hostId] ?? 0)
+      - Math.max(a.recentConnection?.connectedAtUnixMs ?? 0, fileHistory.value[a.host.hostId] ?? 0);
+  })
+  .slice(0, 5));
 
 const dateTimeFormatter = computed(() => new Intl.DateTimeFormat(locale.value, {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
@@ -64,37 +67,41 @@ function updateFileHistory() {
   fileHistory.value = readRecentFileHosts();
 }
 
+/** The New page lives in its own Tab; the owner shell replaces it with the Tab it creates. */
+async function runAndReplace(action: WorkspaceTabShellAction) {
+  if (actionBusy.value) return;
+  actionBusy.value = true;
+  try {
+    await requestWorkspaceTabShellAction(action, { closeSourceOnSuccess: true });
+  } catch (error) {
+    showWorkspaceTabFailure(error, "new-workspace-action");
+  } finally {
+    actionBusy.value = false;
+  }
+}
+
 function openTerminalHost(hostId: string) {
   picker.value = null;
-  void router.push({
-    path: "/terminal",
-    query: { hostId, source: "overview", connectOperationId: createUuidV7() },
-  });
+  void runAndReplace({ type: "navigate", path: "/terminal", query: { hostId, source: "overview", connectOperationId: createUuidV7() } });
 }
 function openSftpHost(hostId: string) {
   picker.value = null;
-  void router.push({
-    path: "/sftp",
-    query: { hostId, fileOperationId: createUuidV7() },
-  });
+  void runAndReplace({ type: "navigate", path: "/sftp", query: { hostId, fileOperationId: createUuidV7() } });
 }
 function openLocalTerminal() {
   picker.value = null;
-  const controller = workspaceTabs.terminalController;
-  if (controller) {
-    if (controller.createLocal()) void router.push("/terminal");
-    return;
-  }
-  workspaceTabs.queueTerminalCreation("local");
-  void router.push("/terminal");
+  void runAndReplace({ type: "new-terminal", behavior: "local" });
 }
 function openLocalFiles() {
-  workspaceTabs.createFileTab("local");
-  void router.push("/sftp");
+  void runAndReplace({ type: "new-file", kind: "local" });
+}
+function openHosts(create = false) {
+  void runAndReplace({ type: "navigate", path: "/hosts", query: create ? { create: "1" } : undefined });
 }
 function showHostPicker(kind: "terminal" | "sftp") {
+  if (actionBusy.value) return;
   if (catalog.value.length) picker.value = kind;
-  else void router.push({ path: "/hosts", query: { create: "1" } });
+  else openHosts(true);
 }
 
 onMounted(async () => {
@@ -127,7 +134,8 @@ onBeforeUnmount(() => {
         </div>
         <NvxButton
           variant="secondary"
-          @click="router.push({ path: '/hosts', query: { create: '1' } })"
+          :disabled="actionBusy"
+          @click="openHosts(true)"
         >
           <NvxIcon
             :icon="Plus"
@@ -136,149 +144,6 @@ onBeforeUnmount(() => {
           {{ t("newWorkspace.addHost") }}
         </NvxButton>
       </header>
-
-      <div class="new-workspace__cards">
-        <section
-          class="new-workspace__card"
-          :aria-label="t('newWorkspace.terminalTitle')"
-        >
-          <div class="new-workspace__card-heading">
-            <span class="new-workspace__card-icon"><NvxIcon
-              :icon="SquareTerminal"
-              :size="22"
-            /></span>
-            <div>
-              <h2>{{ t("newWorkspace.terminalTitle") }}</h2>
-              <p>{{ t("newWorkspace.terminalDescription") }}</p>
-            </div>
-          </div>
-          <div
-            class="new-workspace__terminal-preview"
-            aria-hidden="true"
-          >
-            <div class="new-workspace__terminal-chrome">
-              <span class="new-workspace__traffic"><i /><i /><i /></span>
-              <span class="new-workspace__terminal-tab">{{ t("newWorkspace.previewTerminalTab") }} <span>×</span></span>
-              <NvxIcon
-                :icon="Plus"
-                :size="16"
-              />
-              <NvxIcon
-                class="new-workspace__terminal-menu"
-                :icon="Menu"
-                :size="16"
-              />
-            </div>
-            <div class="new-workspace__terminal-screen">
-              <div><em>user@server:~$</em> hostname</div>
-              <div>prod.example.com</div>
-              <div><em>user@server:~$</em> ls -la</div>
-              <div>total 28</div>
-              <div>drwxr-xr-x &nbsp; 5 user user &nbsp; 4096 &nbsp; .</div>
-              <div>drwxr-xr-x &nbsp; 3 root root &nbsp; 4096 &nbsp; ..</div>
-              <div>drwxr-xr-x &nbsp; 2 user user &nbsp; 4096 &nbsp; logs</div>
-              <div>-rw-r--r-- &nbsp; 1 user user &nbsp; 220 &nbsp; README.md</div>
-              <div><em>user@server:~$</em> ▌</div>
-            </div>
-          </div>
-          <div class="new-workspace__actions">
-            <NvxButton
-              :disabled="loading || loadFailed"
-              @click="showHostPicker('terminal')"
-            >
-              {{ t("newWorkspace.connectTerminal") }} <NvxIcon
-                :icon="ArrowRight"
-                :size="16"
-              />
-            </NvxButton>
-            <NvxButton
-              variant="secondary"
-              @click="openLocalTerminal"
-            >
-              {{ t("newWorkspace.localTerminal") }} <NvxIcon
-                :icon="ArrowRight"
-                :size="16"
-              />
-            </NvxButton>
-          </div>
-        </section>
-
-        <section
-          class="new-workspace__card"
-          :aria-label="t('newWorkspace.sftpTitle')"
-        >
-          <div class="new-workspace__card-heading">
-            <span class="new-workspace__card-icon"><NvxIcon
-              :icon="FolderOpen"
-              :size="22"
-            /></span>
-            <div>
-              <h2>{{ t("newWorkspace.sftpTitle") }}</h2>
-              <p>{{ t("newWorkspace.sftpDescription") }}</p>
-            </div>
-          </div>
-          <div
-            class="new-workspace__files-preview"
-            aria-hidden="true"
-          >
-            <div
-              v-for="kind in ['local', 'remote'] as const"
-              :key="kind"
-              class="new-workspace__mini-file-pane"
-            >
-              <div class="new-workspace__mini-toolbar">
-                <NvxIcon
-                  :icon="kind === 'local' ? Monitor : Server"
-                  :size="16"
-                />
-                {{ t(`newWorkspace.preview.${kind}`) }}
-                <NvxIcon
-                  class="new-workspace__mini-menu"
-                  :icon="Menu"
-                  :size="16"
-                />
-              </div>
-              <div class="new-workspace__mini-path">
-                {{ kind === "local" ? "~/" : "/home/user" }}
-              </div>
-              <div class="new-workspace__mini-sort">
-                {{ t("newWorkspace.preview.name") }} ↓
-              </div>
-              <div
-                v-for="name in (kind === 'local' ? ['Desktop', 'Documents', 'Downloads', 'Pictures', 'README.md'] : ['logs', 'nginx', 'projects', 'scripts', 'config.ini'])"
-                :key="name"
-                class="new-workspace__mini-entry"
-              >
-                <NvxIcon
-                  :icon="name.includes('.') ? FilePlus2 : Folder"
-                  :size="16"
-                />
-                {{ name }}
-              </div>
-            </div>
-          </div>
-          <div class="new-workspace__actions">
-            <NvxButton
-              :disabled="loading || loadFailed"
-              @click="showHostPicker('sftp')"
-            >
-              {{ t("newWorkspace.connectSftp") }} <NvxIcon
-                :icon="ArrowRight"
-                :size="16"
-              />
-            </NvxButton>
-            <NvxButton
-              variant="secondary"
-              @click="openLocalFiles"
-            >
-              {{ t("newWorkspace.localFiles") }} <NvxIcon
-                :icon="ArrowRight"
-                :size="16"
-              />
-            </NvxButton>
-          </div>
-        </section>
-      </div>
 
       <section
         class="new-workspace__recent"
@@ -290,10 +155,12 @@ onBeforeUnmount(() => {
               :icon="Clock3"
               :size="22"
             />{{ t("newWorkspace.recentHosts") }}
+            <span class="new-workspace__recent-hint">{{ t("newWorkspace.recentHostsSortHint") }}</span>
           </h2>
           <button
             type="button"
-            @click="router.push('/hosts')"
+            :disabled="actionBusy"
+            @click="openHosts()"
           >
             {{ t("newWorkspace.viewAll") }} <NvxIcon
               :icon="ArrowRight"
@@ -301,36 +168,74 @@ onBeforeUnmount(() => {
             />
           </button>
         </div>
-        <div class="new-workspace__recent-list">
-          <p
-            v-if="loading"
-            class="new-workspace__message"
-            role="status"
+
+        <div
+          v-if="loading"
+          class="new-workspace__recent-list"
+          role="status"
+        >
+          <span class="new-workspace__sr-only">{{ t("newWorkspace.loading") }}</span>
+          <div
+            v-for="n in 3"
+            :key="n"
+            class="new-workspace__skeleton-row"
+            aria-hidden="true"
           >
-            {{ t("newWorkspace.loading") }}
-          </p>
-          <p
-            v-else-if="loadFailed"
-            class="new-workspace__message"
-            role="alert"
+            <span class="new-workspace__skeleton new-workspace__skeleton--avatar" />
+            <span class="new-workspace__skeleton-lines">
+              <span class="new-workspace__skeleton new-workspace__skeleton--label" />
+              <span class="new-workspace__skeleton new-workspace__skeleton--address" />
+            </span>
+            <span class="new-workspace__skeleton new-workspace__skeleton--meta" />
+          </div>
+        </div>
+        <NvxInlineNotice
+          v-else-if="loadFailed"
+          tone="error"
+          :title="t('newWorkspace.loadFailed')"
+        >
+          <p>{{ t("newWorkspace.loadFailedDescription") }}</p>
+          <NvxButton
+            variant="secondary"
+            size="sm"
+            @click="refresh"
           >
-            {{ t("newWorkspace.loadFailed") }} <button
-              type="button"
-              @click="refresh"
+            {{ t("newWorkspace.retry") }}
+          </NvxButton>
+        </NvxInlineNotice>
+        <NvxInlineNotice
+          v-else-if="!recentHosts.length"
+          tone="info"
+          :title="t('newWorkspace.emptyRecentTitle')"
+        >
+          <p>{{ t("newWorkspace.emptyRecentDescription") }}</p>
+          <div class="new-workspace__empty-actions">
+            <NvxButton
+              size="sm"
+              :disabled="actionBusy"
+              @click="openHosts(true)"
             >
-              {{ t("newWorkspace.retry") }}
-            </button>
-          </p>
-          <p
-            v-else-if="!recentHosts.length"
-            class="new-workspace__message"
-          >
-            {{ t("newWorkspace.emptyRecent") }}
-          </p>
+              {{ t("newWorkspace.addHost") }}
+            </NvxButton>
+            <NvxButton
+              variant="secondary"
+              size="sm"
+              :disabled="actionBusy"
+              @click="openLocalTerminal"
+            >
+              {{ t("newWorkspace.localTerminal") }}
+            </NvxButton>
+          </div>
+        </NvxInlineNotice>
+        <div
+          v-else
+          class="new-workspace__recent-list"
+        >
           <div
             v-for="entry in recentHosts"
             :key="entry.host.hostId"
             class="new-workspace__recent-row"
+            tabindex="0"
           >
             <NvxIcon
               :icon="Server"
@@ -345,10 +250,20 @@ onBeforeUnmount(() => {
               :icon="FolderOpen"
               :size="20"
             /><span>{{ t("newWorkspace.lastSftp") }}<small>{{ lastUsed(fileHistory[entry.host.hostId]) }}</small></span></span>
+            <span
+              class="new-workspace__favorite"
+              :class="{ 'new-workspace__favorite--active': entry.host.favorite }"
+              :title="entry.host.favorite ? t('sshTerminal.favoriteHost') : undefined"
+              aria-hidden="true"
+            ><NvxIcon
+              :icon="Star"
+              :size="16"
+            /></span>
             <div class="new-workspace__row-actions">
               <NvxButton
                 variant="secondary"
                 size="sm"
+                :disabled="actionBusy"
                 @click="openTerminalHost(entry.host.hostId)"
               >
                 <NvxIcon
@@ -359,12 +274,100 @@ onBeforeUnmount(() => {
               <NvxButton
                 variant="secondary"
                 size="sm"
+                :disabled="actionBusy"
                 @click="openSftpHost(entry.host.hostId)"
               >
                 <NvxIcon
                   :icon="FolderOpen"
                   :size="16"
                 />{{ t("newWorkspace.sftpAction") }}
+              </NvxButton>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="new-workspace__new-connection">
+        <h2 class="new-workspace__section-title">
+          {{ t("newWorkspace.newConnectionHeading") }}
+        </h2>
+        <div class="new-workspace__tiles">
+          <div
+            class="new-workspace__tile"
+            :aria-label="t('newWorkspace.terminalTitle')"
+          >
+            <div class="new-workspace__tile-info">
+              <span class="new-workspace__tile-icon"><NvxIcon
+                :icon="SquareTerminal"
+                :size="20"
+              /></span>
+              <div>
+                <div class="new-workspace__tile-title">
+                  {{ t("newWorkspace.terminalTitle") }}
+                </div>
+                <p class="new-workspace__tile-description">
+                  {{ t("newWorkspace.terminalDescription") }}
+                </p>
+              </div>
+            </div>
+            <div class="new-workspace__tile-actions">
+              <button
+                type="button"
+                class="new-workspace__tile-link"
+                :disabled="actionBusy"
+                @click="openLocalTerminal"
+              >
+                {{ t("newWorkspace.localTerminal") }}
+              </button>
+              <NvxButton
+                size="sm"
+                :disabled="actionBusy || loading || loadFailed"
+                @click="showHostPicker('terminal')"
+              >
+                {{ t("newWorkspace.connectTerminal") }} <NvxIcon
+                  :icon="ArrowRight"
+                  :size="16"
+                />
+              </NvxButton>
+            </div>
+          </div>
+
+          <div
+            class="new-workspace__tile"
+            :aria-label="t('newWorkspace.sftpTitle')"
+          >
+            <div class="new-workspace__tile-info">
+              <span class="new-workspace__tile-icon"><NvxIcon
+                :icon="FolderOpen"
+                :size="20"
+              /></span>
+              <div>
+                <div class="new-workspace__tile-title">
+                  {{ t("newWorkspace.sftpTitle") }}
+                </div>
+                <p class="new-workspace__tile-description">
+                  {{ t("newWorkspace.sftpDescription") }}
+                </p>
+              </div>
+            </div>
+            <div class="new-workspace__tile-actions">
+              <button
+                type="button"
+                class="new-workspace__tile-link"
+                :disabled="actionBusy"
+                @click="openLocalFiles"
+              >
+                {{ t("newWorkspace.localFiles") }}
+              </button>
+              <NvxButton
+                size="sm"
+                :disabled="actionBusy || loading || loadFailed"
+                @click="showHostPicker('sftp')"
+              >
+                {{ t("newWorkspace.connectSftp") }} <NvxIcon
+                  :icon="ArrowRight"
+                  :size="16"
+                />
               </NvxButton>
             </div>
           </div>
@@ -382,6 +385,7 @@ onBeforeUnmount(() => {
         <button
           v-for="entry in catalog"
           :key="entry.host.hostId"
+          :disabled="actionBusy"
           type="button"
           @click="picker === 'sftp' ? openSftpHost(entry.host.hostId) : openTerminalHost(entry.host.hostId)"
         >
@@ -403,52 +407,60 @@ onBeforeUnmount(() => {
 <style scoped>
 .new-workspace { width:100%; height:100%; overflow:auto; background:var(--nvx-color-bg-canvas); }
 .new-workspace__content { max-width:1320px; margin:0 auto; padding:36px 40px 50px; }
-.new-workspace__header,.new-workspace__card-heading,.new-workspace__recent-heading { display:flex; align-items:center; justify-content:space-between; gap:24px; }
+.new-workspace__header,.new-workspace__recent-heading { display:flex; align-items:center; justify-content:space-between; gap:24px; }
 .new-workspace__header { margin-bottom:28px; }
 .new-workspace__header h1 { margin:0 0 5px; font-size:32px; line-height:1.25; }
-.new-workspace__header p,.new-workspace__card-heading p { margin:0; color:var(--nvx-color-text-secondary); }
-.new-workspace__header p { font-size:17px; }
-.new-workspace__cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
-.new-workspace__card { display:flex; flex-direction:column; min-width:0; padding:24px; border:1px solid var(--nvx-color-border); border-radius:8px; background:var(--nvx-color-bg-surface); }
-.new-workspace__card-heading { justify-content:flex-start; min-height:72px; margin-bottom:18px; }
-.new-workspace__card-heading h2 { margin:0 0 5px; font-size:24px; line-height:1.25; }
-.new-workspace__card-icon { display:grid; place-items:center; width:64px; height:64px; flex:none; border-radius:10px; color:var(--nvx-color-accent); background:var(--nvx-color-accent-soft); }
-.new-workspace__terminal-preview,.new-workspace__files-preview { height:278px; min-height:278px; border:1px solid var(--nvx-color-border); border-radius:6px; overflow:hidden; }
-.new-workspace__terminal-preview { display:flex; flex-direction:column; padding:4px; background:var(--nvx-color-bg-subtle); }
-.new-workspace__terminal-chrome { display:flex; align-items:center; gap:16px; height:36px; padding:0 12px; color:var(--nvx-color-text-secondary); font-size:12px; }
-.new-workspace__traffic { display:flex; gap:5px; }.new-workspace__traffic i { width:10px; height:10px; border-radius:50%; background:#fa5d59; }.new-workspace__traffic i:nth-child(2){background:#ffbd2e}.new-workspace__traffic i:nth-child(3){background:#28c840}
-.new-workspace__terminal-tab { display:flex; align-items:center; justify-content:space-between; min-width:145px; padding:7px 10px; align-self:stretch; border:1px solid var(--nvx-color-border); border-bottom:0; border-radius:5px 5px 0 0; background:var(--nvx-color-bg-surface); color:var(--nvx-color-text-primary); }
-.new-workspace__terminal-tab span,.new-workspace__terminal-menu,.new-workspace__mini-menu { margin-left:auto; }
-.new-workspace__terminal-screen { flex:1; overflow:hidden; padding:13px 15px; border-radius:5px; color:#d5dfed; background:#1b202b; font:12px/1.55 var(--nvx-font-mono); white-space:nowrap; }
-.new-workspace__terminal-screen em { color:#7fde83; font-style:normal; }
-.new-workspace__files-preview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; border:0; }
-.new-workspace__mini-file-pane { overflow:hidden; border:1px solid var(--nvx-color-border); border-radius:6px; font-size:12px; }
-.new-workspace__mini-toolbar,.new-workspace__mini-path,.new-workspace__mini-sort,.new-workspace__mini-entry { display:flex; align-items:center; gap:8px; min-height:28px; padding:0 12px; }
-.new-workspace__mini-toolbar,.new-workspace__mini-sort { border-bottom:1px solid var(--nvx-color-border); background:var(--nvx-color-bg-subtle); }
-.new-workspace__mini-path { color:var(--nvx-color-text-secondary); border-bottom:1px solid var(--nvx-color-border); }
-.new-workspace__mini-sort { color:var(--nvx-color-text-secondary); font-weight:600; }
-.new-workspace__mini-entry { color:var(--nvx-color-text-primary); }
-.new-workspace__mini-entry :deep(svg) { color:var(--nvx-color-accent); fill:var(--nvx-color-accent-soft); }
-.new-workspace__actions { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:18px; }
-.new-workspace__actions :deep(.nvx-button) { min-width:0; min-height:50px; }
-.new-workspace__recent { margin-top:30px; }
+.new-workspace__header p { margin:0; color:var(--nvx-color-text-secondary); font-size:17px; }
+
+.new-workspace__recent { margin-bottom:28px; }
 .new-workspace__recent-heading { margin-bottom:13px; }
-.new-workspace__recent-heading h2 { display:flex; align-items:center; gap:12px; margin:0; font-size:18px; }
-.new-workspace__recent-heading button,.new-workspace__message button { display:flex; align-items:center; gap:8px; border:0; background:transparent; color:var(--nvx-color-accent); cursor:pointer; font:inherit; }
+.new-workspace__recent-heading h2 { display:flex; align-items:center; gap:10px; margin:0; font-size:18px; }
+.new-workspace__recent-hint { font-size:11.5px; font-weight:400; color:var(--nvx-color-text-tertiary); }
+.new-workspace__recent-heading button { display:flex; align-items:center; gap:8px; border:0; background:transparent; color:var(--nvx-color-accent); cursor:pointer; font:inherit; }
 .new-workspace__recent-list { overflow:hidden; border:1px solid var(--nvx-color-border); border-radius:7px; background:var(--nvx-color-bg-surface); }
-.new-workspace__recent-row { display:grid; grid-template-columns:36px minmax(140px,1.2fr) minmax(150px,1fr) minmax(150px,1fr) auto; align-items:center; gap:16px; min-height:74px; margin:0 24px; border-bottom:1px solid var(--nvx-color-border); }
+.new-workspace__recent-row { display:grid; grid-template-columns:36px minmax(140px,1.2fr) minmax(150px,1fr) minmax(150px,1fr) 24px auto; align-items:center; gap:16px; min-height:74px; padding:0 24px; border-bottom:1px solid var(--nvx-color-border); outline:none; transition:background .12s ease; }
 .new-workspace__recent-row:last-child { border-bottom:0; }
+.new-workspace__recent-row:hover { background:var(--nvx-color-bg-hover); }
+.new-workspace__recent-row:focus-visible { background:var(--nvx-color-bg-hover); box-shadow:inset 0 0 0 2px var(--nvx-color-focus-ring); }
 .new-workspace__host-name,.new-workspace__used span { display:flex; flex-direction:column; min-width:0; }
 .new-workspace__host-name strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .new-workspace__host-name small,.new-workspace__used small { overflow:hidden; color:var(--nvx-color-text-tertiary); text-overflow:ellipsis; white-space:nowrap; }
 .new-workspace__used { display:flex; align-items:center; gap:12px; min-width:0; color:var(--nvx-color-text-secondary); font-size:12px; }
-.new-workspace__row-actions { display:flex; gap:9px; }.new-workspace__row-actions :deep(.nvx-button) { min-width:104px; }
-.new-workspace__message { margin:0; padding:28px; color:var(--nvx-color-text-secondary); }
+.new-workspace__favorite { display:grid; place-items:center; width:24px; height:24px; color:var(--nvx-color-text-tertiary); }
+.new-workspace__favorite--active { color:var(--nvx-color-accent); }
+.new-workspace__favorite--active :deep(svg) { fill:currentColor; }
+.new-workspace__row-actions { display:flex; gap:9px; }
+.new-workspace__row-actions :deep(.nvx-button) { min-width:104px; }
+.new-workspace__empty-actions { display:flex; gap:10px; margin-top:10px; }
+.new-workspace__sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; }
+.new-workspace__skeleton-row { display:grid; grid-template-columns:32px 1.2fr 1fr; align-items:center; gap:16px; min-height:74px; padding:0 24px; border-bottom:1px solid var(--nvx-color-border); }
+.new-workspace__skeleton-row:last-child { border-bottom:0; }
+.new-workspace__skeleton-lines { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.new-workspace__skeleton { display:block; height:10px; border-radius:4px; background:linear-gradient(90deg,var(--nvx-color-bg-subtle) 25%,var(--nvx-color-border) 37%,var(--nvx-color-bg-subtle) 63%); background-size:400% 100%; animation:new-workspace-shimmer 1.6s ease infinite; }
+.new-workspace__skeleton--avatar { width:32px; height:32px; border-radius:50%; }
+.new-workspace__skeleton--label { width:55%; height:12px; }
+.new-workspace__skeleton--address { width:38%; }
+.new-workspace__skeleton--meta { width:65%; justify-self:end; }
+@keyframes new-workspace-shimmer { 0% { background-position:100% 50%; } 100% { background-position:0 50%; } }
+
+.new-workspace__section-title { margin:0 0 10px; font-size:13px; font-weight:700; color:var(--nvx-color-text-secondary); }
+.new-workspace__tiles { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.new-workspace__tile { display:flex; align-items:center; justify-content:space-between; gap:14px; min-width:0; padding:16px; border:1px solid var(--nvx-color-border); border-radius:8px; background:var(--nvx-color-bg-surface); transition:border-color .15s ease,background .15s ease; }
+.new-workspace__tile:hover { border-color:var(--nvx-color-accent); background:var(--nvx-color-bg-hover); }
+.new-workspace__tile-info { display:flex; align-items:center; gap:12px; min-width:0; }
+.new-workspace__tile-icon { display:grid; place-items:center; width:36px; height:36px; flex:none; border-radius:8px; color:var(--nvx-color-accent); background:var(--nvx-color-accent-soft); }
+.new-workspace__tile-title { font-size:14px; font-weight:700; }
+.new-workspace__tile-description { margin:0; font-size:12px; color:var(--nvx-color-text-secondary); }
+.new-workspace__tile-actions { display:flex; align-items:center; gap:12px; flex:none; }
+.new-workspace__tile-link { border:0; background:transparent; color:var(--nvx-color-accent); font-size:12.5px; cursor:pointer; font:inherit; }
+.new-workspace__tile-link:hover { text-decoration:underline; }
+.new-workspace__tile-link:disabled { color:var(--nvx-color-text-tertiary); cursor:default; }
+
 .new-workspace__picker-list { display:grid; gap:6px; max-height:min(410px,60vh); overflow:auto; }
 .new-workspace__picker-list button { display:flex; align-items:center; gap:14px; width:100%; padding:12px; border:1px solid var(--nvx-color-border); border-radius:6px; background:var(--nvx-color-bg-surface); color:var(--nvx-color-text-primary); text-align:left; cursor:pointer; }
 .new-workspace__picker-list button:hover { background:var(--nvx-color-bg-hover); }.new-workspace__picker-list button span { display:flex; flex:1; flex-direction:column; }.new-workspace__picker-list button small { color:var(--nvx-color-text-tertiary); }
 button:focus-visible { outline:2px solid var(--nvx-color-focus-ring); outline-offset:2px; }
-@media (max-width:1100px) { .new-workspace__content { padding:28px 24px; }.new-workspace__recent-row { grid-template-columns:28px minmax(130px,1fr) minmax(110px,1fr) minmax(110px,1fr); }.new-workspace__row-actions { grid-column:2/-1; padding-bottom:12px; } }
-@media (max-width:850px) { .new-workspace__cards { grid-template-columns:1fr; }.new-workspace__recent-row { grid-template-columns:28px minmax(120px,1fr) minmax(110px,1fr); }.new-workspace__used:nth-of-type(2) { display:none; } }
-@media (max-width:560px) { .new-workspace__content { padding:20px 14px; }.new-workspace__header { align-items:flex-start; flex-direction:column; }.new-workspace__card { padding:16px; }.new-workspace__actions { grid-template-columns:1fr; }.new-workspace__recent-row { gap:8px; margin:0 12px; }.new-workspace__used { display:none; } }
+@media (max-width:1100px) { .new-workspace__content { padding:28px 24px; }.new-workspace__recent-row { grid-template-columns:28px minmax(130px,1fr) minmax(110px,1fr) minmax(110px,1fr) 20px; }.new-workspace__row-actions { grid-column:1/-1; padding:10px 0 14px; } }
+@media (max-width:850px) { .new-workspace__tiles { grid-template-columns:1fr; }.new-workspace__recent-row { grid-template-columns:28px minmax(120px,1fr) minmax(110px,1fr) 20px; }.new-workspace__used:nth-of-type(2) { display:none; } }
+@media (max-width:560px) { .new-workspace__content { padding:20px 14px; }.new-workspace__header { align-items:flex-start; flex-direction:column; }.new-workspace__tile { flex-direction:column; align-items:flex-start; }.new-workspace__tile-actions { width:100%; justify-content:space-between; }.new-workspace__recent-row { padding:0 12px; gap:8px; }.new-workspace__used { display:none; } }
 </style>

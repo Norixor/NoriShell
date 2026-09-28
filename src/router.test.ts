@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("./views/OverviewView.vue", () => ({ default: {} }));
+vi.mock("./views/SshTerminalView.vue", () => ({ default: {} }));
 
 import { router } from "./router";
 

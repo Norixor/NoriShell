@@ -2,75 +2,78 @@ import type { Router } from "vue-router";
 
 import { desktopClient } from "./core-api/desktop-client";
 import type { useWorkspaceTabsStore, DesktopHeaderController } from "./stores/workspaceTabs";
-import type { WorkspaceTabHandoff } from "./workspace-tab-transfer";
+import { whenAvailable, type WorkspaceTabRecovery } from "./workspace-tab-recovery";
 import type { WorkspaceTabSnapshot } from "./workspace-tab-windows";
 
 type WorkspaceTabsStore = ReturnType<typeof useWorkspaceTabsStore>;
 
-export interface DesktopTabHandoffSnapshot {
+export interface ActiveDesktopTabSnapshot {
   schemaVersion: 1;
   tabId: string;
   sessionId: string;
   generation: string;
 }
+export interface IdleDesktopTabSnapshot {
+  schemaVersion: 1;
+  tabId: string;
+  profileId: string;
+}
+export type DesktopTabHandoffSnapshot = ActiveDesktopTabSnapshot | IdleDesktopTabSnapshot;
 
 export function parseDesktopHandoff(value: unknown, id: string): DesktopTabHandoffSnapshot | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).length !== 4 || record.schemaVersion !== 1 || record.tabId !== id
-    || typeof record.sessionId !== "string" || !record.sessionId || record.sessionId.length > 128
-    || id !== `desktop:${record.sessionId}` || typeof record.generation !== "string"
-    || !/^[0-9]+$/.test(record.generation) || record.generation.length > 20) return null;
+  if (record.schemaVersion !== 1 || record.tabId !== id) return null;
+  if (Object.keys(record).length === 3 && typeof record.profileId === "string"
+    && record.profileId.length > 0 && record.profileId.length <= 128) {
+    return record as unknown as IdleDesktopTabSnapshot;
+  }
+  if (Object.keys(record).length !== 4 || typeof record.sessionId !== "string"
+    || !record.sessionId || record.sessionId.length > 128
+    || typeof record.generation !== "string" || !/^[0-9]+$/.test(record.generation)
+    || record.generation.length > 20) return null;
   return record as unknown as DesktopTabHandoffSnapshot;
 }
 
-/** A main window owns legacy unregistered sessions; a child only sees explicit Core ownership. */
+/**
+ * Desktop content belongs to exactly one Tab WebView. Shell pages list profiles
+ * only, so a renderer without a native Tab sees no session.
+ */
 export function filterDesktopSessions<T extends { id: string }>(
   sessions: readonly T[],
   ownership: WorkspaceTabSnapshot,
-  label: string,
-  staged: ReadonlySet<string> = new Set(),
-  localCreated: ReadonlySet<string> = new Set(),
+  staged: ReadonlySet<string>,
+  nativeViewTabId: string | null,
+  nativeSessionId: string | null,
 ): T[] {
-  const owned = new Set(ownership.owned.filter((tab) => tab.kind === "desktop").map((tab) => tab.id));
-  const others = new Set(ownership.others.filter((tab) => tab.kind === "desktop").map((tab) => tab.id));
-  return sessions.filter((session) => {
-    const id = `desktop:${session.id}`;
-    if (staged.has(id)) return true;
-    if (others.has(id)) return false;
-    return owned.has(id) || localCreated.has(id) || label === "main";
-  });
+  if (!nativeViewTabId || !nativeSessionId) return [];
+  const owned = staged.has(nativeViewTabId)
+    || ownership.owned.some((tab) => tab.kind === "desktop" && tab.id === nativeViewTabId);
+  return owned ? sessions.filter((session) => session.id === nativeSessionId) : [];
 }
 
-async function controller(store: WorkspaceTabsStore): Promise<DesktopHeaderController> {
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
+function controller(store: WorkspaceTabsStore): Promise<DesktopHeaderController> {
+  return whenAvailable(() => {
     const current = store.desktopController;
-    if (current?.snapshotHandoff && current.freezeHandoff && current.importHandoff
-      && current.commitHandoff && current.rollbackHandoff && current.discardHandoff
-      && current.admitHandoff) return current;
-    await new Promise((resolve) => window.setTimeout(resolve, 50));
-  }
-  throw new Error("workspace_tab.desktop_unavailable");
+    return current?.importHandoff && current.importIdle && current.discardHandoff && current.admitHandoff ? current : null;
+  }, "workspace_tab.desktop_unavailable");
 }
 
-/** Transfer a bounded session handle; the Core session and protocol transport remain alive. */
-export function createDesktopHandoff(store: WorkspaceTabsStore, router: Router): WorkspaceTabHandoff<DesktopTabHandoffSnapshot> {
+/** Binds a Tab to a bounded session handle; the Core session and protocol transport stay alive. */
+export function createDesktopRecovery(store: WorkspaceTabsStore, router: Router): WorkspaceTabRecovery<DesktopTabHandoffSnapshot> {
   return {
-    kind: "desktop",
-    owns: (id) => store.desktopTabs.some((tab) => tab.groupId === id),
-    async snapshot(id) { return (await controller(store)).snapshotHandoff!(id); },
-    async freeze(id) { await (await controller(store)).freezeHandoff!(id); },
     async import(id, payload) {
       const parsed = parseDesktopHandoff(payload, id);
       if (!parsed) throw new Error("workspace_tab.invalid_desktop");
+      if ("profileId" in parsed) {
+        await (await controller(store)).importIdle!(id, parsed.profileId);
+        return;
+      }
       const live = await desktopClient.snapshot();
       const session = live.find((item) => item.id === parsed.sessionId && item.generation === parsed.generation);
       if (!session) throw new Error("workspace_tab.desktop_session_stale");
       await (await controller(store)).importHandoff!(session);
     },
-    commit(id) { store.desktopController?.commitHandoff?.(id); },
-    async rollback(id) { await (await controller(store)).rollbackHandoff!(id); },
     async discard(id) { await (await controller(store)).discardHandoff!(id); },
     async activate(id) {
       const current = await controller(store);
@@ -79,7 +82,6 @@ export function createDesktopHandoff(store: WorkspaceTabsStore, router: Router):
       await router.push("/desktop");
     },
     async activateExisting(id) {
-      if (!store.desktopTabs.some((tab) => tab.groupId === id)) throw new Error("workspace_tab.not_found");
       (await controller(store)).activate(id);
       await router.push("/desktop");
     },

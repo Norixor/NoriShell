@@ -1,17 +1,19 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { reactive } from "vue";
+import { defineComponent, h, reactive } from "vue";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18n } from "../locales";
 
 const mocks = vi.hoisted(() => ({
+  isChild: false,
+  pageTabs: [] as { groupId: string }[],
   loadNavigation: vi.fn(),
   listInstalled: vi.fn(),
   ensure: vi.fn(),
+  createManaged: vi.fn(),
+  activateManaged: vi.fn(),
   snapshot: vi.fn(),
-  register: vi.fn(),
-  unregister: vi.fn(),
   focus: vi.fn(),
 }));
 const extensions = reactive({
@@ -28,11 +30,17 @@ vi.mock("../core-api/client", async (importOriginal) => ({
   listInstalledPlugins: mocks.listInstalled,
 }));
 vi.mock("../stores/pluginExtensions", () => ({ usePluginExtensionsStore: () => extensions }));
-vi.mock("../stores/workspaceTabs", () => ({ useWorkspaceTabsStore: () => ({ ensurePluginPageTab: mocks.ensure }) }));
+vi.mock("../stores/workspaceTabs", async (importOriginal) => ({
+  pluginPageTab: (await importOriginal<typeof import("../stores/workspaceTabs")>()).pluginPageTab,
+  useWorkspaceTabsStore: () => ({ pageTabs: mocks.pageTabs, ensurePluginPageTab: mocks.ensure }),
+}));
+vi.mock("../workspace-tab-view-shell", () => ({
+  createManagedPageTab: mocks.createManaged,
+  activateWorkspaceTabView: mocks.activateManaged,
+}));
+vi.mock("../workspace-window-context", () => ({ isWorkspaceTabView: () => mocks.isChild }));
 vi.mock("../workspace-tab-windows", () => ({
   snapshotWorkspaceTabs: mocks.snapshot,
-  registerWorkspaceTab: mocks.register,
-  unregisterWorkspaceTab: mocks.unregister,
   focusWorkspaceWindowTarget: mocks.focus,
   workspaceWindowLabel: () => "main",
 }));
@@ -46,6 +54,17 @@ const item = {
   navigation: { pageId: "home", label: "Sync", icon: "cloud" },
 };
 const tabId = "page:plugin:org.example.sync:home";
+const tab = {
+  groupId: tabId, pageType: "plugin", route: "/plugin/org.example.sync/home",
+  labelKey: null, label: "Sync", iconName: "cloud",
+};
+const owned = { id: tabId, kind: "page", owner: "main", payload: tab };
+const TargetStub = defineComponent({
+  setup(_props, { expose }) {
+    expose({ refreshAfterSettingsChange: vi.fn() });
+    return () => h("div");
+  },
+});
 
 async function mountPage() {
   const router = createRouter({
@@ -58,90 +77,56 @@ async function mountPage() {
   await router.push("/plugin/org.example.sync/home");
   await router.isReady();
   const wrapper = mount(PluginPageView, {
-    global: { plugins: [router, i18n], stubs: { NvxPluginExtensionTarget: true, NvxPluginSettingsDialog: true } },
+    global: { plugins: [router, i18n], stubs: {
+      NvxPluginExtensionTarget: TargetStub, NvxPluginSettingsDialog: true,
+    } },
   });
   return { wrapper, router };
 }
 
 describe("plugin Page Tab ownership", () => {
   beforeEach(() => {
+    mocks.isChild = false;
+    mocks.pageTabs = [];
     extensions.navigation = [item];
     mocks.loadNavigation.mockReset().mockResolvedValue(undefined);
     mocks.listInstalled.mockReset().mockResolvedValue([]);
     mocks.ensure.mockReset();
-    mocks.snapshot.mockReset().mockResolvedValue({ owned: [], incoming: [], outgoing: [], others: [] });
-    mocks.register.mockReset().mockResolvedValue({ id: tabId, kind: "page", owner: "main", revision: 1, payload: {} });
-    mocks.unregister.mockReset().mockResolvedValue(undefined);
+    mocks.createManaged.mockReset().mockResolvedValue(undefined);
+    mocks.activateManaged.mockReset().mockResolvedValue(undefined);
+    mocks.snapshot.mockReset().mockResolvedValue({ owned: [], others: [] });
     mocks.focus.mockReset().mockResolvedValue(undefined);
   });
   afterEach(() => { extensions.navigation = []; });
 
-  it("does not recreate the source Tab when navigation loading finishes after unmount", async () => {
+  it("does not create a Tab when navigation loading finishes after unmount", async () => {
     let finishLoad!: () => void;
     mocks.loadNavigation.mockReturnValue(new Promise<void>((resolve) => { finishLoad = resolve; }));
     const { wrapper } = await mountPage();
     wrapper.unmount();
     finishLoad();
     await flushPromises();
+    expect(mocks.createManaged).not.toHaveBeenCalled();
     expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(mocks.register).not.toHaveBeenCalled();
   });
 
-  it("does not show a Page Tab while Core reports an outgoing transfer", async () => {
-    mocks.snapshot.mockResolvedValue({
-      owned: [{ id: tabId, kind: "page", owner: "main", revision: 1, payload: {} }],
-      incoming: [], outgoing: [{ tab: { id: tabId }, target: "workspace-a" }], others: [],
-    });
-    const { wrapper, router } = await mountPage();
-    await flushPromises();
-    expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(mocks.register).not.toHaveBeenCalled();
-    expect(router.currentRoute.value.path).toBe("/terminal");
-    wrapper.unmount();
-  });
-
-  it("releases a newly claimed Core record if the page unmounts before the claim returns", async () => {
-    let finishClaim!: (value: unknown) => void;
-    mocks.register.mockReturnValue(new Promise((resolve) => { finishClaim = resolve; }));
-    const { wrapper } = await mountPage();
-    await vi.waitFor(() => expect(mocks.register).toHaveBeenCalledOnce());
-    wrapper.unmount();
-    finishClaim({ id: tabId, kind: "page", owner: "main", revision: 4, payload: {} });
-    await flushPromises();
-    expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(mocks.unregister).toHaveBeenCalledWith(tabId, 4);
-  });
-
-  it("claims Core ownership before showing a newly opened Page Tab", async () => {
+  it("shows a child Page only when its Core record is owned", async () => {
+    mocks.isChild = true;
+    mocks.snapshot.mockResolvedValue({ owned: [owned], others: [] });
     const { wrapper } = await mountPage();
     await flushPromises();
-    expect(mocks.register).toHaveBeenCalledWith(expect.objectContaining({ id: tabId, kind: "page" }));
-    expect(mocks.register.mock.invocationCallOrder[0]).toBeLessThan(mocks.ensure.mock.invocationCallOrder[0]!);
     expect(mocks.ensure).toHaveBeenCalledWith(item);
+    expect(mocks.createManaged).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it("leaves the local Tab absent when another window wins the Core claim", async () => {
-    mocks.register.mockRejectedValue("workspace_tab.conflict");
+  it("fails closed if a child loses its Core record", async () => {
+    mocks.isChild = true;
     const { wrapper } = await mountPage();
     await flushPromises();
     expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(wrapper.text()).toContain("workspace_tab.conflict");
+    expect(wrapper.text()).toContain("workspace_tab.not_found");
     wrapper.unmount();
   });
 
-  it("focuses the winner if ownership changes between snapshot and registration", async () => {
-    mocks.snapshot.mockResolvedValueOnce({ owned: [], incoming: [], outgoing: [], others: [] })
-      .mockResolvedValueOnce({
-        owned: [], incoming: [], outgoing: [],
-        others: [{ id: tabId, kind: "page", owner: "workspace-a", terminalPanes: [] }],
-      });
-    mocks.register.mockRejectedValue("workspace_tab.conflict");
-    const { wrapper, router } = await mountPage();
-    await flushPromises();
-    expect(mocks.ensure).not.toHaveBeenCalled();
-    expect(mocks.focus).toHaveBeenCalledWith("workspace-a");
-    expect(router.currentRoute.value.path).toBe("/terminal");
-    wrapper.unmount();
-  });
 });

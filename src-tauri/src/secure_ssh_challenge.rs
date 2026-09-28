@@ -524,15 +524,20 @@ pub(crate) async fn prompt_sftp_host_key(
 #[tauri::command]
 pub async fn secure_ssh_challenge_open(
     target: ChallengeTarget,
-    window: WebviewWindow,
+    webview: tauri::Webview,
     app: AppHandle,
     service: State<'_, SecureSshChallengeService>,
 ) -> Result<bool, String> {
-    if !ordinary_owner_alive(&app, window.label()) {
+    let owner = crate::workspace_tab_views::ordinary_owner(&app, &webview)
+        .map_err(|_| "secureChallengeDenied")?;
+    if !ordinary_owner_alive(&app, &owner) {
         return Err("secureChallengeDenied".into());
     }
     let projection = content(&app, &target).await?;
-    if !ordinary_owner_alive(&app, window.label()) {
+    if !ordinary_owner_alive(&app, &owner)
+        || crate::workspace_tab_views::ordinary_owner(&app, &webview).as_deref()
+            != Ok(owner.as_str())
+    {
         return Err("secureChallengeDenied".into());
     }
     let id = uuid::Uuid::now_v7().to_string();
@@ -570,12 +575,15 @@ pub async fn secure_ssh_challenge_open(
         tokio::select! {
             value = &mut receiver => break value.ok(),
             _ = &mut deadline => break None,
-            _ = tick.tick() => { if !ordinary_owner_alive(&app, window.label()) || content(&app, &target).await.is_err() { break None; } }
+            _ = tick.tick() => { if !ordinary_owner_alive(&app, &owner) || crate::workspace_tab_views::ordinary_owner(&app, &webview).as_deref() != Ok(owner.as_str()) || content(&app, &target).await.is_err() { break None; } }
         }
     };
-    let Some(answer) =
-        answer.filter(|answer| answer.approved && ordinary_owner_alive(&app, window.label()))
-    else {
+    let Some(answer) = answer.filter(|answer| {
+        answer.approved
+            && ordinary_owner_alive(&app, &owner)
+            && crate::workspace_tab_views::ordinary_owner(&app, &webview).as_deref()
+                == Ok(owner.as_str())
+    }) else {
         cancel_target(&app, target).await?;
         guard.target = None;
         return Ok(false);

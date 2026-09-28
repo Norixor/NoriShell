@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { BellRing, ChevronLeft, ChevronRight, Plus, SquareTerminal, X } from "lucide-vue-next";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
+import { LogicalPosition } from "@tauri-apps/api/dpi";
+import { Menu } from "@tauri-apps/api/menu";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
 
 import { NvxIcon, NvxIconButton } from "../ui";
 import NvxHostMarker from "../hosts/NvxHostMarker.vue";
@@ -11,6 +14,7 @@ export interface TerminalTabItem {
   label: string;
   stateLabel: string;
   icon?: Component;
+  compact?: boolean;
   disabled?: boolean;
   hostMarker?: HostMarker | null;
   completionCount?: number;
@@ -28,7 +32,6 @@ const props = withDefaults(
     closeAllLabel?: string;
     closeLeftLabel?: string;
     closeRightLabel?: string;
-    contextMenuLabel?: string;
     moveToNewWindowLabel?: string;
     moveToMainWindowLabel?: string;
     scrollBackwardLabel?: string;
@@ -37,13 +40,13 @@ const props = withDefaults(
     busy?: boolean;
     createDisabled?: boolean;
     dragEnabled?: boolean;
+    incomingDrag?: boolean;
   }>(),
   {
     closeLabel: "Close tab",
     closeAllLabel: "Close all tabs",
     closeLeftLabel: "Close tabs to the left",
     closeRightLabel: "Close tabs to the right",
-    contextMenuLabel: "Tab actions",
     moveToNewWindowLabel: "Move to a new window",
     moveToMainWindowLabel: "",
     scrollBackwardLabel: "Show earlier tabs",
@@ -52,6 +55,7 @@ const props = withDefaults(
     busy: false,
     createDisabled: false,
     dragEnabled: false,
+    incomingDrag: false,
   },
 );
 
@@ -66,17 +70,23 @@ const emit = defineEmits<{
 }>();
 
 const tabList = ref<HTMLElement | null>(null);
+const incomingPlaceholder = ref<HTMLElement | null>(null);
 const tabButtons = new Map<string, HTMLButtonElement>();
 const tabItems = new Map<string, HTMLElement>();
 const hasOverflow = ref(false);
 const canScrollBackward = ref(false);
 const canScrollForward = ref(false);
-const contextMenu = ref<{ index: number; left: number; top: number } | null>(null);
 let resizeObserver: ResizeObserver | null = null;
+let nativeMenuBusy = false;
 
-const contextTarget = computed(() => (
-  contextMenu.value ? props.items[contextMenu.value.index] ?? null : null
-));
+// Tauri keeps every inline menu action channel in an app-wide map keyed by
+// MenuId and never removes it when the menu resource closes. Fixed ids make each
+// new popup replace (and drop) the previous channels, bounding the retained
+// callbacks to this constant set instead of growing with every right click.
+// Native popups are modal, so a shared id set cannot route a pending action
+// to another open menu.
+const NATIVE_TAB_MENU_ID = "norishell.terminal-tab-menu";
+const nativeTabMenuItemId = (action: string) => `${NATIVE_TAB_MENU_ID}.${action}`;
 
 function setTabButton(groupId: string, element: unknown) {
   if (element instanceof HTMLButtonElement) tabButtons.set(groupId, element);
@@ -119,7 +129,6 @@ function handleWheel(event: WheelEvent) {
 function handleTabPointerDown(groupId: string, event: PointerEvent) {
   if (!props.dragEnabled || props.busy || event.button !== 0
     || props.items.find((item) => item.groupId === groupId)?.disabled) return;
-  closeContextMenu();
   emit("tab-pointer-down", groupId, event);
 }
 
@@ -146,73 +155,62 @@ function handleTabKeydown(event: KeyboardEvent, index: number) {
   } else if (event.key === "End") {
     event.preventDefault();
     focusTab(props.items.length - 1);
+  } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+    event.preventDefault();
+    if (props.busy || props.items[index]?.disabled) return;
+    const groupId = props.items[index]?.groupId;
+    if (!groupId) return;
+    const bounds = tabButtons.get(groupId)?.getBoundingClientRect();
+    openContextMenu(groupId, bounds?.left ?? 0, bounds?.bottom ?? 0);
   }
 }
 
-function menuItems() {
-  return Array.from(
-    document.querySelectorAll<HTMLButtonElement>(
-      ".nvx-terminal-tab-bar__context-menu [role='menuitem']:not(:disabled)",
-    ),
-  );
-}
-
-function closeContextMenu(restoreFocus = false) {
-  const target = contextTarget.value;
-  contextMenu.value = null;
-  if (restoreFocus && target) void nextTick(() => tabButtons.get(target.groupId)?.focus());
+// Tab content lives in native child WebViews layered above this Header
+// WebView, so an HTML menu would be clipped; always use the native popup.
+function openContextMenu(groupId: string, x: number, y: number) {
+  void openNativeContextMenu(groupId, x, y).catch((error: unknown) => {
+    console.error("Native Tab menu failed", error);
+  });
 }
 
 function openTabContextMenu(event: MouseEvent, index: number) {
   if (props.busy || props.items[index]?.disabled) return;
   event.preventDefault();
-  const menuWidth = 196;
-  const menuHeight = props.dragEnabled ? (props.moveToMainWindowLabel ? 180 : 142) : 104;
-  contextMenu.value = {
-    index,
-    left: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-    top: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+  const groupId = props.items[index]?.groupId;
+  if (groupId) openContextMenu(groupId, event.clientX, event.clientY);
+}
+
+async function openNativeContextMenu(groupId: string, x: number, y: number) {
+  if (nativeMenuBusy) return;
+  const index = props.items.findIndex((item) => item.groupId === groupId);
+  if (index < 0 || props.items[index]?.disabled) return;
+  nativeMenuBusy = true;
+  const close = (scope: "all" | "left" | "right") => {
+    const currentIndex = props.items.findIndex((item) => item.groupId === groupId);
+    if (currentIndex < 0) return;
+    const ids = (scope === "all" ? props.items : scope === "left"
+      ? props.items.slice(0, currentIndex) : props.items.slice(currentIndex + 1)).map((item) => item.groupId);
+    if (ids.length) emit("closeMany", ids);
   };
-  void nextTick(() => menuItems()[0]?.focus());
-}
-
-function requestContextClose(scope: "all" | "left" | "right") {
-  const target = contextMenu.value;
-  if (!target) return;
-  const groupIds = scope === "all"
-    ? props.items.map((item) => item.groupId)
-    : scope === "left"
-      ? props.items.slice(0, target.index).map((item) => item.groupId)
-      : props.items.slice(target.index + 1).map((item) => item.groupId);
-  if (groupIds.length) emit("closeMany", groupIds);
-  closeContextMenu(true);
-}
-
-function handleDocumentPointerDown(event: PointerEvent) {
-  if (contextMenu.value && !(event.target as Element).closest(".nvx-terminal-tab-bar__context-menu")) {
-    closeContextMenu();
+  let menu: Menu | null = null;
+  try {
+    menu = await Menu.new({ id: NATIVE_TAB_MENU_ID, items: [
+      ...(props.dragEnabled ? [{ id: nativeTabMenuItemId("move-to-new-window"), text: props.moveToNewWindowLabel,
+        action: () => { if (props.items.some((item) => item.groupId === groupId)) emit("move-to-new-window", groupId); } }] : []),
+      ...(props.dragEnabled && props.moveToMainWindowLabel ? [{ id: nativeTabMenuItemId("move-to-main-window"),
+        text: props.moveToMainWindowLabel,
+        action: () => { if (props.items.some((item) => item.groupId === groupId)) emit("move-to-main-window", groupId); } }] : []),
+      { id: nativeTabMenuItemId("close-left"), text: props.closeLeftLabel, enabled: index > 0, action: () => close("left") },
+      { id: nativeTabMenuItemId("close-right"), text: props.closeRightLabel, enabled: index < props.items.length - 1,
+        action: () => close("right") },
+      { item: "Separator" as const },
+      { id: nativeTabMenuItemId("close-all"), text: props.closeAllLabel, action: () => close("all") },
+    ] });
+    await menu.popup(new LogicalPosition(x, y), getCurrentWindow());
+  } finally {
+    if (menu) await menu.close().catch(() => undefined);
+    nativeMenuBusy = false;
   }
-}
-
-function handleDocumentKeyDown(event: KeyboardEvent) {
-  if (!contextMenu.value) return;
-  if (event.key === "Escape") {
-    event.preventDefault();
-    closeContextMenu(true);
-    return;
-  }
-  const items = menuItems();
-  if (!items.length) return;
-  const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
-  let nextIndex: number | null = null;
-  if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length;
-  else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length;
-  else if (event.key === "Home") nextIndex = 0;
-  else if (event.key === "End") nextIndex = items.length - 1;
-  else if (event.key === "Tab") closeContextMenu();
-  if (nextIndex === null) return;
-  event.preventDefault();
-  items[nextIndex]?.focus();
 }
 
 watch(
@@ -223,18 +221,19 @@ watch(
   }),
 );
 
+watch(() => props.incomingDrag, () => void nextTick(() => {
+  updateOverflowState();
+  if (props.incomingDrag) incomingPlaceholder.value?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}));
+
 onMounted(() => {
   resizeObserver = new ResizeObserver(updateOverflowState);
   if (tabList.value) resizeObserver.observe(tabList.value);
   updateOverflowState();
-  document.addEventListener("pointerdown", handleDocumentPointerDown);
-  document.addEventListener("keydown", handleDocumentKeyDown);
 });
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
-  document.removeEventListener("pointerdown", handleDocumentPointerDown);
-  document.removeEventListener("keydown", handleDocumentKeyDown);
 });
 </script>
 
@@ -277,6 +276,7 @@ onBeforeUnmount(() => {
           class="nvx-terminal-tab-bar__item"
           :class="{
             'nvx-terminal-tab-bar__item--active': modelValue === item.groupId,
+            'nvx-terminal-tab-bar__item--compact': item.compact,
           }"
           data-tauri-drag-region="false"
           @contextmenu="openTabContextMenu($event, index)"
@@ -290,6 +290,7 @@ onBeforeUnmount(() => {
             :aria-selected="modelValue === item.groupId"
             :tabindex="modelValue === item.groupId || (!modelValue && index === 0) ? 0 : -1"
             :disabled="busy || item.disabled"
+            :title="`${item.label} · ${item.stateLabel}`"
             @click="$emit('update:modelValue', item.groupId)"
             @keydown="handleTabKeydown($event, index)"
             @pointerdown="handleTabPointerDown(item.groupId, $event)"
@@ -302,10 +303,6 @@ onBeforeUnmount(() => {
             <span class="nvx-terminal-tab-bar__identity">
               <span class="nvx-terminal-tab-bar__name-row">
                 <span class="nvx-terminal-tab-bar__name">{{ item.label }}</span>
-                <NvxHostMarker
-                  v-if="item.hostMarker"
-                  :marker="item.hostMarker"
-                />
                 <span
                   v-if="item.completionCount"
                   class="nvx-terminal-tab-bar__completion"
@@ -325,6 +322,10 @@ onBeforeUnmount(() => {
               </span>
               <span class="nvx-terminal-tab-bar__state">{{ item.stateLabel }}</span>
             </span>
+            <NvxHostMarker
+              v-if="item.hostMarker"
+              :marker="item.hostMarker"
+            />
           </button>
           <NvxIconButton
             v-if="closable"
@@ -340,6 +341,19 @@ onBeforeUnmount(() => {
               :size="16"
             />
           </NvxIconButton>
+        </div>
+        <div
+          v-if="incomingDrag"
+          ref="incomingPlaceholder"
+          class="nvx-terminal-tab-bar__incoming"
+          data-tauri-drag-region="false"
+          aria-hidden="true"
+        >
+          <span class="nvx-terminal-tab-bar__incoming-icon" />
+          <span class="nvx-terminal-tab-bar__incoming-lines">
+            <span class="nvx-terminal-tab-bar__incoming-line nvx-terminal-tab-bar__incoming-line--title" />
+            <span class="nvx-terminal-tab-bar__incoming-line nvx-terminal-tab-bar__incoming-line--state" />
+          </span>
         </div>
       </div>
       <NvxIconButton
@@ -387,71 +401,43 @@ onBeforeUnmount(() => {
         <slot name="trailing-actions" />
       </span>
     </div>
-
-    <div
-      v-if="contextMenu && contextTarget"
-      class="nvx-terminal-tab-bar__context-menu"
-      data-tauri-drag-region="false"
-      role="menu"
-      :aria-label="contextMenuLabel"
-      :style="{ left: `${contextMenu.left}px`, top: `${contextMenu.top}px` }"
-    >
-      <button
-        v-if="dragEnabled"
-        class="nvx-terminal-tab-bar__context-menu-item"
-        type="button"
-        role="menuitem"
-        @click="$emit('move-to-new-window', contextTarget.groupId); closeContextMenu()"
-      >
-        {{ moveToNewWindowLabel }}
-      </button>
-      <button
-        v-if="dragEnabled && moveToMainWindowLabel"
-        class="nvx-terminal-tab-bar__context-menu-item"
-        type="button"
-        role="menuitem"
-        @click="$emit('move-to-main-window', contextTarget.groupId); closeContextMenu()"
-      >
-        {{ moveToMainWindowLabel }}
-      </button>
-      <button
-        class="nvx-terminal-tab-bar__context-menu-item"
-        type="button"
-        role="menuitem"
-        :disabled="contextMenu.index === 0"
-        @click="requestContextClose('left')"
-      >
-        {{ closeLeftLabel }}
-      </button>
-      <button
-        class="nvx-terminal-tab-bar__context-menu-item"
-        type="button"
-        role="menuitem"
-        :disabled="contextMenu.index === items.length - 1"
-        @click="requestContextClose('right')"
-      >
-        {{ closeRightLabel }}
-      </button>
-      <div
-        class="nvx-terminal-tab-bar__context-menu-separator"
-        role="separator"
-      />
-      <button
-        class="nvx-terminal-tab-bar__context-menu-item nvx-terminal-tab-bar__context-menu-item--danger"
-        type="button"
-        role="menuitem"
-        @click="requestContextClose('all')"
-      >
-        {{ closeAllLabel }}
-      </button>
-    </div>
   </div>
 </template>
 
 <style scoped>
-.nvx-terminal-tab-bar__name-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.nvx-terminal-tab-bar__incoming {
+  display: flex;
+  flex: 0 0 clamp(220px, 22vw, 272px);
+  align-items: center;
+  gap: var(--nvx-space-2);
+  height: 44px;
+  box-sizing: border-box;
+  padding: 0 var(--nvx-space-3);
+  border: 1px dashed var(--nvx-color-border);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-subtle);
+  pointer-events: none;
+}
+.nvx-terminal-tab-bar__incoming-icon,
+.nvx-terminal-tab-bar__incoming-line {
+  display: block;
+  border-radius: var(--nvx-radius-sm);
+  background: var(--nvx-color-border);
+  animation: nvx-tab-incoming-pulse 1.2s ease-in-out infinite alternate;
+}
+.nvx-terminal-tab-bar__incoming-icon { width: 16px; height: 16px; flex: 0 0 auto; }
+.nvx-terminal-tab-bar__incoming-lines { display: grid; flex: 1; gap: 6px; }
+.nvx-terminal-tab-bar__incoming-line--title { width: 72%; height: 10px; }
+.nvx-terminal-tab-bar__incoming-line--state { width: 48%; height: 8px; }
+@keyframes nvx-tab-incoming-pulse { to { opacity: .38; } }
+@media (prefers-reduced-motion: reduce) {
+  .nvx-terminal-tab-bar__incoming-icon,
+  .nvx-terminal-tab-bar__incoming-line { animation: none; }
+}
+
+.nvx-terminal-tab-bar__name-row { display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; }
 .nvx-terminal-tab-bar__name-row > .nvx-terminal-tab-bar__name { min-width: 0; }
-.nvx-terminal-tab-bar__name-row :deep(.nvx-host-marker) { max-width: 6em; font-size: 10px; flex-shrink: 0; }
+.nvx-terminal-tab-bar__tab :deep(.nvx-host-marker) { max-width: 6em; font-size: 10px; flex: 0 0 auto; }
 .nvx-terminal-tab-bar__completion { display: inline-flex; align-items: center; justify-content: center; min-width: 15px; height: 15px; padding: 0 3px; border-radius: var(--nvx-radius-sm); font-size: 10px; color: var(--nvx-color-accent); background: var(--nvx-color-accent-soft); flex-shrink: 0; }
 .nvx-terminal-tab-bar__bell-attention { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; color: var(--nvx-color-warning, currentColor); }
 .nvx-terminal-tab-bar {
@@ -495,14 +481,20 @@ onBeforeUnmount(() => {
 
 .nvx-terminal-tab-bar__item {
   display: flex;
-  flex: 0 0 clamp(168px, 18vw, 232px);
+  flex: 0 0 clamp(220px, 22vw, 272px);
   align-items: center;
-  height: var(--nvx-control-height-md);
+  height: 44px;
   overflow: hidden;
   border-radius: var(--nvx-radius-md);
   background: transparent;
   color: var(--nvx-color-text-secondary);
   transition: background-color var(--nvx-motion-fast), color var(--nvx-motion-fast);
+}
+
+.nvx-terminal-tab-bar__item--compact {
+  flex: 0 1 auto;
+  min-width: 144px;
+  max-width: 220px;
 }
 
 .nvx-terminal-tab-bar__tab {
@@ -551,55 +543,17 @@ onBeforeUnmount(() => {
   margin-right: var(--nvx-space-1);
 }
 
-.nvx-terminal-tab-bar__context-menu {
-  position: fixed;
-  z-index: var(--nvx-z-popover);
-  display: grid;
-  width: min(196px, calc(100vw - 16px));
-  padding: 2px;
-  border: var(--nvx-border-width) solid var(--nvx-color-border-strong);
-  border-radius: var(--nvx-radius-md);
-  background: var(--nvx-color-bg-surface);
-  box-shadow: var(--nvx-shadow-overlay);
-}
 
-.nvx-terminal-tab-bar__context-menu-item {
-  min-height: 30px;
-  padding: 0 var(--nvx-space-2);
-  border: 0;
-  border-radius: var(--nvx-radius-sm);
-  background: transparent;
-  color: var(--nvx-color-text-primary);
-  font: inherit;
-  font-size: var(--nvx-font-size-xs);
-  text-align: start;
-  cursor: pointer;
-}
 
-.nvx-terminal-tab-bar__context-menu-item:hover:not(:disabled),
-.nvx-terminal-tab-bar__context-menu-item:focus-visible {
-  outline: none;
-  background: var(--nvx-color-bg-hover);
-}
 
-.nvx-terminal-tab-bar__context-menu-item:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
 
-.nvx-terminal-tab-bar__context-menu-item--danger {
-  color: var(--nvx-color-danger);
-}
 
-.nvx-terminal-tab-bar__context-menu-separator {
-  height: var(--nvx-border-width);
-  margin: 2px var(--nvx-space-2);
-  background: var(--nvx-color-border);
-}
 
 .nvx-terminal-tab-bar__identity {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
+  gap: 0;
   min-width: 0;
 }
 
@@ -611,6 +565,7 @@ onBeforeUnmount(() => {
 }
 
 .nvx-terminal-tab-bar__name {
+  flex: 1 1 auto;
   font-size: var(--nvx-font-size-sm);
   line-height: var(--nvx-line-height-sm);
   font-weight: var(--nvx-font-weight-medium);

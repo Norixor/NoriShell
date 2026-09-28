@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import NvxSecureWindow from "../components/layout/NvxSecureWindow.vue";
@@ -63,7 +62,6 @@ async function decide(approved: boolean) {
   try {
     await request;
     done.value = true;
-    await getCurrentWindow().close();
   } catch {
     failed.value = true;
   } finally {

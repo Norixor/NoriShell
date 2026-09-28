@@ -19,6 +19,8 @@ const client = vi.hoisted(() => ({
   stopForwardSession: vi.fn(),
   updateForwardRule: vi.fn(),
 }));
+const terminalNavigation = vi.hoisted(() => ({ open: vi.fn(async () => undefined) }));
+vi.mock("../workspace-tab-shell-action", () => ({ openWorkspaceTerminalHost: terminalNavigation.open }));
 
 vi.mock("../core-api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../core-api/client")>();
@@ -202,8 +204,10 @@ describe("TunnelsView operations workspace", () => {
     expect(tips.items.filter((item) => item.title === i18n.global.t("tunnels.failures.hostKeyReviewRequired"))).toHaveLength(1);
     await wrapper.findAll("button").find((button) => button.text().includes("Verify identity"))?.trigger("click");
     await flushPromises();
-    expect(router.currentRoute.value.path).toBe("/terminal");
-    expect(router.currentRoute.value.query.hostId).toBe(host.hostId);
+    expect(router.currentRoute.value.path).toBe("/tunnels");
+    expect(terminalNavigation.open).toHaveBeenCalledWith({
+      hostId: host.hostId, source: "tunnels", connectOperationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
     wrapper.unmount();
     vi.useRealTimers();
   });

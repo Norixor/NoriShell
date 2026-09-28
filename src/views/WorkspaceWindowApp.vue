@@ -1,45 +1,59 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { onBeforeUnmount, onMounted, ref, watch, type VNodeRef } from "vue";
+import { useRoute, useRouter } from "vue-router";
 
-import { NvxAppHeader, NvxWindowFrame, NvxWorkspaceTabBar } from "../components/layout";
-import NvxWorkspaceIncomingSkeleton from "../components/layout/NvxWorkspaceIncomingSkeleton.vue";
+import { NvxAppHeader, NvxWindowFrame, NvxWorkspaceTabBar, NvxWorkspaceTabPlaceholder } from "../components/layout";
 import { NvxTips } from "../components/ui";
 import { useUiStore } from "../stores/ui";
 import { useTipsStore } from "../stores/tips";
 import { i18n } from "../locales";
-import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { startWorkspaceTabWindowUi } from "../workspace-tab-window-ui";
-import { visibleIncomingWorkspaceTabs } from "../workspace-tab-transfer";
+import { setWorkspaceTabViewContentBounds } from "../workspace-tab-view-shell";
+import { useRouteMotion } from "../route-motion";
 
 const ui = useUiStore();
 const router = useRouter();
-const workspaceTabs = useWorkspaceTabsStore();
+const route = useRoute();
+const setRouteMotionElement = useRouteMotion(() => route.path);
 const tips = useTipsStore();
-const incomingSkeletonFull = ref(false);
-watch(visibleIncomingWorkspaceTabs, (count, previous) => {
-  if (count && !previous) {
-    incomingSkeletonFull.value = !(
-      workspaceTabs.terminalTabs.length + workspaceTabs.pageTabs.length
-      + workspaceTabs.fileTabs.length + workspaceTabs.desktopTabs.length
-    );
-  } else if (!count) {
-    incomingSkeletonFull.value = false;
-  }
-}, { flush: "sync" });
+const workspaceContent = ref<HTMLElement | null>(null);
+const setWorkspaceContentElement: VNodeRef = (node, refs) => {
+  workspaceContent.value = node instanceof HTMLElement ? node : null;
+  if (typeof setRouteMotionElement === "function") setRouteMotionElement(node, refs);
+};
+let workspaceContentObserver: ResizeObserver | null = null;
+function syncWorkspaceContentBounds() {
+  const bounds = workspaceContent.value?.getBoundingClientRect();
+  if (!bounds) return;
+  const zoom = ui.appliedUiZoom / 100;
+  setWorkspaceTabViewContentBounds({
+    x: bounds.x * zoom,
+    y: bounds.y * zoom,
+    width: bounds.width * zoom,
+    height: bounds.height * zoom,
+  });
+}
+watch(() => ui.appliedUiZoom, () => { void Promise.resolve().then(syncWorkspaceContentBounds); });
 let stopWorkspaceTabWindows: (() => void) | null = null;
 let disposed = false;
 
 ui.applyPreferences();
 void ui.setUiZoom(ui.uiZoom, false);
 onMounted(() => {
-  void startWorkspaceTabWindowUi(workspaceTabs, router).then((stop) => {
+  workspaceContentObserver = new ResizeObserver(syncWorkspaceContentBounds);
+  if (workspaceContent.value) workspaceContentObserver.observe(workspaceContent.value);
+  window.addEventListener("resize", syncWorkspaceContentBounds);
+  syncWorkspaceContentBounds();
+  void startWorkspaceTabWindowUi(router).then((stop) => {
     if (disposed) stop(); else stopWorkspaceTabWindows = stop;
   }).catch(() => {
     tips.show({ scope: "workspace-tab-windows", tone: "error", title: i18n.global.t("workspaceTabs.unavailable") });
   });
 });
 onBeforeUnmount(() => {
+  workspaceContentObserver?.disconnect();
+  window.removeEventListener("resize", syncWorkspaceContentBounds);
+  setWorkspaceTabViewContentBounds(null);
   disposed = true;
   stopWorkspaceTabWindows?.();
 });
@@ -61,22 +75,18 @@ onBeforeUnmount(() => {
         </template>
       </NvxAppHeader>
       <main
+        :ref="setWorkspaceContentElement"
         class="workspace-window-shell__content"
       >
-        <RouterView v-slot="{ Component, route }">
+        <RouterView v-slot="{ Component, route: renderedRoute }">
           <KeepAlive include="SshTerminalView,DesktopView,FileWorkspaceView,SftpView">
             <component
               :is="Component"
-              :key="route.path"
+              :key="renderedRoute.path"
             />
           </KeepAlive>
         </RouterView>
-        <Transition name="workspace-incoming-fade">
-          <NvxWorkspaceIncomingSkeleton
-            v-if="visibleIncomingWorkspaceTabs"
-            :full="incomingSkeletonFull"
-          />
-        </Transition>
+        <NvxWorkspaceTabPlaceholder />
       </main>
     </div>
   </NvxWindowFrame>

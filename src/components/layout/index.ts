@@ -4,3 +4,4 @@ export { default as NvxPageHeader } from "./NvxPageHeader.vue";
 export { default as NvxWindowControls } from "./NvxWindowControls.vue";
 export { default as NvxWindowFrame } from "./NvxWindowFrame.vue";
 export { default as NvxWorkspaceTabBar } from "./NvxWorkspaceTabBar.vue";
+export { default as NvxWorkspaceTabPlaceholder } from "./NvxWorkspaceTabPlaceholder.vue";

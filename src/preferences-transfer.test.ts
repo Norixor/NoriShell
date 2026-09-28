@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { applyPreferencePreview, exportPreferenceTransfer, parsePreferenceTransfer, previewPreferenceTransfer, type PreferenceGroupAdapter } from "./preferences-transfer";
+import { DEFAULT_APPLICATION_PREFERENCES, validateApplicationPreferences } from "./ui-transfer";
 
 function fixture() {
   let current = { enabled: false };
@@ -15,6 +16,18 @@ function fixture() {
 }
 
 describe("preference file protocol and immutable preview", () => {
+  it("rejects an application preference file carrying retired fields", () => {
+    const legacy: Record<string, unknown> = { ...DEFAULT_APPLICATION_PREFERENCES, headerDensity: "comfortable" };
+    legacy.reduceMotion = true;
+    const adapter: PreferenceGroupAdapter = {
+      id: "application", validate: validateApplicationPreferences,
+      read: async () => DEFAULT_APPLICATION_PREFERENCES,
+      apply: async () => true,
+      defaults: () => DEFAULT_APPLICATION_PREFERENCES,
+    };
+    expect(() => parsePreferenceTransfer(JSON.stringify({ product: "NoriShell", version: 1, groups: { application: legacy } }), [adapter]))
+      .toThrow("invalidGroup");
+  });
   it("rejects unknown groups, fields and oversized input before applying anything", () => {
     const { adapter } = fixture();
     const file = { product: "NoriShell", version: 1, groups: { vault: { password: "test" } } };

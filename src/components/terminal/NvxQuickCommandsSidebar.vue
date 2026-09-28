@@ -3,6 +3,7 @@ import {
   Check,
   Command,
   Copy,
+  Ellipsis,
   Pencil,
   Play,
   Plus,
@@ -32,6 +33,7 @@ import {
   NvxInput,
   NvxTextarea,
 } from "../ui";
+import { usePopoverMenu } from "../ui/usePopoverMenu";
 
 const { t } = useI18n();
 const quickCommands = useQuickCommandsStore();
@@ -46,7 +48,19 @@ const deleteErrorVisible = ref(false);
 const runningId = ref<string | null>(null);
 const copiedId = ref<string | null>(null);
 const actionMessage = ref("");
+const menuItem = ref<QuickCommand | null>(null);
+const {
+  rootRef,
+  triggerRef,
+  viewportPanelRef,
+  viewportPanelStyle,
+  open: menuOpen,
+  closeMenu,
+  toggleMenu,
+  handleMenuKeyDown,
+} = usePopoverMenu();
 let actionMessageTimer: number | null = null;
+let menuTrigger: HTMLElement | null = null;
 
 const editorTitle = computed(() =>
   editingId.value
@@ -55,6 +69,7 @@ const editorTitle = computed(() =>
 );
 
 function openCreate() {
+  closeMenu();
   editingId.value = null;
   label.value = "";
   command.value = "";
@@ -63,6 +78,8 @@ function openCreate() {
 }
 
 function openEdit(item: QuickCommand) {
+  closeMenu();
+  menuTrigger?.focus();
   editingId.value = item.id;
   label.value = item.label;
   command.value = item.command;
@@ -81,9 +98,20 @@ function save() {
 }
 
 function requestDelete(item: QuickCommand) {
+  closeMenu();
+  menuTrigger?.focus();
   pendingDelete.value = item;
   deleteErrorVisible.value = false;
   deleteOpen.value = true;
+}
+
+function toggleActions(item: QuickCommand, event: MouseEvent) {
+  const wasOpen = menuOpen.value && menuItem.value?.id === item.id;
+  closeMenu();
+  menuItem.value = item;
+  menuTrigger = event.currentTarget as HTMLElement;
+  triggerRef(menuTrigger);
+  if (!wasOpen) toggleMenu();
 }
 
 function confirmDelete() {
@@ -138,16 +166,12 @@ onBeforeUnmount(() => {
 
 <template>
   <aside
+    :ref="rootRef"
     class="quick-commands"
     :aria-label="t('quickCommands.title')"
   >
     <header class="quick-commands__header">
-      <div>
-        <h2>{{ t("quickCommands.title") }}</h2>
-        <p aria-live="polite">
-          {{ actionMessage || t("quickCommands.description") }}
-        </p>
-      </div>
+      <h2>{{ t("quickCommands.title") }}</h2>
       <NvxIconButton
         :label="t('quickCommands.add')"
         size="sm"
@@ -159,6 +183,13 @@ onBeforeUnmount(() => {
         />
       </NvxIconButton>
     </header>
+    <p
+      v-if="actionMessage"
+      class="quick-commands__feedback"
+      role="status"
+    >
+      {{ actionMessage }}
+    </p>
     <div
       v-if="quickCommands.commands.length"
       class="quick-commands__list"
@@ -168,66 +199,98 @@ onBeforeUnmount(() => {
         :key="item.id"
         class="quick-command"
       >
-        <div class="quick-command__summary">
+        <div class="quick-command__content">
           <strong :title="item.label">{{ item.label }}</strong>
-          <div class="quick-command__primary-actions">
-            <NvxIconButton
-              class="quick-command__run"
-              :label="t('quickCommands.run', { label: item.label })"
-              :title="canRunInFocusedTerminal
-                ? t('quickCommands.runIn', { terminal: focusedTerminalLabel ?? t('quickCommands.focusedTerminal') })
-                : t('quickCommands.runUnavailable')"
-              size="sm"
-              :disabled="!canRunInFocusedTerminal || runningId !== null"
-              @click="run(item)"
-            >
-              <NvxIcon
-                :icon="Play"
-                :size="16"
-              />
-            </NvxIconButton>
-            <NvxIconButton
-              :label="t('quickCommands.copy', { label: item.label })"
-              size="sm"
-              @click="copy(item)"
-            >
-              <NvxIcon
-                :icon="copiedId === item.id ? Check : Copy"
-                :size="16"
-              />
-            </NvxIconButton>
-          </div>
-        </div>
-        <div class="quick-command__detail">
           <code :title="item.command">{{ item.command }}</code>
-          <div class="quick-command__manage-actions">
-            <NvxIconButton
-              :label="t('quickCommands.edit', { label: item.label })"
-              size="sm"
-              @click="openEdit(item)"
-            >
-              <NvxIcon
-                :icon="Pencil"
-                :size="16"
-              />
-            </NvxIconButton>
-            <NvxIconButton
-              :label="t('quickCommands.delete', { label: item.label })"
-              size="sm"
-              @click="requestDelete(item)"
-            >
-              <NvxIcon
-                :icon="Trash2"
-                :size="16"
-              />
-            </NvxIconButton>
-          </div>
+        </div>
+        <div class="quick-command__actions">
+          <NvxButton
+            class="quick-command__run"
+            variant="ghost"
+            size="sm"
+            :aria-label="t('quickCommands.run', { label: item.label })"
+            :title="canRunInFocusedTerminal
+              ? t('quickCommands.runIn', { terminal: focusedTerminalLabel ?? t('quickCommands.focusedTerminal') })
+              : t('quickCommands.runUnavailable')"
+            :disabled="!canRunInFocusedTerminal || runningId !== null"
+            @click="run(item)"
+          >
+            <NvxIcon
+              :icon="Play"
+              :size="16"
+            />
+            {{ t("quickCommands.runAction") }}
+          </NvxButton>
+          <NvxButton
+            class="quick-command__copy"
+            variant="ghost"
+            size="sm"
+            :aria-label="t('quickCommands.copy', { label: item.label })"
+            @click="copy(item)"
+          >
+            <NvxIcon
+              :icon="copiedId === item.id ? Check : Copy"
+              :size="16"
+            />
+            {{ t("quickCommands.copyAction") }}
+          </NvxButton>
+          <NvxIconButton
+            :label="t('quickCommands.moreActions')"
+            size="sm"
+            aria-haspopup="menu"
+            :aria-expanded="menuOpen && menuItem?.id === item.id"
+            @click="toggleActions(item, $event)"
+          >
+            <NvxIcon
+              :icon="Ellipsis"
+              :size="16"
+            />
+          </NvxIconButton>
         </div>
       </article>
     </div>
 
+    <Teleport to="body">
+      <div
+        v-if="menuOpen && menuItem"
+        :ref="viewportPanelRef"
+        class="quick-command__menu"
+        :style="viewportPanelStyle"
+        role="menu"
+        :aria-label="t('quickCommands.moreActions')"
+        @keydown="handleMenuKeyDown"
+      >
+        <button
+          class="quick-command__menu-item"
+          type="button"
+          role="menuitem"
+          :aria-label="t('quickCommands.edit', { label: menuItem.label })"
+          @click="openEdit(menuItem)"
+        >
+          <NvxIcon
+            :icon="Pencil"
+            :size="16"
+          />
+          {{ t("quickCommands.editAction") }}
+        </button>
+        <button
+          class="quick-command__menu-item quick-command__menu-item--danger"
+          type="button"
+          role="menuitem"
+          :aria-label="t('quickCommands.delete', { label: menuItem.label })"
+          @click="requestDelete(menuItem)"
+        >
+          <NvxIcon
+            :icon="Trash2"
+            :size="16"
+          />
+          {{ t("quickCommands.deleteAction") }}
+        </button>
+      </div>
+    </Teleport>
+
     <div
-      v-else
+      v-if="!quickCommands.commands.length"
       class="quick-commands__empty"
     >
       <NvxIcon
@@ -329,11 +392,11 @@ onBeforeUnmount(() => {
 <style scoped>
 .quick-commands {
   display: flex;
-  flex: 1 1 auto;
+  flex: 0 0 clamp(var(--nvx-layout-inspector-width), 30vw, 380px);
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  width: var(--nvx-layout-inspector-width);
+  width: clamp(var(--nvx-layout-inspector-width), 30vw, 380px);
   border-left: var(--nvx-border-width) solid var(--nvx-color-border);
   background: var(--nvx-color-bg-surface);
   color: var(--nvx-color-text-primary);
@@ -352,9 +415,11 @@ onBeforeUnmount(() => {
 .quick-commands__header {
   display: flex;
   gap: var(--nvx-space-3);
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  padding: var(--nvx-space-3);
+  min-height: 56px;
+  box-sizing: border-box;
+  padding: 0 var(--nvx-space-4);
   border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
@@ -367,12 +432,20 @@ onBeforeUnmount(() => {
   font-size: var(--nvx-font-size-body);
 }
 
-.quick-commands__header p,
+.quick-commands__feedback,
 .quick-commands__empty p {
-  margin-top: var(--nvx-space-1);
   color: var(--nvx-color-text-secondary);
   font-size: var(--nvx-font-size-xs);
   line-height: var(--nvx-line-height-xs);
+}
+
+.quick-commands__feedback {
+  padding: var(--nvx-space-2) var(--nvx-space-4);
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+}
+
+.quick-commands__empty p {
+  margin-top: var(--nvx-space-1);
 }
 
 .quick-commands__list {
@@ -381,26 +454,27 @@ onBeforeUnmount(() => {
 }
 
 .quick-command {
-  display: grid;
-  gap: 2px;
-  padding: var(--nvx-space-1) var(--nvx-space-2);
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--nvx-space-2);
+  padding: var(--nvx-space-3) var(--nvx-space-4);
   border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
-.quick-command__summary,
-.quick-command__detail {
-  display: flex;
+.quick-command__content {
+  display: grid;
+  flex: 1 1 auto;
   min-width: 0;
-  gap: var(--nvx-space-1);
-  align-items: center;
-  justify-content: space-between;
+  gap: 2px;
 }
 
 .quick-command:hover {
   background: var(--nvx-color-bg-subtle);
 }
 
-.quick-command__summary strong,
+.quick-command__content strong,
 .quick-command code {
   min-width: 0;
   overflow: hidden;
@@ -410,20 +484,68 @@ onBeforeUnmount(() => {
 
 .quick-command code {
   display: block;
-  flex: 1 1 auto;
   color: var(--nvx-color-text-secondary);
-  font-size: var(--nvx-font-size-xs);
-  line-height: var(--nvx-line-height-xs);
+  font-family: var(--nvx-font-mono);
+  font-size: var(--nvx-font-size-sm);
+  line-height: var(--nvx-line-height-sm);
 }
 
-.quick-command__primary-actions,
-.quick-command__manage-actions {
+.quick-command__actions {
   display: flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.quick-command__actions .nvx-button {
+  padding-inline: var(--nvx-space-1);
+}
+
+.quick-command__actions .nvx-button :deep(.nvx-button__content) {
+  gap: var(--nvx-space-1);
 }
 
 .quick-command__run:not(:disabled) {
   color: var(--nvx-color-accent);
+}
+
+.quick-command__menu {
+  position: fixed;
+  z-index: var(--nvx-z-popover);
+  display: grid;
+  box-sizing: border-box;
+  width: min(168px, calc(100vw - 24px));
+  padding: 2px;
+  border: var(--nvx-border-width) solid var(--nvx-color-border-strong);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-surface);
+  box-shadow: var(--nvx-shadow-overlay);
+}
+
+.quick-command__menu-item {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: var(--nvx-space-2);
+  padding: 0 var(--nvx-space-2);
+  border: 0;
+  border-radius: var(--nvx-radius-sm);
+  background: transparent;
+  color: var(--nvx-color-text-primary);
+  font: inherit;
+  font-size: var(--nvx-font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.quick-command__menu-item:hover,
+.quick-command__menu-item:focus-visible {
+  outline: none;
+  background: var(--nvx-color-bg-hover);
+}
+
+.quick-command__menu-item--danger {
+  color: var(--nvx-color-danger);
 }
 
 .quick-commands__empty {

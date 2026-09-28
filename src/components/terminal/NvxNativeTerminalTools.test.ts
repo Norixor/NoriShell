@@ -153,6 +153,38 @@ describe("NvxNativeTerminalTools", () => {
     wrapper.unmount();
   });
 
+  it("switches history scope in the sidebar while rows remain copy and delete only", async () => {
+    const send = vi.fn();
+    registerTerminalInputTarget({ id: "pane-a", label: () => "Pane A", focusTarget, applyFocusLease: vi.fn(), canAcceptInput: () => true, canAcceptRawInput: () => true, send });
+    await focusTerminalInputTarget("pane-a");
+    api.listNativeTerminalHistory.mockResolvedValue([historyEntry("pwd")]);
+    api.deleteNativeTerminalHistory.mockResolvedValue(undefined);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const { wrapper } = mountTools();
+    await (wrapper.vm as unknown as { openHistory(): Promise<void> }).openHistory();
+    await flushPromises();
+
+    const scopes = document.querySelectorAll<HTMLButtonElement>(".native-terminal-tools__scopes button");
+    expect(scopes).toHaveLength(2);
+    expect(scopes[0]?.getAttribute("aria-pressed")).toBe("true");
+    expect(api.listNativeTerminalHistory).toHaveBeenCalledWith({ scope: { kind: "host", hostId: "host-a" }, query: "", limit: 50 });
+    scopes[1]?.click();
+    await vi.advanceTimersByTimeAsync(150);
+    await flushPromises();
+    expect(scopes[1]?.getAttribute("aria-pressed")).toBe("true");
+    expect(api.listNativeTerminalHistory).toHaveBeenCalledWith({ scope: null, query: "", limit: 50 });
+
+    document.querySelector<HTMLButtonElement>(".native-terminal-tools__entry-actions button[aria-label='Copy']")?.click();
+    await flushPromises();
+    expect(writeText).toHaveBeenCalledWith("pwd");
+    document.querySelector<HTMLButtonElement>(".native-terminal-tools__entry-actions button[aria-label='Delete this history entry']")?.click();
+    await flushPromises();
+    expect(api.deleteNativeTerminalHistory).toHaveBeenCalledWith("019d0000-0000-7000-8000-000000000301");
+    expect(send).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("sends only a matching suffix without Enter and invalidates its draft after concurrent typing before ack", async () => {
     const target = focusTarget();
     const ack = deferred<void>();

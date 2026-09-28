@@ -45,6 +45,7 @@ export const usePluginExtensionsStore = defineStore("pluginExtensions", () => {
   const navigation = ref<PluginNavigationItem[]>([]);
   const leases = new Map<string, ActiveTargetLease>();
   const pendingLeases = new Map<string, Promise<ActiveTargetLease>>();
+  const pendingCloses = new Map<string, Promise<void>>();
   const contributions = ref<Record<string, PluginUiContribution[]>>({});
   const loadingHandles = ref(new Set<string>());
   const busyActionKey = ref<string | null>(null);
@@ -113,6 +114,7 @@ export const usePluginExtensionsStore = defineStore("pluginExtensions", () => {
     const definition = definitionById.value.get(targetId);
     if (!definition) throw new Error("unknown plugin extension target");
     const key = `${targetId}\u0000${targetInstanceKey}`;
+    await pendingCloses.get(key)?.catch(() => undefined);
     const existing = leases.get(key);
     if (existing) {
       existing.references += 1;
@@ -147,14 +149,23 @@ export const usePluginExtensionsStore = defineStore("pluginExtensions", () => {
     if (!active || active.context.contextHandle !== lease.context.contextHandle) return;
     active.references -= 1;
     if (active.references > 0) return;
-    leases.delete(lease.key);
-    delete contributions.value[active.context.contextHandle];
-    latestRequests.delete(active.context.contextHandle);
-    loadingHandles.value = new Set([...loadingHandles.value].filter((handle) => handle !== active.context.contextHandle));
-    await closePluginTargetContext({
+    const closing = closePluginTargetContext({
       contextHandle: active.context.contextHandle,
       expectedTargetRevision: active.context.targetRevision,
     });
+    pendingCloses.set(lease.key, closing);
+    try {
+      await closing;
+      leases.delete(lease.key);
+      delete contributions.value[active.context.contextHandle];
+      latestRequests.delete(active.context.contextHandle);
+      loadingHandles.value = new Set([...loadingHandles.value].filter((handle) => handle !== active.context.contextHandle));
+    } catch (error) {
+      active.references = 1;
+      throw error;
+    } finally {
+      pendingCloses.delete(lease.key);
+    }
   }
 
   function contextIsActive(context: PluginExtensionTargetContext) {

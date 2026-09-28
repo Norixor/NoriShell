@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { History, Copy, Trash2 } from "lucide-vue-next";
+import { History, Copy, Search, Trash2 } from "lucide-vue-next";
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
@@ -10,7 +10,7 @@ import { captureTerminalInput, type TerminalInputTicket } from "../../terminal-i
 import { useNativeTerminalStore } from "../../stores/nativeTerminal";
 import { useTipsStore } from "../../stores/tips";
 import { historySuggestionSuffix } from "../../terminal/draft";
-import { NvxButton, NvxDialog, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
+import { NvxButton, NvxDialog, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput } from "../ui";
 
 const props = defineProps<{
   paneId: string;
@@ -49,11 +49,6 @@ const historyAvailable = computed(() => native.available && Boolean(config.value
 const historyScope = computed<NativeTerminalHistoryScope | null>(() => props.hostId ? { kind: "host", hostId: props.hostId } : props.session?.kind === "local" ? { kind: "local" } : null);
 const canSuggest = computed(() => historyScope.value !== null && historyAvailable.value && !config.value?.historyPaused && props.active && props.writable
   && props.draft !== null);
-const scopeOptions = computed(() => [
-  ...(historyScope.value ? [{ value: "current", label: t(props.hostId ? "nativeTerminal.thisHost" : "nativeTerminal.local") }] : []),
-  { value: "all", label: t("nativeTerminal.global") },
-]);
-
 function notify(key: string, tone: "success" | "error" = "success") {
   tips.show({ scope: `native-terminal:${props.paneId}`, tone, title: t(`nativeTerminal.${key}`) });
 }
@@ -229,107 +224,143 @@ defineExpose({ openHistory, acceptSuggestion });
     <NvxDialog
       :model-value="open"
       :title="t('nativeTerminal.tools')"
-      :description="label"
       :close-label="t('nativeTerminal.close')"
       :dismissible="!busy"
-      size="lg"
+      layout="split"
       plugin-protected
       @update:model-value="(value) => { if (!value) void close(); }"
     >
-      <div class="native-terminal-tools__dialog">
-        <div class="native-terminal-tools__filters">
+      <template #sidebar>
+        <div class="native-terminal-tools__sidebar">
+          <p class="native-terminal-tools__context">
+            {{ label }}
+          </p>
+          <nav
+            class="native-terminal-tools__scopes"
+            :aria-label="t('nativeTerminal.source')"
+          >
+            <NvxButton
+              v-if="historyScope"
+              class="native-terminal-tools__scope"
+              :class="{ 'native-terminal-tools__scope--active': !allScopes }"
+              variant="ghost"
+              :aria-pressed="!allScopes"
+              @click="allScopes = false"
+            >
+              {{ t(hostId ? 'nativeTerminal.thisHost' : 'nativeTerminal.local') }}
+            </NvxButton>
+            <NvxButton
+              class="native-terminal-tools__scope"
+              :class="{ 'native-terminal-tools__scope--active': allScopes }"
+              variant="ghost"
+              :aria-pressed="allScopes"
+              @click="allScopes = true"
+            >
+              {{ t('nativeTerminal.allHistory') }}
+            </NvxButton>
+          </nav>
+          <p class="native-terminal-tools__sidebar-hint">
+            {{ t('nativeTerminal.historyPanelHint') }}
+          </p>
+        </div>
+      </template>
+      <div class="native-terminal-tools__content">
+        <div class="native-terminal-tools__search">
+          <NvxIcon
+            :icon="Search"
+            :size="16"
+            aria-hidden="true"
+          />
           <NvxInput
             v-model="query"
+            data-nvx-dialog-initial-focus
             :aria-label="t('nativeTerminal.query')"
             :placeholder="t('nativeTerminal.query')"
             :maxlength="256"
           />
-          <NvxSelect
-            :model-value="allScopes ? 'all' : 'current'"
-            :options="scopeOptions"
-            :aria-label="t('nativeTerminal.source')"
-            @update:model-value="allScopes = $event === 'all'"
-          />
         </div>
-        <NvxInlineNotice v-if="!native.available">
-          {{ t('nativeTerminal.unavailable') }}
-        </NvxInlineNotice>
-        <NvxInlineNotice v-else-if="!config?.historyEnabled">
-          {{ t('nativeTerminal.disabled') }}
-        </NvxInlineNotice>
-        <NvxInlineNotice
-          v-else-if="native.settingsSnapshot?.historyPersistenceFailed"
-          tone="warning"
-        >
-          {{ t('nativeTerminal.persistenceFailed') }}
-        </NvxInlineNotice>
-        <NvxInlineNotice
-          v-else-if="!historyAvailable"
-          tone="warning"
-        >
-          {{ t('nativeTerminal.locked') }}
-        </NvxInlineNotice>
-        <NvxInlineNotice v-else-if="config.historyPaused">
-          {{ t('nativeTerminal.paused') }}
-        </NvxInlineNotice>
-        <NvxInlineNotice
-          v-if="historyError"
-          tone="error"
-        >
-          {{ t('nativeTerminal.unavailable') }} <NvxButton
-            variant="ghost"
-            @click="loadHistory"
+        <div class="native-terminal-tools__results">
+          <NvxInlineNotice v-if="!native.available">
+            {{ t('nativeTerminal.unavailable') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice v-else-if="!config?.historyEnabled">
+            {{ t('nativeTerminal.disabled') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice
+            v-else-if="native.settingsSnapshot?.historyPersistenceFailed"
+            tone="warning"
           >
-            {{ t('nativeTerminal.retry') }}
-          </NvxButton>
-        </NvxInlineNotice>
-        <span
-          v-else-if="loading"
-          role="status"
-        >{{ t('nativeTerminal.loading') }}</span>
-        <p v-else-if="historyAvailable && !history.length">
-          {{ t('nativeTerminal.noHistory') }}
-        </p>
-        <ul
-          v-if="history.length"
-          class="native-terminal-tools__history"
-        >
-          <li
-            v-for="entry in history"
-            :key="entry.entryId"
+            {{ t('nativeTerminal.persistenceFailed') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice
+            v-else-if="!historyAvailable"
+            tone="warning"
           >
-            <div class="native-terminal-tools__entry">
-              <code>{{ entry.command }}</code><small>{{ timestamp(entry.completedAtUnixMs) }} · {{ entry.scope.kind === 'local' ? t('nativeTerminal.local') : entry.scope.hostId === hostId ? label : t('nativeTerminal.otherHost') }}</small>
-            </div>
-            <div class="native-terminal-tools__entry-actions">
-              <NvxIconButton
-                size="sm"
-                :label="t('nativeTerminal.copy')"
-                @click="copy(entry)"
-              >
-                <NvxIcon
-                  :icon="Copy"
-                  :size="16"
-                />
-              </NvxIconButton>
-              <NvxIconButton
-                size="sm"
-                :label="t('nativeTerminal.remove')"
-                :disabled="busy"
-                @click="remove(entry)"
-              >
-                <NvxIcon
-                  :icon="Trash2"
-                  :size="16"
-                />
-              </NvxIconButton>
-            </div>
-          </li>
-        </ul>
-        <NvxInlineNotice v-if="session?.kind === 'ssh' && !hostId">
-          {{ t('nativeTerminal.quickConnectHistory') }}
-        </NvxInlineNotice>
-        <small>{{ t('nativeTerminal.insertHint') }}</small>
+            {{ t('nativeTerminal.locked') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice v-else-if="config.historyPaused">
+            {{ t('nativeTerminal.paused') }}
+          </NvxInlineNotice>
+          <NvxInlineNotice
+            v-if="historyError"
+            tone="error"
+          >
+            {{ t('nativeTerminal.unavailable') }}
+            <NvxButton
+              variant="ghost"
+              @click="loadHistory"
+            >
+              {{ t('nativeTerminal.retry') }}
+            </NvxButton>
+          </NvxInlineNotice>
+          <span
+            v-else-if="loading"
+            role="status"
+          >{{ t('nativeTerminal.loading') }}</span>
+          <p v-else-if="historyAvailable && !history.length">
+            {{ t('nativeTerminal.noHistory') }}
+          </p>
+          <ul
+            v-if="history.length"
+            class="native-terminal-tools__history"
+          >
+            <li
+              v-for="entry in history"
+              :key="entry.entryId"
+            >
+              <div class="native-terminal-tools__entry">
+                <code>{{ entry.command }}</code>
+                <small>{{ timestamp(entry.completedAtUnixMs) }} · {{ entry.scope.kind === 'local' ? t('nativeTerminal.local') : entry.scope.hostId === hostId ? label : t('nativeTerminal.otherHost') }}</small>
+              </div>
+              <div class="native-terminal-tools__entry-actions">
+                <NvxIconButton
+                  size="sm"
+                  :label="t('nativeTerminal.copy')"
+                  @click="copy(entry)"
+                >
+                  <NvxIcon
+                    :icon="Copy"
+                    :size="16"
+                  />
+                </NvxIconButton>
+                <NvxIconButton
+                  size="sm"
+                  :label="t('nativeTerminal.remove')"
+                  :disabled="busy"
+                  @click="remove(entry)"
+                >
+                  <NvxIcon
+                    :icon="Trash2"
+                    :size="16"
+                  />
+                </NvxIconButton>
+              </div>
+            </li>
+          </ul>
+          <NvxInlineNotice v-if="session?.kind === 'ssh' && !hostId">
+            {{ t('nativeTerminal.quickConnectHistory') }}
+          </NvxInlineNotice>
+        </div>
       </div>
       <template #actions>
         <NvxButton
@@ -340,7 +371,7 @@ defineExpose({ openHistory, acceptSuggestion });
           {{ t('nativeTerminal.settings') }}
         </NvxButton>
         <NvxButton
-          variant="ghost"
+          variant="primary"
           :disabled="busy"
           @click="close"
         >
@@ -353,14 +384,24 @@ defineExpose({ openHistory, acceptSuggestion });
 
 <style scoped>
 .native-terminal-tools { display: inline-flex; align-items: center; flex-shrink: 0; }
-.native-terminal-tools__dialog { display: grid; gap: var(--nvx-space-3); min-width: 0; }
-.native-terminal-tools__dialog p { margin: 0; font-size: var(--nvx-font-size-sm); }
-.native-terminal-tools__dialog small { color: var(--nvx-color-text-secondary); line-height: 1.5; }
-.native-terminal-tools__filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 220px); gap: var(--nvx-space-2); }
-.native-terminal-tools__history { list-style: none; padding: 0; margin: 0; max-height: min(380px, 44vh); overflow: auto; }
-.native-terminal-tools__history li { display: flex; align-items: center; gap: var(--nvx-space-2); padding: 8px 0; border-bottom: 1px solid var(--nvx-color-border-subtle); }
+.native-terminal-tools__sidebar { display: flex; flex-direction: column; gap: var(--nvx-space-4); min-height: 0; }
+.native-terminal-tools__context { padding-inline: var(--nvx-space-2); color: var(--nvx-color-text-secondary); overflow-wrap: anywhere; }
+.native-terminal-tools__scopes { display: grid; gap: var(--nvx-space-2); }
+.native-terminal-tools__scope { width: 100%; justify-content: flex-start; text-align: left; color: var(--nvx-color-text-primary); }
+.native-terminal-tools__scope--active { background: var(--nvx-color-accent-soft); color: var(--nvx-color-accent); box-shadow: inset 3px 0 var(--nvx-color-accent); }
+.native-terminal-tools__sidebar-hint { margin: 0; color: var(--nvx-color-text-tertiary); font-size: var(--nvx-font-size-sm); line-height: var(--nvx-line-height-sm); }
+.native-terminal-tools__content { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: var(--nvx-space-4); min-width: 0; min-height: 0; height: 100%; }
+.native-terminal-tools__search { position: relative; }
+.native-terminal-tools__search > :first-child { position: absolute; left: var(--nvx-space-3); top: 50%; transform: translateY(-50%); color: var(--nvx-color-text-secondary); pointer-events: none; }
+.native-terminal-tools__search :deep(.nvx-input) { padding-left: 40px; }
+.native-terminal-tools__results { min-width: 0; overflow: auto; }
+.native-terminal-tools__results p { margin: 0; font-size: var(--nvx-font-size-sm); }
+.native-terminal-tools__history { list-style: none; padding: 0; margin: 0; }
+.native-terminal-tools__history li { display: flex; align-items: center; gap: var(--nvx-space-2); padding: var(--nvx-space-4) 0; border-bottom: 1px solid var(--nvx-color-border); }
+.native-terminal-tools__history li:last-child { border-bottom: 0; }
 .native-terminal-tools__entry { min-width: 0; flex: 1; display: grid; gap: 3px; }
-.native-terminal-tools__entry code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.native-terminal-tools__entry code { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--nvx-color-text-primary); font-family: var(--nvx-font-mono); font-size: var(--nvx-font-size-sm); }
+.native-terminal-tools__entry small { color: var(--nvx-color-text-secondary); line-height: var(--nvx-line-height-sm); }
 .native-terminal-tools__entry-actions { display: flex; align-items: center; flex-shrink: 0; }
-@media (max-width: 700px) { .native-terminal-tools__filters { grid-template-columns: minmax(0, 1fr); } .native-terminal-tools__history li { flex-wrap: wrap; } }
+@media (max-width: 700px) { .native-terminal-tools__scopes { grid-template-columns: repeat(2, minmax(0, 1fr)); } .native-terminal-tools__sidebar-hint { display: none; } .native-terminal-tools__history li { flex-wrap: wrap; } }
 </style>

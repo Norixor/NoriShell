@@ -116,11 +116,13 @@ fn ordinary_owner_alive(app: &tauri::AppHandle, label: &str) -> bool {
 #[tauri::command]
 pub(crate) async fn tool_window_open(
     app: tauri::AppHandle,
-    window: WebviewWindow,
+    webview: tauri::Webview,
     state: State<'_, ToolWindows>,
     target: ToolTarget,
 ) -> Result<(), String> {
-    if !ordinary_owner_alive(&app, window.label())
+    let owner =
+        crate::workspace_tab_views::ordinary_owner(&app, &webview).map_err(|_| "unavailable")?;
+    if !ordinary_owner_alive(&app, &owner)
         || target.title().len() > 1024
         || app
             .state::<crate::tool_window_exit::ToolWindowExit>()
@@ -140,7 +142,7 @@ pub(crate) async fn tool_window_open(
         }
     };
     if existing {
-        if !ordinary_owner_alive(&app, window.label()) {
+        if !ordinary_owner_alive(&app, &owner) {
             return Err("unavailable".into());
         }
         if let Some(child) = app.get_webview_window(&label) {
@@ -179,7 +181,7 @@ pub(crate) async fn tool_window_open(
             return Err("unavailable".into());
         }
     };
-    if !ordinary_owner_alive(&app, window.label())
+    if !ordinary_owner_alive(&app, &owner)
         || app
             .state::<crate::tool_window_exit::ToolWindowExit>()
             .is_preparing()

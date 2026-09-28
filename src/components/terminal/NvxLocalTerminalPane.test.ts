@@ -18,6 +18,7 @@ const client = vi.hoisted(() => ({
   attachLocalSession: vi.fn(),
   changeTerminalInputFocus: vi.fn(),
   detachLocalSession: vi.fn(),
+  fetchLocalSessionSnapshot: vi.fn(),
   fetchTerminalInputFocusSnapshot: vi.fn(),
   getLocalSession: vi.fn(),
   heartbeatLocalAttachment: vi.fn(),
@@ -136,6 +137,12 @@ function details(session: LocalSessionSummary): LocalSessionDetails {
   return { session, attachments: [attachment()], inputLease: null };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((finish) => { resolve = finish; });
+  return { promise, resolve };
+}
+
 function mountPane(
   existingSession: LocalSessionSummary | null = null,
   active = true,
@@ -143,6 +150,8 @@ function mountPane(
   visible = true,
   initialDimensions?: { rows: number; cols: number },
   initialOutputGeometry?: Array<{ afterOutputSeq: string; rows: number; cols: number }>,
+  initialOpen?: { paneId: string; openAttemptId: string; operationId: string; attachAttemptId: string; initialRows: number; initialCols: number },
+  initialTabId?: string,
 ) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -157,6 +166,8 @@ function mountPane(
       visible,
       initialDimensions,
       initialOutputGeometry,
+      initialOpen,
+      initialTabId,
       canSplitHorizontal: true,
       canSplitVertical: true,
       canSplitWorkspaceRight: true,
@@ -166,6 +177,14 @@ function mountPane(
 }
 
 describe("NvxLocalTerminalPane", () => {
+  const initialOpen = {
+    paneId,
+    openAttemptId: summary("running").openAttemptId,
+    operationId: "019d0000-0000-7000-8000-000000001041",
+    attachAttemptId: "019d0000-0000-7000-8000-000000001042",
+    initialRows: 24,
+    initialCols: 80,
+  };
   beforeEach(() => {
     vi.clearAllMocks();
     viewDimensions = { rows: 31, cols: 101 };
@@ -211,6 +230,256 @@ describe("NvxLocalTerminalPane", () => {
 
     expect(client.openLocalSession).toHaveBeenCalledTimes(1);
     wrapper.unmount();
+  });
+
+  it("reattaches the exact initial open attempt after a child WebView restart", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    const running = summary("running");
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "4", sessions: [running] });
+    client.getLocalSession.mockResolvedValue(details(running));
+    client.attachLocalSession.mockResolvedValue({
+      stateRevision: running.stateRevision,
+      attachmentRevision: running.attachmentRevision,
+      attachment: attachment(),
+      replay: [],
+    });
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    await flushPromises();
+
+    expect(client.openLocalSession).not.toHaveBeenCalled();
+    expect(client.attachLocalSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: running.sessionId, viewId: paneId }), expect.any(Function));
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+      kind: "local", tabId: "local-tab", resourceId: initialOpen.paneId, safeToProject: true,
+    });
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("refreshes the revision once when Shell Ready races the initial attach", async () => {
+    const starting = summary("starting", { stateRevision: "1", ptyId: null });
+    const running = summary("running", { stateRevision: "2" });
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "2", sessions: [starting] });
+    client.getLocalSession.mockResolvedValueOnce(details(starting)).mockResolvedValueOnce(details(running));
+    client.attachLocalSession.mockRejectedValueOnce({
+      code: "local_terminal.stale_fence", messageKey: "errors.localTerminal.staleFence",
+    }).mockResolvedValueOnce({
+      stateRevision: "2", attachmentRevision: "3", attachment: attachment({ stateRevision: "2" }),
+      replay: [{ kind: "frame", payload: { sessionId: running.sessionId, generation: running.generation,
+        ptyId: running.ptyId, outputSeq: "1", bytes: [65] } }],
+    });
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    await flushPromises();
+
+    expect(client.openLocalSession).not.toHaveBeenCalled();
+    expect(client.attachLocalSession).toHaveBeenCalledTimes(2);
+    expect(client.attachLocalSession.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ expectedStateRevision: "1" }));
+    expect(client.attachLocalSession.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      sessionId: running.sessionId, expectedGeneration: running.generation, expectedStateRevision: "2",
+    }));
+    expect(writes.bytes).toHaveBeenCalledWith([65], "1");
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.states.running"));
+    expect(wrapper.text()).not.toContain(i18n.global.t("localSession.viewUnavailable"));
+    wrapper.unmount();
+  });
+
+  it("keeps a second stale attach rejected and retries display on the same Core session", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    const starting = summary("starting", { stateRevision: "1", ptyId: null });
+    const running = summary("running", { stateRevision: "2" });
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "2", sessions: [starting] });
+    client.getLocalSession.mockResolvedValueOnce(details(starting)).mockResolvedValue(details(running));
+    client.attachLocalSession.mockRejectedValueOnce({ code: "local_terminal.stale_fence", messageKey: "x" })
+      .mockRejectedValueOnce({ code: "local_terminal.stale_fence", messageKey: "x" })
+      .mockResolvedValueOnce({ stateRevision: "2", attachmentRevision: "3", attachment: attachment(), replay: [] });
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    await flushPromises();
+
+    expect(client.attachLocalSession).toHaveBeenCalledTimes(2);
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(false);
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.retryDisplay"));
+    expect(wrapper.get(".terminal-view-stub").attributes("data-read-only")).toBe("true");
+    expect(wrapper.get(".terminal-view-stub").attributes()).toHaveProperty("inert");
+    const retry = wrapper.findAll("button").find((button) => button.text().includes("Retry display"));
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(client.attachLocalSession).toHaveBeenCalledTimes(3);
+    expect(client.openLocalSession).not.toHaveBeenCalled();
+    expect((settled.mock.calls[1]?.[0] as CustomEvent).detail.safeToProject).toBe(true);
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.states.running"));
+    expect(wrapper.get(".terminal-view-stub").attributes()).not.toHaveProperty("inert");
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("does not automatically retry an attach with an unknown result", async () => {
+    const running = summary("running");
+    client.getLocalSession.mockResolvedValue(details(running));
+    client.attachLocalSession.mockRejectedValue(new Error("private diagnostic detail"));
+    const wrapper = mountPane(running);
+    await flushPromises();
+    expect(client.attachLocalSession).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).not.toContain("private diagnostic detail");
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.viewAttachFailed"));
+    expect(wrapper.emitted("viewFailure")?.[0]?.[0]).toEqual({ code: "local.view.attachFailed", diagnosticId: null });
+    wrapper.unmount();
+  });
+
+  it("keeps a missing Core resource visible as a view failure without opening another PTY", async () => {
+    const running = summary("running");
+    client.getLocalSession.mockRejectedValue({ code: "local_terminal.not_found", messageKey: "errors.localTerminal.notFound" });
+    const wrapper = mountPane(running);
+    await flushPromises();
+    expect(client.openLocalSession).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.viewAttachFailed"));
+    expect(wrapper.get(".terminal-view-stub").attributes("data-read-only")).toBe("true");
+    expect(wrapper.emitted("viewFailure")?.[0]?.[0]).toEqual({ code: "local_terminal.not_found", diagnosticId: null });
+    wrapper.unmount();
+  });
+
+  it("releases an attachment that completes after the Pane unmounts", async () => {
+    const running = summary("running");
+    const response = deferred<{ stateRevision: string; attachmentRevision: string;
+      attachment: LocalSessionAttachment; replay: [] }>();
+    client.getLocalSession.mockResolvedValue(details(running));
+    client.attachLocalSession.mockReturnValue(response.promise);
+    const wrapper = mountPane(running);
+    await flushPromises();
+    expect(client.attachLocalSession).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+    response.resolve({ stateRevision: running.stateRevision, attachmentRevision: "3", attachment: attachment(), replay: [] });
+    await flushPromises();
+    expect(client.detachLocalSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: running.sessionId, attachmentId: attachment().attachmentId, intent: "rendererUnavailable",
+    }));
+  });
+
+  it("opens a missing initial local resource with the exact seed operation and fixed geometry", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "1", sessions: [
+      summary("running", { openAttemptId: "019d0000-0000-7000-8000-000000001099" }),
+    ] });
+    const opened = summary("running", { sessionId: "019d0000-0000-7000-8000-000000001088" });
+    const originalAttachment = attachment({ sessionId: opened.sessionId });
+    client.openLocalSession.mockResolvedValue({ session: opened, attachment: originalAttachment });
+    client.getLocalSession.mockResolvedValue({ session: opened, attachments: [originalAttachment], inputLease: null });
+    client.attachLocalSession.mockResolvedValue({
+      stateRevision: opened.stateRevision,
+      attachmentRevision: "3",
+      attachment: attachment({ sessionId: opened.sessionId, attachmentId: "019d0000-0000-7000-8000-000000001089" }),
+      replay: [],
+    });
+    viewDimensions = { rows: 31, cols: 101 };
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    await flushPromises();
+
+    expect(client.openLocalSession).toHaveBeenCalledWith({
+      viewId: paneId, rows: 24, cols: 80,
+      operationId: initialOpen.operationId,
+      openAttemptId: initialOpen.openAttemptId,
+      attachAttemptId: initialOpen.attachAttemptId,
+    }, expect.any(Function));
+    expect(client.attachLocalSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: opened.sessionId }), expect.any(Function));
+    // Core atomically replaces an attachment for the same viewId.
+    expect(client.detachLocalSession).not.toHaveBeenCalled();
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(true);
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("retains the initial seed and reports an unbound exact Core session after attach failure", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    const running = summary("running");
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "2", sessions: [running] });
+    client.getLocalSession.mockRejectedValue(new Error("attachment unavailable"));
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    await flushPromises();
+
+    expect(client.fetchLocalSessionSnapshot).toHaveBeenCalledTimes(2);
+    expect(client.openLocalSession).not.toHaveBeenCalled();
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(false);
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.viewAttachFailed"));
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.retryDisplay"));
+    expect(wrapper.get(".terminal-view-stub").attributes("data-read-only")).toBe("true");
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("releases the projection gate after a failed initial open with no Core resource", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "2", sessions: [] });
+    client.openLocalSession.mockRejectedValue({
+      code: "local_terminal.invalid_request", messageKey: "errors.localTerminal.invalidRequest",
+    });
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    await flushPromises();
+
+    expect(client.fetchLocalSessionSnapshot).toHaveBeenCalledTimes(2);
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(true);
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.viewOpenFailed"));
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("keeps the initial seed when an uncertain open is absent from an early snapshot", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "2", sessions: [] });
+    client.openLocalSession.mockRejectedValue(new Error("IPC result unknown"));
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    await flushPromises();
+
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(false);
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.viewOpenFailed"));
+    expect(wrapper.text()).not.toContain("IPC result unknown");
+    const running = summary("running");
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "3", sessions: [running] });
+    client.getLocalSession.mockResolvedValue(details(running));
+    client.attachLocalSession.mockResolvedValue({
+      stateRevision: running.stateRevision, attachmentRevision: "4", attachment: attachment(), replay: [],
+    });
+    const retry = wrapper.findAll("button").find((button) => button.text().includes("Retry display"));
+    await retry!.trigger("click");
+    await flushPromises();
+    expect(client.openLocalSession).toHaveBeenCalledTimes(1);
+    expect(client.attachLocalSession).toHaveBeenCalledTimes(1);
+    expect((settled.mock.calls[1]?.[0] as CustomEvent).detail.safeToProject).toBe(true);
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("releases the projection gate for an exact Core resource already closed", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "2", sessions: [summary("closed")] });
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    await flushPromises();
+
+    expect(client.openLocalSession).not.toHaveBeenCalled();
+    expect(client.attachLocalSession).not.toHaveBeenCalled();
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(true);
+    expect(wrapper.text()).toContain(i18n.global.t("localSession.states.closed"));
+    expect(wrapper.text()).not.toContain(i18n.global.t("localSession.failureFallback"));
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("does not continue an initial open after the Pane unmounts during snapshot loading", async () => {
+    const snapshot = deferred<{ snapshotRevision: string; sessions: LocalSessionSummary[] }>();
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    client.fetchLocalSessionSnapshot.mockReturnValue(snapshot.promise);
+    const wrapper = mountPane(null, true, false, true, undefined, undefined, initialOpen, "local-tab");
+    wrapper.unmount();
+    snapshot.resolve({ snapshotRevision: "1", sessions: [] });
+    await flushPromises();
+    expect(client.openLocalSession).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
   });
 
   it("accepts fresh output sequence numbers after restarting a failed Shell", async () => {

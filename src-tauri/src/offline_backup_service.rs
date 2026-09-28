@@ -19,7 +19,9 @@ use norishell_ssh_profile_sync::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tauri::{AppHandle, Manager as _, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Manager as _, State, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -37,6 +39,26 @@ use std::fs::File;
 
 const BACKUP_CONTENT_FORMAT: &str = "norishell-offline-content-v1";
 const MAIN_WINDOW_LABEL: &str = "main";
+
+fn ordinary_owner_alive(app: &AppHandle, label: &str) -> bool {
+    app.get_webview_window(label).is_some()
+        && (label == MAIN_WINDOW_LABEL
+            || app
+                .state::<crate::workspace_windows::WorkspaceWindows>()
+                .contains(label))
+}
+
+fn ordinary_page_window(webview: &Webview) -> Result<WebviewWindow, String> {
+    let app = webview.app_handle();
+    if !app
+        .state::<crate::workspace_windows::WorkspaceWindows>()
+        .is_main_or_page(webview)
+    {
+        return Err("offline-backup-unavailable".into());
+    }
+    app.get_webview_window(webview.window().label())
+        .ok_or_else(|| "offline-backup-unavailable".into())
+}
 const PENDING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const MAX_PENDING: usize = 4;
 const SECURE_PROMPT_LIFETIME: Duration = Duration::from_secs(180);
@@ -582,7 +604,7 @@ async fn request_secure_password(
     app: &AppHandle,
     service: &OfflineBackupService,
 ) -> Result<Option<SecureBackupAnswer>, String> {
-    if owner.label() != MAIN_WINDOW_LABEL {
+    if !ordinary_owner_alive(app, owner.label()) {
         return Err("offline-backup-unavailable".into());
     }
     let id = Uuid::now_v7().to_string();
@@ -656,8 +678,7 @@ async fn request_secure_password(
     tokio::pin!(deadline);
     let mut owner_check = tokio::time::interval(Duration::from_millis(250));
     let owner_label = owner.label().to_owned();
-    let owner_valid =
-        || owner_label == MAIN_WINDOW_LABEL && app.get_webview_window(&owner_label).is_some();
+    let owner_valid = || ordinary_owner_alive(app, &owner_label);
     loop {
         tokio::select! {
             response = &mut receiver => return Ok(response.ok()),
@@ -754,14 +775,12 @@ pub(crate) fn offline_backup_secure_cancel(
 
 #[tauri::command]
 pub(crate) async fn offline_backup_discard(
-    window: WebviewWindow,
+    webview: Webview,
     service: State<'_, OfflineBackupService>,
     adapter: State<'_, NoriShellSshSyncLocalAdapter>,
     handle: String,
 ) -> Result<(), OfflineBackupCommandError> {
-    if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".into());
-    }
+    ordinary_page_window(&webview)?;
     let _operation = service.operation.lock().await;
     if let Ok(pending) = service.take(&handle)
         && let Some(prepared) = pending.prepared.filter(|prepared| prepared.portable)
@@ -812,7 +831,7 @@ fn import_selection_allowed(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn offline_backup_preview(
-    window: WebviewWindow,
+    webview: Webview,
     service: State<'_, OfflineBackupService>,
     adapter: State<'_, NoriShellSshSyncLocalAdapter>,
     vault: State<'_, VaultService>,
@@ -821,9 +840,7 @@ pub(crate) async fn offline_backup_preview(
     duplicate_policy: OfflineDuplicatePolicy,
     vault_mode: Option<OfflineVaultImportMode>,
 ) -> Result<BackupImportPreview, OfflineBackupCommandError> {
-    if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".into());
-    }
+    ordinary_page_window(&webview)?;
     let _operation = service.operation.lock().await;
     if selection.vault != vault_mode.is_some() {
         return Err("offline-backup-invalid-selection".into());
@@ -920,7 +937,7 @@ pub(crate) async fn offline_backup_preview(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn offline_backup_apply(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     service: State<'_, OfflineBackupService>,
     adapter: State<'_, NoriShellSshSyncLocalAdapter>,
@@ -929,9 +946,7 @@ pub(crate) async fn offline_backup_apply(
     handle: String,
     preview_handle: String,
 ) -> Result<BackupImportResult, OfflineBackupCommandError> {
-    if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".into());
-    }
+    let window = ordinary_page_window(&webview)?;
     // Prompt before taking the prepared import. Cancellation must leave both
     // the archive handle and its portable restore plan available to retry.
     let vault_mode = service.vault_import_mode(&handle, &preview_handle)?;
@@ -1136,7 +1151,7 @@ async fn choose_backup_path(
 
 #[tauri::command]
 pub(crate) async fn offline_backup_export(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     service: State<'_, OfflineBackupService>,
     adapter: State<'_, NoriShellSshSyncLocalAdapter>,
@@ -1144,9 +1159,7 @@ pub(crate) async fn offline_backup_export(
     hosts: State<'_, HostService>,
     selection: OfflineBackupSelection,
 ) -> Result<bool, OfflineBackupCommandError> {
-    if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".into());
-    }
+    let window = ordinary_page_window(&webview)?;
     selection.validate().map_err(str::to_owned)?;
     let Some(path) = choose_backup_path(&window, true).await? else {
         return Ok(false);
@@ -1214,13 +1227,11 @@ pub(crate) async fn offline_backup_export(
 
 #[tauri::command]
 pub(crate) async fn offline_backup_open(
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     service: State<'_, OfflineBackupService>,
 ) -> Result<Option<OpenedOfflineBackup>, OfflineBackupCommandError> {
-    if window.label() != MAIN_WINDOW_LABEL {
-        return Err("offline-backup-unavailable".into());
-    }
+    let window = ordinary_page_window(&webview)?;
     let Some(path) = choose_backup_path(&window, false).await? else {
         return Ok(None);
     };

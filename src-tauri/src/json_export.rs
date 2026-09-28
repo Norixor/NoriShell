@@ -1,13 +1,12 @@
-//! JSON export for the main window only; selected paths never enter the shared filesystem scope.
+//! JSON export from ordinary Settings pages; selected paths never enter the shared filesystem scope.
 
 use std::{io::Write as _, path::PathBuf};
 
 use serde::Deserialize;
-use tauri::{Manager as _, WebviewWindow};
+use tauri::Manager as _;
 use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::oneshot;
 
-const MAIN_WINDOW_LABEL: &str = "main";
 const MAX_PREFERENCE_TRANSFER_BYTES: usize = 256 * 1024;
 const MAX_SHORTCUT_PROFILE_BYTES: usize = 32 * 1024;
 const MAX_THEME_PROFILE_BYTES: usize = 32 * 1024;
@@ -219,18 +218,23 @@ fn write_json_atomically(path: PathBuf, text: String) -> Result<(), String> {
 /// The native save dialog writes only to the returned path; it grants no reusable or cumulative filesystem capability to the renderer.
 #[tauri::command]
 pub(crate) async fn native_json_export<R: tauri::Runtime>(
-    window: WebviewWindow<R>,
+    webview: tauri::Webview<R>,
     kind: JsonExportKind,
     text: String,
 ) -> Result<bool, String> {
-    if window.label() != MAIN_WINDOW_LABEL {
+    if !webview
+        .app_handle()
+        .state::<crate::workspace_windows::WorkspaceWindows>()
+        .is_main_or_page(&webview)
+    {
         return Err("native-json-export-unavailable".to_owned());
     }
 
     let spec = validate_json_object(&kind, &text)?;
 
     let (sender, receiver) = oneshot::channel();
-    window
+    let window = webview.window();
+    webview
         .app_handle()
         .dialog()
         .file()

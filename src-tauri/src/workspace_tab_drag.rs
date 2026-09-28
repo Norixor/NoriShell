@@ -15,7 +15,8 @@ use crate::workspace_windows::WorkspaceWindows;
 
 const PAGE: &str = "workspace-tab-drag-preview.html";
 const RELEASED: &str = "workspace-tab-drag-released";
-const HEADER_HEIGHT: f64 = 56.0;
+const HOVER: &str = "workspace-tab-drag-hover";
+const HEADER_HEIGHT: f64 = 60.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(15);
 const FADE_DURATION: Duration = Duration::from_millis(120);
@@ -29,6 +30,7 @@ struct ActiveDrag {
     source: String,
     preview: String,
     released_at: Option<Instant>,
+    hover_target: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -39,6 +41,54 @@ struct Release {
     target: Option<String>,
     x: f64,
     y: f64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Hover {
+    id: String,
+    nonce: String,
+    active: bool,
+}
+
+fn emit_hover<R: Runtime>(app: &AppHandle<R>, drag: &ActiveDrag, target: &str, active: bool) {
+    let _ = app.emit_to(
+        target,
+        HOVER,
+        Hover {
+            id: drag.id.clone(),
+            nonce: drag.nonce.clone(),
+            active,
+        },
+    );
+}
+
+fn update_hover<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &WorkspaceTabDrag,
+    source: &str,
+    nonce: &str,
+    target: Option<String>,
+) {
+    let Ok(mut active) = state.0.lock() else {
+        return;
+    };
+    let Some(drag) = active.as_mut() else { return };
+    if !active_matches(drag, source, nonce) || drag.released_at.is_some() {
+        return;
+    }
+    let target = target.filter(|target| target != source);
+    if drag.hover_target == target {
+        return;
+    }
+    // Emit transitions while holding the drag lock so cancellation cannot precede a late enter.
+    if let Some(previous) = drag.hover_target.as_deref() {
+        emit_hover(app, drag, previous, false);
+    }
+    drag.hover_target = target;
+    if let Some(next) = drag.hover_target.as_deref() {
+        emit_hover(app, drag, next, true);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -83,10 +133,13 @@ fn finish_drag<R: Runtime>(
         if !active_matches(current, source, nonce) {
             return Err("workspace_tab.drag_wrong_owner".into());
         }
-        active.take().map(|drag| drag.preview)
+        active.take()
     };
-    if let Some(label) = preview_label {
-        fade_and_destroy(app.clone(), label);
+    if let Some(drag) = preview_label {
+        if let Some(target) = drag.hover_target.as_deref() {
+            emit_hover(app, &drag, target, false);
+        }
+        fade_and_destroy(app.clone(), drag.preview);
     }
     Ok(())
 }
@@ -220,13 +273,14 @@ fn poll_drag(app: AppHandle, state: WorkspaceTabDrag, nonce: String) {
             let _ = finish_drag(&app, &state, &source_label, &nonce);
             return;
         };
+        let target = release_target(&app, &source_label, cursor.x, cursor.y);
+        update_hover(&app, &state, &source_label, &nonce, target.clone());
         if left_button_down() {
             if let Some(preview) = app.get_webview_window(&preview_label) {
                 preview_position(&preview, cursor.x, cursor.y);
             }
             continue;
         }
-        let target = release_target(&app, &source_label, cursor.x, cursor.y);
         let should_emit = state.0.lock().is_ok_and(|mut active| {
             if let Some(drag) = active.as_mut()
                 && active_matches(drag, &source_label, &nonce)
@@ -260,8 +314,10 @@ fn poll_drag(app: AppHandle, state: WorkspaceTabDrag, nonce: String) {
     }
 }
 
+// Async for the same reason as `workspace_window_open`: building the preview
+// window from a sync command deadlocks the Windows main thread.
 #[tauri::command]
-pub(crate) fn workspace_tab_drag_begin(
+pub(crate) async fn workspace_tab_drag_begin(
     app: AppHandle,
     window: WebviewWindow,
     tabs: State<'_, WorkspaceWindows>,
@@ -272,9 +328,6 @@ pub(crate) fn workspace_tab_drag_begin(
     tabs.owns_tab(window.label(), &id)?;
     if nonce.is_empty() || nonce.len() > 128 || !nonce.is_ascii() {
         return Err("workspace_tab.drag_invalid_nonce".into());
-    }
-    if !left_button_down() {
-        return Err("workspace_tab.drag_button_released".into());
     }
     let mut active = drag
         .0
@@ -332,6 +385,7 @@ pub(crate) fn workspace_tab_drag_begin(
         source: window.label().to_owned(),
         preview: label,
         released_at: None,
+        hover_target: None,
     });
     drop(active);
     let drag_state = drag.inner().clone();
@@ -365,13 +419,16 @@ pub(crate) fn on_window_destroyed<R: Runtime>(app: &AppHandle<R>, label: &str) {
     };
     let preview = state.0.lock().ok().and_then(|mut active| {
         if active.as_ref().is_some_and(|drag| drag.source == label) {
-            active.take().map(|drag| drag.preview)
+            active.take()
         } else {
             None
         }
     });
-    if let Some(preview) = preview {
-        fade_and_destroy(app.clone(), preview);
+    if let Some(drag) = preview {
+        if let Some(target) = drag.hover_target.as_deref() {
+            emit_hover(app, &drag, target, false);
+        }
+        fade_and_destroy(app.clone(), drag.preview);
     }
 }
 

@@ -35,6 +35,7 @@ export default defineConfig({
       input: {
         main: resolve(projectRoot, "index.html"),
         workspaceWindow: resolve(projectRoot, "workspace-window.html"),
+        workspaceTab: resolve(projectRoot, "workspace-tab.html"),
         workspaceTabDragPreview: resolve(projectRoot, "workspace-tab-drag-preview.html"),
         toolWindow: resolve(projectRoot, "tool-window.html"),
         secureVault: resolve(projectRoot, "secure-vault.html"),

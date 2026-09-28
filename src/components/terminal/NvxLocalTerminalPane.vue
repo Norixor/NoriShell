@@ -6,9 +6,11 @@ import { useI18n } from "vue-i18n";
 import {
   attachLocalSession,
   detachLocalSession,
+  fetchLocalSessionSnapshot,
   getLocalSession,
   heartbeatLocalAttachment,
   openLocalSession,
+  parseCoreApiError,
   renewLocalInputLease,
   resizeLocalTerminal,
   sendLocalInput,
@@ -67,11 +69,22 @@ interface TerminalToolsExpose {
   copySelection(): Promise<void>;
 }
 
+interface InitialLocalOpen {
+  paneId: string;
+  openAttemptId: string;
+  operationId: string;
+  attachAttemptId: string;
+  initialRows: number;
+  initialCols: number;
+}
+
 const props = withDefaults(defineProps<{
   paneId: string;
   label: string;
   existingSession: LocalSessionSummary | null;
   deferredStart?: boolean;
+  initialOpen?: InitialLocalOpen;
+  initialTabId?: string;
   initialDimensions?: { rows: number; cols: number };
   initialOutputGeometry?: TerminalOutputGeometryMarker[];
   visible: boolean;
@@ -79,11 +92,12 @@ const props = withDefaults(defineProps<{
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
   canSplitWorkspaceRight: boolean;
-}>(), { deferredStart: false, initialDimensions: undefined, initialOutputGeometry: undefined });
+}>(), { deferredStart: false, initialOpen: undefined, initialTabId: undefined, initialDimensions: undefined, initialOutputGeometry: undefined });
 
 const emit = defineEmits<{
   activate: [paneId: string];
   state: [state: LocalSessionState, summary: LocalSessionSummary | null];
+  viewFailure: [failure: { code: string; diagnosticId: string | null } | null];
   bellAttention: [active: boolean];
   split: [direction: "horizontal" | "vertical"];
   splitWorkspaceRight: [];
@@ -97,6 +111,8 @@ const nativeTools = ref<InstanceType<typeof NvxNativeTerminalTools> | null>(null
 const inputDraft = ref<string | null>(null);
 const ghostSuggestion = ref<{ draft: string; suffix: string } | null>(null);
 const viewId = props.paneId;
+let paneMounted = false;
+const paneRoot = ref<HTMLElement | null>(null);
 const terminalView = ref<TerminalViewExpose | null>(null);
 const terminalTools = ref<TerminalToolsExpose | null>(null);
 const hasSelection = ref(false);
@@ -112,8 +128,11 @@ const attachment = ref<LocalSessionAttachment | null>(null);
 const lease = ref<LocalSessionInputLease | null>(null);
 const failure = ref<LocalSessionFailureReason | null>(props.existingSession?.failureReason ?? null);
 const opening = ref(false);
+const recoveringInitial = ref(false);
 const openFailed = ref(false);
+const viewFailure = ref<{ code: string; diagnosticId: string | null } | null>(null);
 const terminating = ref(false);
+let bindingEpoch = 0;
 let inputSequence = 0n;
 let leaseTimer: number | null = null;
 let attachmentHeartbeatTimer: number | null = null;
@@ -164,10 +183,11 @@ function reassertCurrentResize() {
   if (size) fencedResize.reassert(size.rows, size.cols);
 }
 
-const state = computed<LocalSessionState>(
-  () => session.value?.state
-    ?? (openFailed.value ? "failed" : props.deferredStart ? "closed" : "starting"),
-);
+const state = computed<LocalSessionState>(() => session.value?.state
+  ?? (openFailed.value ? "failed" : props.deferredStart ? "closed" : "starting"));
+const viewUnavailable = computed(() => viewFailure.value !== null);
+const canRetryDisplay = computed(() => viewUnavailable.value
+  && (session.value === null || ["starting", "running", "stopping"].includes(session.value.state)));
 const ownsLease = computed(() => {
   const current = session.value;
   const currentAttachment = attachment.value;
@@ -184,6 +204,7 @@ const ownsLease = computed(() => {
     && currentLease.expiresAtUnixMs > Date.now();
 });
 const writable = computed(() => props.active
+  && !viewUnavailable.value
   && state.value === "running"
   && ownsLease.value
   && isTerminalInputTargetFocused(props.paneId, lease.value?.focusEpoch ?? null));
@@ -198,24 +219,51 @@ function runShortcut(commandId: ShortcutCommandId) {
   else if (commandId === "terminal.paste") void terminalView.value?.pasteFromClipboard();
   else if (commandId === "terminal.clear") terminalView.value?.clear();
   else if (commandId === "terminal.history-suggestions") void nativeTools.value?.openHistory();
+  else if (commandId === "terminal.reconnect" && canRetryDisplay.value) void retryDisplay();
   else if (commandId === "terminal.reconnect" && ["exited", "failed", "closed"].includes(state.value) && !cleanupPending.value) void open();
   else if (commandId === "terminal.disconnect" && (!['exited', 'failed', 'closed'].includes(state.value) || cleanupPending.value)) void terminateForClose();
 }
-const stateLabel = computed(() => t(`localSession.states.${state.value}`));
+const stateLabel = computed(() => viewUnavailable.value
+  ? t("localSession.viewUnavailable")
+  : t(`localSession.states.${state.value}`));
 const shellLabel = computed(() => session.value?.shellName || props.label);
 const cleanupPending = computed(
   () => failure.value?.code === "processCleanupFailed",
 );
 const failureMessage = computed(() => {
+  if (viewFailure.value) return session.value
+    ? t("localSession.viewAttachFailed")
+    : t("localSession.viewOpenFailed");
   if (!failure.value) return openFailed.value ? t("localSession.failureFallback") : null;
   return te(failure.value.messageKey)
     ? t(failure.value.messageKey)
     : t("localSession.failureFallback");
 });
 
+function setViewFailure(error: unknown, fallbackCode: string) {
+  const coreError = parseCoreApiError(error);
+  const code = coreError?.code && /^[a-z][a-z0-9_.-]{0,95}$/.test(coreError.code)
+    ? coreError.code : fallbackCode;
+  const diagnosticId = coreError?.diagnosticId && /^[a-zA-Z0-9_-]{1,96}$/.test(coreError.diagnosticId)
+    ? coreError.diagnosticId : null;
+  viewFailure.value = { code, diagnosticId };
+  emit("viewFailure", viewFailure.value);
+  applyFocusLease(null);
+  const focused = document.activeElement;
+  if (focused instanceof HTMLElement
+    && paneRoot.value?.querySelector(".nvx-terminal-view")?.contains(focused)) focused.blur();
+}
+
+function clearViewFailure() {
+  if (!viewFailure.value) return;
+  viewFailure.value = null;
+  emit("viewFailure", null);
+}
+
 function updateSummary(next: LocalSessionSummary) {
   session.value = next;
   failure.value = next.failureReason;
+  if (["exited", "failed", "closed"].includes(next.state)) clearViewFailure();
   emit("state", next.state, next);
 }
 
@@ -295,6 +343,7 @@ function applyOutputItem(item: LocalSessionOutputItem) {
 }
 
 function applyEvent(event: LocalSessionEvent) {
+  if (!paneMounted) return;
   if (!session.value || binding) {
     bufferPendingEvent(event);
     return;
@@ -364,67 +413,197 @@ function replayPendingEvents(sessionId: string, generation: string) {
   events.forEach(applyEvent);
 }
 
-async function open() {
+async function open(initialOpen?: InitialLocalOpen, onInitialFailure?: (error: unknown) => void) {
   if (opening.value) return;
+  const epoch = ++bindingEpoch;
   opening.value = true;
   openFailed.value = false;
   binding = true;
   released = false;
   try {
     await nextTick();
-    const size = terminalView.value?.dimensions() ?? { rows: 24, cols: 80 };
-    const response = await openLocalSession({ viewId, rows: size.rows, cols: size.cols }, applyEvent);
+    const size = initialOpen
+      ? { rows: initialOpen.initialRows, cols: initialOpen.initialCols }
+      : terminalView.value?.dimensions() ?? { rows: 24, cols: 80 };
+    const response = await openLocalSession({
+      viewId, rows: size.rows, cols: size.cols,
+      ...(initialOpen ? {
+        operationId: initialOpen.operationId,
+        openAttemptId: initialOpen.openAttemptId,
+        attachAttemptId: initialOpen.attachAttemptId,
+      } : {}),
+    }, applyEvent);
+    if (!paneMounted || epoch !== bindingEpoch) {
+      void detachLateAttachment(response.session, response.attachment);
+      return;
+    }
     // A restarted session begins at sequence 1. Retain existing scrollback,
     // but never deduplicate or label new-session input or output with the old process counter.
     lastAppliedEventSeq = 0n;
     lastAppliedOutputSeq = 0n;
     inputSequence = 0n;
+    if (initialOpen) {
+      updateSummary(response.session);
+      return response.attachment;
+    }
     attachment.value = response.attachment;
     updateSummary(response.session);
+    clearViewFailure();
     binding = false;
     replayPendingEvents(response.session.sessionId, response.session.generation);
     startAttachmentHeartbeat();
     if (response.session.state === "running" && props.active) activateFromTab();
     if (props.active) terminalView.value?.focus();
-  } catch {
+  } catch (error) {
+    if (!paneMounted || epoch !== bindingEpoch) return;
+    if (initialOpen) onInitialFailure?.(error);
     clearPendingEvents();
     openFailed.value = true;
-    emit("state", "failed", session.value);
+    setViewFailure(error, "local.view.openFailed");
+    if (!session.value) emit("state", "failed", null);
   } finally {
-    binding = false;
-    opening.value = false;
+    if (epoch === bindingEpoch) {
+      binding = false;
+      opening.value = false;
+    }
+  }
+}
+
+async function detachLateAttachment(current: LocalSessionSummary, attached: LocalSessionAttachment) {
+  try {
+    await detachLocalSession({
+      sessionId: current.sessionId,
+      expectedGeneration: current.generation,
+      expectedStateRevision: attached.stateRevision,
+      attachmentId: attached.attachmentId,
+      viewId,
+      intent: "rendererUnavailable",
+      confirmation: null,
+    });
+  } catch { /* Core's attachment timeout also releases a renderer that disappeared. */ }
+}
+
+async function recoverOrOpenInitial(initialOpen: InitialLocalOpen) {
+  if (recoveringInitial.value) return;
+  recoveringInitial.value = true;
+  let safeToProject = false;
+  let openRejectedWithoutResource = false;
+  try {
+    const snapshot = await fetchLocalSessionSnapshot();
+    if (!paneMounted) return;
+    const matches = snapshot.sessions.filter((item) => item.openAttemptId === initialOpen.openAttemptId);
+    if (matches.length > 1) throw new Error("local.initial_open_ambiguous");
+    const existing = matches[0];
+    if (existing) {
+      updateSummary(existing);
+      if (existing.state === "closed") {
+        openFailed.value = false;
+        clearViewFailure();
+        safeToProject = true;
+        return;
+      }
+      await attachExistingSession(true);
+      safeToProject = paneMounted && attachment.value?.sessionId === existing.sessionId;
+      return;
+    }
+    // The original Core open may still be queued; its stable operation tuple makes replay safe.
+    if (paneMounted) {
+      const originalAttachment = await open(initialOpen, (error) => {
+        const code = parseCoreApiError(error)?.code;
+        // These errors return before the actor can retain a LocalSession.
+        openRejectedWithoutResource = code === "local_terminal.invalid_request"
+          || code === "local_terminal.unavailable";
+      });
+      if (!originalAttachment || !paneMounted) return;
+      // Core operation replay can return an attachment/channel from the lost WebView.
+      await attachExistingSession(true);
+      const current = session.value;
+      safeToProject = Boolean(paneMounted && current && attachment.value?.sessionId === current.sessionId
+        && current.openAttemptId === initialOpen.openAttemptId);
+    }
+  } catch (error) {
+    if (paneMounted && !viewFailure.value) {
+      setViewFailure(error, "local.view.initialRecoveryFailed");
+    }
+    // The seed remains authoritative until Core proves that no orphaned open exists.
+  } finally {
+    if (paneMounted && !safeToProject) {
+      const snapshot = await fetchLocalSessionSnapshot().catch(() => null);
+      if (paneMounted) {
+        const matches = snapshot?.sessions.filter((item) => item.openAttemptId === initialOpen.openAttemptId) ?? [];
+        const exact = matches.length === 1 ? matches[0] : null;
+        safeToProject = Boolean(snapshot && (exact?.state === "closed"
+          || (matches.length === 0 && openRejectedWithoutResource)));
+        openFailed.value = exact?.state !== "closed";
+        if (exact?.state === "closed") updateSummary(exact);
+        else if (matches.length === 0 && snapshot) {
+          session.value = null;
+          attachment.value = null;
+        } else if (exact && !session.value) updateSummary(exact);
+        if (exact?.state !== "closed" && !viewFailure.value) setViewFailure(null, "local.view.initialRecoveryFailed");
+        emit("state", session.value?.state ?? "failed", session.value);
+      }
+    }
+    if (paneMounted && props.initialTabId) window.dispatchEvent(new CustomEvent("norishell:initial-resource-settled", {
+      detail: { kind: "local", tabId: props.initialTabId, resourceId: initialOpen.paneId, safeToProject },
+    }));
+    recoveringInitial.value = false;
   }
 }
 
 async function attachExistingSession(resumeRenderedOutput = false) {
   const current = session.value;
   if (opening.value || !current) return;
+  const epoch = ++bindingEpoch;
   const renderedGeneration = current.generation;
   const renderedOutputSeq = lastAppliedOutputSeq;
   opening.value = true;
   binding = true;
   released = false;
+  stopAttachmentHeartbeat();
+  attachment.value = null;
+  applyFocusLease(null);
   if (!resumeRenderedOutput) {
     lastAppliedEventSeq = 0n;
     lastAppliedOutputSeq = 0n;
   }
   try {
-    const details = await getLocalSession(current.sessionId);
+    let details = await getLocalSession(current.sessionId);
+    if (!paneMounted || epoch !== bindingEpoch) return;
+    if (details.session.generation !== renderedGeneration) throw new Error("local.view.generationChanged");
+    updateSummary(details.session);
     const canResumeRenderedOutput = resumeRenderedOutput
       && details.session.generation === renderedGeneration;
     if (!canResumeRenderedOutput) {
       lastAppliedEventSeq = 0n;
       lastAppliedOutputSeq = 0n;
     }
-    const response = await attachLocalSession({
-      sessionId: details.session.sessionId,
-      expectedGeneration: details.session.generation,
-      expectedStateRevision: details.session.stateRevision,
-      viewId,
-      afterOutputSeq: canResumeRenderedOutput && renderedOutputSeq > 0n
-        ? renderedOutputSeq.toString()
-        : null,
-    }, applyEvent);
+    let response;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        response = await attachLocalSession({
+          sessionId: details.session.sessionId,
+          expectedGeneration: details.session.generation,
+          expectedStateRevision: details.session.stateRevision,
+          viewId,
+          afterOutputSeq: canResumeRenderedOutput && renderedOutputSeq > 0n
+            ? renderedOutputSeq.toString() : null,
+        }, applyEvent);
+        break;
+      } catch (error) {
+        if (attempt !== 0 || parseCoreApiError(error)?.code !== "local_terminal.stale_fence") throw error;
+        const refreshed = await getLocalSession(current.sessionId);
+        if (!paneMounted || epoch !== bindingEpoch) return;
+        if (refreshed.session.generation !== renderedGeneration) throw error;
+        details = refreshed;
+        updateSummary(details.session);
+      }
+    }
+    if (!response) return;
+    if (!paneMounted || epoch !== bindingEpoch) {
+      void detachLateAttachment(details.session, response.attachment);
+      return;
+    }
     attachment.value = response.attachment;
     updateSummary({
       ...details.session,
@@ -435,18 +614,32 @@ async function attachExistingSession(resumeRenderedOutput = false) {
     if (snapshotEventSeq > lastAppliedEventSeq) lastAppliedEventSeq = snapshotEventSeq;
     response.replay.forEach(applyOutputItem);
     if (props.initialOutputGeometry?.length) await terminalView.value?.finishReplay();
+    if (!paneMounted || epoch !== bindingEpoch) return;
     binding = false;
     replayPendingEvents(details.session.sessionId, details.session.generation);
     startAttachmentHeartbeat();
     if (details.session.state === "running" && props.active) activateFromTab();
     await terminalView.value?.whenOutputParsed();
-  } catch {
+    if (!paneMounted || epoch !== bindingEpoch) return;
+    clearViewFailure();
+    openFailed.value = false;
+  } catch (error) {
+    if (!paneMounted || epoch !== bindingEpoch) return;
     clearPendingEvents();
-    emit("state", "failed", session.value);
+    setViewFailure(error, "local.view.attachFailed");
   } finally {
-    binding = false;
-    opening.value = false;
+    if (epoch === bindingEpoch) {
+      binding = false;
+      opening.value = false;
+    }
   }
+}
+
+async function retryDisplay() {
+  if (opening.value || recoveringInitial.value || !paneMounted) return;
+  if (props.initialOpen) await recoverOrOpenInitial(props.initialOpen);
+  else if (session.value) await attachExistingSession(true);
+  else await open();
 }
 
 function currentFocusTarget() {
@@ -696,9 +889,11 @@ defineExpose({ terminateForClose, activateFromTab, deactivateFromTab, runShortcu
   terminalDimensions, terminalOutputGeometry, waitForHandoffReplay });
 
 onMounted(() => {
+  paneMounted = true;
   if (props.active) activateFromTab();
   window.addEventListener("beforeunload", releaseRendererBinding);
   if (session.value) initialAttachmentReady = attachExistingSession();
+  else if (props.initialOpen) initialAttachmentReady = recoverOrOpenInitial(props.initialOpen);
   else if (!props.deferredStart) void open();
 });
 
@@ -712,6 +907,8 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  paneMounted = false;
+  bindingEpoch += 1;
   window.removeEventListener("beforeunload", releaseRendererBinding);
   stopLeaseHeartbeat();
   stopAttachmentHeartbeat();
@@ -723,13 +920,14 @@ onBeforeUnmount(() => {
 
 <template>
   <section
+    ref="paneRoot"
     class="local-terminal-pane"
     @pointerdown="activateTerminalSurface"
     @focusin="activateTerminalSurface"
   >
     <header class="local-terminal-pane__status">
       <div class="local-terminal-pane__identity">
-        <NvxStatusLabel :tone="state === 'running' ? 'success' : state === 'failed' ? 'danger' : 'neutral'">
+        <NvxStatusLabel :tone="viewUnavailable || state === 'failed' ? 'danger' : state === 'running' ? 'success' : 'neutral'">
           {{ stateLabel }}
         </NvxStatusLabel>
         <span
@@ -774,7 +972,16 @@ onBeforeUnmount(() => {
           @close="emit('close')"
         >
           <NvxButton
-            v-if="!['exited', 'failed', 'closed'].includes(state) || cleanupPending"
+            v-if="canRetryDisplay"
+            variant="ghost"
+            size="sm"
+            :loading="opening || recoveringInitial"
+            @click="retryDisplay"
+          >
+            {{ t("localSession.retryDisplay") }}
+          </NvxButton>
+          <NvxButton
+            v-else-if="!['exited', 'failed', 'closed'].includes(state) || cleanupPending"
             class="local-terminal-pane__terminate"
             variant="ghost"
             size="sm"
@@ -810,15 +1017,15 @@ onBeforeUnmount(() => {
           :has-selection="hasSelection"
           :show-layout-actions="active"
           show-session-action
-          :session-action-label="['exited', 'failed', 'closed'].includes(state) && !cleanupPending ? t('localSession.restart') : t('localSession.terminate')"
-          :session-action-icon="['exited', 'failed', 'closed'].includes(state) && !cleanupPending ? SquareTerminal : Unplug"
-          :session-action-disabled="terminating || opening"
-          :session-action-danger="!['exited', 'failed', 'closed'].includes(state) || cleanupPending"
+          :session-action-label="canRetryDisplay ? t('localSession.retryDisplay') : ['exited', 'failed', 'closed'].includes(state) && !cleanupPending ? t('localSession.restart') : t('localSession.terminate')"
+          :session-action-icon="canRetryDisplay || ['exited', 'failed', 'closed'].includes(state) && !cleanupPending ? SquareTerminal : Unplug"
+          :session-action-disabled="terminating || opening || recoveringInitial"
+          :session-action-danger="!canRetryDisplay && (!['exited', 'failed', 'closed'].includes(state) || cleanupPending)"
           @search="openSearch"
           @copy="copySelection"
           @split="emit('split', $event)"
           @split-workspace-right="emit('splitWorkspaceRight')"
-          @session="['exited', 'failed', 'closed'].includes(state) && !cleanupPending ? open() : terminateForClose()"
+          @session="canRetryDisplay ? retryDisplay() : ['exited', 'failed', 'closed'].includes(state) && !cleanupPending ? open() : terminateForClose()"
           @close="emit('close')"
         />
       </div>
@@ -834,9 +1041,11 @@ onBeforeUnmount(() => {
       class="local-terminal-pane__failure"
       tone="error"
       :title="failureMessage"
+      :data-error-code="viewFailure?.code"
     />
     <NvxTerminalView
       ref="terminalView"
+      :inert="viewUnavailable"
       :pane-id="paneId"
       :initial-dimensions="initialDimensions"
       :initial-output-geometry="initialOutputGeometry"

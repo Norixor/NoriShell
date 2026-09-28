@@ -16,8 +16,8 @@ import {
   NvxNavigationRail,
   NvxWindowFrame,
   NvxWorkspaceTabBar,
+  NvxWorkspaceTabPlaceholder,
 } from "./components/layout";
-import NvxWorkspaceIncomingSkeleton from "./components/layout/NvxWorkspaceIncomingSkeleton.vue";
 import { NvxPluginCommandPalette } from "./components/terminal";
 import { NvxPluginExtensionTarget } from "./components/plugins";
 import NvxPluginFloatingControls from "./components/plugins/NvxPluginFloatingControls.vue";
@@ -27,7 +27,8 @@ import {
   requestApplicationExit,
   setPluginLocale,
 } from "./core-api/client";
-import type { ExitReadiness, InstalledPluginSummary, PluginSpecialPermissionOutcome, PluginApprovedHostSessionLaunch, PluginSettingsChanged } from "./core-api/generated/core-api";
+import type { ExitReadiness, InstalledPluginSummary, PluginSpecialPermissionOutcome, PluginApprovedHostSessionLaunch, PluginApprovedTerminalChannelLaunch, PluginSettingsChanged } from "./core-api/generated/core-api";
+import { listPluginProtocolLaunches } from "./core-api/plugin-terminal";
 import { invalidatePluginHostDom } from "./plugins/hostDomBroker";
 import { usePluginsStore } from "./stores/plugins";
 import { usePluginExtensionsStore } from "./stores/pluginExtensions";
@@ -39,10 +40,12 @@ import { useWorkspaceTabsStore } from "./stores/workspaceTabs";
 import { useNativeTerminalStore } from "./stores/nativeTerminal";
 import { setNativeNotificationContext, type NativeResourceNotificationClick } from "./core-api/native-notifications";
 import { requestExitAfterTerminalWorkspaceFlush } from "./terminal-workspace-persistence";
-import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./views/sftpPluginNavigation";
+import { acceptSftpPluginNavigation, discardSftpPluginNavigations, takeSftpPluginNavigation } from "./views/sftpPluginNavigation";
 import { routeRevealKey } from "./routeReveal";
+import { useRouteMotion } from "./route-motion";
 import { startWorkspaceTabWindowUi } from "./workspace-tab-window-ui";
-import { visibleIncomingWorkspaceTabs } from "./workspace-tab-transfer";
+import { showWorkspaceTabFailure } from "./workspace-tab-errors";
+import { createManagedApprovedPluginChannel, createManagedFileTab, createManagedPluginProtocolLaunch, createManagedTerminalForHost, setWorkspaceTabViewContentBounds } from "./workspace-tab-view-shell";
 
 function isToolWindowExitCancelled(error: unknown) { return typeof error === "object" && error !== null && "code" in error && error.code === "app.tool_window_exit_cancelled"; }
 
@@ -57,6 +60,7 @@ watch(() => plugins.installed.map((item) => `${item.pluginId}:${item.stateVersio
   if (isTauri()) void appTheme.refreshThemes();
 }, { immediate: true });
 const tips = useTipsStore(pinia);
+const showWorkspaceTabCreationFailure = (error: unknown) => showWorkspaceTabFailure(error, "workspace-tab-create");
 const workspaceTabs = useWorkspaceTabsStore(pinia);
 const nativeTerminal = useNativeTerminalStore(pinia);
 const appUpdate = useAppUpdateStore(pinia);
@@ -87,6 +91,21 @@ const contentRouteLabel = computed(() => {
 });
 const contentInstanceKey = ref(`route:${crypto.randomUUID()}`);
 const routeReady = ref(false);
+const setRouteMotionElement = useRouteMotion(() => routeReady.value ? routePath.value : null);
+const workspaceContent = ref<HTMLElement | null>(null);
+let workspaceContentObserver: ResizeObserver | null = null;
+function syncWorkspaceContentBounds() {
+  const bounds = workspaceContent.value?.getBoundingClientRect();
+  if (!bounds) return;
+  const zoom = ui.appliedUiZoom / 100;
+  setWorkspaceTabViewContentBounds({
+    x: bounds.x * zoom,
+    y: bounds.y * zoom,
+    width: bounds.width * zoom,
+    height: bounds.height * zoom,
+  });
+}
+watch(() => ui.appliedUiZoom, () => { void nextTick().then(syncWorkspaceContentBounds); });
 const contentAvailability = ref<Partial<Record<ContentRegion, number>>>({});
 const contentTargets = computed(() => contentRegions.map((region) => ({
   region,
@@ -120,6 +139,13 @@ void ui.setUiZoom(ui.uiZoom, false).then((success) => {
 });
 
 let unlistenPluginProtocolLaunch: UnlistenFn | null = null;
+let unlistenPluginTerminalChannel: UnlistenFn | null = null;
+const approvedPluginChannels = new Set<string>();
+async function reconcilePluginProtocolTabs() {
+  const launches = await listPluginProtocolLaunches();
+  await Promise.all(launches.filter((launch) => !launch.claimed && launch.expiresAtUnixMs > Date.now())
+    .map((launch) => createManagedPluginProtocolLaunch(launch).catch(showWorkspaceTabCreationFailure)));
+}
 let unlistenApplicationExit: UnlistenFn | null = null;
 let unlistenNativeResourceNotification: UnlistenFn | null = null;
 let unlistenPluginHostSession: UnlistenFn | null = null;
@@ -202,7 +228,11 @@ async function confirmResourceCleanupAndExit() {
 let disposeStartupVaultTip: (() => void) | undefined;
 onMounted(async () => {
   if (!isTauri()) return;
-  void startWorkspaceTabWindowUi(workspaceTabs, router).then((stop) => {
+  workspaceContentObserver = new ResizeObserver(syncWorkspaceContentBounds);
+  if (workspaceContent.value) workspaceContentObserver.observe(workspaceContent.value);
+  window.addEventListener("resize", syncWorkspaceContentBounds);
+  syncWorkspaceContentBounds();
+  void startWorkspaceTabWindowUi(router).then((stop) => {
     if (workspaceWindowUiDisposed) stop(); else stopWorkspaceTabWindows = stop;
   }).catch(() => {
     tips.show({ scope: "workspace-tab-windows", tone: "error", title: t("workspaceTabs.unavailable") });
@@ -211,7 +241,15 @@ onMounted(async () => {
   updateCheckTimer = setInterval(() => { void appUpdate.checkForUpdates(); }, 6 * 60 * 60 * 1000);
   disposeStartupVaultTip = initializeStartupVaultTip({ t, tips });
   stopPluginAppNavigation = await startPluginAppNavigation(router);
-  unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => { void router.push("/terminal"); });
+  unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => {
+    void reconcilePluginProtocolTabs().catch(showWorkspaceTabCreationFailure);
+  });
+  void reconcilePluginProtocolTabs().catch(showWorkspaceTabCreationFailure);
+  unlistenPluginTerminalChannel = await listen<PluginApprovedTerminalChannelLaunch>("plugin-terminal-channel-approved", ({ payload }) => {
+    if (!payload?.operationId || approvedPluginChannels.has(payload.operationId)) return;
+    approvedPluginChannels.add(payload.operationId);
+    void createManagedApprovedPluginChannel(payload).catch(showWorkspaceTabCreationFailure);
+  });
   nativeTerminal.start();
   void startTrayNavigation().catch(trayUnavailable);
   unlistenNativeResourceNotification = await listen<NativeResourceNotificationClick>("native-resource-notification-click", ({ payload }) => {
@@ -242,17 +280,10 @@ onMounted(async () => {
     "plugin-host-session-approved",
     ({ payload }) => {
       if (payload.kind === "terminal") {
-        void router.push({
-          path: "/terminal",
-          query: {
-            hostId: payload.hostId,
-            connectOperationId: payload.operationId,
-            pluginAuthorizationToken: payload.authorizationToken,
-            source: "plugin",
-          },
-        });
+        void createManagedTerminalForHost({ hostId: payload.hostId, connectOperationId: payload.operationId,
+          pluginAuthorizationToken: payload.authorizationToken, source: "plugin" }).catch(showWorkspaceTabCreationFailure);
       } else if (payload.kind === "sftp") {
-        void router.push({ path: "/sftp", query: { hostId: payload.hostId, fileOperationId: payload.operationId } });
+        void createManagedFileTab("remote", payload.hostId).catch(showWorkspaceTabCreationFailure);
       } else {
         void router.push({ path: "/tunnels", query: { hostId: payload.hostId } });
       }
@@ -261,7 +292,10 @@ onMounted(async () => {
   unlistenPluginHostNavigation = await listen<unknown>(
     "plugin-host-navigation-requested",
     ({ payload }) => {
-      if (acceptSftpPluginNavigation(payload)) void router.push("/sftp");
+      if (acceptSftpPluginNavigation(payload)) {
+        const intent = takeSftpPluginNavigation();
+        if (intent) void createManagedFileTab("remote", null, "", intent).catch(showWorkspaceTabCreationFailure);
+      }
     },
   );
   unlistenPluginSpecialPermission = await listen<PluginSpecialPermissionOutcome>(
@@ -312,6 +346,9 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  workspaceContentObserver?.disconnect();
+  window.removeEventListener("resize", syncWorkspaceContentBounds);
+  setWorkspaceTabViewContentBounds(null);
   workspaceWindowUiDisposed = true;
   stopWorkspaceTabWindows?.();
   if (updateCheckTimer) clearInterval(updateCheckTimer);
@@ -321,6 +358,8 @@ onBeforeUnmount(() => {
   trayUnlisteners.splice(0).forEach((unlisten) => unlisten());
   unlistenPluginProtocolLaunch?.();
   unlistenPluginProtocolLaunch = null;
+  unlistenPluginTerminalChannel?.();
+  unlistenPluginTerminalChannel = null;
   nativeTerminal.stop();
   stopPluginAppNavigation?.();
   stopPluginAppNavigation = null;
@@ -361,6 +400,7 @@ onBeforeUnmount(() => {
       <div class="app-workspace">
         <NvxNavigationRail />
         <main
+          ref="workspaceContent"
           class="app-main"
           :class="{ 'app-main--route-pending': !routeReady }"
           :aria-busy="!routeReady"
@@ -371,6 +411,7 @@ onBeforeUnmount(() => {
           >
             <div
               v-if="target.region === 'route'"
+              :ref="setRouteMotionElement"
               class="app-route-content"
             >
               <RouterView v-slot="{ Component, route }">
@@ -418,9 +459,7 @@ onBeforeUnmount(() => {
           >
             {{ t("navigation.loading") }}
           </div>
-          <Transition name="workspace-incoming-fade">
-            <NvxWorkspaceIncomingSkeleton v-if="visibleIncomingWorkspaceTabs" />
-          </Transition>
+          <NvxWorkspaceTabPlaceholder />
         </main>
       </div>
     </div>
@@ -489,7 +528,7 @@ onBeforeUnmount(() => {
   overflow: auto;
 }
 
-.app-main--route-pending > :not(.app-route-placeholder, .workspace-incoming) {
+.app-main--route-pending > :not(.app-route-placeholder, .nvx-workspace-tab-placeholder) {
   visibility: hidden;
 }
 

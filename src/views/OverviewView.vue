@@ -8,6 +8,7 @@ import { NvxInlineNotice } from "../components/ui";
 import {
   canUseDesktopCore,
   fetchServerOverview,
+  fetchSshSessionSnapshot,
   reconcileMetrics,
   retryMetrics,
 } from "../core-api/client";
@@ -21,6 +22,9 @@ import { createUuidV7 } from "../core-api/ids";
 import { overviewVisualFixture } from "../overview/visual-fixture";
 import { useTipsStore } from "../stores/tips";
 import { useRouteReveal } from "../routeReveal";
+import { openWorkspaceTerminalHost } from "../workspace-tab-shell-action";
+import { focusManagedTerminalSession } from "../workspace-tab-view-shell";
+import { showWorkspaceTabFailure } from "../workspace-tab-errors";
 
 const { t } = useI18n();
 const router = useRouter();
@@ -49,18 +53,17 @@ async function refresh() {
 }
 
 function connect(hostId: string) {
-  void router.push({
-    path: "/terminal",
-    query: {
-      hostId,
-      source: "overview",
-      connectOperationId: createUuidV7(),
-    },
-  });
+  void openWorkspaceTerminalHost({
+    hostId, source: "overview", connectOperationId: createUuidV7(),
+  }).catch((error: unknown) => showWorkspaceTabFailure(error, "overview-connect"));
 }
 
 function focusTerminal(sessionId: string) {
-  void router.push({ path: "/terminal", query: { focusSessionId: sessionId } });
+  void fetchSshSessionSnapshot().then(async ({ sessions }) => {
+    const session = sessions.find((item) => item.sessionId === sessionId);
+    if (!session) throw new Error("workspace_tab.session_unavailable");
+    await focusManagedTerminalSession({ kind: "focusSshSession", sessionId, generation: session.generation });
+  }).catch((error: unknown) => showWorkspaceTabFailure(error, "overview-focus"));
 }
 
 function findMetricsSession(hostId: string): MetricsSessionSummary | null {
