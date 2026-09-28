@@ -6,10 +6,19 @@ use ironrdp_rdpeudp_tokio::{MultitransportBootstrap, UdpTlsConfig, UdpTransport}
 use ironrdp_tls::CertificateValidation;
 use norishell_desktop_protocol::{EngineControl, EngineError, Result};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio_rustls::rustls::pki_types::UnixTime;
+use tokio_rustls::rustls::{crypto::CryptoProvider, pki_types::UnixTime};
 use x509_cert::{Certificate, der::Decode};
 
 const MAX_UDP_PAYLOAD: usize = u16::MAX as usize;
+
+fn ensure_udp_crypto_provider() {
+    // IronRDP builds its UDP TLS config with ClientConfig::builder(), which
+    // needs a process default when both rustls crypto backends are enabled.
+    // Keep any default another component has already installed.
+    if CryptoProvider::get_default().is_none() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    }
+}
 
 fn approved_leaf_may_override_error(approved_leaf: &[u8], leaf: &[u8], reason: &str) -> bool {
     if leaf != approved_leaf {
@@ -117,6 +126,7 @@ impl UdpSession {
             return false;
         }
 
+        ensure_udp_crypto_provider();
         let tls = self.tls_config();
         let mut bootstrap = MultitransportBootstrap::new(request);
         if let Err(error) = bootstrap
@@ -170,6 +180,13 @@ pub(super) fn response(
 mod tests {
     use super::*;
     use tokio_rustls::rustls::{self, pki_types::ServerName};
+
+    #[test]
+    fn udp_initializes_provider_before_upstream_tls_builder() {
+        ensure_udp_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        let _ = rustls::ClientConfig::builder();
+    }
 
     #[test]
     fn gateway_and_missing_peer_never_advertise_udp() {
