@@ -42,14 +42,14 @@ Working on a server often means switching between terminal tabs, file transfer w
 
 ## Installation and quick start
 
-Latest release: **[v0.1.5](https://github.com/Norixor/NoriShell/releases/tag/v0.1.5)**. Choose an installer or a standalone ZIP for your device.
+Latest release: **[v0.1.6](https://github.com/Norixor/NoriShell/releases/tag/v0.1.6)**. Choose an installer or a standalone ZIP for your device.
 
 | Platform | Architecture | Installer | Standalone ZIP |
 | --- | --- | --- | --- |
-| macOS 13 or later | Apple Silicon (ARM64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_arm64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_arm64.zip) |
-| macOS 13 or later | Intel (x64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_x64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_macos_x64.zip) |
-| Windows | x64 (Intel / AMD) | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_x64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_x64.zip) |
-| Windows | ARM64 | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_arm64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.5/NoriShell_0.1.5_windows_arm64.zip) |
+| macOS 13 or later | Apple Silicon (ARM64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_arm64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_arm64.zip) |
+| macOS 13 or later | Intel (x64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_x64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_x64.zip) |
+| Windows | x64 (Intel / AMD) | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_x64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_x64.zip) |
+| Windows | ARM64 | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_arm64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_arm64.zip) |
 
 For a macOS installer, drag NoriShell into Applications; on Windows, follow the installer. ZIP builds use the same local settings and data directories. Extract the full archive before running. The Windows ZIP requires WebView2 Runtime to be installed.
 
