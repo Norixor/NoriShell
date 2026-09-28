@@ -1,10 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 
 import type { ExitReadiness } from "../core-api/generated/core-api";
+import { i18n } from "../locales";
 import { flushTerminalWorkspaceBeforeExit } from "../terminal-workspace-persistence";
 
 type ReleaseStatus = "idle" | "checking" | "upToDate" | "updateAvailable" | "noRelease" | "failed";
@@ -26,13 +28,56 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
   const installFailureCode = ref<InstallFailureCode | null>(null);
   const checkDiagnosticId = ref<string | null>(null);
   const installDiagnosticId = ref<string | null>(null);
-  const currentVersion = ref<string | null>(null);
+  // The authoritative version Core reported for the last release check.
+  const checkedVersion = ref<string | null>(null);
+  // Falls back to the packaged (renderer-visible) version until a release check reports one.
+  const packagedVersion = ref<string | null>(null);
+  const currentVersion = computed(() => checkedVersion.value ?? packagedVersion.value);
   const latestVersion = ref<string | null>(null);
   const supportsAutoInstall = ref(false);
   const progressPercent = ref<number | null>(null);
   const hasUpdate = computed(() => status.value === "updateAvailable" && !!latestVersion.value);
+  // Set by an interactive "update available" entry point (e.g. the navigation rail) that
+  // hands off to the Settings page, which consumes it to open the install confirmation.
+  const installConfirmPending = ref(false);
   let checkInFlight: Promise<void> | null = null;
   let installInFlight: Promise<void> | null = null;
+
+  const tone = computed<"success" | "warning" | "danger" | "neutral">(() => {
+    if (status.value === "updateAvailable") return "warning";
+    if (status.value === "failed") return "danger";
+    if (status.value === "upToDate") return "success";
+    // idle/checking/noRelease: no confirmed outcome yet, so neither success nor failure.
+    return "neutral";
+  });
+
+  const statusText = computed(() => {
+    if (status.value === "checking") return i18n.global.t("releases.checking");
+    if (status.value === "updateAvailable") {
+      return i18n.global.t("releases.status.updateAvailable", { version: latestVersion.value ?? "" });
+    }
+    if (status.value === "failed" && checkFailureCode.value) return i18n.global.t(`releases.checkErrors.${checkFailureCode.value}`);
+    return i18n.global.t(`releases.status.${status.value}`);
+  });
+
+  async function loadPackagedVersion(): Promise<void> {
+    if (!isTauri()) return;
+    try {
+      packagedVersion.value = await getVersion();
+    } catch {
+      // currentVersion keeps falling back to whatever Core's release check already reported.
+    }
+  }
+
+  function requestInstallConfirmation(): void {
+    installConfirmPending.value = true;
+  }
+
+  function consumeInstallConfirmationRequest(): boolean {
+    if (!installConfirmPending.value) return false;
+    installConfirmPending.value = false;
+    return true;
+  }
 
   function checkForUpdates(): Promise<void> {
     if (checkInFlight) return checkInFlight;
@@ -42,7 +87,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     checkDiagnosticId.value = null;
     checkInFlight = invoke<ReleaseCheckResponse>("release_check")
       .then((result) => {
-        currentVersion.value = result.currentVersion;
+        checkedVersion.value = result.currentVersion;
         status.value = result.status;
         latestVersion.value = result.latestVersion;
         supportsAutoInstall.value = result.supportsAutoInstall;
@@ -163,5 +208,10 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     }
   }
 
-  return { status, installStatus, checkFailureCode, installFailureCode, checkDiagnosticId, installDiagnosticId, currentVersion, latestVersion, supportsAutoInstall, progressPercent, hasUpdate, checkForUpdates, installUpdate, restartApp };
+  return {
+    status, installStatus, checkFailureCode, installFailureCode, checkDiagnosticId, installDiagnosticId,
+    checkedVersion, packagedVersion, currentVersion, latestVersion, supportsAutoInstall, progressPercent,
+    hasUpdate, tone, statusText, installConfirmPending, checkForUpdates, installUpdate, restartApp,
+    loadPackagedVersion, requestInstallConfirmation, consumeInstallConfirmationRequest,
+  };
 });

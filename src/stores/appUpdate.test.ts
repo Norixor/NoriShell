@@ -9,8 +9,11 @@ const api = vi.hoisted(() => ({
   download: vi.fn(),
   install: vi.fn(),
   close: vi.fn(),
+  getVersion: vi.fn(),
+  isTauri: vi.fn(),
 }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke, isTauri: api.isTauri }));
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: api.getVersion }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: api.check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: api.relaunch }));
 vi.mock("../terminal-workspace-persistence", () => ({ flushTerminalWorkspaceBeforeExit: api.flush }));
@@ -30,6 +33,8 @@ describe("app update", () => {
     api.close.mockResolvedValue(undefined);
     api.flush.mockResolvedValue(undefined);
     api.relaunch.mockResolvedValue(undefined);
+    api.isTauri.mockReturnValue(true);
+    api.getVersion.mockResolvedValue("0.1.5");
   });
 
   it("checks for updates without downloading or installing", async () => {
@@ -130,6 +135,48 @@ describe("app update", () => {
     expect(api.install).not.toHaveBeenCalled();
     expect(api.invoke).not.toHaveBeenCalledWith("release_update_allow_relaunch");
     expect(updates.installStatus).toBe("cancelled");
+  });
+
+  it("falls back to the packaged version until a release check reports one", async () => {
+    const updates = useAppUpdateStore();
+    expect(updates.currentVersion).toBeNull();
+    await updates.loadPackagedVersion();
+    expect(updates.currentVersion).toBe("0.1.5");
+    await updates.checkForUpdates();
+    expect(updates.currentVersion).toBe("0.1.2");
+  });
+
+  it("skips loading the packaged version outside a Tauri window", async () => {
+    api.isTauri.mockReturnValue(false);
+    const updates = useAppUpdateStore();
+    await updates.loadPackagedVersion();
+    expect(api.getVersion).not.toHaveBeenCalled();
+    expect(updates.currentVersion).toBeNull();
+  });
+
+  it("derives a stable tone and status text from the check outcome, keeping noRelease neutral", async () => {
+    const updates = useAppUpdateStore();
+    expect(updates.tone).toBe("neutral");
+    await updates.checkForUpdates();
+    expect(updates.tone).toBe("warning");
+    expect(updates.statusText).toContain("0.1.3");
+    updates.status = "noRelease";
+    expect(updates.tone).toBe("neutral");
+    updates.status = "upToDate";
+    expect(updates.tone).toBe("success");
+    updates.status = "failed";
+    updates.checkFailureCode = "requestFailed";
+    expect(updates.tone).toBe("danger");
+  });
+
+  it("hands an install confirmation request off once, for the next consumer", async () => {
+    const updates = useAppUpdateStore();
+    expect(updates.consumeInstallConfirmationRequest()).toBe(false);
+    updates.requestInstallConfirmation();
+    expect(updates.installConfirmPending).toBe(true);
+    expect(updates.consumeInstallConfirmationRequest()).toBe(true);
+    expect(updates.installConfirmPending).toBe(false);
+    expect(updates.consumeInstallConfirmationRequest()).toBe(false);
   });
 
   it("keeps resources fenced and offers a restart if installation fails", async () => {

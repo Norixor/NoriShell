@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import appIconUrl from "../../assets/branding/norishell-app-icon.png";
@@ -13,39 +12,23 @@ const RELEASES_PAGE = "https://github.com/Norixor/NoriShell/releases";
 
 const { t } = useI18n();
 const updates = useAppUpdateStore();
-const packagedVersion = ref<string | null>(null);
-const currentVersion = computed(() => updates.currentVersion ?? packagedVersion.value);
+const currentVersion = computed(() => updates.currentVersion);
 const status = computed(() => updates.status);
 const latestVersion = computed(() => updates.latestVersion);
+const tone = computed(() => updates.tone);
+const statusText = computed(() => updates.statusText);
 const confirmOpen = ref(false);
 const forceConfirmOpen = ref(false);
 const openFailed = ref(false);
 let mounted = false;
 
-const tone = computed<"success" | "warning" | "danger" | "neutral">(() => {
-  if (status.value === "upToDate") return "success";
-  if (status.value === "updateAvailable") return "warning";
-  if (status.value === "failed") return "danger";
-  return "neutral";
-});
-
-const statusText = computed(() => {
-  if (status.value === "checking") return t("releases.checking");
-  if (status.value === "updateAvailable") {
-    return t("releases.status.updateAvailable", { version: latestVersion.value ?? "" });
-  }
-  if (status.value === "failed" && updates.checkFailureCode) return t(`releases.checkErrors.${updates.checkFailureCode}`);
-  return t(`releases.status.${status.value}`);
-});
-
-async function loadVersion() {
-  try {
-    const version = await getVersion();
-    if (mounted) packagedVersion.value = version;
-  } catch {
-    // The update action still reads the authoritative packaged version in Core.
-  }
-}
+// An interactive "update available" entry point elsewhere (e.g. the navigation rail) hands
+// off here through the store instead of a router query flag, so a click while already on
+// this page still opens the confirmation.
+watch(() => updates.installConfirmPending, (pending) => {
+  if (!pending || !updates.consumeInstallConfirmationRequest()) return;
+  if (updates.hasUpdate && updates.supportsAutoInstall && updates.installStatus === "idle") confirmOpen.value = true;
+}, { immediate: true });
 
 async function checkForUpdates() {
   openFailed.value = false;
@@ -83,7 +66,7 @@ async function openProject() {
 
 onMounted(() => {
   mounted = true;
-  void loadVersion();
+  void updates.loadPackagedVersion();
 });
 onBeforeUnmount(() => {
   mounted = false;

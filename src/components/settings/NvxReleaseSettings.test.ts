@@ -1,9 +1,11 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
 import { createPinia, setActivePinia } from "pinia";
+import { createMemoryHistory, createRouter } from "vue-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { releasesEn } from "../../locales/releases";
+import { useAppUpdateStore } from "../../stores/appUpdate";
 
 const api = vi.hoisted(() => ({
   getVersion: vi.fn(),
@@ -13,7 +15,7 @@ const api = vi.hoisted(() => ({
   relaunch: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: api.getVersion }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke, isTauri: () => true }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: api.openUrl }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: api.checkUpdate }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: api.relaunch }));
@@ -23,8 +25,12 @@ import NvxReleaseSettings from "./NvxReleaseSettings.vue";
 function mountSettings() {
   const pinia = createPinia();
   setActivePinia(pinia);
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: "/:pathMatch(.*)*", component: { template: "<div />" } }],
+  });
   return mount(NvxReleaseSettings, {
-    global: { plugins: [pinia, createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn } } })] },
+    global: { plugins: [pinia, router, createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn } } })] },
   });
 }
 
@@ -98,6 +104,29 @@ describe("release settings", () => {
     expect(wrapper.text()).toContain("Download the new ZIP and replace it manually");
     expect(wrapper.findAll("button").some((item) => item.text().includes("Update and restart"))).toBe(false);
     expect(wrapper.findAll("button").some((item) => item.text().includes("Download on GitHub"))).toBe(true);
+  });
+
+  it("opens the confirmation when an update-available entry point hands off through the store", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const updates = useAppUpdateStore();
+    updates.status = "updateAvailable";
+    updates.latestVersion = "0.1.6";
+    updates.supportsAutoInstall = true;
+    updates.requestInstallConfirmation();
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/:pathMatch(.*)*", component: { template: "<div />" } }],
+    });
+    await router.push("/settings?section=about");
+    await router.isReady();
+    const wrapper = mount(NvxReleaseSettings, {
+      global: { plugins: [pinia, router, createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn } } })] },
+    });
+    await flushPromises();
+    expect(document.querySelector("[role='dialog']")?.textContent).toContain("Update NoriShell");
+    expect(updates.installConfirmPending).toBe(false);
+    wrapper.unmount();
   });
 
   it("offers prereleases a manual download without an in-app install action", async () => {
