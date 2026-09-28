@@ -2,12 +2,11 @@ use std::time::Duration;
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, WebviewWindow};
+use tauri::Manager;
 
 const GITHUB_RELEASES_API: &str =
     "https://api.github.com/repos/Norixor/NoriShell/releases?per_page=100";
 pub const GITHUB_RELEASES_PAGE: &str = "https://github.com/Norixor/NoriShell/releases";
-const MAIN_WINDOW_LABEL: &str = "main";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -176,9 +175,13 @@ async fn read_bounded_response(
 
 #[tauri::command]
 pub(crate) async fn release_check<R: tauri::Runtime>(
-    window: WebviewWindow<R>,
+    webview: tauri::Webview<R>,
 ) -> Result<ReleaseCheckResponse, ReleaseCheckFailure> {
-    if window.label() != MAIN_WINDOW_LABEL {
+    if !webview
+        .app_handle()
+        .state::<crate::workspace_windows::WorkspaceWindows>()
+        .is_main_or_page(&webview)
+    {
         return Err(ReleaseCheckFailure::new(
             ReleaseCheckFailureCode::WindowNotAllowed,
         ));
@@ -213,15 +216,19 @@ pub(crate) async fn release_check<R: tauri::Runtime>(
 
 #[tauri::command]
 pub(crate) fn release_update_readiness<R: tauri::Runtime>(
-    window: WebviewWindow<R>,
+    webview: tauri::Webview<R>,
 ) -> Result<norishell_core_api::ExitReadiness, ReleaseCheckFailure> {
-    if window.label() != MAIN_WINDOW_LABEL {
+    if !webview
+        .app_handle()
+        .state::<crate::workspace_windows::WorkspaceWindows>()
+        .is_main_or_page(&webview)
+    {
         return Err(ReleaseCheckFailure::new(
             ReleaseCheckFailureCode::WindowNotAllowed,
         ));
     }
     Ok(crate::lifecycle::current_update_readiness(
-        window.app_handle(),
+        webview.app_handle(),
     ))
 }
 

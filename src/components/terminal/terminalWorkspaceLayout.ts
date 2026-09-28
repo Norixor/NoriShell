@@ -11,7 +11,7 @@ import {
 } from "./terminalLayout";
 
 export const TERMINAL_WORKSPACE_LAYOUT_SCHEMA_VERSION = 1;
-export const MAX_TERMINAL_WORKSPACE_TABS = 32;
+export const MAX_TERMINAL_WORKSPACE_TABS = 512;
 export const MAX_TERMINAL_WORKSPACE_PANES_PER_TAB = 2_048;
 export const MAX_TERMINAL_WORKSPACE_LAYOUT_DEPTH = 64;
 

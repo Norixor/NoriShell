@@ -1,19 +1,17 @@
 <script setup lang="ts">
 import {
-  Fingerprint,
   FilePlus2,
   FolderOpen,
   Monitor,
-  KeyRound,
-  Plug,
   PanelRightClose,
   PanelRightOpen,
   SquareTerminal,
 } from "lucide-vue-next";
 import { storeToRefs } from "pinia";
-import { computed, onBeforeUnmount, onMounted, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { isTauri } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 
@@ -27,21 +25,30 @@ import {
   isShortcutExecutionAllowed,
   matchShortcut,
   shouldConsumeShortcut,
+  SHORTCUT_COMMANDS,
   type ShortcutCommand,
   type ShortcutPlatform,
 } from "../../shortcuts";
 import { detectDesktopPlatform } from "../../platform";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { useShortcutsStore } from "../../stores/shortcuts";
-import { useWorkspaceTabsStore, type WorkspacePageType } from "../../stores/workspaceTabs";
+import { useWorkspaceTabsStore } from "../../stores/workspaceTabs";
 import { useUiStore } from "../../stores/ui";
-import { hiddenOutgoingWorkspaceTabs, moveWorkspaceTab, moveWorkspaceTabToNewWindow } from "../../workspace-tab-transfer";
+import { moveWorkspaceTab, moveWorkspaceTabToNewWindow } from "../../workspace-tab-transfer";
+import { showWorkspaceTabFailure } from "../../workspace-tab-errors";
+import {
+  activateWorkspaceTabView,
+  createManagedFileTab,
+  createManagedPageForRoute,
+  createManagedTerminalTab,
+  requestCloseWorkspaceTabView,
+} from "../../workspace-tab-view-shell";
+import { activeWorkspaceTabViewId, pendingWorkspaceTabViewId, workspaceTabViewSummaries, workspaceTabViewSummary } from "../../workspace-tab-view-state";
 import {
   beginWorkspaceTabDrag,
   cancelWorkspaceTabDrag,
   finishWorkspaceTabDrag,
   workspaceWindowLabel,
-  type WorkspaceTabKind,
 } from "../../workspace-tab-windows";
 import { useTipsStore } from "../../stores/tips";
 
@@ -53,39 +60,23 @@ const ui = useUiStore();
 const tips = useTipsStore();
 const shortcuts = useShortcutsStore();
 const hostMarkers = useHostMarkersStore();
-const {
-  terminalTabs,
-  activeTerminalTabId,
-  terminalBusy,
-  terminalActivationBlocked,
-  quickCommandsOpen,
-  pageTabs,
-  terminalController,
-  desktopTabs,
-  activeDesktopTabId,
-  desktopBusy,
-  desktopController,
-  fileTabs,
-  activeFileTabId,
-} = storeToRefs(workspaceTabs);
-
-const filePaneShortcutIds = new Set([
-  "terminal.split-right", "terminal.split-down", "terminal.focus-next-pane",
-  "terminal.focus-previous-pane", "terminal.close-pane",
-]);
-const createDisabled = computed(() => terminalBusy.value
-  && (ui.newTerminalBehavior === "terminalWelcome" || ui.newTerminalBehavior === "localTerminal"));
-
-const pageIcons = {
-  newPage: FilePlus2,
-  knownHosts: Fingerprint,
-  sshIdentities: KeyRound,
-  plugin: Plug,
-} satisfies Record<WorkspacePageType, typeof Fingerprint>;
+const { terminalActivationBlocked } = storeToRefs(workspaceTabs);
+// Quick Commands belong to the active Terminal Tab WebView, never to the shell page it covers.
+const activeTerminal = computed(() => {
+  // A Tab still rendering has no writable terminal yet.
+  if (activeWorkspaceTabViewId.value === pendingWorkspaceTabViewId.value) return null;
+  const summary = activeWorkspaceTabViewId.value ? workspaceTabViewSummary(activeWorkspaceTabViewId.value) : null;
+  return summary?.kind === "terminal" ? summary : null;
+});
+function toggleQuickCommands() {
+  const summary = activeTerminal.value;
+  if (!summary) return;
+  void emitTo(summary.viewLabel, "workspace-tab-view-toggle-quick-commands", { id: summary.id })
+    .catch((error: unknown) => openFailure(error));
+}
 
 interface PendingPointerDrag {
   id: string;
-  kind: WorkspaceTabKind;
   pointerId: number;
   x: number;
   y: number;
@@ -93,7 +84,6 @@ interface PendingPointerDrag {
 
 interface ActivePointerDrag {
   id: string;
-  kind: WorkspaceTabKind;
   nonce: string;
 }
 
@@ -107,24 +97,27 @@ interface DragReleased {
 
 let pendingDrag: PendingPointerDrag | null = null;
 let activeDrag: ActivePointerDrag | null = null;
+interface DragHover { id: string; nonce: string; active: boolean }
+const incomingDrag = ref<DragHover | null>(null);
+let stopDragHover: UnlistenFn | null = null;
+let mounted = false;
 let stopDragReleased: UnlistenFn | null = null;
+let dragReleaseReady = false;
+let stopChildShortcuts: UnlistenFn | null = null;
+let batchClosePending = false;
 
-function tabKind(id: string): WorkspaceTabKind | null {
-  if (terminalTabs.value.some((tab) => tab.groupId === id)) return "terminal";
-  if (pageTabs.value.some((tab) => tab.groupId === id)) return "page";
-  if (desktopTabs.value.some((tab) => tab.groupId === id)) return "desktop";
-  if (fileTabs.value.some((tab) => tab.groupId === id)) return "file";
-  return null;
+function tabActionFailure(action: "move" | "close" | "open", error?: unknown) {
+  if (action === "move" && tips.items.some((item) => item.scope === "workspace-tab-diagnostic")) return;
+  showWorkspaceTabFailure(error, `workspace-tab-${action}`, `workspace_tab.${action}_failed`, `workspaceTabs.${action}Failed`);
 }
 
-function moveFailure() {
-  tips.show({ scope: "workspace-tab-move", tone: "error", title: t("workspaceTabs.moveFailed") });
-}
+const moveFailure = (error?: unknown) => tabActionFailure("move", error);
+const closeFailure = (error?: unknown) => tabActionFailure("close", error);
+const openFailure = (error?: unknown) => tabActionFailure("open", error);
 
 function tabPointerDown(id: string, event: PointerEvent) {
-  const kind = tabKind(id);
-  if (!isTauri() || !kind || activeDrag || event.button !== 0) return;
-  pendingDrag = { id, kind, pointerId: event.pointerId, x: event.screenX, y: event.screenY };
+  if (!dragReleaseReady || !workspaceTabViewSummary(id) || activeDrag || event.button !== 0) return;
+  pendingDrag = { id, pointerId: event.pointerId, x: event.screenX, y: event.screenY };
 }
 
 function pointerMove(event: PointerEvent) {
@@ -133,13 +126,14 @@ function pointerMove(event: PointerEvent) {
   if (!(event.buttons & 1)) { pendingDrag = null; return; }
   if (Math.hypot(event.screenX - pending.x, event.screenY - pending.y) < 6) return;
   pendingDrag = null;
-  const current = { id: pending.id, kind: pending.kind, nonce: crypto.randomUUID() };
+  const current = { id: pending.id, nonce: crypto.randomUUID() };
   activeDrag = current;
+  tips.dismissScope("workspace-tab-diagnostic");
   void beginWorkspaceTabDrag(current.id, current.nonce).catch((error: unknown) => {
     if (activeDrag !== current) return;
     activeDrag = null;
     void cancelWorkspaceTabDrag(current.nonce).catch(() => undefined);
-    if (String(error) !== "workspace_tab.drag_button_released") moveFailure();
+    if (String(error) !== "workspace_tab.drag_button_released") moveFailure(error);
   });
 }
 
@@ -162,169 +156,85 @@ async function dragReleased(payload: DragReleased) {
   activeDrag = null;
   try {
     if (payload.target === workspaceWindowLabel()) return;
-    if (payload.target) await moveWorkspaceTab(current.id, current.kind, payload.target);
-    else await moveWorkspaceTabToNewWindow(current.id, current.kind, { x: payload.x, y: payload.y });
-  } catch {
-    moveFailure();
+    if (payload.target) await moveWorkspaceTab(current.id, payload.target);
+    else await moveWorkspaceTabToNewWindow(current.id, { x: payload.x, y: payload.y });
+  } catch (error) {
+    moveFailure(error);
   } finally {
     await finishWorkspaceTabDrag(current.nonce).catch(() => undefined);
   }
 }
 
 function moveToNewWindow(id: string) {
-  const kind = tabKind(id);
-  if (kind) void moveWorkspaceTabToNewWindow(id, kind).catch(moveFailure);
+  if (!workspaceTabViewSummary(id)) return;
+  tips.dismissScope("workspace-tab-diagnostic");
+  void moveWorkspaceTabToNewWindow(id).catch(moveFailure);
 }
 
 function moveToMainWindow(id: string) {
-  const kind = tabKind(id);
-  if (kind) void moveWorkspaceTab(id, kind, "main").catch(moveFailure);
+  if (!workspaceTabViewSummary(id)) return;
+  tips.dismissScope("workspace-tab-diagnostic");
+  void moveWorkspaceTab(id, "main").catch(moveFailure);
 }
 
-const items = computed<TerminalTabItem[]>(() => [
-  ...terminalTabs.value.map((tab) => ({
-    ...tab,
-    icon: SquareTerminal,
-    hostMarker: tab.hostId ? hostMarkers.visibleMarker(tab.hostId) : null,
-    bellAttentionLabel: tab.bellAttention ? t("terminalInteraction.bellAttention") : undefined,
-    disabled: terminalBusy.value,
-  })),
-  ...fileTabs.value.map((tab) => ({
-    groupId: tab.groupId,
-    label: tab.label || t(tab.kind === "remote" ? "fileWorkspace.remoteTab" : "fileWorkspace.localTab"),
-    stateLabel: `${t("fileWorkspace.tabState")} · ${t("sshTerminal.paneCount", { count: tab.paneCount })}`,
-    icon: FolderOpen,
-  })),
-  ...pageTabs.value.map((tab) => ({
-    groupId: tab.groupId,
-    label: tab.labelKey ? t(tab.labelKey) : tab.label,
-    stateLabel: t("workspaceTabs.pageState"),
-    icon: pageIcons[tab.pageType],
-  })),
-  ...desktopTabs.value.map((tab) => ({ ...tab, icon: Monitor, disabled: desktopBusy.value })),
-].filter((tab) => !hiddenOutgoingWorkspaceTabs.value.has(tab.groupId)));
+// Every Header Tab is a native Tab WebView; shell pages are not Tabs.
+const items = computed<TerminalTabItem[]>(() => workspaceTabViewSummaries.value.map((summary) => ({
+  groupId: summary.id,
+  label: summary.label,
+  stateLabel: summary.stateLabel,
+  icon: summary.kind === "terminal" ? SquareTerminal : summary.kind === "file" ? FolderOpen
+    : summary.kind === "desktop" ? Monitor : FilePlus2,
+  compact: summary.kind === "page",
+  hostMarker: summary.hostId ? hostMarkers.visibleMarker(summary.hostId) : null,
+  bellAttentionLabel: summary.bellAttention ? t("terminalInteraction.bellAttention") : undefined,
+})));
 
-function pageIsActive(page: { pageType: WorkspacePageType; route: string }): boolean {
-  if (page.route === route.path) return true;
-  return route.path === "/settings" && (
-    (page.pageType === "knownHosts" && route.query.section === "knownHosts")
-    || (page.pageType === "sshIdentities" && route.query.section === "identities")
-  );
-}
-
-const activeGroupId = computed(() => {
-  if (route.path === "/desktop") return activeDesktopTabId.value;
-  if (route.path === "/sftp") return activeFileTabId.value;
-  const page = pageTabs.value.find(pageIsActive);
-  if (page) return page.groupId;
-  return route.path === "/terminal" ? activeTerminalTabId.value : "";
-});
-
-function deactivateTerminalWorkspace() {
-  terminalController.value?.deactivate();
-}
+const activeGroupId = computed(() => activeWorkspaceTabViewId.value ?? "");
 
 function activateGroup(groupId: string) {
-  if (fileTabs.value.some((tab) => tab.groupId === groupId)) {
-    deactivateTerminalWorkspace();
-    desktopController.value?.deactivate();
-    workspaceTabs.activateFileTab(groupId);
-    void router.push("/sftp");
-    return;
-  }
-  if (desktopTabs.value.some((tab) => tab.groupId === groupId)) {
-    deactivateTerminalWorkspace();
-    desktopController.value?.activate(groupId);
-    return;
-  }
-  desktopController.value?.deactivate();
-  const page = pageTabs.value.find((tab) => tab.groupId === groupId);
-  if (page) {
-    deactivateTerminalWorkspace();
-    void router.push(page.route);
-    return;
-  }
-  terminalController.value?.activate(groupId);
+  void activateWorkspaceTabView(groupId).catch(openFailure);
 }
 
 function closeGroup(groupId: string) {
-  if (fileTabs.value.some((tab) => tab.groupId === groupId)) {
-    activateGroup(groupId);
-    void workspaceTabs.requestCloseFileTab(groupId);
-    return;
-  }
-  if (desktopTabs.value.some((tab) => tab.groupId === groupId)) {
-    desktopController.value?.close(groupId);
-    return;
-  }
-  const page = pageTabs.value.find((tab) => tab.groupId === groupId);
-  if (!page) {
-    terminalController.value?.close(groupId);
-    return;
-  }
-  const closingActivePage = pageIsActive(page);
-  workspaceTabs.closePageTab(groupId);
-  if (!closingActivePage) return;
-  if (activeTerminalTabId.value && terminalController.value) {
-    terminalController.value.activate(activeTerminalTabId.value);
-    return;
-  }
-  const fallbackPage = pageTabs.value.at(-1);
-  void router.push(fallbackPage?.route ?? "/settings");
+  void requestCloseWorkspaceTabView(groupId).catch(closeFailure);
+}
+
+/** One owner-window dialog covers every resource that may still be running when closure begins. */
+async function confirmBatchClose(groupIds: string[]): Promise<boolean> {
+  if (groupIds.every((id) => workspaceTabViewSummary(id)?.kind === "page")) return true;
+  return ask(t("workspaceTabs.confirmBatchCloseBody", { tabs: groupIds.length }), {
+    title: t("workspaceTabs.confirmBatchCloseTitle"), kind: "warning",
+    okLabel: t("workspaceTabs.confirmBatchCloseAction"),
+    cancelLabel: t("sshTerminal.cancel"),
+  });
 }
 
 async function closeGroups(groupIds: string[]) {
-  const targetIds = new Set(groupIds);
-  if (!targetIds.size) return;
-  const fileIds = fileTabs.value.filter((tab) => targetIds.has(tab.groupId)).map((tab) => tab.groupId);
-  for (const id of fileIds) {
-    activateGroup(id);
-    if (!await workspaceTabs.requestCloseFileTab(id)) return;
+  if (batchClosePending) return;
+  if (!groupIds.length) return;
+  batchClosePending = true;
+  try {
+    if (!await confirmBatchClose(groupIds)) return;
+    // Resource Tabs close before Page Tabs; a failed close keeps the remaining Tabs.
+    const ordered = [...groupIds.filter((id) => workspaceTabViewSummary(id)?.kind !== "page"),
+      ...groupIds.filter((id) => workspaceTabViewSummary(id)?.kind === "page")];
+    for (const id of ordered) {
+      if (workspaceTabViewSummary(id) && !await requestCloseWorkspaceTabView(id, true)) return;
+    }
+  } catch (error) {
+    closeFailure(error);
+  } finally {
+    batchClosePending = false;
   }
-  const desktopIds = desktopTabs.value.filter((tab) => targetIds.has(tab.groupId)).map((tab) => tab.groupId);
-  if (desktopIds.length) desktopController.value?.closeMany(desktopIds);
-  const terminalIds = terminalTabs.value
-    .filter((tab) => targetIds.has(tab.groupId))
-    .map((tab) => tab.groupId);
-  const closingActivePage = pageTabs.value.some((tab) => (
-    targetIds.has(tab.groupId) && pageIsActive(tab)
-  ));
-  for (const page of pageTabs.value.filter((tab) => targetIds.has(tab.groupId))) {
-    workspaceTabs.closePageTab(page.groupId);
-  }
-  if (terminalIds.length && terminalController.value) {
-    terminalController.value.closeMany(terminalIds);
-    return;
-  }
-  if (!closingActivePage) return;
-  const fallbackTerminal = terminalTabs.value.find((tab) => !targetIds.has(tab.groupId));
-  if (fallbackTerminal && terminalController.value) {
-    terminalController.value.activate(fallbackTerminal.groupId);
-    return;
-  }
-  void router.push(pageTabs.value.at(-1)?.route ?? "/settings");
 }
 
 function createTerminal() {
-  desktopController.value?.deactivate();
-  if (ui.newTerminalBehavior === "welcome") {
-    deactivateTerminalWorkspace();
-    workspaceTabs.ensurePageTabForRoute("/new");
-    void router.push("/new");
-    return;
-  }
-  if (ui.newTerminalBehavior === "sftpWelcome") {
-    deactivateTerminalWorkspace();
-    workspaceTabs.showFileWelcome();
-    void router.push("/sftp");
-    return;
-  }
-  if (terminalController.value) {
-    terminalController.value.create();
-    return;
-  }
-  workspaceTabs.queueTerminalCreation();
-  void router.push("/terminal");
+  const pending = ui.newTerminalBehavior === "welcome"
+    ? createManagedPageForRoute("/new")
+    : ui.newTerminalBehavior === "sftpWelcome"
+      ? createManagedFileTab("remote")
+      : createManagedTerminalTab(ui.newTerminalBehavior === "localTerminal" ? "local" : "welcome");
+  void pending.catch(openFailure);
 }
 
 function reserveWorkspaceShortcut(event: KeyboardEvent) {
@@ -346,7 +256,7 @@ function dialogOpen() {
 }
 
 function activateRelativeWorkspaceTab(offset: 1 | -1) {
-  const available = items.value.filter((item) => !item.disabled);
+  const available = items.value;
   if (!available.length) return;
   const activeIndex = available.findIndex((item) => item.groupId === activeGroupId.value);
   const nextIndex = activeIndex < 0
@@ -367,35 +277,17 @@ function executeShortcut(command: ShortcutCommand) {
     case "navigation.settings": void router.push("/settings"); break;
     case "navigation.known-hosts": void router.push("/settings?section=knownHosts"); break;
     case "navigation.ssh-identities": void router.push("/settings?section=identities"); break;
-    case "workspace.new":
-      if (!createDisabled.value) createTerminal();
+    case "workspace.new": createTerminal(); break;
+    case "workspace.close":
+      if (activeGroupId.value) closeGroup(activeGroupId.value);
       break;
-    case "workspace.close": {
-      const active = items.value.find((item) => item.groupId === activeGroupId.value);
-      if (active && !active.disabled) closeGroup(active.groupId);
-      break;
-    }
     case "workspace.next": activateRelativeWorkspaceTab(1); break;
     case "workspace.previous": activateRelativeWorkspaceTab(-1); break;
-    case "workspace.new-local": terminalController.value?.runShortcut?.(command.id); break;
-    case "terminal.split-right":
-    case "terminal.split-down":
-    case "terminal.focus-next-pane":
-    case "terminal.focus-previous-pane":
-    case "terminal.close-pane":
-      if (route.path === "/sftp") workspaceTabs.runFileShortcut(command.id);
-      else terminalController.value?.runShortcut?.(command.id);
-      break;
-    case "terminal.toggle-quick-commands": terminalController.value?.toggleQuickCommands(); break;
+    case "workspace.new-local": void createManagedTerminalTab("local").catch(openFailure); break;
     default: {
       const tabMatch = command.id.match(/^workspace\.tab\.([1-9])$/);
-      if (tabMatch) {
-        const index = Number(tabMatch[1]) - 1;
-        const target = items.value[index];
-        if (target && !target.disabled) activateGroup(target.groupId);
-        break;
-      }
-      terminalController.value?.runShortcut?.(command.id);
+      const target = tabMatch ? items.value[Number(tabMatch[1]) - 1] : undefined;
+      if (target) activateGroup(target.groupId);
     }
   }
 }
@@ -407,9 +299,8 @@ function handleWorkspaceShortcut(event: KeyboardEvent) {
   if (isEditableShortcutTarget(event.target) && !modalOpen) return;
   const platform = shortcutPlatform();
   const command = matchShortcut(event, platform, shortcuts.bindingsFor(platform));
+  // Terminal and File Pane commands execute only inside the focused Tab WebView.
   const context = {
-    terminalActive: (route.path === "/terminal" && Boolean(terminalController.value))
-      || (route.path === "/sftp" && Boolean(activeFileTabId.value) && Boolean(command && filePaneShortcutIds.has(command.id))),
     modalOpen,
     shortcutRecording: recording,
   };
@@ -418,30 +309,63 @@ function handleWorkspaceShortcut(event: KeyboardEvent) {
   if (command && isShortcutExecutionAllowed(command, event, context)) executeShortcut(command);
 }
 
+// `/new` is a Page Tab, never a shell page.
 watch(
   () => route.path,
-  (path) => workspaceTabs.ensurePageTabForRoute(path),
+  (path) => {
+    if (path !== "/new") return;
+    void createManagedPageForRoute(path).then((created) => {
+      if (created && route.path === path) {
+        void router.replace(workspaceWindowLabel() === "main" ? "/terminal" : "/workspace-window");
+      }
+    }).catch(openFailure);
+  },
   { immediate: true },
 );
 
 onMounted(() => {
+  mounted = true;
   window.addEventListener("keydown", handleWorkspaceShortcut, { capture: true });
   window.addEventListener("keydown", cancelPointerDrag, { capture: true });
   window.addEventListener("pointermove", pointerMove, { capture: true });
   window.addEventListener("pointerup", pointerUp, { capture: true });
   window.addEventListener("pointercancel", pointerUp, { capture: true });
   if (!isTauri()) return;
+  void listen<DragHover>("workspace-tab-drag-hover", ({ payload }) => {
+    if (payload.active) incomingDrag.value = payload;
+    else if (incomingDrag.value?.nonce === payload.nonce) incomingDrag.value = null;
+  }).then((unlisten) => {
+    if (mounted) stopDragHover = unlisten;
+    else unlisten();
+  }).catch(() => undefined);
   void listen<DragReleased>("workspace-tab-drag-released", ({ payload }) => {
     void dragReleased(payload);
-  }).then((unlisten) => { stopDragReleased = unlisten; }).catch(() => undefined);
+  }).then((unlisten) => {
+    if (mounted) {
+      stopDragReleased = unlisten;
+      dragReleaseReady = true;
+    } else unlisten();
+  }).catch(() => { if (mounted) moveFailure("workspace_tab.drag_listener_unavailable"); });
+  void listen<{ id: string; viewLabel: string; commandId: string }>("workspace-tab-shortcut", ({ payload }) => {
+    if (payload.id !== activeWorkspaceTabViewId.value
+      || workspaceTabViewSummary(payload.id)?.viewLabel !== payload.viewLabel) return;
+    const command = SHORTCUT_COMMANDS.find((item) => item.id === payload.commandId);
+    if (command?.scope === "app" && !dialogOpen()) executeShortcut(command);
+  }).then((unlisten) => { stopChildShortcuts = unlisten; }).catch(() => undefined);
 });
 onBeforeUnmount(() => {
+  mounted = false;
+  stopDragHover?.();
+  incomingDrag.value = null;
   window.removeEventListener("keydown", handleWorkspaceShortcut, { capture: true });
   window.removeEventListener("keydown", cancelPointerDrag, { capture: true });
   window.removeEventListener("pointermove", pointerMove, { capture: true });
   window.removeEventListener("pointerup", pointerUp, { capture: true });
   window.removeEventListener("pointercancel", pointerUp, { capture: true });
   stopDragReleased?.();
+  stopDragReleased = null;
+  dragReleaseReady = false;
+  stopChildShortcuts?.();
   pendingDrag = null;
   if (activeDrag) void cancelWorkspaceTabDrag(activeDrag.nonce).catch(() => undefined);
   activeDrag = null;
@@ -459,13 +383,12 @@ onBeforeUnmount(() => {
     :close-all-label="t('workspaceTabs.closeAll')"
     :close-left-label="t('workspaceTabs.closeLeft')"
     :close-right-label="t('workspaceTabs.closeRight')"
-    :context-menu-label="t('workspaceTabs.actions')"
     :move-to-new-window-label="t('workspaceTabs.moveToNewWindow')"
     :move-to-main-window-label="isTauri() && workspaceWindowLabel() !== 'main' ? t('workspaceTabs.moveToMainWindow') : ''"
     :scroll-backward-label="t('sshTerminal.scrollTabsBackward')"
     :scroll-forward-label="t('sshTerminal.scrollTabsForward')"
-    :create-disabled="createDisabled"
     :drag-enabled="isTauri()"
+    :incoming-drag="Boolean(incomingDrag && !items.some((item) => item.groupId === incomingDrag?.id))"
     @update:model-value="activateGroup"
     @create="createTerminal"
     @close="closeGroup"
@@ -482,12 +405,12 @@ onBeforeUnmount(() => {
         :show-identity="false"
       />
       <NvxIconButton
-        v-if="route.path === '/terminal'"
-        :label="quickCommandsOpen ? t('quickCommands.collapse') : t('quickCommands.show')"
-        @click="terminalController?.toggleQuickCommands()"
+        v-if="activeTerminal"
+        :label="activeTerminal.quickCommandsOpen ? t('quickCommands.collapse') : t('quickCommands.show')"
+        @click="toggleQuickCommands"
       >
         <NvxIcon
-          :icon="quickCommandsOpen ? PanelRightClose : PanelRightOpen"
+          :icon="activeTerminal.quickCommandsOpen ? PanelRightClose : PanelRightOpen"
           :size="20"
         />
       </NvxIconButton>

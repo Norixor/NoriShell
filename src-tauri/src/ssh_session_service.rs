@@ -61,7 +61,7 @@ use norishell_ssh_transport::{
     KeyboardInteractiveChallenge as TransportKeyboardChallenge, ObservedHostKey, PtySize,
     RemoteShell, ShellEvent, TransportError, TransportHeartbeatHandle, VerifyFuture,
 };
-use tauri::{State, ipc::Channel};
+use tauri::{Manager, State, ipc::Channel};
 use tokio::{
     sync::{broadcast, mpsc, oneshot, watch},
     task::AbortHandle,
@@ -2029,12 +2029,28 @@ linearized_request_command!(
 );
 
 #[tauri::command]
-pub async fn terminal_input_focus_change(
+pub async fn terminal_input_focus_change<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
     request: TerminalInputFocusChangeRequest,
     service: State<'_, SshSessionService>,
     telnet: State<'_, crate::telnet_session_service::TelnetSessionService>,
     plugin: State<'_, crate::plugin_terminal_session_service::PluginTerminalSessionService>,
 ) -> CoreResult<TerminalInputFocusChangeResponse> {
+    // A hidden Tab WebView (a background Tab) must never take input focus; clearing is always allowed.
+    if request.target.is_some()
+        && webview
+            .app_handle()
+            .try_state::<crate::workspace_tab_views::WorkspaceTabViews>()
+            .is_some_and(|views| !views.may_take_input(webview.label()))
+    {
+        return Err(crate::core_api_error::core_error(
+            request.meta.request_id.clone(),
+            "terminal_input.view_hidden",
+            ErrorCategory::Conflict,
+            RetryStrategy::Never,
+            "errors.sshSession.staleFocus",
+        ));
+    }
     telnet.ensure_focus_coordinator(service.inner().clone());
     let broker = service.focus_broker();
     let operation_request = request.clone();

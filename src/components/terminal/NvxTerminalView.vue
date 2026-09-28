@@ -76,6 +76,10 @@ let fitAddon: FitAddon | null = null;
 let searchAddon: SearchAddon | null = null;
 let observer: ResizeObserver | null = null;
 let animationFrame = 0;
+// The first xterm fit may happen after a new Tab WebView becomes visible,
+// before this component can receive the shell's visibility event.
+let refreshOnNextFit = true;
+let visibleRefreshFrame = 0;
 let lastRows = 0;
 let lastCols = 0;
 let reducedMotionQuery: MediaQueryList | null = null;
@@ -126,6 +130,11 @@ function applyInteractionOptions() {
   }
 }
 
+function effectiveCursorBlink() {
+  // Reduced motion collapses xterm's CSS blink animation to 0.01ms; keep the cursor visible and still.
+  return ui.terminalCursorBlink && !reducedMotionQuery?.matches;
+}
+
 function terminalTheme() {
   const palette = ui.resolvedTerminalPalette;
   return {
@@ -161,6 +170,10 @@ function fitAt(afterOutputSeq: string) {
     lastRows = terminal.rows;
     lastCols = terminal.cols;
     emit("resize", terminal.rows, terminal.cols);
+  }
+  if (refreshOnNextFit) {
+    refreshOnNextFit = false;
+    terminal.refresh(0, terminal.rows - 1);
   }
   scheduleGhost();
 }
@@ -236,6 +249,22 @@ function scheduleGhost() {
 function scheduleFit() {
   cancelAnimationFrame(animationFrame);
   animationFrame = requestAnimationFrame(fit);
+}
+
+function handleWorkspaceTabVisibility(event: Event) {
+  cancelAnimationFrame(visibleRefreshFrame);
+  if ((event as CustomEvent<boolean>).detail !== true) return;
+  // The child WebView can receive output while hidden at its initial 1x1 size.
+  // Repaint after the native surface has had a frame to become visible;
+  // refreshing in the same frame as show() can leave WebKit's surface blank.
+  refreshOnNextFit = true;
+  scheduleFit();
+  visibleRefreshFrame = requestAnimationFrame(() => {
+    visibleRefreshFrame = requestAnimationFrame(() => {
+      visibleRefreshFrame = 0;
+      terminal?.refresh(0, terminal.rows - 1);
+    });
+  });
 }
 
 function writeBytes(bytes: readonly number[], outputSeq?: string) {
@@ -877,6 +906,10 @@ defineExpose({
 
 onMounted(async () => {
   window.addEventListener("blur", handleWindowBlur);
+  if (typeof window.matchMedia === "function") {
+    reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  }
+  window.addEventListener("norishell:workspace-tab-visibility", handleWorkspaceTabVisibility);
   terminal = new Terminal({
     ...(props.initialOutputGeometry?.[0]
       ? { rows: props.initialOutputGeometry[0].rows, cols: props.initialOutputGeometry[0].cols }
@@ -884,7 +917,7 @@ onMounted(async () => {
     allowProposedApi: true,
     convertEol: false,
     customGlyphs: true,
-    cursorBlink: ui.terminalCursorBlink,
+    cursorBlink: effectiveCursorBlink(),
     cursorStyle: ui.terminalCursorStyle,
     disableStdin: props.readOnly,
     fontFamily: terminalFontCssFamily(ui.terminalFontFamily),
@@ -907,9 +940,11 @@ onMounted(async () => {
   searchAddon = new SearchAddon();
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(searchAddon);
-  if (typeof window.matchMedia === "function") {
-    reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const updateForMotionPreference = () => applyInteractionOptions();
+  if (reducedMotionQuery) {
+    const updateForMotionPreference = () => {
+      applyInteractionOptions();
+      if (terminal) terminal.options.cursorBlink = effectiveCursorBlink();
+    };
     reducedMotionQuery.addEventListener("change", updateForMotionPreference);
     removeReducedMotionListener = () => reducedMotionQuery?.removeEventListener("change", updateForMotionPreference);
   }
@@ -981,8 +1016,6 @@ watch(
     ui.terminalBoldFontWeight,
     ui.terminalLineHeight,
     ui.terminalLetterSpacing,
-    ui.terminalCursorStyle,
-    ui.terminalCursorBlink,
   ] as const,
   async ([
     fontFamily,
@@ -991,8 +1024,6 @@ watch(
     boldFontWeight,
     lineHeight,
     letterSpacing,
-    cursorStyle,
-    cursorBlink,
   ]) => {
     if (!terminal) return;
     terminal.options.fontFamily = terminalFontCssFamily(fontFamily);
@@ -1001,10 +1032,17 @@ watch(
     terminal.options.fontWeightBold = boldFontWeight;
     terminal.options.lineHeight = lineHeight;
     terminal.options.letterSpacing = letterSpacing;
-    terminal.options.cursorStyle = cursorStyle;
-    terminal.options.cursorBlink = cursorBlink;
     await nextTick();
     scheduleFit();
+  },
+);
+
+watch(
+  () => [ui.terminalCursorStyle, ui.terminalCursorBlink] as const,
+  ([cursorStyle]) => {
+    if (!terminal) return;
+    terminal.options.cursorStyle = cursorStyle;
+    terminal.options.cursorBlink = effectiveCursorBlink();
   },
 );
 
@@ -1019,11 +1057,13 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  cancelAnimationFrame(visibleRefreshFrame);
   cancelAnimationFrame(ghostFrame);
   clearGhost();
   ghostWriteListener?.dispose();
   ghostResizeListener?.dispose();
   window.removeEventListener("blur", handleWindowBlur);
+  window.removeEventListener("norishell:workspace-tab-visibility", handleWorkspaceTabVisibility);
   resetSelectionMouseGesture();
   cancelAnimationFrame(animationFrame);
   if (bellFlashTimer !== null) clearTimeout(bellFlashTimer);

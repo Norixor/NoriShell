@@ -10,6 +10,8 @@ import { i18n } from "../locales";
 import { useTipsStore } from "../stores/tips";
 
 const nativeWindows = vi.hoisted(() => ({ open: vi.fn(), listen: vi.fn(), vault: vi.fn() }));
+const terminalNavigation = vi.hoisted(() => ({ open: vi.fn(async () => undefined) }));
+vi.mock("../workspace-tab-shell-action", () => ({ openWorkspaceTerminalHost: terminalNavigation.open }));
 const savedConnections = vi.hoisted(() => ({ changed: undefined as (() => void) | undefined }));
 vi.mock("../tool-windows", () => ({ openToolWindow: nativeWindows.open, onToolWindowChanged: nativeWindows.listen }));
 vi.mock("../saved-connections", () => ({ onSavedConnectionsChanged: vi.fn(async (callback: () => void) => {
@@ -1800,13 +1802,13 @@ describe("HostsView single-Host management contract", () => {
     wrapper.unmount();
   });
 
-  it("navigates to the kept-alive Terminal route with an explicit hostId intent", async () => {
+  it("sends an explicit Host intent to the native Terminal Tab manager", async () => {
     const { router, wrapper } = await mountView();
     await button("Connect")?.click();
     await flushPromises();
 
-    expect(router.currentRoute.value.path).toBe("/terminal");
-    expect(router.currentRoute.value.query).toEqual({ hostId: host.hostId });
+    expect(terminalNavigation.open).toHaveBeenCalledWith({ hostId: host.hostId });
+    expect(router.currentRoute.value.path).toBe("/hosts");
     wrapper.unmount();
   });
 

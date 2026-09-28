@@ -5,7 +5,7 @@ import { takeNativeTransferNavigation, matchesNativeTransferNavigation } from ".
 import { homeDir, sep } from "@tauri-apps/api/path";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Activity, Archive, ArrowUp, Download, Eye, FileArchive, FilePlus2, FolderOpen, FolderPlus, HardDrive, Link2, ListFilter, Pause, Pencil, PlugZap, Plus, Radio, RefreshCw, RotateCcw, Save, Search, Server, ShieldCheck, Square, Terminal, Trash2, X } from "lucide-vue-next";
+import { Activity, Archive, ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Download, Eye, FileArchive, FilePlus2, FolderOpen, FolderPlus, HardDrive, Link2, ListFilter, Pause, Pencil, PlugZap, Plus, Radio, RefreshCw, RotateCcw, Save, Search, Server, ShieldCheck, Terminal, Trash2, Unplug, X } from "lucide-vue-next";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
@@ -49,7 +49,8 @@ import {
   visibleSftpPaneEntries, type SftpPaneDragIntent, type SftpPaneEntry, type SftpPaneState,
 } from "./sftpPaneState";
 import { pendingSftpPluginNavigations, resolveSftpPluginNavigation, takeSftpPluginNavigation } from "./sftpPluginNavigation";
-import { createSftpTerminalLaunch } from "./sftpTerminalLaunch";
+import { shellDirectoryFromSftpPath } from "./sftpTerminalLaunch";
+import { openWorkspaceDirectoryTerminal, openWorkspaceTerminalHost } from "../workspace-tab-shell-action";
 import type { FileTabHandoffSnapshot } from "./fileTabHandoffSnapshot";
 
 interface LocalTrailItem {
@@ -57,6 +58,11 @@ interface LocalTrailItem {
   displayPath: string;
   rememberedPath: string | null;
 }
+type DirectoryLocation =
+  | { kind: "local"; displayPath: string; filesystemPath: string }
+  | { kind: "remote"; pathBytes: number[]; sessionId: string; generation: string };
+interface DirectoryHistory { back: DirectoryLocation[]; forward: DirectoryLocation[] }
+interface PathCrumb { label: string; location: DirectoryLocation; isCurrent?: boolean }
 interface RecursiveDirectoryEndpoint {
   kind: "local" | "remote";
   directoryRef: string;
@@ -134,9 +140,12 @@ const props = withDefaults(defineProps<{
   workspaceTabId?: string;
   initialKind?: "legacy" | "local" | "remote";
   initialHostId?: string | null;
+  initialSessionId?: string | null;
+  initialGeneration?: string | null;
   active?: boolean;
   handoffSnapshot?: FileTabHandoffSnapshot | null;
-}>(), { workspaceTabId: "", initialKind: "legacy", initialHostId: null, active: true, handoffSnapshot: null });
+}>(), { workspaceTabId: "", initialKind: "legacy", initialHostId: null, initialSessionId: null,
+  initialGeneration: null, active: true, handoffSnapshot: null });
 const router = useRouter();
 const tips = useTipsStore();
 const workspaceTabs = useWorkspaceTabsStore();
@@ -167,6 +176,7 @@ const previewTextExtensions = new Set([
 const previewTextNames = new Set(["dockerfile", "makefile", "license", "readme", "hosts", "known_hosts"]);
 const hosts = ref<HostSummary[]>([]);
 const sessions = ref<SftpSessionSummary[]>([]);
+const responseLatencyBySession = reactive<Record<string, number>>({});
 const legacyTransfers = ref<SftpTransferSummary[]>([]);
 const intentTransfers = ref<SftpTransferIntentSummary[]>([]);
 const loading = ref(true);
@@ -226,16 +236,46 @@ const previewTarget = ref<TextPreviewTarget | null>(null);
 const previewMode = ref<"preview" | "tail">("preview");
 const nextCursorByPane = reactive<Record<string, number[] | null>>({});
 const pathDraftByPane = reactive<Record<string, string>>({});
+const pathEditingByPane = reactive<Record<string, boolean>>({});
 const pathSuggestionsOpenByPane = reactive<Record<string, boolean>>({});
 const pathSuggestionIndexByPane = reactive<Record<string, number>>({});
 const searchOpenByPane = reactive<Record<string, boolean>>({});
 const pendingPaneIds = reactive(new Set<string>());
 const localTrailByPane = new Map<string, LocalTrailItem[]>();
 const localFilesystemPathByPane = new Map<string, string>();
-let handoffFrozen = false;
-let handoffCommitted = false;
-let handoffSnapshotSignature: string | null = null;
+const directoryHistoryByPane = reactive<Record<string, DirectoryHistory>>({});
 let sftpViewMounted = false;
+let initialResourceSettled = false;
+let initialResourceSettlement: Promise<void> | null = null;
+
+function settleInitialResource(allowProjection: boolean): Promise<void> {
+  if (initialResourceSettled || !props.workspaceTabId || !props.initialSessionId || props.handoffSnapshot) return Promise.resolve();
+  if (initialResourceSettlement) return initialResourceSettlement;
+  const initialSessionId = props.initialSessionId;
+  const workspaceTabId = props.workspaceTabId;
+  initialResourceSettlement = (async () => {
+    const pane = paneStates[remotePaneId];
+    let safeToProject = Boolean(allowProjection && sftpViewMounted && pane?.endpoint.kind === "remote"
+      && pane.endpoint.sessionId === initialSessionId && pane.endpoint.generation
+      && (!props.initialGeneration || pane.endpoint.generation === props.initialGeneration)
+      && workspaceTabs.fileSessionOwner(initialSessionId) === workspaceTabId);
+    if (!safeToProject) {
+      const snapshot = await fetchSftpSessionSnapshot().catch(() => null);
+      const exact = snapshot?.sessions.find((item) => item.sessionId === initialSessionId);
+      // A finished initial attempt cannot orphan a resource when Core has no
+      // record or explicitly closed it. All other unbound states retain the seed.
+      safeToProject = Boolean(allowProjection && sftpViewMounted && snapshot
+        && (!exact || exact.state === "closed"));
+      if (allowProjection && sftpViewMounted) showOperationFailed();
+    }
+    if (initialResourceSettled) return;
+    initialResourceSettled = true;
+    window.dispatchEvent(new CustomEvent("norishell:initial-resource-settled", {
+      detail: { kind: "file", tabId: workspaceTabId, resourceId: initialSessionId, safeToProject },
+    }));
+  })();
+  return initialResourceSettlement;
+}
 let refreshTimer: number | null = null;
 let stopNativeFileDrop: (() => void) | null = null;
 let previewRequestRevision = 0;
@@ -279,6 +319,9 @@ watch(() => countTerminalPanes(sftpLayout.value), (count) => {
 }, { immediate: true });
 
 const activePane = computed(() => paneStates[activeSftpPaneId.value] ?? null);
+const singlePane = computed(() => countTerminalPanes(sftpLayout.value) === 1 ? activePane.value : null);
+const singleLocalPane = computed(() => singlePane.value?.endpoint.kind === "local" ? singlePane.value : null);
+const singleRemotePane = computed(() => singlePane.value?.endpoint.kind === "remote" ? singlePane.value : null);
 const closeRemotePanePending = computed(() => {
   const paneId = closeRemotePaneTargetId.value;
   return paneId ? paneInteractionPending(paneId) : false;
@@ -356,11 +399,13 @@ const fileUtilityValid = computed(() => {
   } catch { return false }
 });
 
-function showOperationFailed() {
+function showOperationFailed(error?: unknown) {
   tips.show({
     scope: operationFeedbackScope,
     tone: "error",
     title: t("sftp.operationFailed"),
+    message: error instanceof Error && error.message === "workspace_tab.file_cleanup_incomplete"
+      ? error.message : parseCoreApiError(error)?.code,
   });
 }
 function showFileUtilityFailed(error: unknown) {
@@ -432,7 +477,7 @@ function setPaneSearch(pane: SftpPaneState, value: string) {
 
 function sftpPaneKind(pane: TerminalPaneNode) { return pane.terminalId === "local" ? "local" : "remote" }
 function paneStillActive(pane: SftpPaneState, endpointRevision: number) {
-  return sftpViewMounted && !handoffFrozen && paneStates[pane.paneId] === pane && pane.endpointRevision === endpointRevision;
+  return sftpViewMounted && paneStates[pane.paneId] === pane && pane.endpointRevision === endpointRevision;
 }
 async function releaseLocalCapability(capability: SftpLocalDirectoryCapability) {
   await releaseSftpLocalDirectory({
@@ -478,6 +523,21 @@ function paneHost(pane: SftpPaneState) {
 function paneRemoteLabel(pane: SftpPaneState) {
   const parent = sessionForPane(pane)?.parentSshSession;
   return paneHost(pane)?.label ?? (parent ? parentSessionLabels[parent.sessionId] : null) ?? t("sftp.parentConnection");
+}
+function paneRemoteAddress(pane: SftpPaneState) {
+  const host = paneHost(pane);
+  return host ? `${host.normalizedAddress}:${host.port}` : null;
+}
+function paneResponseLatency(pane: SftpPaneState) {
+  const session = sessionForPane(pane);
+  return session?.state === "ready" ? responseLatencyBySession[`${session.sessionId}:${session.generation}`] ?? null : null;
+}
+function paneConnectionStatus(pane: SftpPaneState) {
+  const session = sessionForPane(pane);
+  if (!session) return "";
+  if (session.state !== "ready") return t(`sftp.states.${session.state}`);
+  const latency = paneResponseLatency(pane);
+  return latency === null ? t("sftp.responseLatencyPending") : t("sftp.responseLatency", { latency });
 }
 
 async function consumePluginNavigation() {
@@ -579,7 +639,55 @@ function paneEntries(paneId: string) {
   return pane && paneReady(pane) ? visibleSftpPaneEntries(pane) : [];
 }
 function paneState(paneId: string) { return paneStates[paneId]! }
-function paneInteractionPending(paneId: string) { return handoffFrozen || pendingPaneIds.has(paneId) }
+/** A remote Pane bound to a session offers reconnect until its SFTP session is live again. */
+function paneNeedsReconnect(pane: SftpPaneState) {
+  const session = sessionForPane(pane);
+  return paneHasSession(pane) && (!session || session.state === "failed" || session.state === "closed");
+}
+/** Shared bindings for the single-pane toolbar menu and the per-pane header menu. */
+function paneActionsMenuProps(
+  pane: SftpPaneState,
+  kind: "local" | "remote",
+  canSplitHorizontal: boolean,
+  canSplitVertical: boolean,
+  canClose: boolean,
+) {
+  return {
+    paneId: pane.paneId,
+    kind,
+    ready: paneReady(pane),
+    hasSelection: pane.selectedEntryKeys.length > 0,
+    singleSelection: pane.selectedEntryKeys.length === 1,
+    pending: paneInteractionPending(pane.paneId),
+    showHidden: pane.showHidden,
+    foldersFirst: pane.foldersFirst,
+    canSplitHorizontal,
+    canSplitVertical,
+    canClose,
+  };
+}
+function paneActionsMenuListeners(pane: SftpPaneState, canSplitHorizontal: boolean) {
+  const addDirection = canSplitHorizontal ? "horizontal" : "vertical";
+  const mutate = (kind: "mkdir" | "rename" | "delete") => {
+    activeSftpPaneId.value = pane.paneId;
+    openMutation(kind);
+  };
+  return {
+    chooseFolder: () => chooseLocalFolder(pane),
+    upload: () => uploadFilesFromPicker(pane),
+    download: () => downloadSelectedFromPicker(pane),
+    mkdir: () => mutate("mkdir"),
+    rename: () => mutate("rename"),
+    delete: () => mutate("delete"),
+    toggleShowHidden: () => togglePaneShowHidden(pane),
+    toggleFoldersFirst: () => togglePaneFoldersFirst(pane),
+    split: (direction: TerminalSplitDirection) => splitSftpPane(pane.paneId, direction),
+    addLocal: () => splitSftpPane(pane.paneId, addDirection, "local"),
+    addRemote: () => splitSftpPane(pane.paneId, addDirection, "remote"),
+    close: () => requestCloseSftpPane(pane.paneId),
+  };
+}
+function paneInteractionPending(paneId: string) { return pendingPaneIds.has(paneId) }
 function paneHostId(pane: SftpPaneState) {
   return pane.endpoint.kind === "remote" ? pane.endpoint.hostId ?? "" : "";
 }
@@ -587,7 +695,7 @@ function paneHasSession(pane: SftpPaneState) {
   return pane.endpoint.kind === "remote" && Boolean(pane.endpoint.sessionId);
 }
 function setPaneHostId(pane: SftpPaneState, hostId: string) {
-  if (handoffFrozen || pane.endpoint.kind !== "remote" || pane.endpoint.sessionId) return;
+  if (pane.endpoint.kind !== "remote" || pane.endpoint.sessionId) return;
   replaceSftpPaneEndpoint(pane, { kind: "remote", hostId: hostId || null, sessionId: null, generation: null }, "/", [47]);
 }
 function pathSuggestions(pane: SftpPaneState) {
@@ -642,7 +750,20 @@ function onPathKeydown(event: KeyboardEvent, pane: SftpPaneState) {
     pathSuggestionsOpenByPane[pane.paneId] = false;
     pathSuggestionIndexByPane[pane.paneId] = -1;
     pathDraftByPane[pane.paneId] = pane.directory;
+    pathEditingByPane[pane.paneId] = false;
   }
+}
+async function editPath(pane: SftpPaneState) {
+  pathDraftByPane[pane.paneId] = pane.directory;
+  pathEditingByPane[pane.paneId] = true;
+  await nextTick();
+  sftpRoot.value?.querySelector<HTMLInputElement>(`[data-pane-id="${pane.paneId}"] .sftp-view__command-path input`)?.focus();
+}
+function closePathEditor(pane: SftpPaneState) {
+  pathSuggestionsOpenByPane[pane.paneId] = false;
+  pathSuggestionIndexByPane[pane.paneId] = -1;
+  pathDraftByPane[pane.paneId] = pane.directory;
+  pathEditingByPane[pane.paneId] = false;
 }
 function requestOverwriteConfirmation(displayName: string, kind: "file" | "directory", allowReplaceAll = false) {
   if (overwritePrompt.value) return Promise.resolve<OverwriteDecision>("skip");
@@ -718,13 +839,10 @@ function recoverRemotePane(pane: SftpPaneState) {
 async function openHostInTerminal(pane: SftpPaneState) {
   const host = pane ? paneHost(pane) : null;
   if (!host) return;
-  await router.push({
-    path: "/terminal",
-    query: {
-      hostId: host.hostId,
-      source: "sftp",
-      connectOperationId: crypto.randomUUID(),
-    },
+  await openWorkspaceTerminalHost({
+    hostId: host.hostId,
+    source: "sftp",
+    connectOperationId: crypto.randomUUID(),
   });
 }
 function remotePath(bytes: number[]) { return { bytes } }
@@ -733,9 +851,9 @@ function joinRemoteBytes(parentBytes: number[], name: string) {
   return Array.from(encoder.encode(`${parent === "/" ? "" : parent}/${name}`));
 }
 function parentRemoteBytes(bytes: number[]) {
-  const path = decoder.decode(new Uint8Array(bytes));
-  if (path === "/") return [47];
-  return Array.from(encoder.encode(path.slice(0, path.lastIndexOf("/")) || "/"));
+  if (bytes.length <= 1) return [47];
+  const separatorIndex = bytes.lastIndexOf(47);
+  return separatorIndex > 0 ? bytes.slice(0, separatorIndex) : [47];
 }
 function formatModified(value: number | null) { return value === null ? "—" : modifiedDateFormatter.value.format(new Date(value)) }
 function olderWireSequence(candidate: string, applied: string | null) {
@@ -837,10 +955,10 @@ function splitSftpWorkspaceRight() {
 }
 function closeActiveSftpPane() {
   if (countTerminalPanes(sftpLayout.value) > 1) void requestCloseSftpPane(activeSftpPaneId.value);
-  else void requestCloseFileTab();
+  else void requestCloseFileTab().catch((error: unknown) => showOperationFailed(error));
 }
 function runFileShortcut(commandId: ShortcutCommandId) {
-  if (handoffFrozen || !props.active || !paneStates[activeSftpPaneId.value]) return;
+  if (!props.active || !paneStates[activeSftpPaneId.value]) return;
   switch (commandId) {
     case "terminal.split-right": splitSftpPane(activeSftpPaneId.value, "horizontal", "remote"); break;
     case "terminal.split-down": splitSftpPane(activeSftpPaneId.value, "vertical", "remote"); break;
@@ -865,6 +983,11 @@ function currentTabSessions() {
     seen.add(session.sessionId);
     return [session];
   });
+}
+
+async function disconnectClosedSftpSession(sessionId: string, generation: string): Promise<void> {
+  const result = await disconnectSftpSession({ sessionId, expectedGeneration: generation });
+  if (result.state !== "closed") throw new Error("workspace_tab.file_cleanup_incomplete");
 }
 
 function buildFileTabHandoff(): FileTabHandoffSnapshot {
@@ -894,7 +1017,7 @@ function buildFileTabHandoff(): FileTabHandoffSnapshot {
 }
 
 function captureFileTabHandoff(): FileTabHandoffSnapshot {
-  if (!sftpViewMounted || !navigationReady || handoffFrozen || pendingPaneIds.size
+  if (!sftpViewMounted || !navigationReady || pendingPaneIds.size
     || Object.values(paneStates).some((pane) => pane.loading) || navigationWorking
     || operationPending.value || previewSaving.value || closeFileTabPending.value
     || closeFileTabConfirm.value || overwritePrompt.value || mutationDialog.value
@@ -903,34 +1026,9 @@ function captureFileTabHandoff(): FileTabHandoffSnapshot {
   return buildFileTabHandoff();
 }
 
-function snapshotFileTabHandoff() {
-  const snapshot = captureFileTabHandoff();
-  handoffSnapshotSignature = JSON.stringify(snapshot);
-  return snapshot;
-}
-
-function freezeFileTabHandoff() {
-  if (!handoffSnapshotSignature || JSON.stringify(captureFileTabHandoff()) !== handoffSnapshotSignature) {
-    throw new Error("workspace_tab.file_changed");
-  }
-  handoffFrozen = true;
-  stopPageObservers();
-}
-
-function rollbackFileTabHandoff() {
-  handoffFrozen = false;
-  handoffSnapshotSignature = null;
-  if (props.active && sftpViewMounted) startPageObservers();
-}
-
-function commitFileTabHandoff() {
-  handoffCommitted = true;
-  handoffSnapshotSignature = null;
-}
-
 function observeFileTabHandoff(listener: (snapshot: FileTabHandoffSnapshot) => void) {
   return watch(() => {
-    if (!sftpViewMounted || handoffFrozen || handoffCommitted) return null;
+    if (!sftpViewMounted) return null;
     try { return JSON.stringify(buildFileTabHandoff()); }
     catch { return null; }
   }, (value) => {
@@ -938,15 +1036,26 @@ function observeFileTabHandoff(listener: (snapshot: FileTabHandoffSnapshot) => v
   }, { immediate: true, flush: "post" });
 }
 
-async function requestCloseFileTab(): Promise<boolean> {
-  if (handoffFrozen || !props.workspaceTabId || closeFileTabConfirm.value || closeFileTabPending.value
-    || pendingPaneIds.size || operationPending.value || previewSaving.value) return false;
+/**
+ * Resolves true once the Tab closed and false only when the user cancels the confirmation. Every failure rejects
+ * with its own code so batch and native closes can report it. `confirmed` skips the dialog for batch closes.
+ */
+async function requestCloseFileTab(confirmed = false): Promise<boolean> {
+  if (!props.workspaceTabId || closeFileTabConfirm.value || closeFileTabPending.value
+    || pendingPaneIds.size || operationPending.value || previewSaving.value) throw new Error("workspace_tab.busy");
   if (Object.values(paneStates).some((pane) => pane.endpoint.kind === "remote" && pane.endpoint.sessionId)) {
     try { await refreshSnapshot(); }
-    catch { showOperationFailed(); return false; }
+    catch (error) {
+      showOperationFailed(error);
+      throw error;
+    }
   }
   if (!currentTabSessions().length) {
     workspaceTabs.finishCloseFileTab(props.workspaceTabId);
+    return true;
+  }
+  if (confirmed) {
+    await closeFileTabSessions();
     return true;
   }
   closeFileTabConfirm.value = true;
@@ -960,22 +1069,29 @@ function cancelCloseFileTab() {
   settleFileTabClose = null;
 }
 
-async function confirmCloseFileTab() {
-  if (!props.workspaceTabId || closeFileTabPending.value) return;
+/** Disconnects this Tab's sessions and closes it; a failure is shown and rethrown with its code. */
+async function closeFileTabSessions(): Promise<void> {
+  if (!props.workspaceTabId || closeFileTabPending.value) throw new Error("workspace_tab.busy");
   closeFileTabPending.value = true;
   try {
     for (const session of currentTabSessions()) {
-      await disconnectSftpSession({ sessionId: session.sessionId, expectedGeneration: session.generation });
+      await disconnectClosedSftpSession(session.sessionId, session.generation);
     }
     closeFileTabConfirm.value = false;
     const resolve = settleFileTabClose;
     settleFileTabClose = null;
     workspaceTabs.finishCloseFileTab(props.workspaceTabId);
     resolve?.(true);
-  } catch {
-    showOperationFailed();
+  } catch (error) {
+    showOperationFailed(error);
     await refreshSnapshot().catch(() => undefined);
+    throw error;
   } finally { closeFileTabPending.value = false; }
+}
+
+async function confirmCloseFileTab() {
+  // The dialog stays open after a failure that closeFileTabSessions already reported.
+  await closeFileTabSessions().catch(() => undefined);
 }
 function resizeSftpSplit(splitId: string, ratio: number) { sftpLayout.value = setTerminalSplitRatio(sftpLayout.value, splitId, ratio) }
 
@@ -1020,6 +1136,8 @@ async function finalizeCloseSftpPane(paneId: string, allowPanePending = false) {
   delete paneStates[paneId];
   delete nextCursorByPane[paneId];
   delete pathDraftByPane[paneId];
+  delete pathEditingByPane[paneId];
+  delete directoryHistoryByPane[paneId];
   delete pathSuggestionsOpenByPane[paneId];
   delete pathSuggestionIndexByPane[paneId];
   delete searchOpenByPane[paneId];
@@ -1046,17 +1164,14 @@ async function disconnectAndCloseRemotePane() {
     || paneInteractionPending(paneId)) return;
   pendingPaneIds.add(paneId);
   try {
-    await disconnectSftpSession({
-      sessionId: session.sessionId,
-      expectedGeneration: session.generation,
-    });
+    await disconnectClosedSftpSession(session.sessionId, session.generation);
     if (props.workspaceTabId) workspaceTabs.releaseFileSession(session.sessionId, props.workspaceTabId);
     closeRemotePaneTargetId.value = null;
     await finalizeCloseSftpPane(paneId, true);
     await refreshSnapshot();
-  } catch {
+  } catch (error) {
     pane.error = t("sftp.closeRemotePaneFailed");
-    showOperationFailed();
+    showOperationFailed(error);
   } finally {
     pendingPaneIds.delete(paneId);
   }
@@ -1064,15 +1179,20 @@ async function disconnectAndCloseRemotePane() {
 
 const recordedReadySessionGenerations = new Set<string>();
 async function refreshSnapshot() {
-  if (handoffFrozen || !canUseDesktopCore()) return;
+  if (!canUseDesktopCore()) return;
   const [sessionSnapshot, intentSnapshot] = await Promise.all([fetchSftpSessionSnapshot(), fetchSftpTransferIntentSnapshot()]);
-  if (handoffFrozen || !sftpViewMounted) return;
+  if (!sftpViewMounted) return;
   const completedTransferIds = [
     ...sessionSnapshot.transfers.filter((transfer) => transfer.state === "completed").map((transfer) => transfer.transferId),
     ...intentSnapshot.transfers.filter((transfer) => transfer.state === "completed").map((transfer) => transfer.transferId),
   ];
   if (!olderWireSequence(sessionSnapshot.snapshotRevision, appliedSessionSnapshotRevision)) {
     appliedSessionSnapshotRevision = sessionSnapshot.snapshotRevision;
+    const readyGenerations = new Set(sessionSnapshot.sessions.filter((session) => session.state === "ready")
+      .map((session) => `${session.sessionId}:${session.generation}`));
+    for (const key of Object.keys(responseLatencyBySession)) {
+      if (!readyGenerations.has(key)) delete responseLatencyBySession[key];
+    }
     sessions.value = sessionSnapshot.sessions;
     legacyTransfers.value = sessionSnapshot.transfers;
     for (const pane of Object.values(paneStates)) {
@@ -1147,7 +1267,7 @@ async function refreshCompletedTransferTargets(transferIds: string[]) {
   }
   await Promise.all([...panes.values()].map((pane) => pane.endpoint.kind === "local" ? loadLocalDirectory(pane) : loadRemoteDirectory(pane)));
 }
-async function connectRemotePane(pane: SftpPaneState) {
+async function connectRemotePane(pane: SftpPaneState, initialSessionId?: string) {
   const host = paneHost(pane);
   if (!pane || pane.endpoint.kind !== "remote" || !host || paneInteractionPending(pane.paneId)) return;
   activeSftpPaneId.value = pane.paneId;
@@ -1165,7 +1285,8 @@ async function connectRemotePane(pane: SftpPaneState) {
       const recoverVault = sessions.value.find((session) => session.sessionId === sessionId)?.failure?.code === "vaultLocked";
       if (!await ensureHostVault(host.hostId, host.stateVersion, recoverVault) || !stillCurrent()) return;
     }
-    const summary = reusableSession ?? await openSftpSession({ hostId: host.hostId, expectedHostStateVersion: host.stateVersion, ...(sessionId ? { sessionId } : {}) });
+    const summary = reusableSession ?? await openSftpSession({ hostId: host.hostId, expectedHostStateVersion: host.stateVersion,
+      ...((sessionId ?? initialSessionId) ? { sessionId: (sessionId ?? initialSessionId)! } : {}) });
     if (!stillCurrent()) return;
     if (!attachSftpSessionToPane(pane, summary)) throw new Error("sessionOwnedByAnotherFileTab");
     await refreshSnapshot();
@@ -1182,11 +1303,11 @@ async function disconnectRemotePane(pane: SftpPaneState) {
   pendingPaneIds.add(pane.paneId);
   try {
     await cancelRemotePaneCursor(pane);
-    await disconnectSftpSession({ sessionId: pane.endpoint.sessionId, expectedGeneration: pane.endpoint.generation });
+    await disconnectClosedSftpSession(pane.endpoint.sessionId, pane.endpoint.generation);
     if (props.workspaceTabId) workspaceTabs.releaseFileSession(pane.endpoint.sessionId, props.workspaceTabId);
     replaceSftpPaneEndpoint(pane, { kind: "remote", hostId: pane.endpoint.hostId, sessionId: null, generation: null }, "/", [47]);
     await refreshSnapshot();
-  } catch { showOperationFailed(); } finally { pendingPaneIds.delete(pane.paneId) }
+  } catch (error) { showOperationFailed(error); } finally { pendingPaneIds.delete(pane.paneId) }
 }
 
 function mapRemoteEntry(entry: { entryRef: string; path: { bytes: number[] }; displayName: string; kind: SftpPaneEntry["kind"]; size: number | null; modifiedAtUnixMs: number | null; permissionBits: number | null }): SftpPaneEntry {
@@ -1210,6 +1331,7 @@ async function loadRemoteDirectory(
   await cancelRemotePaneCursor(pane);
   const fence = beginSftpPaneDirectoryLoad(pane);
   try {
+    const requestStartedAt = performance.now();
     const listing = await listSftpDirectory({ sessionId, expectedGeneration: generation, path: remotePath(pathBytes), cursor: null, pageSize: 256 });
     if (!paneStillActive(pane, fence.endpointRevision)) {
       if (listing.nextCursor) {
@@ -1226,6 +1348,7 @@ async function loadRemoteDirectory(
     }
     const applied = completeSftpPaneDirectoryLoad(pane, fence, decoder.decode(new Uint8Array(listing.path.bytes)), listing.entries.map(mapRemoteEntry), listing.path.bytes, listing.directoryRef);
     if (applied) {
+      responseLatencyBySession[`${sessionId}:${generation}`] = Math.max(1, Math.round(performance.now() - requestStartedAt));
       nextCursorByPane[pane.paneId] = listing.nextCursor;
       pathDraftByPane[pane.paneId] = pane.directory;
       if (hostId) rememberSuccessfulRemoteDirectory(pane, hostId, listing.path.bytes);
@@ -1261,10 +1384,20 @@ async function loadLocalDirectory(pane: SftpPaneState, allowPanePending = false)
       return true;
     }
     return false;
-  } catch {
-    if (paneStillActive(pane, fence.endpointRevision)) failSftpPaneDirectoryLoad(pane, fence, t("sftp.paneLoadFailed"));
+  } catch (error) {
+    if (paneStillActive(pane, fence.endpointRevision)) {
+      failSftpPaneDirectoryLoad(pane, fence, localDirectoryFailureMessage(error, "sftp.paneLoadFailed"));
+    }
     return false;
   }
+}
+
+/** Pane message for a failed local directory call; a timeout also raises a tip because the Pane stays usable. */
+function localDirectoryFailureMessage(error: unknown, fallbackKey: string): string {
+  const timedOut = parseCoreApiError(error)?.code === "sftp.local_directory_timeout";
+  const message = t(timedOut ? "sftp.pathOpenTimeout" : fallbackKey);
+  if (timedOut) tips.show({ scope: operationFeedbackScope, tone: "error", title: message });
+  return message;
 }
 
 async function firstLocalDirectoryPage(capability: SftpLocalDirectoryCapability) {
@@ -1295,6 +1428,85 @@ function applyFirstLocalDirectoryPage(
 
 function samePathBytes(left: number[], right: number[]) {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+function currentDirectoryLocation(pane: SftpPaneState): DirectoryLocation | null {
+  if (pane.endpoint.kind === "local") return pane.endpoint.directoryRef
+    ? { kind: "local", displayPath: pane.directory, filesystemPath: localFilesystemPathByPane.get(pane.paneId) ?? pane.directory }
+    : null;
+  return pane.endpoint.sessionId && pane.endpoint.generation && pane.remoteDirectoryPathBytes
+    ? { kind: "remote", pathBytes: [...pane.remoteDirectoryPathBytes], sessionId: pane.endpoint.sessionId, generation: pane.endpoint.generation }
+    : null;
+}
+function sameDirectoryLocation(left: DirectoryLocation, right: DirectoryLocation) {
+  return left.kind === right.kind && (left.kind === "local" && right.kind === "local"
+    ? left.filesystemPath === right.filesystemPath
+    : left.kind === "remote" && right.kind === "remote" && left.sessionId === right.sessionId
+      && left.generation === right.generation && samePathBytes(left.pathBytes, right.pathBytes));
+}
+function recordDirectoryNavigation(pane: SftpPaneState, previous: DirectoryLocation | null) {
+  const current = currentDirectoryLocation(pane);
+  if (!previous || !current || sameDirectoryLocation(previous, current)) return;
+  const history = directoryHistoryByPane[pane.paneId] ?? { back: [], forward: [] };
+  history.back.push(previous);
+  if (history.back.length > 50) history.back.shift();
+  history.forward = [];
+  directoryHistoryByPane[pane.paneId] = history;
+}
+function canNavigateHistory(pane: SftpPaneState, direction: "back" | "forward") {
+  const target = directoryHistoryByPane[pane.paneId]?.[direction].at(-1);
+  if (!target || !paneReady(pane) || paneInteractionPending(pane.paneId) || pane.loading) return false;
+  if (target.kind === "local") return pane.endpoint.kind === "local";
+  return pane.endpoint.kind === "remote" && pane.endpoint.sessionId === target.sessionId
+    && pane.endpoint.generation === target.generation;
+}
+function pathCrumbs(pane: SftpPaneState): PathCrumb[] {
+  const current = currentDirectoryLocation(pane);
+  if (!current) return [];
+  if (current.kind === "remote") {
+    const bytes = current.pathBytes;
+    const crumbs: PathCrumb[] = [{ label: "/", location: { ...current, pathBytes: [47] } }];
+    for (let start = 1; start < bytes.length;) {
+      let end = bytes.indexOf(47, start);
+      if (end < 0) end = bytes.length;
+      if (end > start) crumbs.push({
+        label: decoder.decode(new Uint8Array(bytes.slice(start, end))),
+        location: { ...current, pathBytes: bytes.slice(0, end) },
+      });
+      start = end + 1;
+    }
+    crumbs[crumbs.length - 1]!.isCurrent = true;
+    return crumbs;
+  }
+  const path = current.displayPath;
+  const separator = path.includes("\\") && !path.includes("/") ? "\\" : "/";
+  const root = /^[A-Za-z]:[\\/]/.exec(path)?.[0] ?? (path.startsWith("~/") ? "~/" : path.startsWith("/") ? "/" : "");
+  if (!root) return [{ label: path, location: current, isCurrent: true }];
+  const crumbs: PathCrumb[] = [{ label: root, location: { kind: "local", displayPath: root, filesystemPath: root } }];
+  let prefix = root;
+  for (const segment of path.slice(root.length).split(/[\\/]+/).filter(Boolean)) {
+    prefix = prefix.endsWith(separator) ? `${prefix}${segment}` : `${prefix}${separator}${segment}`;
+    crumbs.push({ label: segment, location: { kind: "local", displayPath: prefix, filesystemPath: prefix } });
+  }
+  crumbs[crumbs.length - 1]!.isCurrent = true;
+  return crumbs;
+}
+function parentLocalDisplayPath(path: string) {
+  const root = /^[A-Za-z]:[\\/]/.exec(path)?.[0] ?? (path.startsWith("~/") ? "~/" : path.startsWith("/") ? "/" : "");
+  if (!root || path === root) return null;
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const separatorIndex = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return separatorIndex < root.length ? root : trimmed.slice(0, separatorIndex);
+}
+function parentLocalLocation(pane: SftpPaneState): DirectoryLocation | null {
+  if (pane.endpoint.kind !== "local") return null;
+  const displayPath = parentLocalDisplayPath(pane.directory);
+  if (displayPath) return { kind: "local", displayPath, filesystemPath: displayPath };
+  const filesystemPath = parentLocalDisplayPath(localFilesystemPathByPane.get(pane.paneId) ?? "");
+  return filesystemPath ? { kind: "local", displayPath: filesystemPath, filesystemPath } : null;
+}
+function canGoUp(pane: SftpPaneState) {
+  return pane.endpoint.kind === "remote" ? pane.directory !== "/"
+    : Boolean(localTrailByPane.get(pane.paneId)?.length || parentLocalLocation(pane));
 }
 
 async function loadInitialRemoteDirectory(pane: SftpPaneState, allowPanePending = false) {
@@ -1343,7 +1555,9 @@ async function loadMore(pane: SftpPaneState) {
         await cancelSftpDirectoryListing({ sessionId: listing.sessionId, expectedGeneration: listing.generation, path: listing.path, cursor: listing.nextCursor }).catch(() => undefined);
       }
     }
-  } catch { pane.error = t("sftp.paneLoadFailed") } finally { if (pane.endpointRevision === endpointRevision) pane.loading = false }
+  } catch (error) {
+    pane.error = localDirectoryFailureMessage(error, "sftp.paneLoadFailed");
+  } finally { if (pane.endpointRevision === endpointRevision) pane.loading = false }
 }
 async function chooseLocalFolder(pane: SftpPaneState) {
   if (paneInteractionPending(pane.paneId)) return;
@@ -1357,6 +1571,7 @@ async function chooseLocalFolder(pane: SftpPaneState) {
     try {
       const listing = await firstLocalDirectoryPage(capability);
       if (!paneStillActive(pane, endpointRevision)) return;
+      const previous = currentDirectoryLocation(pane);
       await releaseLocalPane(pane.paneId);
       if (!paneStillActive(pane, endpointRevision)) return;
       localTrailByPane.set(pane.paneId, []);
@@ -1364,28 +1579,21 @@ async function chooseLocalFolder(pane: SftpPaneState) {
       replaceSftpPaneEndpoint(pane, { kind: "local", directoryRef: capability.directoryRef, revision: capability.revision, displayPath: selected }, selected, null, capability.directoryRef);
       adopted = true;
       applyFirstLocalDirectoryPage(pane, listing);
+      recordDirectoryNavigation(pane, previous);
     } finally {
       if (!adopted) await releaseLocalCapability(capability);
     }
-  } catch {
-    if (paneStillActive(pane, endpointRevision)) pane.error = t("sftp.paneLoadFailed");
+  } catch (error) {
+    if (paneStillActive(pane, endpointRevision)) {
+      pane.error = localDirectoryFailureMessage(error, "sftp.paneLoadFailed");
+    }
   } finally {
     pendingPaneIds.delete(pane.paneId);
   }
 }
 
-async function openTypedPath(pane: SftpPaneState) {
-  const requested = (pathDraftByPane[pane.paneId] ?? pane.directory).trim();
-  if (!requested || paneInteractionPending(pane.paneId)) {
-    pathDraftByPane[pane.paneId] = pane.directory;
-    return;
-  }
-  if (pane.endpoint.kind === "remote") {
-    if (!paneReady(pane)) return;
-    await loadRemoteDirectory(pane, Array.from(encoder.encode(requested)));
-    pathDraftByPane[pane.paneId] = pane.directory;
-    return;
-  }
+async function openLocalPath(pane: SftpPaneState, requested: string, displayPath = requested, record = true) {
+  if (pane.endpoint.kind !== "local" || !paneReady(pane) || paneInteractionPending(pane.paneId)) return false;
   pendingPaneIds.add(pane.paneId);
   const endpointRevision = pane.endpointRevision;
   try {
@@ -1405,31 +1613,51 @@ async function openTypedPath(pane: SftpPaneState) {
     let adopted = false;
     try {
       const listing = await firstLocalDirectoryPage(capability);
-      if (!paneStillActive(pane, endpointRevision)) return;
+      if (!paneStillActive(pane, endpointRevision)) return false;
+      const previous = currentDirectoryLocation(pane);
       await releaseLocalPane(pane.paneId);
-      if (!paneStillActive(pane, endpointRevision)) return;
+      if (!paneStillActive(pane, endpointRevision)) return false;
       localTrailByPane.set(pane.paneId, []);
       setRememberableLocalPath(pane, capability);
       replaceSftpPaneEndpoint(
         pane,
-        { kind: "local", directoryRef: capability.directoryRef, revision: capability.revision, displayPath: requested },
-        requested,
+        { kind: "local", directoryRef: capability.directoryRef, revision: capability.revision, displayPath },
+        displayPath,
         null,
         capability.directoryRef,
       );
       adopted = true;
       applyFirstLocalDirectoryPage(pane, listing);
+      if (record) recordDirectoryNavigation(pane, previous);
+      return true;
     } finally {
       if (!adopted) await releaseLocalCapability(capability);
     }
-  } catch {
+  } catch (error) {
     if (paneStillActive(pane, endpointRevision)) {
-      pane.error = t("sftp.pathOpenFailed");
+      pane.error = localDirectoryFailureMessage(error, "sftp.pathOpenFailed");
       pathDraftByPane[pane.paneId] = pane.directory;
     }
+    return false;
   } finally {
     pendingPaneIds.delete(pane.paneId);
   }
+}
+async function openTypedPath(pane: SftpPaneState) {
+  const requested = (pathDraftByPane[pane.paneId] ?? pane.directory).trim();
+  if (!requested || paneInteractionPending(pane.paneId)) {
+    pathDraftByPane[pane.paneId] = pane.directory;
+    return;
+  }
+  if (pane.endpoint.kind === "remote") {
+    if (!paneReady(pane)) return;
+    const previous = currentDirectoryLocation(pane);
+    if (await loadRemoteDirectory(pane, Array.from(encoder.encode(requested)))) recordDirectoryNavigation(pane, previous);
+  } else {
+    await openLocalPath(pane, requested);
+  }
+  pathDraftByPane[pane.paneId] = pane.directory;
+  pathEditingByPane[pane.paneId] = false;
 }
 
 function localDefaultDisplayPath() {
@@ -1506,7 +1734,11 @@ async function initializeDefaultLocalPaneSafely(pane: SftpPaneState) {
 async function activateEntry(pane: SftpPaneState, entry: SftpPaneEntry) {
   if (paneInteractionPending(pane.paneId)) return;
   if (entry.kind !== "directory") { selectSftpPaneEntry(pane, entry.key); return }
-  if (pane.endpoint.kind === "remote" && entry.remotePathBytes) { await loadRemoteDirectory(pane, entry.remotePathBytes); return }
+  if (pane.endpoint.kind === "remote" && entry.remotePathBytes) {
+    const previous = currentDirectoryLocation(pane);
+    if (await loadRemoteDirectory(pane, entry.remotePathBytes)) recordDirectoryNavigation(pane, previous);
+    return;
+  }
   if (pane.endpoint.kind === "local" && pane.endpoint.directoryRef && pane.endpoint.revision) {
     const endpointRevision = pane.endpointRevision;
     pendingPaneIds.add(pane.paneId);
@@ -1516,6 +1748,7 @@ async function activateEntry(pane: SftpPaneState, entry: SftpPaneEntry) {
       try {
         const listing = await firstLocalDirectoryPage(child);
         if (!paneStillActive(pane, endpointRevision)) return;
+        const previous = currentDirectoryLocation(pane);
         const trail = localTrailByPane.get(pane.paneId) ?? [];
         trail.push({
           capability: {
@@ -1532,11 +1765,14 @@ async function activateEntry(pane: SftpPaneState, entry: SftpPaneEntry) {
         replaceSftpPaneEndpoint(pane, { kind: "local", directoryRef: child.directoryRef, revision: child.revision, displayPath: child.displayName }, joinLocalDisplayPath(pane.directory, child.displayName), null, child.directoryRef);
         adopted = true;
         applyFirstLocalDirectoryPage(pane, listing);
+        recordDirectoryNavigation(pane, previous);
       } finally {
         if (!adopted) await releaseLocalCapability(child);
       }
-    } catch {
-      if (paneStillActive(pane, endpointRevision)) pane.error = t("sftp.localDirectoryOpenFailed");
+    } catch (error) {
+      if (paneStillActive(pane, endpointRevision)) {
+        pane.error = localDirectoryFailureMessage(error, "sftp.localDirectoryOpenFailed");
+      }
     } finally {
       pendingPaneIds.delete(pane.paneId);
     }
@@ -1544,17 +1780,57 @@ async function activateEntry(pane: SftpPaneState, entry: SftpPaneEntry) {
 }
 async function goUp(pane: SftpPaneState) {
   if (paneInteractionPending(pane.paneId)) return;
-  if (pane.endpoint.kind === "remote") { await loadRemoteDirectory(pane, parentRemoteBytes(pane.remoteDirectoryPathBytes ?? [47])); return }
+  if (pane.endpoint.kind === "remote") {
+    const previous = currentDirectoryLocation(pane);
+    if (await loadRemoteDirectory(pane, parentRemoteBytes(pane.remoteDirectoryPathBytes ?? [47]))) recordDirectoryNavigation(pane, previous);
+    return;
+  }
   const trail = localTrailByPane.get(pane.paneId) ?? [];
-  const parent = trail.pop();
-  if (!parent || !pane.endpoint.directoryRef || !pane.endpoint.revision) return;
+  const parent = trail.at(-1);
+  if (!parent) {
+    const location = parentLocalLocation(pane);
+    if (location) await navigateToLocation(pane, location);
+    return;
+  }
+  if (!pane.endpoint.directoryRef || !pane.endpoint.revision) return;
+  const endpointRevision = pane.endpointRevision;
   const current = { directoryRef: pane.endpoint.directoryRef, expectedRevision: pane.endpoint.revision };
-  localTrailByPane.set(pane.paneId, trail);
-  if (parent.rememberedPath) localFilesystemPathByPane.set(pane.paneId, parent.rememberedPath);
-  else localFilesystemPathByPane.delete(pane.paneId);
-  replaceSftpPaneEndpoint(pane, { kind: "local", directoryRef: parent.capability.directoryRef, revision: parent.capability.revision, displayPath: parent.capability.displayName }, parent.displayPath, null, parent.capability.directoryRef);
-  await releaseSftpLocalDirectory(current).catch(() => undefined);
-  await loadLocalDirectory(pane);
+  pendingPaneIds.add(pane.paneId);
+  try {
+    const listing = await firstLocalDirectoryPage(parent.capability);
+    if (!paneStillActive(pane, endpointRevision)) return;
+    const previous = currentDirectoryLocation(pane);
+    localTrailByPane.set(pane.paneId, trail.slice(0, -1));
+    if (parent.rememberedPath) localFilesystemPathByPane.set(pane.paneId, parent.rememberedPath);
+    else localFilesystemPathByPane.delete(pane.paneId);
+    replaceSftpPaneEndpoint(pane, { kind: "local", directoryRef: parent.capability.directoryRef, revision: parent.capability.revision, displayPath: parent.capability.displayName }, parent.displayPath, null, parent.capability.directoryRef);
+    applyFirstLocalDirectoryPage(pane, listing);
+    recordDirectoryNavigation(pane, previous);
+    await releaseSftpLocalDirectory(current).catch(() => undefined);
+  } catch {
+    if (paneStillActive(pane, endpointRevision)) pane.error = t("sftp.localDirectoryOpenFailed");
+  } finally {
+    pendingPaneIds.delete(pane.paneId);
+  }
+}
+async function navigateToLocation(pane: SftpPaneState, location: DirectoryLocation, record = true) {
+  const previous = currentDirectoryLocation(pane);
+  if (!previous || sameDirectoryLocation(previous, location)) return true;
+  if (location.kind === "local") return openLocalPath(pane, location.filesystemPath, location.displayPath, record);
+  if (pane.endpoint.kind !== "remote" || pane.endpoint.sessionId !== location.sessionId
+    || pane.endpoint.generation !== location.generation) return false;
+  const loaded = await loadRemoteDirectory(pane, location.pathBytes);
+  if (loaded && record) recordDirectoryNavigation(pane, previous);
+  return loaded;
+}
+async function navigateHistory(pane: SftpPaneState, direction: "back" | "forward") {
+  if (!canNavigateHistory(pane, direction)) return;
+  const history = directoryHistoryByPane[pane.paneId]!;
+  const target = history[direction].at(-1)!;
+  const previous = currentDirectoryLocation(pane);
+  if (!previous || !await navigateToLocation(pane, target, false)) return;
+  history[direction].pop();
+  history[direction === "back" ? "forward" : "back"].push(previous);
 }
 
 async function uploadFilesFromPicker(target: SftpPaneState) {
@@ -2118,13 +2394,14 @@ function runSftpContextAction(action: "refresh" | "mkdir" | "touch" | "preview" 
       showOperationFailed();
       return;
     }
-    const operationId = createSftpTerminalLaunch(menu.hostId, menu.directoryPathBytes);
-    if (!operationId) {
+    const hostId = menu.hostId;
+    const pathBytes = menu.directoryPathBytes;
+    // Only a lossless absolute UTF-8 path can become the Shell `cd` of the new Tab.
+    if (shellDirectoryFromSftpPath(pathBytes) === null) {
       tips.show({ scope: operationFeedbackScope, tone: "error", title: t("sftp.openTerminalUnsupportedPath") });
       return;
     }
-    void router.push({ path: "/terminal", query: { hostId: menu.hostId, source: "sftpDirectory", connectOperationId: operationId } })
-      .catch(() => showOperationFailed());
+    void openWorkspaceDirectoryTerminal(hostId, pathBytes).catch(() => showOperationFailed());
   } else if (action === "refresh") refreshPane(pane);
   else if (action === "preview") void previewSelectedFile(pane);
   else if (action === "tail") void previewSelectedFile(pane, "tail");
@@ -2772,10 +3049,7 @@ onMounted(async () => {
   if (props.workspaceTabId) removeFileController = workspaceTabs.registerFileController(props.workspaceTabId, {
     requestClose: requestCloseFileTab,
     runShortcut: runFileShortcut,
-    snapshotHandoff: snapshotFileTabHandoff,
-    freezeHandoff: freezeFileTabHandoff,
-    rollbackHandoff: rollbackFileTabHandoff,
-    commitHandoff: commitFileTabHandoff,
+    snapshotHandoff: captureFileTabHandoff,
     observeHandoffSnapshot: observeFileTabHandoff,
   });
   if (canUseDesktopCore()) {
@@ -2812,11 +3086,29 @@ onMounted(async () => {
           }
         }
       }
-    } else if (pane?.endpoint.kind === "remote" && props.initialHostId) {
-      const host = hostList.find((item) => item.hostId === props.initialHostId);
-      if (host) {
+    } else if (pane?.endpoint.kind === "remote"
+      && (props.initialHostId || (props.initialSessionId && props.initialGeneration))) {
+      // An exact session/generation handoff must attach that session; a Host-only launch may adopt the named
+      // session of the same Host or connect a new one.
+      const exact = Boolean(props.initialSessionId && props.initialGeneration);
+      const initialSession = props.initialSessionId
+        ? sessions.value.find((item) => item.sessionId === props.initialSessionId
+          && (!exact || item.generation === props.initialGeneration))
+        : undefined;
+      if (!exact) {
+        const host = hostList.find((item) => item.hostId === props.initialHostId);
+        if (!host) throw new Error("workspace_tab.initial_sftp_host_unavailable");
         replaceSftpPaneEndpoint(pane, { kind: "remote", hostId: host.hostId, sessionId: null, generation: null }, "/", [47]);
-        await connectRemotePane(pane);
+      }
+      if (initialSession) {
+        if ((!exact && initialSession.hostId !== props.initialHostId) || !attachSftpSessionToPane(pane, initialSession)) {
+          throw new Error("workspace_tab.initial_sftp_session_mismatch");
+        }
+        if (initialSession.state === "ready") await loadInitialRemoteDirectory(pane, true);
+      } else if (exact) {
+        throw new Error("workspace_tab.initial_sftp_session_unavailable");
+      } else {
+        await connectRemotePane(pane, props.initialSessionId ?? undefined);
       }
     } else if (props.initialKind === "legacy" && pane?.endpoint.kind === "remote" && !pane.endpoint.hostId && hostList[0] && !pendingSftpPluginNavigations.value.length) {
       const existingSession = unclaimedSftpSessionForHost(hostList[0].hostId, true);
@@ -2831,7 +3123,10 @@ onMounted(async () => {
         generation: null,
       }, "/", [47]);
     }
-  } catch { showOperationFailed(); } finally { navigationReady = true; loading.value = false; revealRoute(); }
+  } catch { showOperationFailed(); } finally {
+    await settleInitialResource(true);
+    navigationReady = true; loading.value = false; revealRoute();
+  }
 });
 onActivated(() => {
   if (!sftpViewMounted || !props.active) return;
@@ -2885,6 +3180,7 @@ watch(() => props.active, (active) => {
   }
 });
 onBeforeUnmount(() => {
+  void settleInitialResource(false);
   workspaceResizeObserver?.disconnect();
   removeFileController?.();
   settleFileTabClose?.(false);
@@ -2898,7 +3194,7 @@ onBeforeUnmount(() => {
   settleOverwriteConfirmation("skip");
   for (const paneId of Object.keys(paneStates)) {
     void cancelRemotePaneCursor(paneStates[paneId]);
-    if (!handoffCommitted) void releaseLocalPane(paneId);
+    void releaseLocalPane(paneId);
   }
 });
 </script>
@@ -2908,15 +3204,44 @@ onBeforeUnmount(() => {
     ref="sftpRoot"
     class="sftp-view"
   >
-    <header class="sftp-view__topbar">
+    <header
+      class="sftp-view__topbar"
+      :class="{ 'sftp-view__topbar--local': singleLocalPane, 'sftp-view__topbar--split': !singlePane }"
+    >
       <div class="sftp-view__title">
         <NvxIcon
-          :icon="FolderOpen"
+          v-if="singlePane"
+          :icon="activePane?.endpoint.kind === 'local' ? HardDrive : Server"
           :size="20"
-        /><h1>{{ t("sftp.title") }}</h1>
+        />
+        <strong
+          v-if="singlePane"
+          :title="activePane?.endpoint.kind === 'remote' && paneHasSession(activePane) ? paneRemoteLabel(activePane) : undefined"
+        >
+          {{ activePane?.endpoint.kind === "local" ? t("sftp.localPane") : activePane?.endpoint.kind === "remote" && paneHasSession(activePane) ? paneRemoteLabel(activePane) : t("fileWorkspace.remotePane") }}
+        </strong>
+        <NvxStatusLabel
+          v-if="singleRemotePane && sessionForPane(singleRemotePane)"
+          class="sftp-view__topbar-status"
+          :tone="stateTone(sessionForPane(singleRemotePane)!.state)"
+          :title="paneSessionFailure(singleRemotePane) ? sessionFailureLabel(paneSessionFailure(singleRemotePane)!.code) : sessionForPane(singleRemotePane)!.state === 'ready' ? t('sftp.responseLatencyHint') : undefined"
+        >
+          {{ paneConnectionStatus(singleRemotePane) }}
+        </NvxStatusLabel>
+        <span
+          v-if="singleRemotePane && paneRemoteAddress(singleRemotePane)"
+          class="sftp-view__topbar-address"
+          :title="paneRemoteAddress(singleRemotePane) ?? undefined"
+        >{{ paneRemoteAddress(singleRemotePane) }}</span>
+        <span
+          v-if="singlePane"
+          class="sftp-view__title-divider"
+          aria-hidden="true"
+        />
         <NvxButton
           size="sm"
           variant="ghost"
+          class="sftp-view__new-tab"
           @click="workspaceTabs.showFileWelcome()"
         >
           <NvxIcon
@@ -3149,6 +3474,7 @@ onBeforeUnmount(() => {
         </section>
       </div>
       <NvxTerminalPaneControls
+        class="sftp-view__pane-toolbar"
         :show-layout-actions="true"
         :show-plugin-slot="false"
         :can-split-horizontal="!!paneStates[activeSftpPaneId] && !paneInteractionPending(activeSftpPaneId) && canSplitSftpPane(activeSftpPaneId, 'horizontal')"
@@ -3158,7 +3484,44 @@ onBeforeUnmount(() => {
         @split="splitSftpPane(activeSftpPaneId, $event, 'remote')"
         @split-workspace-right="splitSftpWorkspaceRight"
         @close="closeActiveSftpPane"
-      />
+      >
+        <template
+          v-if="singlePane"
+          #default
+        >
+          <template v-if="singleRemotePane && paneHasSession(singleRemotePane)">
+            <NvxIconButton
+              v-if="paneNeedsReconnect(singleRemotePane)"
+              :label="paneConnectionLabel(singleRemotePane)"
+              size="sm"
+              :disabled="loading || !paneHostId(singleRemotePane) || paneInteractionPending(singleRemotePane.paneId)"
+              @click="recoverRemotePane(singleRemotePane)"
+            >
+              <NvxIcon
+                :icon="PlugZap"
+                :size="16"
+              />
+            </NvxIconButton>
+            <NvxIconButton
+              v-else
+              :label="t('sftp.disconnect')"
+              size="sm"
+              :disabled="paneInteractionPending(singleRemotePane.paneId)"
+              @click="disconnectRemotePane(singleRemotePane)"
+            >
+              <NvxIcon
+                :icon="Unplug"
+                :size="16"
+              />
+            </NvxIconButton>
+          </template>
+          <NvxSftpPaneActionsMenu
+            class="sftp-view__topbar-more"
+            v-bind="paneActionsMenuProps(singlePane, singlePane.endpoint.kind, canSplitSftpPane(singlePane.paneId, 'horizontal'), canSplitSftpPane(singlePane.paneId, 'vertical'), false)"
+            v-on="paneActionsMenuListeners(singlePane, canSplitSftpPane(singlePane.paneId, 'horizontal'))"
+          />
+        </template>
+      </NvxTerminalPaneControls>
     </header>
     <section class="sftp-view__browser">
       <NvxTerminalSplitTree
@@ -3175,9 +3538,12 @@ onBeforeUnmount(() => {
           <section
             v-if="paneStates[pane.paneId]"
             class="sftp-view__pane"
-            :class="{ 'is-drop-target': dropPaneId === pane.paneId }"
+            :class="{ 'is-drop-target': dropPaneId === pane.paneId, 'is-single-pane': Boolean(singlePane) }"
           >
-            <header class="sftp-view__pane-header">
+            <header
+              v-if="!singlePane"
+              class="sftp-view__pane-header"
+            >
               <div class="sftp-view__pane-identity">
                 <NvxIcon
                   :icon="sftpPaneKind(pane) === 'local' ? HardDrive : Server"
@@ -3188,28 +3554,21 @@ onBeforeUnmount(() => {
                 v-if="sftpPaneKind(pane) === 'remote' && paneHasSession(paneState(pane.paneId))"
                 class="sftp-view__pane-endpoint"
               >
-                <NvxSelect
-                  v-if="paneHasSession(paneState(pane.paneId)) && (!sessionForPane(paneState(pane.paneId))?.parentSshSession || paneHostId(paneState(pane.paneId)))"
-                  :model-value="paneHostId(paneState(pane.paneId))"
-                  class="sftp-view__host-control"
-                  :options="hostOptions"
-                  :disabled="paneHasSession(paneState(pane.paneId)) || paneInteractionPending(pane.paneId)"
-                  :aria-label="t('sftp.paneHost')"
-                  @update:model-value="setPaneHostId(paneState(pane.paneId), $event)"
-                />
                 <span
-                  v-else
-                  class="sftp-view__parent-label"
-                >{{ paneRemoteLabel(paneState(pane.paneId)) }}</span>
+                  v-if="paneRemoteAddress(paneState(pane.paneId))"
+                  class="sftp-view__pane-address"
+                  :title="paneRemoteAddress(paneState(pane.paneId)) ?? undefined"
+                >{{ paneRemoteAddress(paneState(pane.paneId)) }}</span>
                 <NvxStatusLabel
                   v-if="sessionForPane(paneState(pane.paneId))"
+                  class="sftp-view__pane-status"
                   :tone="stateTone(sessionForPane(paneState(pane.paneId))!.state)"
-                  :title="paneSessionFailure(paneState(pane.paneId)) ? sessionFailureLabel(paneSessionFailure(paneState(pane.paneId))!.code) : undefined"
+                  :title="paneSessionFailure(paneState(pane.paneId)) ? sessionFailureLabel(paneSessionFailure(paneState(pane.paneId))!.code) : sessionForPane(paneState(pane.paneId))!.state === 'ready' ? t('sftp.responseLatencyHint') : undefined"
                 >
-                  {{ t(`sftp.states.${sessionForPane(paneState(pane.paneId))!.state}`) }}
+                  {{ paneConnectionStatus(paneState(pane.paneId)) }}
                 </NvxStatusLabel>
                 <NvxButton
-                  v-if="paneHasSession(paneState(pane.paneId)) && (!sessionForPane(paneState(pane.paneId)) || ['failed', 'closed'].includes(sessionForPane(paneState(pane.paneId))!.state))"
+                  v-if="paneNeedsReconnect(paneState(pane.paneId))"
                   size="sm"
                   :loading="paneInteractionPending(pane.paneId)"
                   :disabled="loading || !paneHostId(paneState(pane.paneId)) || paneInteractionPending(pane.paneId)"
@@ -3220,46 +3579,24 @@ onBeforeUnmount(() => {
                     :size="16"
                   />{{ paneConnectionLabel(paneState(pane.paneId)) }}
                 </NvxButton>
-                <NvxButton
+                <NvxIconButton
                   v-else
+                  :label="t('sftp.disconnect')"
                   size="sm"
-                  variant="ghost"
-                  :loading="paneInteractionPending(pane.paneId)"
                   :disabled="paneInteractionPending(pane.paneId)"
                   @click="disconnectRemotePane(paneState(pane.paneId))"
                 >
                   <NvxIcon
-                    :icon="Square"
+                    :icon="Unplug"
                     :size="16"
-                  />{{ t("sftp.disconnect") }}
-                </NvxButton>
+                  />
+                </NvxIconButton>
               </div>
               <div class="sftp-view__pane-controls">
                 <NvxSftpPaneActionsMenu
-                  :pane-id="pane.paneId"
                   class="sftp-view__pane-actions-menu"
-                  :kind="sftpPaneKind(pane)"
-                  :ready="paneReady(paneState(pane.paneId))"
-                  :has-selection="paneState(pane.paneId).selectedEntryKeys.length > 0"
-                  :single-selection="paneState(pane.paneId).selectedEntryKeys.length === 1"
-                  :pending="paneInteractionPending(pane.paneId)"
-                  :show-hidden="paneState(pane.paneId).showHidden"
-                  :folders-first="paneState(pane.paneId).foldersFirst"
-                  :can-split-horizontal="canSplitHorizontal"
-                  :can-split-vertical="canSplitVertical"
-                  :can-close="countTerminalPanes(sftpLayout) > 1"
-                  @choose-folder="chooseLocalFolder(paneState(pane.paneId))"
-                  @upload="uploadFilesFromPicker(paneState(pane.paneId))"
-                  @download="downloadSelectedFromPicker(paneState(pane.paneId))"
-                  @mkdir="activeSftpPaneId = pane.paneId; openMutation('mkdir')"
-                  @rename="activeSftpPaneId = pane.paneId; openMutation('rename')"
-                  @delete="activeSftpPaneId = pane.paneId; openMutation('delete')"
-                  @toggle-show-hidden="togglePaneShowHidden(paneState(pane.paneId))"
-                  @toggle-folders-first="togglePaneFoldersFirst(paneState(pane.paneId))"
-                  @split="splitSftpPane(pane.paneId, $event)"
-                  @add-local="splitSftpPane(pane.paneId, canSplitHorizontal ? 'horizontal' : 'vertical', 'local')"
-                  @add-remote="splitSftpPane(pane.paneId, canSplitHorizontal ? 'horizontal' : 'vertical', 'remote')"
-                  @close="requestCloseSftpPane(pane.paneId)"
+                  v-bind="paneActionsMenuProps(paneState(pane.paneId), sftpPaneKind(pane), canSplitHorizontal, canSplitVertical, countTerminalPanes(sftpLayout) > 1)"
+                  v-on="paneActionsMenuListeners(paneState(pane.paneId), canSplitHorizontal)"
                 />
               </div>
             </header>
@@ -3267,11 +3604,33 @@ onBeforeUnmount(() => {
               <NvxIconButton
                 :label="t('sftp.up')"
                 size="sm"
-                :disabled="paneInteractionPending(pane.paneId) || !paneReady(paneState(pane.paneId)) || (sftpPaneKind(pane) === 'remote' ? paneState(pane.paneId).directory === '/' : !(localTrailByPane.get(pane.paneId)?.length))"
+                :disabled="paneInteractionPending(pane.paneId) || !paneReady(paneState(pane.paneId)) || !canGoUp(paneState(pane.paneId))"
                 @click="goUp(paneState(pane.paneId))"
               >
                 <NvxIcon
                   :icon="ArrowUp"
+                  :size="16"
+                />
+              </NvxIconButton>
+              <NvxIconButton
+                :label="t('sftp.back')"
+                size="sm"
+                :disabled="!canNavigateHistory(paneState(pane.paneId), 'back')"
+                @click="navigateHistory(paneState(pane.paneId), 'back')"
+              >
+                <NvxIcon
+                  :icon="ArrowLeft"
+                  :size="16"
+                />
+              </NvxIconButton>
+              <NvxIconButton
+                :label="t('sftp.forward')"
+                size="sm"
+                :disabled="!canNavigateHistory(paneState(pane.paneId), 'forward')"
+                @click="navigateHistory(paneState(pane.paneId), 'forward')"
+              >
+                <NvxIcon
+                  :icon="ArrowRight"
                   :size="16"
                 />
               </NvxIconButton>
@@ -3281,16 +3640,55 @@ onBeforeUnmount(() => {
                   :icon="FolderOpen"
                   :size="16"
                 />
+                <div
+                  v-show="!pathEditingByPane[pane.paneId]"
+                  class="sftp-view__breadcrumbs"
+                >
+                  <template
+                    v-for="(crumb, index) in pathCrumbs(paneState(pane.paneId))"
+                    :key="index"
+                  >
+                    <NvxIcon
+                      v-if="index > 0"
+                      :icon="ChevronRight"
+                      :size="16"
+                      aria-hidden="true"
+                    />
+                    <button
+                      type="button"
+                      :title="crumb.label"
+                      :disabled="paneInteractionPending(pane.paneId) || !paneReady(paneState(pane.paneId)) || crumb.isCurrent"
+                      @click="navigateToLocation(paneState(pane.paneId), crumb.location)"
+                    >
+                      {{ crumb.label }}
+                    </button>
+                  </template>
+                </div>
                 <NvxInput
+                  v-show="pathEditingByPane[pane.paneId]"
                   :model-value="pathDraftByPane[pane.paneId] ?? paneState(pane.paneId).directory"
                   :aria-label="sftpPaneKind(pane) === 'local' ? t('sftp.localPath') : t('sftp.remotePath')"
                   :disabled="paneInteractionPending(pane.paneId) || (sftpPaneKind(pane) === 'remote' && !paneReady(paneState(pane.paneId)))"
                   @focus="pathSuggestionsOpenByPane[pane.paneId] = true"
+                  @blur="closePathEditor(paneState(pane.paneId))"
                   @update:model-value="updatePathDraft(paneState(pane.paneId), $event)"
                   @keydown="onPathKeydown($event, paneState(pane.paneId))"
                 />
+                <button
+                  v-show="!pathEditingByPane[pane.paneId]"
+                  type="button"
+                  class="sftp-view__edit-path"
+                  :aria-label="t('sftp.editPath')"
+                  :disabled="paneInteractionPending(pane.paneId) || !paneReady(paneState(pane.paneId))"
+                  @click="editPath(paneState(pane.paneId))"
+                >
+                  <NvxIcon
+                    :icon="Pencil"
+                    :size="16"
+                  />
+                </button>
                 <ul
-                  v-if="pathSuggestionsOpenByPane[pane.paneId] && pathSuggestions(paneState(pane.paneId)).length"
+                  v-if="pathEditingByPane[pane.paneId] && pathSuggestionsOpenByPane[pane.paneId] && pathSuggestions(paneState(pane.paneId)).length"
                   class="sftp-view__path-suggestions"
                   role="listbox"
                   :aria-label="t('sftp.localPath')"
@@ -3352,7 +3750,7 @@ onBeforeUnmount(() => {
                 <NvxSelect
                   v-model="paneState(pane.paneId).sort"
                   :options="sortOptions"
-                  :aria-label="t('sftp.sort')"
+                  :aria-label="t(sftpPaneKind(pane) === 'local' ? 'sftp.sortLocal' : 'sftp.sort')"
                   :popup-min-width="160"
                 />
                 <NvxIcon
@@ -3368,14 +3766,14 @@ onBeforeUnmount(() => {
               <span>{{ t("sftp.nameColumn") }}<small
                 v-if="paneState(pane.paneId).selectedEntryKeys.length"
                 class="sftp-view__selection-count"
-              > · {{ t("sftp.selectedItems", { count: paneState(pane.paneId).selectedEntryKeys.length }) }}</small></span><span>{{ t("sftp.sizeColumn") }}</span><span>{{ t("sftp.modifiedColumn") }}</span>
+              > · {{ t("sftp.selectedItems", { count: paneState(pane.paneId).selectedEntryKeys.length }) }}</small></span><span>{{ t("sftp.modifiedColumn") }}</span><span>{{ t("sftp.sizeColumn") }}</span><span>{{ t("sftp.typeColumn") }}</span>
             </div>
             <div
               class="sftp-view__entries"
               role="listbox"
               aria-multiselectable="true"
-              :aria-label="t('sftp.remoteFiles')"
-              :title="t('sftp.multiSelectHint')"
+              :aria-label="t(sftpPaneKind(pane) === 'local' ? 'sftp.localFiles' : 'sftp.remoteFiles')"
+              :title="t(sftpPaneKind(pane) === 'local' ? 'sftp.multiSelectHintLocal' : 'sftp.multiSelectHint')"
               @contextmenu="openSftpContextMenu($event, paneState(pane.paneId))"
             >
               <button
@@ -3398,8 +3796,9 @@ onBeforeUnmount(() => {
                 <span class="sftp-view__entry-name"><NvxIcon
                   :icon="sftpEntryIcon(entry)"
                   :size="16"
+                  :class="{ 'sftp-view__folder-icon': entry.kind === 'directory' }"
                 /><span>{{ entry.displayName }}</span></span>
-                <small>{{ entry.kind === "file" && entry.size !== null ? t("sftp.bytes", { count: entry.size }) : t(`sftp.entryKinds.${entry.kind}`) }}</small><small>{{ formatModified(entry.modifiedAtUnixMs) }}</small>
+                <small>{{ formatModified(entry.modifiedAtUnixMs) }}</small><small>{{ entry.kind === "file" && entry.size !== null ? t("sftp.bytes", { count: entry.size }) : "-" }}</small><small>{{ t(`sftp.entryKinds.${entry.kind}`) }}</small>
               </button>
               <div
                 v-if="paneState(pane.paneId).error && (sftpPaneKind(pane) === 'local' || sessionForPane(paneState(pane.paneId))?.state === 'ready')"
@@ -4045,18 +4444,25 @@ onBeforeUnmount(() => {
 <style scoped>
 .sftp-view { display:flex; flex-direction:column; width:100%; height:100%; min-width:0; min-height:0; overflow:hidden; background:var(--nvx-color-bg-surface); }
 .sftp-view__topbar,.sftp-view__title,.sftp-view__pane-header,.sftp-view__pane-header>div,.sftp-view__pane-controls,.sftp-view__commandbar,.sftp-view__command-path,.sftp-view__transfers>header,.sftp-view__transfers>header>div,.sftp-view__transfer-title,.sftp-view__transfer-actions { display:flex; gap:var(--nvx-space-2); align-items:center; }
-.sftp-view__topbar { position:relative; z-index:var(--nvx-z-sticky); display:grid; flex:0 0 auto; grid-template-columns:max-content 1fr max-content; align-items:center; gap:var(--nvx-space-3); min-height:56px; padding:var(--nvx-space-2) var(--nvx-space-4); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); background:var(--nvx-color-bg-surface); }
-.sftp-view__title { min-width:0; }.sftp-view__title h1 { margin:0; font-size:var(--nvx-font-size-md); white-space:nowrap; }.sftp-view__host-control { flex:1 1 220px; width:min(300px,100%); min-width:150px; }.sftp-view__transfer-toggle { position:relative; overflow:hidden; white-space:nowrap; }.sftp-view__transfer-toggle-percent { color:var(--nvx-color-accent); font-variant-numeric:tabular-nums; }.sftp-view__transfer-toggle-track { position:absolute; right:var(--nvx-space-2); bottom:2px; left:var(--nvx-space-2); height:2px; overflow:hidden; border-radius:var(--nvx-radius-sm); background:var(--nvx-color-border-subtle); }.sftp-view__transfer-toggle-track>span { display:block; height:100%; background:var(--nvx-color-accent); }
-.sftp-view__transfer-activity { position:relative; justify-self:end; }
+.sftp-view__topbar { position:relative; z-index:var(--nvx-z-sticky); display:flex; flex:0 0 auto; align-items:center; gap:var(--nvx-space-3); min-height:56px; padding:var(--nvx-space-2) var(--nvx-space-4); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); background:var(--nvx-color-bg-surface); }
+.sftp-view__title { flex:0 1 auto; min-width:0; white-space:nowrap; }.sftp-view__title>:deep(svg) { flex:0 0 auto; }.sftp-view__title strong { flex:0 0 auto; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__title-divider { flex:0 0 var(--nvx-border-width); align-self:stretch; min-height:24px; margin-inline:var(--nvx-space-1); background:var(--nvx-color-border); }.sftp-view__new-tab { flex:0 0 auto; white-space:nowrap; }.sftp-view__topbar-status { flex:0 0 auto; font-variant-numeric:tabular-nums; }.sftp-view__topbar-address { flex:0 0 auto; max-width:220px; overflow:hidden; color:var(--nvx-color-text-secondary); font-size:var(--nvx-font-size-sm); text-overflow:ellipsis; white-space:nowrap; }.sftp-view__topbar-more { flex:0 0 auto; }.sftp-view__transfer-toggle { position:relative; overflow:hidden; white-space:nowrap; }.sftp-view__transfer-toggle-percent { color:var(--nvx-color-accent); font-variant-numeric:tabular-nums; }.sftp-view__transfer-toggle-track { position:absolute; right:var(--nvx-space-2); bottom:2px; left:var(--nvx-space-2); height:2px; overflow:hidden; border-radius:var(--nvx-radius-sm); background:var(--nvx-color-border-subtle); }.sftp-view__transfer-toggle-track>span { display:block; height:100%; background:var(--nvx-color-accent); }
+.sftp-view__transfer-activity { position:relative; flex:0 0 auto; margin-inline-start:auto; }
+.sftp-view__topbar--split .sftp-view__transfer-activity { margin-inline-start:0; }
+.sftp-view__topbar--split .sftp-view__pane-toolbar { margin-inline-start:auto; }
+.sftp-view__topbar:not(.sftp-view__topbar--split) .sftp-view__pane-toolbar :deep(.terminal-pane-controls__group + .terminal-pane-controls__separator) { display:none; }
 .sftp-view__browser { display:block; flex:1 1 auto; min-width:0; min-height:0; overflow:hidden; background:var(--nvx-color-bg-surface); }
 .sftp-view__workspace { width:100%; height:100%; min-width:0; min-height:0; --nvx-color-terminal-bg:var(--nvx-color-bg-surface); --nvx-color-terminal-pane-active-border:var(--nvx-color-border-strong); }
 .sftp-view__pane { container-name:sftp-file-pane; container-type:inline-size; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:auto auto auto minmax(0,1fr); width:100%; height:100%; min-width:0; min-height:0; overflow:hidden; background:var(--nvx-color-bg-surface); }.sftp-view__pane.is-drop-target { box-shadow:inset 0 0 0 2px var(--nvx-color-accent); background:var(--nvx-color-accent-soft); }
-.sftp-view__pane-header { min-height:50px; padding:var(--nvx-space-2) var(--nvx-space-3); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); }.sftp-view__pane-identity { min-width:112px; }.sftp-view__pane-identity strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__pane-endpoint { flex:1 1 auto; min-width:0; justify-content:flex-end; }.sftp-view__pane-controls { flex:0 0 auto; }.sftp-view__pane-actions-menu { display:inline-flex; }
+.sftp-view__pane.is-single-pane { grid-template-rows:auto auto minmax(0,1fr); }
+.sftp-view__pane-header { min-height:50px; padding:var(--nvx-space-2) var(--nvx-space-3); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); white-space:nowrap; }.sftp-view__pane-identity { flex:0 1 auto; min-width:0; max-width:38%; }.sftp-view__pane-identity>:deep(svg) { flex:0 0 auto; }.sftp-view__pane-identity strong { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__pane-endpoint { flex:1 1 auto; min-width:0; justify-content:flex-end; }.sftp-view__pane-address { flex:0 1 auto; min-width:0; overflow:hidden; color:var(--nvx-color-text-secondary); font-size:var(--nvx-font-size-sm); text-overflow:ellipsis; }.sftp-view__pane-status { flex:0 0 auto; font-variant-numeric:tabular-nums; }.sftp-view__pane-controls { flex:0 0 auto; }.sftp-view__pane-actions-menu { display:inline-flex; }
 .sftp-view__commandbar { position:relative; min-height:48px; padding:var(--nvx-space-1) var(--nvx-space-3); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border-subtle); }
 .sftp-view__command-separator { flex:0 0 1px; align-self:stretch; min-height:24px; margin-block:var(--nvx-space-1); background:var(--nvx-color-border-subtle); }
 .sftp-view__command-path { position:relative; flex:1 1 auto; min-width:96px; height:var(--nvx-control-height-sm); padding-inline:var(--nvx-space-2); border:var(--nvx-border-width) solid var(--nvx-color-border); border-radius:var(--nvx-radius-sm); background:var(--nvx-color-bg-surface); }
 .sftp-view__command-path>:deep(svg) { flex:0 0 auto; color:var(--nvx-color-text-secondary); }
 .sftp-view__command-path>:deep(.nvx-input) { min-width:0; height:calc(var(--nvx-control-height-sm) - 2px); min-height:calc(var(--nvx-control-height-sm) - 2px); padding:0; border:0; border-radius:0; background:transparent; box-shadow:none; }
+.sftp-view__breadcrumbs { display:flex; flex:1 1 auto; align-items:center; gap:var(--nvx-space-1); min-width:0; overflow:auto hidden; scrollbar-width:none; white-space:nowrap; }.sftp-view__breadcrumbs::-webkit-scrollbar { display:none; }
+.sftp-view__breadcrumbs>:deep(svg) { flex:0 0 auto; color:var(--nvx-color-text-tertiary); }.sftp-view__breadcrumbs>button,.sftp-view__edit-path { flex:0 0 auto; padding:2px var(--nvx-space-1); border:0; border-radius:var(--nvx-radius-xs); background:transparent; color:var(--nvx-color-text-secondary); font:inherit; cursor:pointer; }.sftp-view__breadcrumbs>button:hover:not(:disabled),.sftp-view__edit-path:hover:not(:disabled) { background:var(--nvx-color-bg-hover); color:var(--nvx-color-text-primary); }.sftp-view__breadcrumbs>button:disabled { color:var(--nvx-color-text-primary); cursor:default; }.sftp-view__breadcrumbs>button:focus-visible,.sftp-view__edit-path:focus-visible { outline:var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring); }
+.sftp-view__edit-path { display:inline-flex; align-items:center; justify-content:center; }
 .sftp-view__command-path:focus-within { border-color:var(--nvx-color-accent); box-shadow:0 0 0 var(--nvx-focus-ring-width) var(--nvx-color-focus-ring); }
 .sftp-view__path-suggestions { position:absolute; z-index:var(--nvx-z-popover); top:calc(100% + var(--nvx-space-2)); left:0; width:max(220px,100%); max-width:min(360px,calc(100cqw - 24px)); max-height:224px; margin:0; padding:var(--nvx-space-1); overflow:auto; border:var(--nvx-border-width) solid var(--nvx-color-border); border-radius:var(--nvx-radius-sm); background:var(--nvx-color-bg-surface); box-shadow:var(--nvx-shadow-overlay); list-style:none; }
 .sftp-view__path-suggestions button { width:100%; min-height:32px; padding:0 var(--nvx-space-2); overflow:hidden; border:0; border-radius:var(--nvx-radius-xs); background:transparent; color:var(--nvx-color-text-primary); font:inherit; text-align:start; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__path-suggestions button:hover,.sftp-view__path-suggestions button.is-active { background:var(--nvx-color-bg-hover); }.sftp-view__path-suggestions button:focus-visible { outline:var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring); }
@@ -4069,10 +4475,11 @@ onBeforeUnmount(() => {
 .sftp-view__command-sort :deep(.nvx-select__trigger:hover:not(:disabled)) { background:var(--nvx-color-bg-hover); }
 .sftp-view__command-sort :deep(.nvx-select__value),.sftp-view__command-sort :deep(.nvx-select__chevron) { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 .sftp-view__command-sort>svg { position:absolute; inset:50% auto auto 50%; pointer-events:none; transform:translate(-50%,-50%); color:var(--nvx-color-text-secondary); }
-.sftp-view__columns,.sftp-view__entries>button { display:grid; grid-template-columns:minmax(160px,1fr) minmax(84px,.28fr) minmax(112px,.36fr); gap:var(--nvx-space-3); align-items:center; }.sftp-view__columns { min-height:28px; padding:0 var(--nvx-space-3); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); color:var(--nvx-color-text-tertiary); font-size:var(--nvx-font-size-xs); }
+.sftp-view__columns,.sftp-view__entries>button { display:grid; grid-template-columns:minmax(160px,1fr) minmax(112px,.32fr) minmax(72px,.2fr) minmax(80px,.22fr); gap:var(--nvx-space-3); align-items:center; }.sftp-view__columns { min-height:28px; padding:0 var(--nvx-space-3); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); color:var(--nvx-color-text-tertiary); font-size:var(--nvx-font-size-xs); }
 .sftp-view__entries { min-height:0; overflow:auto; }.sftp-view__entries>button { width:100%; min-height:34px; padding:0 var(--nvx-space-3); border:0; border-bottom:var(--nvx-border-width) solid var(--nvx-color-border-subtle); background:transparent; color:var(--nvx-color-text-primary); text-align:start; }.sftp-view__entries>button:hover { background:var(--nvx-color-bg-hover); }.sftp-view__entries>button.is-selected { background:var(--nvx-color-accent-soft); }.sftp-view__entries>button:focus-visible { outline:var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring); outline-offset:-2px; }
 .sftp-view__selection-count { font:inherit; color:var(--nvx-color-accent); }
 .sftp-view__entry-name { display:flex; gap:var(--nvx-space-2); align-items:center; min-width:0; }.sftp-view__entry-name span,.sftp-view__entries small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__entries small { color:var(--nvx-color-text-secondary); font-variant-numeric:tabular-nums; }.sftp-view__entries>p { margin:0; padding:var(--nvx-space-4); color:var(--nvx-color-text-secondary); }
+.sftp-view__folder-icon { flex:0 0 auto; fill:var(--nvx-color-accent); color:var(--nvx-color-accent); }
 .sftp-view__pane-error { display:grid; justify-items:start; gap:var(--nvx-space-2); padding:var(--nvx-space-4); color:var(--nvx-color-text-secondary); }.sftp-view__pane-error p { margin:0; }
 .sftp-view__empty-remote { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:var(--nvx-space-4); min-height:100%; padding:var(--nvx-space-6); color:var(--nvx-color-text-secondary); text-align:center; }
 .sftp-view__empty-remote>svg { color:var(--nvx-color-text-tertiary); }
@@ -4091,25 +4498,16 @@ onBeforeUnmount(() => {
 .sftp-view__preview { display:grid; place-items:center; min-height:280px; max-height:min(62vh,560px); overflow:auto; border:var(--nvx-border-width) solid var(--nvx-color-border); border-radius:var(--nvx-radius-sm); background:var(--nvx-color-bg-subtle); }.sftp-view__preview>p { margin:0; color:var(--nvx-color-text-secondary); }.sftp-view__preview img { display:block; max-width:100%; max-height:min(62vh,560px); object-fit:contain; }
 .sftp-view__preview.is-text { display:flex; flex-direction:column; align-items:stretch; width:100%; height:min(62vh,500px); overflow:hidden; background:var(--nvx-color-bg-surface); }.sftp-view__preview-toolbar { display:flex; flex:0 0 auto; align-items:center; gap:var(--nvx-space-2); min-height:44px; padding:var(--nvx-space-2) var(--nvx-space-3); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); }.sftp-view__preview-toolbar>span:first-child { margin-inline-end:auto; color:var(--nvx-color-text-secondary); font-size:var(--nvx-font-size-sm); }.sftp-view__preview.is-text>:deep(.nvx-inline-notice) { flex:0 0 auto; margin:var(--nvx-space-2); }.sftp-view__code-editor { flex:1 1 auto; min-height:0; }
 .sftp-view__transfers { position:absolute; inset-block-start:calc(100% + var(--nvx-space-2)); inset-inline-end:0; z-index:var(--nvx-z-popover); display:grid; gap:var(--nvx-space-2); width:min(500px,calc(100vw - 112px)); max-height:min(500px,calc(100vh - 132px)); padding:var(--nvx-space-3); overflow:auto; border:var(--nvx-border-width) solid var(--nvx-color-border); border-radius:var(--nvx-radius-md); background:var(--nvx-color-bg-surface); box-shadow:var(--nvx-shadow-overlay); }.sftp-view__transfers.is-empty { width:min(360px,calc(100vw - 112px)); }.sftp-view__transfers>header { justify-content:space-between; }.sftp-view__transfers>header>div { min-width:0; }.sftp-view__transfers h2 { margin:0; font-size:var(--nvx-font-size-md); }.sftp-view__transfers header span { color:var(--nvx-color-text-tertiary); font-size:var(--nvx-font-size-xs); white-space:nowrap; }.sftp-view__transfer-empty { margin:0; color:var(--nvx-color-text-secondary); }.sftp-view__transfer { display:grid; gap:var(--nvx-space-1); min-width:0; padding-top:var(--nvx-space-2); border-top:var(--nvx-border-width) solid var(--nvx-color-border-subtle); }.sftp-view__transfer-title { min-width:0; }.sftp-view__transfer-title strong { margin-inline-end:auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__transfer-meta { display:flex; flex-wrap:wrap; gap:var(--nvx-space-2); color:var(--nvx-color-text-secondary); font-size:var(--nvx-font-size-xs); font-variant-numeric:tabular-nums; }.sftp-view__transfer-meta:empty { display:none; }.sftp-view__transfer-actions { flex-wrap:wrap; justify-content:flex-end; }
-@container sftp-file-pane (max-width:620px) {
-  .sftp-view__pane-header { display:grid; grid-template-columns:minmax(0,1fr) max-content; }
-  .sftp-view__pane-identity { grid-column:1; }
-  .sftp-view__pane-controls { grid-column:2; grid-row:1; }
-  .sftp-view__pane-endpoint { grid-column:1/-1; grid-row:2; flex-wrap:wrap; justify-content:flex-start; }
-  .sftp-view__host-control { flex:1 1 180px; width:auto; }
-}
 @container sftp-file-pane (max-width:480px) {
   .sftp-view__pane-header,.sftp-view__commandbar { padding-inline:var(--nvx-space-2); }
   .sftp-view__pane-controls { gap:var(--nvx-space-1); }
   .sftp-view__columns,.sftp-view__entries>button { grid-template-columns:minmax(0,1fr) minmax(72px,.32fr); gap:var(--nvx-space-2); padding-inline:var(--nvx-space-2); }
-  .sftp-view__columns>:nth-child(3),.sftp-view__entries>button>:nth-child(3) { display:none; }
+  .sftp-view__columns>:nth-child(2),.sftp-view__entries>button>:nth-child(2),.sftp-view__columns>:nth-child(4),.sftp-view__entries>button>:nth-child(4) { display:none; }
 }
 @container sftp-file-pane (max-width:340px) {
-  .sftp-view__pane-endpoint { flex-wrap:wrap; }
-  .sftp-view__pane-endpoint>:deep(.nvx-status-label) { order:-1; }
   .sftp-view__columns,.sftp-view__entries>button { grid-template-columns:minmax(0,1fr); }
-  .sftp-view__columns>:nth-child(2),.sftp-view__entries>button>:nth-child(2) { display:none; }
+  .sftp-view__columns>:nth-child(3),.sftp-view__entries>button>:nth-child(3) { display:none; }
 }
-@media (max-width:1100px) { .sftp-view__topbar { gap:var(--nvx-space-2); padding-inline:var(--nvx-space-3); } }
+@media (max-width:1100px) { .sftp-view__topbar { gap:var(--nvx-space-2); padding-inline:var(--nvx-space-3); }.sftp-view__topbar-address { display:none; } }
 .sftp-view__transfer--focused { outline: 2px solid var(--nvx-color-border); outline-offset: 4px; }
 </style>

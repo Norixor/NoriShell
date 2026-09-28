@@ -13,6 +13,8 @@ export default tseslint.config(
       "src/core-api/generated/**",
       "src-tauri/gen/**",
       "vendor/tauri-plugin-updater/**",
+      "vendor/tauri-reparent/**",
+      "vendor/tauri-runtime-wry-reparent/**",
     ],
   },
   eslint.configs.recommended,

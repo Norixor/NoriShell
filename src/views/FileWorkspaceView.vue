@@ -8,7 +8,11 @@ import type { HostSummary } from "../core-api/generated/core-api";
 import { useRouteReveal } from "../routeReveal";
 import { onSavedConnectionsChanged } from "../saved-connections";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
-import { pendingSftpPluginNavigations } from "./sftpPluginNavigation";
+import { isWorkspaceTabView } from "../workspace-window-context";
+import { showWorkspaceTabFailure } from "../workspace-tab-errors";
+import { runWorkspaceTabShellAction, type WorkspaceTabShellAction } from "../workspace-tab-shell-action";
+import { createManagedFileForFocus, createManagedFileTab } from "../workspace-tab-view-shell";
+import { pendingSftpPluginNavigations, takeSftpPluginNavigation } from "./sftpPluginNavigation";
 import FileWelcomeView from "./FileWelcomeView.vue";
 import SftpView from "./SftpView.vue";
 
@@ -25,24 +29,26 @@ let lastHostRequest = "";
 
 const currentTab = computed(() => fileTabs.value.find((tab) => tab.groupId === activeFileTabId.value) ?? null);
 
+function showFileCreateFailure(error: unknown) {
+  showWorkspaceTabFailure(error, "file-create", "workspace_tab.action_failed", "errors.tray.actionUnavailable");
+}
+
 async function refreshHosts() {
   if (!canUseDesktopCore()) { loading.value = false; revealRoute(); return; }
   try { hosts.value = await listHosts(); }
   finally { loading.value = false; revealRoute(); }
 }
 
-function createLocal() {
-  workspaceTabs.createFileTab("local");
+function createFileTabFromShell(action: Extract<WorkspaceTabShellAction, { type: "new-file" }>) {
+  void runWorkspaceTabShellAction(action).catch(showFileCreateFailure);
 }
 
-function createEmptyRemote() {
-  workspaceTabs.createFileTab("remote");
-}
+const createLocal = () => createFileTabFromShell({ type: "new-file", kind: "local" });
+const createEmptyRemote = () => createFileTabFromShell({ type: "new-file", kind: "remote" });
 
 function createRemote(hostId: string) {
   const host = hosts.value.find((item) => item.hostId === hostId);
-  if (!host) return;
-  workspaceTabs.createFileTab("remote", hostId, host.label);
+  if (host) createFileTabFromShell({ type: "new-file", kind: "remote", hostId, label: host.label });
 }
 
 function acceptExternalNavigation() {
@@ -54,20 +60,23 @@ function acceptExternalNavigation() {
     if (typeof sessionId === "string") {
       const owner = workspaceTabs.fileSessionOwner(sessionId);
       if (owner) workspaceTabs.activateFileTab(owner);
-      else {
-        const tabId = workspaceTabs.createFileTab("remote", null);
-        workspaceTabs.claimFileSession(sessionId, tabId);
-      }
-    } else if (!currentTab.value) workspaceTabs.createFileTab("local");
+      else if (isWorkspaceTabView() && currentTab.value) workspaceTabs.claimFileSession(sessionId, currentTab.value.groupId);
+      else if (!isWorkspaceTabView()) void createManagedFileForFocus(Object.fromEntries(
+        Object.entries(route.query).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      )).catch(showFileCreateFailure);
+    } else if (!currentTab.value && !isWorkspaceTabView()) {
+      void createManagedFileForFocus({ focusOperation }).catch(showFileCreateFailure);
+    }
     return;
   }
   const pendingPluginSession = pendingSftpPluginNavigations.value[0]?.sftpSession.sessionId;
   if (pendingPluginSession) {
     const owner = workspaceTabs.fileSessionOwner(pendingPluginSession);
     if (owner) workspaceTabs.activateFileTab(owner);
-    else {
-      const tabId = workspaceTabs.createFileTab("remote", null);
-      workspaceTabs.claimFileSession(pendingPluginSession, tabId);
+    else if (isWorkspaceTabView() && currentTab.value) workspaceTabs.claimFileSession(pendingPluginSession, currentTab.value.groupId);
+    else if (!isWorkspaceTabView()) {
+      const intent = takeSftpPluginNavigation();
+      if (intent) void createManagedFileTab("remote", null, "", intent).catch(showFileCreateFailure);
     }
     return;
   }
@@ -127,6 +136,8 @@ onBeforeUnmount(() => {
         :workspace-tab-id="tab.groupId"
         :initial-kind="tab.kind"
         :initial-host-id="tab.hostId"
+        :initial-session-id="tab.initialSessionId"
+        :initial-generation="tab.initialGeneration"
         :handoff-snapshot="workspaceTabs.importedFileSnapshots.get(tab.groupId) ?? null"
         :active="tab.groupId === activeFileTabId"
       />

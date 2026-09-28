@@ -54,6 +54,15 @@ describe("plugin extension target leases", () => {
       expectedTargetRevision: "1",
     });
   });
+  it("retains the final lease when Core close is temporarily rejected", async () => {
+    const store = usePluginExtensionsStore();
+    const lease = await store.acquireTarget("terminal.toolbar", "pane-1");
+    vi.mocked(closePluginTargetContext).mockRejectedValueOnce(new Error("plugin.target_context_transfer_pending"));
+    await expect(store.releaseTarget(lease)).rejects.toThrow("plugin.target_context_transfer_pending");
+    await store.releaseTarget(lease);
+    expect(closePluginTargetContext).toHaveBeenCalledTimes(2);
+    expect(openPluginTargetContext).toHaveBeenCalledTimes(1);
+  });
   it("does not revive a released context when a listing arrives late", async () => {
     const store = usePluginExtensionsStore();
     const lease = await store.acquireTarget("terminal.toolbar", "pane-1");

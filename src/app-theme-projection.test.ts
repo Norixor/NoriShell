@@ -42,6 +42,7 @@ describe("auxiliary theme projection", () => {
     localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({ themePreference: "light", locale: "en" }));
     applySecureWindowAppearance();
     expect(document.documentElement.dataset.theme).toBe("light");
-    expect(document.documentElement.style.length).toBe(0);
+    expect(document.documentElement.style.getPropertyValue("--nvx-layout-header-height")).toBe("");
+    expect(document.documentElement.style.getPropertyValue("--nvx-radius-md")).toBe("");
   });
 });

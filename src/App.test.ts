@@ -25,6 +25,7 @@ vi.mock("./workspace-tab-window-ui", () => ({
   startWorkspaceTabWindowUi: vi.fn(async () => () => undefined),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
+  emit: vi.fn(async () => undefined),
   listen: vi.fn(async (event: string, callback: never) => {
     if (event === "application-exit-requested") hooks.applicationExit = callback;
     if (event === "plugin-runtime-invalidated") hooks.runtimeInvalidated = callback;
@@ -49,6 +50,10 @@ vi.mock("./core-api/client", () => ({
   listPluginNavigation: hooks.listPluginNavigation,
   requestApplicationExit: vi.fn(),
   setPluginLocale: vi.fn().mockResolvedValue(undefined),
+  parseCoreApiError: () => null,
+}));
+vi.mock("./core-api/plugin-terminal", () => ({
+  listPluginProtocolLaunches: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("./terminal-workspace-persistence", () => ({
   requestExitAfterTerminalWorkspaceFlush: hooks.flushAndExit,

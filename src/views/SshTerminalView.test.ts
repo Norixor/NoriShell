@@ -10,9 +10,12 @@ import type {
   SshSessionSummary,
   TelnetSessionSummary,
 } from "../core-api/generated/core-api";
-import NvxWorkspaceTabBar from "../components/layout/NvxWorkspaceTabBar.vue";
+import NvxTerminalTabBar from "../components/terminal/NvxTerminalTabBar.vue";
+import { createUuidV7 } from "../core-api/ids";
 import { i18n } from "../locales";
+import { useUiStore } from "../stores/ui";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { planTerminalWorkspaceRestore } from "../workspace-tab-terminal-restore";
 import { useTipsStore } from "../stores/tips";
 import {
   focusedTerminalLabel,
@@ -27,6 +30,12 @@ import { createSftpTerminalLaunch } from "./sftpTerminalLaunch";
 const defaultNavigatorPlatform = navigator.platform;
 const nativeEvents = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
 const workspaceLabel = vi.hoisted(() => ({ value: "main" }));
+const workspaceView = vi.hoisted(() => ({ tab: false }));
+vi.mock("../workspace-window-context", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../workspace-window-context")>(),
+  isWorkspaceChildWindow: () => workspaceView.tab,
+  isWorkspaceTabView: () => workspaceView.tab,
+}));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, callback: (event: { payload: unknown }) => void) => {
     nativeEvents.set(name, callback);
@@ -326,7 +335,7 @@ const LocalPaneContractStub = defineComponent({
     canSplitHorizontal: Boolean,
     canSplitVertical: Boolean,
   },
-  emits: ["split", "close"],
+  emits: ["split", "close", "state", "viewFailure"],
   setup(props, { emit, expose }) {
     const activateFromTab = vi.fn();
     const deactivateFromTab = vi.fn();
@@ -386,10 +395,27 @@ const TelnetPaneContractStub = defineComponent({
   },
 });
 
+// The owner shell renders this Tab WebView's summary; the fixture projects it the same way.
+const TestHeader = defineComponent({
+  name: "TestTerminalHeader",
+  setup() {
+    const tabs = useWorkspaceTabsStore();
+    return () => h(NvxTerminalTabBar, {
+      items: tabs.terminalTabs.map((tab) => ({ ...tab })),
+      modelValue: tabs.activeTerminalTabId,
+      label: "Tabs",
+      newLabel: i18n.global.t("newWorkspace.title"),
+      closeLabel: i18n.global.t("workspaceTabs.close"),
+      "onUpdate:modelValue": (id: string) => tabs.terminalController?.activate(id),
+      onClose: (id: string) => tabs.terminalController?.close(id),
+    });
+  },
+});
+
 const Shell = defineComponent({
   setup() {
     return () => h("div", [
-      h("header", { id: "nvx-terminal-tabs-host" }, [h(NvxWorkspaceTabBar)]),
+      h("header", { id: "nvx-terminal-tabs-host" }, [h(TestHeader)]),
       h(RouterView, null, {
         default: ({ Component }: { Component: unknown }) => h(
           KeepAlive,
@@ -401,12 +427,18 @@ const Shell = defineComponent({
   },
 });
 
-async function mountShell(initialLocation = "/terminal") {
+/**
+ * Mounts the Terminal View. `restore` mounts it as a Tab WebView and restores the
+ * first Tab that the main shell's startup plan would create from the mocked Core state.
+ */
+async function mountShell(initialLocation = "/terminal", options: { restore?: boolean } = {}) {
+  if (options.restore) workspaceView.tab = true;
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: "/terminal", component: SshTerminalView },
       { path: "/new", component: { template: "<div />" } },
+      { path: "/sftp", component: { template: "<div />" } },
       { path: "/hosts", component: HostsStub },
     ],
   });
@@ -429,7 +461,27 @@ async function mountShell(initialLocation = "/terminal") {
     },
   });
   await flushPromises();
+  if (options.restore) {
+    const plan = await planTerminalWorkspaceRestore(useUiStore(pinia).terminalStartupBehavior === "restoreHistory");
+    const seed = plan.tabs[0];
+    const controller = useWorkspaceTabsStore(pinia).terminalController!;
+    if (seed) {
+      await controller.restoreInitialTab!(seed.tab.tabId, seed);
+      // The owner shell activates the Tab once its content has rendered.
+      controller.activate(seed.tab.tabId);
+    }
+    await flushPromises();
+  }
   return { router, wrapper, pinia };
+}
+
+/** Creates this Tab WebView's first, welcome Launcher Tab as the native manager does. */
+async function createWelcomeTab(pinia: ReturnType<typeof createPinia>) {
+  const id = createUuidV7();
+  const controller = useWorkspaceTabsStore(pinia).terminalController!;
+  await controller.createInitialTab!(id, "welcome");
+  controller.activate(id);
+  await flushPromises();
 }
 
 function deferred<T>() {
@@ -441,6 +493,20 @@ function deferred<T>() {
 }
 
 describe("SshTerminalView route and Header behavior", () => {
+  it("leaves an SFTP Host request on the Files route while Terminal is cached", async () => {
+    const { wrapper, router } = await mountShell();
+    await router.push("/new");
+    await flushPromises();
+
+    const callsBeforeFileNavigation = client.listHosts.mock.calls.length;
+    await router.push({ path: "/sftp", query: { hostId: host.hostId, fileOperationId: crypto.randomUUID() } });
+    await flushPromises();
+
+    expect(router.currentRoute.value.path).toBe("/sftp");
+    expect(client.listHosts.mock.calls.length).toBe(callsBeforeFileNavigation);
+    wrapper.unmount();
+  });
+
   it("opens each SFTP directory request in a new Host tab and consumes its path only once", async () => {
     const readyHost = { ...host, hasReadyCredential: true };
     client.listHosts.mockResolvedValue([readyHost]);
@@ -491,15 +557,25 @@ describe("SshTerminalView route and Header behavior", () => {
     ]));
     wrapper.unmount();
   });
-  it("recovers a pending plugin launch even when its navigation event was lost and deduplicates later events", async () => {
+  it("claims only the exact pending plugin launch through the child initial Tab interface", async () => {
     const launch = { launchId: "launch", pluginId: "provider.test", providerId: "serial", label: "Serial device",
       tabId: "provider-tab", paneId: "provider-pane", revision: "1", claimed: false, expiresAtUnixMs: Date.now() + 60_000 };
     pluginClient.listPluginProtocolLaunches.mockResolvedValue([launch]);
-    const { wrapper } = await mountShell();
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
+    const controller = useWorkspaceTabsStore(pinia).terminalController!;
+    await expect(controller.createInitialPluginProtocolTab!(launch.tabId, {
+      launchId: launch.launchId, revision: "stale", paneId: launch.paneId,
+    })).rejects.toThrow("workspace_tab.plugin_launch_unavailable");
+    expect(wrapper.findAll("nvx-plugin-terminal-pane-stub")).toHaveLength(0);
+    await controller.createInitialPluginProtocolTab!(launch.tabId, {
+      launchId: launch.launchId, revision: launch.revision, paneId: launch.paneId,
+    });
     expect(wrapper.findAll("nvx-plugin-terminal-pane-stub")).toHaveLength(1);
     expect(wrapper.findComponent({ name: "NvxPluginTerminalPane" }).props("paneId")).toBe("provider-pane");
-    nativeEvents.get("plugin-protocol-launch")?.({ payload: launch });
-    await flushPromises();
+    await expect(controller.createInitialPluginProtocolTab!(launch.tabId, {
+      launchId: launch.launchId, revision: launch.revision, paneId: launch.paneId,
+    })).rejects.toThrow("workspace_tab.invalid_plugin_launch");
     expect(wrapper.findAll("nvx-plugin-terminal-pane-stub")).toHaveLength(1);
     wrapper.unmount();
   });
@@ -511,17 +587,18 @@ describe("SshTerminalView route and Header behavior", () => {
         layout: { kind: "pane", paneId: "provider-pane", terminalId: "provider-pane" },
         panes: [{ kind: "plugin", paneId: "provider-pane", label: "Serial device", pluginId: "provider.test", providerId: "serial", schemaHash: "hash", configuration: { baud: 115200 } }],
       }] } });
-    // A live provider session forces layout recovery independent of startup preference.
+    // A live provider session forces layout recovery independent of startup preference;
+    // that unrelated session is adopted into its own Tab WebView.
     pluginClient.fetchPluginTerminalSessionSnapshot.mockResolvedValue({ snapshotRevision: "1", sessions: [{
       sessionId: "other-session", tabId: "other-tab", paneId: "other-pane", label: "Other device",
       pluginId: "provider.test", providerId: "serial", schemaHash: "hash", configuration: {},
       state: "running", generation: "1", stateRevision: "1", attachmentRevision: "1", eventSeq: "1", streamId: "stream",
       attachmentCount: 0, cleanupBlocked: false, failureReason: null,
     }] });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     const history = wrapper.findAllComponents({ name: "NvxPluginTerminalPane" }).find((pane) => pane.props("paneId") === "provider-pane");
     expect(history?.props("deferredStart")).toBe(true);
-    expect(wrapper.findAll("nvx-plugin-terminal-pane-stub")).toHaveLength(2);
+    expect(wrapper.findAll("nvx-plugin-terminal-pane-stub")).toHaveLength(1);
     wrapper.unmount();
   });
 
@@ -534,7 +611,8 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "1",
       sessions: [savedHostSession],
     });
-    const { wrapper, pinia } = await mountShell();
+    client.getSshSession.mockResolvedValue({ session: savedHostSession, attachments: [], activeHostKeyChallenge: null, inputLease: null });
+    const { wrapper, pinia } = await mountShell("/terminal", { restore: true });
     const workspaceTabs = useWorkspaceTabsStore(pinia);
     const controller = workspaceTabs.terminalController;
     expect(workspaceTabs.terminalTabs[0]?.hostId).toBe(host.hostId);
@@ -542,18 +620,12 @@ describe("SshTerminalView route and Header behavior", () => {
     controller?.runShortcut?.("terminal.split-right");
     await flushPromises();
     expect(document.querySelectorAll(".nvx-terminal-split-tree__pane")).toHaveLength(2);
-
-    controller?.runShortcut?.("terminal.focus-previous-pane");
-    controller?.runShortcut?.("workspace.new-local");
-    await flushPromises();
-    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(2);
-    expect(document.querySelectorAll(".local-pane-contract-stub")).toHaveLength(1);
     wrapper.unmount();
   });
 
   it("places a new full-height Pane to the right of a vertical stack", async () => {
     client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "1", sessions: [runningSession] });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     await wrapper.get('button[aria-label="向下拆分 Pane"]').trigger("click");
     await flushPromises();
@@ -572,7 +644,7 @@ describe("SshTerminalView route and Header behavior", () => {
 
   it("aggregates a background pane BEL into the Header tab marker and clears it on focus", async () => {
     client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "1", sessions: [runningSession] });
-    const { wrapper, pinia } = await mountShell();
+    const { wrapper, pinia } = await mountShell("/terminal", { restore: true });
     const workspaceTabs = useWorkspaceTabsStore(pinia);
     const pane = wrapper.findComponent(SshPaneContractStub);
     pane.vm.$emit("bellAttention", true);
@@ -585,19 +657,17 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
-  it("creates a local terminal directly and opens Quick Connect in an explicit Launcher", async () => {
+  it("opens Quick Connect only in this Tab's Launcher Pane", async () => {
+    workspaceView.tab = true;
     const { wrapper, pinia } = await mountShell();
     const controller = useWorkspaceTabsStore(pinia).terminalController!;
-
-    expect(controller.createLocal()).toBe(true);
-    await flushPromises();
-    expect(wrapper.findAll(".local-pane-contract-stub")).toHaveLength(1);
-
+    // A Tab WebView without a Launcher never creates a second Tab for the request.
+    expect(controller.quickConnect()).toBe(false);
+    await createWelcomeTab(pinia);
     expect(controller.quickConnect()).toBe(true);
     await flushPromises();
     expect(document.querySelector("#quick-address")).not.toBeNull();
-    // Do not create and discard a default local PTY while the authentication form is already open.
-    expect(controller.createLocal()).toBe(false);
+    expect(useWorkspaceTabsStore(pinia).terminalTabs).toHaveLength(1);
     wrapper.unmount();
   });
 
@@ -610,11 +680,12 @@ describe("SshTerminalView route and Header behavior", () => {
       socketId: null,
       state: "connecting",
     };
+    // Each unbound live Session is adopted into its own Tab; this view owns the first.
     client.fetchTelnetSessionSnapshot.mockResolvedValue({
       snapshotRevision: "1",
       sessions: [runningTelnetSession, noSocketSession],
     });
-    const { wrapper, router, pinia } = await mountShell();
+    const { wrapper, router, pinia } = await mountShell("/terminal", { restore: true });
     const controller = useWorkspaceTabsStore(pinia).terminalController!;
     const snapshotCalls = client.fetchTelnetSessionSnapshot.mock.calls.length;
 
@@ -623,6 +694,7 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(controller.focusTelnetSession(runningTelnetSession.sessionId, "999", runningTelnetSession.socketId!)).toBe(false);
     expect(controller.focusTelnetSession(runningTelnetSession.sessionId, runningTelnetSession.generation, null)).toBe(false);
     expect(controller.focusTelnetSession(runningTelnetSession.sessionId, runningTelnetSession.generation, "019d0000-0000-7000-8000-000000000499")).toBe(false);
+    expect(controller.focusTelnetSession(noSocketSession.sessionId, noSocketSession.generation, null)).toBe(false);
     expect(router.currentRoute.value.path).toBe("/hosts");
 
     expect(controller.focusTelnetSession(
@@ -633,12 +705,6 @@ describe("SshTerminalView route and Header behavior", () => {
     await flushPromises();
     expect(router.currentRoute.value.path).toBe("/terminal");
     expect(client.fetchTelnetSessionSnapshot).toHaveBeenCalledTimes(snapshotCalls);
-
-    await router.push("/hosts");
-    expect(controller.focusTelnetSession(noSocketSession.sessionId, noSocketSession.generation, runningTelnetSession.socketId!)).toBe(false);
-    expect(controller.focusTelnetSession(noSocketSession.sessionId, noSocketSession.generation, null)).toBe(true);
-    await flushPromises();
-    expect(router.currentRoute.value.path).toBe("/terminal");
 
     await router.push("/hosts");
     const dialog = document.createElement("div");
@@ -655,11 +721,13 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
-  it("opens an approved extra terminal channel once without looking up Hosts or credentials", async () => {
-    const { wrapper } = await mountShell();
+  it("opens an approved extra terminal channel once through the child seed without looking up credentials", async () => {
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
+    const controller = useWorkspaceTabsStore(pinia).terminalController!;
     const listCalls = client.listHosts.mock.calls.length;
     const event = { operationId: "019d0000-0000-7000-8000-000000000951", authorizationToken: "019d0000-0000-7000-8000-000000000952", target: runningSession.target, label: "Docker · web" };
-    nativeEvents.get("plugin-terminal-channel-approved")?.({ payload: event });
+    await controller.createInitialApprovedPluginChannel!("019d0000-0000-7000-8000-000000000953", event);
     await flushPromises();
     const panes = wrapper.findAllComponents(SshPaneContractStub);
     expect(panes).toHaveLength(1);
@@ -670,14 +738,15 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(client.listHosts).toHaveBeenCalledTimes(listCalls);
     expect(client.getHostConnectionConfig).not.toHaveBeenCalled();
     expect(client.prepareTransientCredential).not.toHaveBeenCalled();
-    nativeEvents.get("plugin-terminal-channel-approved")?.({ payload: event });
-    await flushPromises();
+    await expect(controller.createInitialApprovedPluginChannel!("019d0000-0000-7000-8000-000000000953", event))
+      .rejects.toThrow("workspace_tab.invalid_plugin_channel");
     expect(wrapper.findAllComponents(SshPaneContractStub)).toHaveLength(1);
     wrapper.unmount();
   });
 
   beforeEach(() => {
     workspaceLabel.value = "main";
+    workspaceView.tab = false;
     pluginClient.fetchPluginTerminalSessionSnapshot.mockResolvedValue({ snapshotRevision: "0", sessions: [] });
     pluginClient.listPluginProtocolLaunches.mockResolvedValue([]);
     vi.clearAllMocks();
@@ -808,14 +877,10 @@ describe("SshTerminalView route and Header behavior", () => {
     document.body.innerHTML = "";
   });
 
-  it("keeps both Header actions visible while Quick Commands starts collapsed", async () => {
+  it("starts with Quick Commands collapsed and the Launcher showing recent Hosts", async () => {
     const { wrapper } = await mountShell();
 
     expect(document.querySelector('.quick-commands')).toBeNull();
-    expect(document.querySelectorAll("#nvx-workspace-tab-bar")).toHaveLength(1);
-    expect(document.querySelectorAll(".nvx-terminal-tab-bar")).toHaveLength(1);
-    expect(document.querySelectorAll('button[aria-label="新建页面"]')).toHaveLength(1);
-    expect(document.querySelectorAll('button[aria-label="显示快捷命令"]')).toHaveLength(1);
     expect(document.body.textContent).toContain("最近连接");
     expect(document.body.textContent).toContain(host.label);
     wrapper.unmount();
@@ -826,7 +891,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "1",
       sessions: [runningSession],
     });
-    const { router, wrapper } = await mountShell();
+    const { router, wrapper } = await mountShell("/terminal", { restore: true });
 
     await router.push("/hosts");
     await flushPromises();
@@ -840,10 +905,10 @@ describe("SshTerminalView route and Header behavior", () => {
   });
 
   it("debounces a secret-free workspace projection into the SQLite command", async () => {
-    const { wrapper } = await mountShell();
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
     vi.useFakeTimers();
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
-    await flushPromises();
+    await createWelcomeTab(pinia);
 
     await vi.advanceTimersByTimeAsync(399);
     expect(client.replaceTerminalWorkspaceLayout).not.toHaveBeenCalled();
@@ -860,6 +925,7 @@ describe("SshTerminalView route and Header behavior", () => {
 
   it("persists an imported Tab into an initially empty workspace window", async () => {
     workspaceLabel.value = "workspace-test";
+    workspaceView.tab = true;
     const { wrapper, pinia } = await mountShell();
     const controller = useWorkspaceTabsStore(pinia).terminalController!;
     const tabId = "019d0000-0000-7000-8000-000000000951";
@@ -881,6 +947,7 @@ describe("SshTerminalView route and Header behavior", () => {
 
   it("keeps a committed imported Tab visible when layout persistence fails", async () => {
     workspaceLabel.value = "workspace-test";
+    workspaceView.tab = true;
     client.replaceTerminalWorkspaceLayout.mockRejectedValue(new Error("SQLite unavailable"));
     const { wrapper, pinia } = await mountShell();
     const controller = useWorkspaceTabsStore(pinia).terminalController!;
@@ -913,15 +980,15 @@ describe("SshTerminalView route and Header behavior", () => {
         layout,
         updatedAtUnixMs: 2,
       }));
-    const { wrapper } = await mountShell();
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
     vi.useFakeTimers();
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
-    await flushPromises();
+    await createWelcomeTab(pinia);
     await vi.advanceTimersByTimeAsync(400);
     expect(client.replaceTerminalWorkspaceLayout).toHaveBeenCalledTimes(1);
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
+    useWorkspaceTabsStore(pinia).terminalController!.runShortcut!("terminal.split-right");
     await flushPromises();
     let exitBarrierResolved = false;
     const exitBarrier = flushTerminalWorkspaceBeforeExit().then(() => {
@@ -939,7 +1006,7 @@ describe("SshTerminalView route and Header behavior", () => {
 
     expect(client.replaceTerminalWorkspaceLayout).toHaveBeenCalledTimes(2);
     expect(client.replaceTerminalWorkspaceLayout.mock.calls[1]?.[0].expectedRevision).toBe("2");
-    expect(client.replaceTerminalWorkspaceLayout.mock.calls[1]?.[0].layout.tabs).toHaveLength(2);
+    expect(client.replaceTerminalWorkspaceLayout.mock.calls[1]?.[0].layout.tabs[0].panes).toHaveLength(2);
     wrapper.unmount();
   });
 
@@ -947,16 +1014,23 @@ describe("SshTerminalView route and Header behavior", () => {
     client.replaceTerminalWorkspaceLayout.mockRejectedValueOnce(
       new Error("SQLite write failed"),
     );
-    const { wrapper } = await mountShell();
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
     vi.useFakeTimers();
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
-    await flushPromises();
+    await createWelcomeTab(pinia);
 
     await expect(flushTerminalWorkspaceBeforeExit()).rejects.toThrow(
       "terminal workspace layout is not durable",
     );
     expect(client.replaceTerminalWorkspaceLayout).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("has nothing to flush in the shell, whose Terminal page keeps no Tab", async () => {
+    const { wrapper } = await mountShell();
+    await expect(flushTerminalWorkspaceBeforeExit()).resolves.toBeUndefined();
+    expect(client.replaceTerminalWorkspaceLayout).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -1033,48 +1107,6 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
-  it("initializes persisted/live state before consuming a first-mount Host query", async () => {
-    client.fetchTerminalWorkspaceLayout.mockResolvedValue({
-      revision: "7",
-      layout: {
-        schemaVersion: 1,
-        activeTabId: "tab-1",
-        tabs: [{
-          tabId: "tab-1",
-          layout: { kind: "pane", paneId: "pane-local", terminalId: "pane-local" },
-          activePaneId: "pane-local",
-          panes: [{ kind: "local", paneId: "pane-local", label: "zsh" }],
-        }],
-      },
-      updatedAtUnixMs: 10,
-    });
-    const { wrapper } = await mountShell(`/terminal?hostId=${host.hostId}`);
-
-    expect(client.fetchTerminalWorkspaceLayout).toHaveBeenCalledTimes(1);
-    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(2);
-    expect((document.querySelector("#quick-address") as HTMLInputElement | null)?.value)
-      .toBe(host.address);
-    wrapper.unmount();
-  });
-
-  it("restores an active Core session even when startup prefers the welcome page", async () => {
-    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({
-      terminalStartupBehavior: "welcome",
-      newTerminalBehavior: "terminalWelcome",
-    }));
-    client.fetchSshSessionSnapshot.mockResolvedValue({
-      snapshotRevision: "9",
-      sessions: [runningSession],
-    });
-
-    const { wrapper } = await mountShell();
-
-    expect(client.fetchSshSessionSnapshot).toHaveBeenCalledTimes(1);
-    expect(document.body.textContent).toContain("norishell@127.0.0.1");
-    expect(document.querySelector(".ssh-pane-contract-stub")).not.toBeNull();
-    wrapper.unmount();
-  });
-
   it("reattaches a live Core session into its persisted Pane instead of flattening the layout", async () => {
     client.fetchSshSessionSnapshot.mockResolvedValue({
       snapshotRevision: "9",
@@ -1127,7 +1159,7 @@ describe("SshTerminalView route and Header behavior", () => {
       inputLease: null,
     });
 
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(document.querySelectorAll(".nvx-terminal-split-tree__pane")).toHaveLength(2);
@@ -1170,7 +1202,7 @@ describe("SshTerminalView route and Header behavior", () => {
       },
       updatedAtUnixMs: 10,
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(document.querySelectorAll(".nvx-terminal-split-tree__pane")).toHaveLength(2);
@@ -1217,7 +1249,7 @@ describe("SshTerminalView route and Header behavior", () => {
       updatedAtUnixMs: 10,
     });
 
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     expect(client.fetchVaultStatus).not.toHaveBeenCalled();
     expect(document.querySelector(".ssh-pane-contract-stub")?.getAttribute("data-deferred-start"))
@@ -1227,11 +1259,7 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
-  it("shows the welcome page without overwriting history until the user creates a terminal", async () => {
-    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({
-      terminalStartupBehavior: "welcome",
-      newTerminalBehavior: "terminalWelcome",
-    }));
+  it("keeps unrestored history in the layout when a new Tab persists", async () => {
     client.fetchTerminalWorkspaceLayout.mockResolvedValue({
       revision: "7",
       layout: {
@@ -1251,19 +1279,15 @@ describe("SshTerminalView route and Header behavior", () => {
       },
       updatedAtUnixMs: 10,
     });
-    const { wrapper } = await mountShell();
-
-    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(0);
-    expect(document.body.textContent).toContain(i18n.global.t("sshTerminal.launcherTitle"));
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
     expect(client.replaceTerminalWorkspaceLayout).not.toHaveBeenCalled();
 
     vi.useFakeTimers();
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
-    await flushPromises();
+    await createWelcomeTab(pinia);
     await vi.advanceTimersByTimeAsync(400);
     await flushPromises();
 
-    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(client.replaceTerminalWorkspaceLayout).toHaveBeenCalledTimes(1);
     expect(client.replaceTerminalWorkspaceLayout.mock.calls[0]?.[0].layout.tabs.map(
       (tab: { panes: { kind: string }[] }) => tab.panes[0]?.kind,
@@ -1296,19 +1320,47 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
-  it("opens a fresh local terminal when the new-terminal preference requests it", async () => {
-    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({
-      newTerminalBehavior: "localTerminal",
-    }));
-    const { wrapper } = await mountShell();
-
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
+  it("starts the seeded local terminal of a new local Tab", async () => {
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
+    await useWorkspaceTabsStore(pinia).terminalController!.createInitialTab!(createUuidV7(), "local", {
+      paneId: createUuidV7(), openAttemptId: createUuidV7(), operationId: createUuidV7(),
+      attachAttemptId: createUuidV7(), initialRows: 24, initialCols: 80,
+    });
     await flushPromises();
 
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(document.querySelector(".local-pane-contract-stub")?.getAttribute("data-deferred-start"))
       .toBe("false");
     expect(document.body.textContent).not.toContain(i18n.global.t("sshTerminal.newTabState"));
+    wrapper.unmount();
+  });
+
+  it("uses the Pane presentation failure in the Header without treating a running Shell as closed", async () => {
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    await tabs.terminalController!.createInitialTab!(createUuidV7(), "local", {
+      paneId: createUuidV7(), openAttemptId: createUuidV7(), operationId: createUuidV7(),
+      attachAttemptId: createUuidV7(), initialRows: 24, initialCols: 80,
+    });
+    await flushPromises();
+    const pane = wrapper.findComponent(LocalPaneContractStub);
+    const running: LocalSessionSummary = { ...cleanupFailedLocalSession, state: "running", failureReason: null };
+    pane.vm.$emit("state", "running", running);
+    await flushPromises();
+    expect(tabs.terminalTabs[0]?.stateLabel).toContain(i18n.global.t("localSession.states.running"));
+
+    pane.vm.$emit("viewFailure", { code: "local_terminal.stale_fence", diagnosticId: null });
+    await flushPromises();
+    expect(tabs.terminalTabs[0]?.stateLabel).toContain(i18n.global.t("localSession.viewUnavailable"));
+    document.querySelector<HTMLButtonElement>('button[aria-label^="关闭标签页："]')?.click();
+    await flushPromises();
+    expect(document.body.textContent).toContain("1 个仍在连接或运行的终端会话");
+
+    pane.vm.$emit("viewFailure", null);
+    await flushPromises();
+    expect(tabs.terminalTabs[0]?.stateLabel).toContain(i18n.global.t("localSession.states.running"));
     wrapper.unmount();
   });
 
@@ -1332,7 +1384,7 @@ describe("SshTerminalView route and Header behavior", () => {
       },
       updatedAtUnixMs: 10,
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     expect(document.querySelector(".ssh-pane-contract-stub")?.getAttribute("data-deferred-start"))
       .toBe("true");
@@ -1343,7 +1395,7 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
-  it("unlocks Vault and retries the same Pane after Core reports a locked credential", async () => {
+  it("asks for Vault only after an explicit click when a restored Pane reports a locked credential", async () => {
     const readyHost = { ...host, identityId: "019d0000-0000-7000-8000-000000000501", hasReadyCredential: true };
     client.listHosts.mockResolvedValue([readyHost]);
     client.fetchVaultStatus.mockResolvedValue({
@@ -1371,16 +1423,19 @@ describe("SshTerminalView route and Header behavior", () => {
       },
       updatedAtUnixMs: 10,
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     const pane = wrapper.findComponent(SshPaneContractStub);
+    const target = { kind: "host", hostId: readyHost.hostId, expectedHostStateVersion: readyHost.stateVersion };
 
-    pane.vm.$emit("requestAuthenticationRecovery", "pane-1", {
-      kind: "host",
-      hostId: readyHost.hostId,
-      expectedHostStateVersion: readyHost.stateVersion,
-    });
+    // Startup restore is a background action: it waits for the user's explicit unlock.
+    pane.vm.$emit("requestAuthenticationRecovery", "pane-1", target);
     await flushPromises();
+    expect(secureVault).not.toHaveBeenCalled();
+    expect(pane.attributes("data-deferred-start")).toBe("true");
+    expect(pane.attributes("data-deferred-recovery")).toBe("vaultUnlock");
 
+    pane.vm.$emit("requestVaultUnlock", "pane-1", target);
+    await flushPromises();
     await flushPromises();
 
     expect(secureVault).toHaveBeenCalledWith("ensureUnlocked");
@@ -1399,7 +1454,7 @@ describe("SshTerminalView route and Header behavior", () => {
         activePaneId: "pane-1", panes: [{ kind: "sshHost", paneId: "pane-1", label: readyHost.label, hostId: readyHost.hostId }],
       }] }, updatedAtUnixMs: 10,
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     let resolveHosts!: (hosts: HostSummary[]) => void;
     client.listHosts.mockReturnValue(new Promise<HostSummary[]>((resolve) => { resolveHosts = resolve; }));
     const callsBefore = client.listHosts.mock.calls.length;
@@ -1439,7 +1494,7 @@ describe("SshTerminalView route and Header behavior", () => {
       },
       updatedAtUnixMs: 10,
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     const pane = wrapper.findComponent(SshPaneContractStub);
 
     pane.vm.$emit("requestVaultUnlock", "pane-1", {
@@ -1477,34 +1532,10 @@ describe("SshTerminalView route and Header behavior", () => {
       updatedAtUnixMs: 10,
     });
 
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     expect(wrapper.findComponent({ name: "NvxTelnetTerminalPane" }).props("deferredStart"))
       .toBe(true);
-    wrapper.unmount();
-  });
-
-  it("does not treat a failed Core session snapshot as proof that restart restore is safe", async () => {
-    client.fetchSshSessionSnapshot.mockRejectedValue(new Error("Core unavailable"));
-    client.fetchTerminalWorkspaceLayout.mockResolvedValue({
-      revision: "7",
-      layout: {
-        schemaVersion: 1,
-        activeTabId: "tab-1",
-        tabs: [{
-          tabId: "tab-1",
-          layout: { kind: "pane", paneId: "pane-1", terminalId: "" },
-          activePaneId: "pane-1",
-          panes: [{ kind: "local", paneId: "pane-1", label: "zsh" }],
-        }],
-      },
-      updatedAtUnixMs: 10,
-    });
-    const { wrapper } = await mountShell();
-
-    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(0);
-    expect(document.body.textContent).toContain("终端布局暂时无法读取或保存");
-    expect(client.replaceTerminalWorkspaceLayout).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
@@ -1513,7 +1544,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "10",
       sessions: [cleanupFailedLocalSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     expect(document.querySelector(".local-pane-contract-stub")).not.toBeNull();
     document.querySelector<HTMLButtonElement>(
@@ -1532,7 +1563,7 @@ describe("SshTerminalView route and Header behavior", () => {
 
   it("focuses only the exact notification session across routes and respects a blocking dialog", async () => {
     client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "9", sessions: [runningSession] });
-    const { wrapper, router, pinia } = await mountShell();
+    const { wrapper, router, pinia } = await mountShell("/terminal", { restore: true });
     const scope = { kind: "ssh" as const, sessionId: runningSession.sessionId, generation: runningSession.generation, channelId: runningSession.channelId!, paneId: wrapper.findComponent(SshPaneContractStub).props("paneId") };
     const controller = useWorkspaceTabsStore(pinia).terminalController!;
     await router.push("/hosts"); await flushPromises();
@@ -1551,7 +1582,19 @@ describe("SshTerminalView route and Header behavior", () => {
   it("focuses existing SSH and Local failure panes by session and generation without requiring Channel or PTY", async () => {
     client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "9", sessions: [runningSession] });
     client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "9", sessions: [cleanupFailedLocalSession] });
-    const { wrapper, router, pinia } = await mountShell();
+    client.getSshSession.mockResolvedValue({ session: runningSession, attachments: [{ viewId: "pane-ssh" }], activeHostKeyChallenge: null, inputLease: null });
+    client.getLocalSession.mockResolvedValue({ session: cleanupFailedLocalSession, attachments: [{ viewId: "pane-local" }], inputLease: null });
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({ revision: "7", updatedAtUnixMs: 10, layout: {
+      schemaVersion: 1, activeTabId: "tab-1", tabs: [{
+        tabId: "tab-1", activePaneId: "pane-ssh",
+        layout: { kind: "split", splitId: "split-1", direction: "horizontal", ratio: 0.5,
+          first: { kind: "pane", paneId: "pane-ssh", terminalId: "pane-ssh" },
+          second: { kind: "pane", paneId: "pane-local", terminalId: "pane-local" } },
+        panes: [{ kind: "sshQuickConnect", paneId: "pane-ssh", label: "norishell@127.0.0.1", endpoint: runningSession.endpoint },
+          { kind: "local", paneId: "pane-local", label: "zsh" }],
+      }],
+    } });
+    const { wrapper, router, pinia } = await mountShell("/terminal", { restore: true });
     const controller = useWorkspaceTabsStore(pinia).terminalController!;
     const sshSnapshotCalls = client.fetchSshSessionSnapshot.mock.calls.length;
     const localSnapshotCalls = client.fetchLocalSessionSnapshot.mock.calls.length;
@@ -1575,47 +1618,73 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
-  it("routes Header click and Arrow activation through Pane focus ownership, then clears it for a blank Tab", async () => {
-    const secondSession: SshSessionSummary = {
-      ...runningSession,
-      sessionId: "019d0000-0000-7000-8000-000000000211",
-      openAttemptId: "019d0000-0000-7000-8000-000000000212",
-      channelId: "019d0000-0000-7000-8000-000000000213",
-      endpoint: { address: "second.example.test", port: 22, username: "root" },
-      target: {
-        kind: "quickConnect",
-        endpoint: { address: "second.example.test", port: 22, username: "root" },
-      },
-    };
-    client.fetchSshSessionSnapshot.mockResolvedValue({
-      snapshotRevision: "9",
-      sessions: [runningSession, secondSession],
-    });
-    const { wrapper } = await mountShell();
-    const firstLabel = "norishell@127.0.0.1";
-    const secondLabel = "root@second.example.test";
-    const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+  it("attaches live Panes and keeps history unwritten when the Host catalog is unavailable", async () => {
+    client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "9", sessions: [runningSession] });
+    client.getSshSession.mockResolvedValue({ session: runningSession, attachments: [{ viewId: "pane-live" }], activeHostKeyChallenge: null, inputLease: null });
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({ revision: "7", updatedAtUnixMs: 10, layout: {
+      schemaVersion: 1, activeTabId: "tab-1", tabs: [{
+        tabId: "tab-1", activePaneId: "pane-live",
+        layout: { kind: "split", splitId: "split-1", direction: "horizontal", ratio: 0.5,
+          first: { kind: "pane", paneId: "pane-live", terminalId: "pane-live" },
+          second: { kind: "pane", paneId: "pane-host", terminalId: "pane-host" } },
+        panes: [{ kind: "sshQuickConnect", paneId: "pane-live", label: "norishell@127.0.0.1", endpoint: runningSession.endpoint },
+          { kind: "sshHost", paneId: "pane-host", label: host.label, hostId: host.hostId }],
+      }],
+    } });
+    client.listHosts.mockRejectedValue(new Error("catalog unavailable"));
+    vi.useFakeTimers();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
+    expect(document.querySelectorAll(".ssh-pane-contract-stub")).toHaveLength(1);
+    expect(document.querySelector(".ssh-pane-contract-stub")?.getAttribute("data-deferred-start")).toBe("false");
+    expect(document.body.textContent).toContain(i18n.global.t("sshTerminal.workspacePersistenceFailed"));
+    await vi.advanceTimersByTimeAsync(400);
+    expect(client.replaceTerminalWorkspaceLayout).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
 
-    expect(focusedTerminalLabel.value).toBe(firstLabel);
-    tabs.find((tab) => tab.textContent?.includes(secondLabel))?.click();
+  it("keeps a restored background Tab's live Pane inactive until the shell activates the Tab", async () => {
+    client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "9", sessions: [runningSession] });
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
+    const plan = await planTerminalWorkspaceRestore(true);
+    const controller = useWorkspaceTabsStore(pinia).terminalController!;
+    await controller.restoreInitialTab!(plan.tabs[0]!.tab.tabId, plan.tabs[0]!);
     await flushPromises();
-    expect(paneControls.get(firstLabel)?.deactivateFromTab).toHaveBeenCalled();
-    expect(paneControls.get(secondLabel)?.activateFromTab).toHaveBeenCalled();
-    expect(focusedTerminalLabel.value).toBe(secondLabel);
+    expect(document.querySelector(".ssh-pane-contract-stub")?.getAttribute("data-active")).toBe("false");
+    expect(focusedTerminalLabel.value).toBeNull();
+
+    controller.activate(plan.tabs[0]!.tab.tabId);
+    await flushPromises();
+    expect(focusedTerminalLabel.value).toBe("norishell@127.0.0.1");
+    await controller.deactivate();
+    await flushPromises();
+    expect(document.querySelector(".ssh-pane-contract-stub")?.getAttribute("data-active")).toBe("false");
+    wrapper.unmount();
+  });
+
+  it("routes Tab activation and deactivation through Pane focus ownership", async () => {
+    client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "9", sessions: [runningSession] });
+    const { wrapper, pinia } = await mountShell("/terminal", { restore: true });
+    const workspaceTabs = useWorkspaceTabsStore(pinia);
+    const controller = workspaceTabs.terminalController!;
+    const label = "norishell@127.0.0.1";
+    const tabId = workspaceTabs.terminalTabs[0]!.groupId;
+
+    expect(focusedTerminalLabel.value).toBe(label);
+    await controller.deactivate();
+    await flushPromises();
+    expect(paneControls.get(label)?.deactivateFromTab).toHaveBeenCalled();
+    expect(focusedTerminalLabel.value).toBeNull();
+    expect(await runInFocusedTerminal("whoami")).toBe("unavailable");
+
+    controller.activate(tabId);
+    await flushPromises();
+    expect(focusedTerminalLabel.value).toBe(label);
     expect(await runInFocusedTerminal("uptime")).toBe("sent");
-    expect(paneControls.get(secondLabel)?.send).toHaveBeenCalledWith("uptime\r");
-    expect(paneControls.get(firstLabel)?.send).not.toHaveBeenCalled();
-
-    tabs.find((tab) => tab.textContent?.includes(secondLabel))?.dispatchEvent(new KeyboardEvent(
-      "keydown",
-      { key: "ArrowLeft", bubbles: true },
-    ));
-    await flushPromises();
-    expect(paneControls.get(secondLabel)?.deactivateFromTab).toHaveBeenCalled();
-    expect(focusedTerminalLabel.value).toBe(firstLabel);
+    expect(paneControls.get(label)?.send).toHaveBeenCalledWith("uptime\r");
 
     document.querySelector<HTMLButtonElement>(
-      `button[aria-label="${i18n.global.t("sshTerminal.closeTab")}：${secondLabel}"]`,
+      `button[aria-label="${i18n.global.t("workspaceTabs.close")}：${label}"]`,
     )?.click();
     await flushPromises();
     expect(focusedTerminalLabel.value).toBeNull();
@@ -1623,14 +1692,7 @@ describe("SshTerminalView route and Header behavior", () => {
       .find((button) => button.textContent?.includes(i18n.global.t("sshTerminal.cancel")))
       ?.click();
     await flushPromises();
-    expect(focusedTerminalLabel.value).toBe(secondLabel);
-
-    document.querySelector<HTMLButtonElement>(
-      `button[aria-label="${i18n.global.t("newWorkspace.title")}"]`,
-    )?.click();
-    await flushPromises();
-    expect(focusedTerminalLabel.value).toBeNull();
-    expect(await runInFocusedTerminal("whoami")).toBe("unavailable");
+    expect(focusedTerminalLabel.value).toBe(label);
     wrapper.unmount();
   });
 
@@ -1639,7 +1701,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     reconcileAfterForeground.mockClear();
 
     window.dispatchEvent(new Event("focus"));
@@ -1649,104 +1711,10 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
-  it.each([
-    { platform: "MacIntel", modifier: { metaKey: true }, wrongModifier: { ctrlKey: true } },
-    { platform: "Win32", modifier: { ctrlKey: true }, wrongModifier: { metaKey: true } },
-  ])("reserves numeric Tab shortcuts on $platform before terminal input", async ({
-    platform,
-    modifier,
-    wrongModifier,
-  }) => {
-    Object.defineProperty(navigator, "platform", { configurable: true, value: platform });
-    const secondSession: SshSessionSummary = {
-      ...runningSession,
-      sessionId: "019d0000-0000-7000-8000-000000000221",
-      openAttemptId: "019d0000-0000-7000-8000-000000000222",
-      channelId: "019d0000-0000-7000-8000-000000000223",
-      endpoint: { address: "shortcut.example.test", port: 22, username: "root" },
-      target: {
-        kind: "quickConnect",
-        endpoint: { address: "shortcut.example.test", port: 22, username: "root" },
-      },
-    };
-    client.fetchSshSessionSnapshot.mockResolvedValue({
-      snapshotRevision: "9",
-      sessions: [runningSession, secondSession],
-    });
-    const { wrapper } = await mountShell();
-    const terminalSurface = document.querySelector<HTMLElement>(".ssh-pane-contract-stub");
-
-    const wrongPlatformEvent = new KeyboardEvent("keydown", {
-      key: "2",
-      ...wrongModifier,
-      bubbles: true,
-      cancelable: true,
-    });
-    terminalSurface?.dispatchEvent(wrongPlatformEvent);
-    await flushPromises();
-    expect(wrongPlatformEvent.defaultPrevented).toBe(false);
-    expect(focusedTerminalLabel.value).toBe("norishell@127.0.0.1");
-
-    const selectSecond = new KeyboardEvent("keydown", {
-      key: "2",
-      ...modifier,
-      bubbles: true,
-      cancelable: true,
-    });
-    terminalSurface?.dispatchEvent(selectSecond);
-    await flushPromises();
-    expect(selectSecond.defaultPrevented).toBe(true);
-    expect(focusedTerminalLabel.value).toBe("root@shortcut.example.test");
-    expect(paneControls.get("norishell@127.0.0.1")?.deactivateFromTab).toHaveBeenCalled();
-    expect(paneControls.get("root@shortcut.example.test")?.activateFromTab).toHaveBeenCalled();
-
-    const missingTarget = new KeyboardEvent("keydown", {
-      key: "9",
-      ...modifier,
-      bubbles: true,
-      cancelable: true,
-    });
-    terminalSurface?.dispatchEvent(missingTarget);
-    await flushPromises();
-    expect(missingTarget.defaultPrevented).toBe(true);
-    expect(focusedTerminalLabel.value).toBe("root@shortcut.example.test");
-    wrapper.unmount();
-  });
-
-  it("consumes a numeric Tab shortcut without switching behind a blocking dialog", async () => {
-    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
-    client.fetchSshSessionSnapshot.mockResolvedValue({
-      snapshotRevision: "9",
-      sessions: [runningSession],
-    });
-    const { wrapper } = await mountShell();
-
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
-    await flushPromises();
-    await openLauncherQuickConnect(".terminal-pane-launcher", "dialog.example.test");
-    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(focusedTerminalLabel.value).toBeNull();
-
-    const blockedShortcut = new KeyboardEvent("keydown", {
-      key: "1",
-      metaKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    document.querySelector<HTMLInputElement>("#quick-address")?.dispatchEvent(blockedShortcut);
-    await flushPromises();
-    expect(blockedShortcut.defaultPrevented).toBe(true);
-    expect(focusedTerminalLabel.value).toBeNull();
-    expect(document.querySelectorAll<HTMLElement>('[role="tab"]')[0]?.getAttribute("aria-selected"))
-      .toBe("false");
-    wrapper.unmount();
-  });
-
   it("renders every Telnet risk acknowledgement as visible checkbox text", async () => {
-    const { wrapper } = await mountShell();
-
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
-    await flushPromises();
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
+    await createWelcomeTab(pinia);
     Array.from(document.querySelectorAll<HTMLButtonElement>(".terminal-pane-launcher button"))
       .find((button) => button.textContent?.includes(i18n.global.t("sshTerminal.telnetAction")))
       ?.click();
@@ -1765,7 +1733,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     document.querySelector<HTMLButtonElement>(
       `button[aria-label="关闭标签页：norishell@127.0.0.1"]`,
@@ -1791,7 +1759,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     document.querySelector<HTMLButtonElement>(
       `button[aria-label="关闭标签页：norishell@127.0.0.1"]`,
@@ -1804,12 +1772,70 @@ describe("SshTerminalView route and Header behavior", () => {
     wrapper.unmount();
   });
 
+  it("still asks before a batch close when single-Pane direct close is enabled", async () => {
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({
+      singlePaneTabCloseBehavior: "closeDirectly",
+    }));
+    client.fetchSshSessionSnapshot.mockResolvedValue({
+      snapshotRevision: "9",
+      sessions: [runningSession],
+    });
+    const { wrapper, pinia } = await mountShell("/terminal", { restore: true });
+    const workspaceTabs = useWorkspaceTabsStore(pinia);
+    expect(workspaceTabs.terminalController?.closeMany([workspaceTabs.terminalTabs[0]!.groupId])).toBe(true);
+    await flushPromises();
+
+    expect(disconnectForClose).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    Array.from(document.querySelectorAll<HTMLButtonElement>(".nvx-dialog__actions button"))
+      .find((candidate) => candidate.textContent?.includes("取消"))?.click();
+    await flushPromises();
+    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("closes a native batch Tab after the owner window has confirmed", async () => {
+    client.fetchSshSessionSnapshot.mockResolvedValue({
+      snapshotRevision: "9",
+      sessions: [runningSession],
+    });
+    const { wrapper, pinia } = await mountShell("/terminal", { restore: true });
+    const workspaceTabs = useWorkspaceTabsStore(pinia);
+    expect(workspaceTabs.terminalController?.closeMany([workspaceTabs.terminalTabs[0]!.groupId], true)).toBe(true);
+    await flushPromises();
+
+    expect(disconnectForClose).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  it("reports a confirmed batch failure without opening another cancellable dialog", async () => {
+    client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "9", sessions: [runningSession] });
+    disconnectForClose.mockRejectedValueOnce(new Error("disconnect rejected"));
+    const failed = vi.fn();
+    window.addEventListener("norishell:terminal-tab-close-failed", failed);
+    const { wrapper, pinia } = await mountShell("/terminal", { restore: true });
+    const workspaceTabs = useWorkspaceTabsStore(pinia);
+    const tabId = workspaceTabs.terminalTabs[0]!.groupId;
+    expect(workspaceTabs.terminalController?.closeMany([tabId], true)).toBe(true);
+    await flushPromises();
+
+    expect(failed).toHaveBeenCalledWith(expect.objectContaining({
+      detail: { tabIds: [tabId], code: "workspace_tab.terminal_close_failed" },
+    }));
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(workspaceTabs.terminalTabs.some((tab) => tab.groupId === tabId)).toBe(true);
+    window.removeEventListener("norishell:terminal-tab-close-failed", failed);
+    wrapper.unmount();
+  });
+
   it("persists the single-Pane don't-ask-again choice from the confirmation", async () => {
     client.fetchSshSessionSnapshot.mockResolvedValue({
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     document.querySelector<HTMLButtonElement>(
       `button[aria-label="关闭标签页：norishell@127.0.0.1"]`,
@@ -1833,7 +1859,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
 
     document.querySelector<HTMLButtonElement>('button[aria-label="向右拆分 Pane"]')?.click();
     await flushPromises();
@@ -1866,7 +1892,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     const body = new DOMWrapper(document.body);
     document.querySelector<HTMLButtonElement>('button[aria-label="向右拆分 Pane"]')?.click();
     await flushPromises();
@@ -1892,7 +1918,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     document.querySelector<HTMLButtonElement>('button[aria-label="向右拆分 Pane"]')?.click();
     await flushPromises();
     Array.from(document.querySelectorAll<HTMLButtonElement>(".terminal-pane-launcher button"))
@@ -1921,7 +1947,7 @@ describe("SshTerminalView route and Header behavior", () => {
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     const firstDisconnect = deferred<void>();
     disconnectForClose
       .mockImplementationOnce(() => firstDisconnect.promise)
@@ -1959,11 +1985,13 @@ describe("SshTerminalView route and Header behavior", () => {
   });
 
   it("closes only the confirmed active Pane and keeps the sibling session visible", async () => {
+    const committed = vi.fn();
+    window.addEventListener("norishell:terminal-tab-close-committed", committed);
     client.fetchSshSessionSnapshot.mockResolvedValue({
       snapshotRevision: "9",
       sessions: [runningSession],
     });
-    const { wrapper } = await mountShell();
+    const { wrapper } = await mountShell("/terminal", { restore: true });
     document.querySelector<HTMLButtonElement>('button[aria-label="向右拆分 Pane"]')?.click();
     await flushPromises();
     Array.from(document.querySelectorAll<HTMLButtonElement>(".terminal-pane-launcher button"))
@@ -1991,7 +2019,41 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(document.querySelectorAll(".nvx-terminal-split-tree__pane")).toHaveLength(1);
     expect(document.querySelector(".local-pane-contract-stub")).not.toBeNull();
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
+    expect(committed).not.toHaveBeenCalled();
     wrapper.unmount();
+    window.removeEventListener("norishell:terminal-tab-close-committed", committed);
+  });
+
+  it("commits a Tab close only after its last Pane has finished disconnecting", async () => {
+    client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "9", sessions: [runningSession] });
+    const committed = vi.fn();
+    window.addEventListener("norishell:terminal-tab-close-committed", committed);
+    const { wrapper, pinia } = await mountShell("/terminal", { restore: true });
+    const tabId = useWorkspaceTabsStore(pinia).terminalTabs[0]!.groupId;
+
+    document.querySelector<HTMLButtonElement>('button[aria-label="关闭当前 Pane"]')?.click();
+    await flushPromises();
+    Array.from(document.querySelectorAll<HTMLButtonElement>(".nvx-dialog__actions button"))
+      .find((candidate) => candidate.textContent?.includes("取消"))?.click();
+    await flushPromises();
+    expect(disconnectForClose).not.toHaveBeenCalled();
+    expect(committed).not.toHaveBeenCalled();
+
+    document.querySelector<HTMLButtonElement>('button[aria-label="关闭当前 Pane"]')?.click();
+    await flushPromises();
+    Array.from(document.querySelectorAll<HTMLButtonElement>(".nvx-dialog__actions button"))
+      .find((candidate) => candidate.textContent?.includes("断开并关闭 Pane"))?.click();
+    await flushPromises();
+    expect(disconnectForClose).toHaveBeenCalledTimes(1);
+    expect(committed).not.toHaveBeenCalled();
+    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
+
+    wrapper.findComponent(SshPaneContractStub).vm.$emit("state", "closed", { ...runningSession, state: "closed" });
+    await flushPromises();
+    expect(document.querySelectorAll('[role="tab"]')).toHaveLength(0);
+    expect((committed.mock.calls[0]?.[0] as CustomEvent).detail).toEqual([tabId]);
+    wrapper.unmount();
+    window.removeEventListener("norishell:terminal-tab-close-committed", committed);
   });
 
   it("refreshes the cached launcher after a sync commit without changing terminal sessions", async () => {
@@ -2023,11 +2085,11 @@ describe("SshTerminalView route and Header behavior", () => {
         successfulConnectionCount: "1",
       },
     }]);
-    const { wrapper } = await mountShell();
+    workspaceView.tab = true;
+    const { wrapper, pinia } = await mountShell();
     const body = new DOMWrapper(document.body);
 
-    document.querySelector<HTMLButtonElement>('button[aria-label="新建页面"]')?.click();
-    await flushPromises();
+    await createWelcomeTab(pinia);
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(document.body.textContent).toContain(host.label);
     expect(document.body.textContent).toContain("最近连接");

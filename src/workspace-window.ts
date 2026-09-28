@@ -2,7 +2,7 @@ import { createApp, watch } from "vue";
 import { createPinia } from "pinia";
 
 import WorkspaceWindowApp from "./views/WorkspaceWindowApp.vue";
-import { initializeApplicationPreferences } from "./application-preferences-startup";
+import { initializeApplicationPreferences, observeApplicationPreferenceProjection } from "./application-preferences-startup";
 import { i18n } from "./locales";
 import { router } from "./router";
 import { useAppThemeStore } from "./stores/appTheme";
@@ -36,6 +36,8 @@ async function revealWorkspaceWindow() {
 async function start() {
   try {
     await initializeApplicationPreferences(pinia);
+    const stopProjection = observeApplicationPreferenceProjection(pinia);
+    window.addEventListener("pagehide", stopProjection, { once: true });
     createApp(WorkspaceWindowApp).use(pinia).use(i18n).use(router).mount("#workspace-window-app");
     await router.isReady().then(revealWorkspaceWindow, revealWorkspaceWindow);
   } catch {

@@ -82,4 +82,46 @@ describe("NvxQuickCommandsSidebar", () => {
     wrapper.unmount();
     unregister();
   });
+
+  it("keeps run disabled without a writable focus and moves editing and deletion into the menu", async () => {
+    const store = useQuickCommandsStore();
+    expect(store.save({ label: "Disk", command: "df -h" })).toBe("saved");
+    const wrapper = mount(NvxQuickCommandsSidebar, {
+      global: { plugins: [i18n] },
+    });
+
+    expect(wrapper.get<HTMLButtonElement>('button[aria-label="Run Disk"]').element.disabled).toBe(true);
+    expect(wrapper.get('button[aria-label="Copy the command for Disk"]').text()).toContain("Copy");
+    expect(wrapper.find('button[aria-label="Edit Disk"]').exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="Delete Disk"]').exists()).toBe(false);
+
+    await wrapper.get('button[aria-haspopup="menu"]').trigger("click");
+    await flushPromises();
+    const edit = document.body.querySelector<HTMLButtonElement>('[role="menuitem"][aria-label="Edit Disk"]');
+    expect(edit).not.toBeNull();
+    edit?.click();
+    await flushPromises();
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("Edit Quick Command");
+
+    wrapper.unmount();
+  });
+
+  it("deletes only after the overflow action is confirmed", async () => {
+    const store = useQuickCommandsStore();
+    expect(store.save({ label: "Disk", command: "df -h" })).toBe("saved");
+    const wrapper = mount(NvxQuickCommandsSidebar, {
+      global: { plugins: [i18n] },
+    });
+
+    await wrapper.get('button[aria-haspopup="menu"]').trigger("click");
+    await flushPromises();
+    document.body.querySelector<HTMLButtonElement>('[role="menuitem"][aria-label="Delete Disk"]')?.click();
+    await flushPromises();
+    expect(store.commands).toHaveLength(1);
+    document.body.querySelector<HTMLButtonElement>('.nvx-dialog__actions button:last-child')?.click();
+    await flushPromises();
+    expect(store.commands).toHaveLength(0);
+
+    wrapper.unmount();
+  });
 });

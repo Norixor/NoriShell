@@ -6,7 +6,7 @@ use ts_rs::TS;
 use crate::{HostId, RequestMeta, SshSessionEndpoint, WireSequence};
 
 pub const TERMINAL_WORKSPACE_LAYOUT_SCHEMA_VERSION: u16 = 1;
-pub const MAX_TERMINAL_WORKSPACE_TABS: usize = 32;
+pub const MAX_TERMINAL_WORKSPACE_TABS: usize = 512;
 pub const MAX_TERMINAL_WORKSPACE_PANES_PER_TAB: usize = 2_048;
 pub const MAX_TERMINAL_WORKSPACE_LAYOUT_DEPTH: usize = 64;
 
@@ -380,6 +380,32 @@ mod tests {
     #[test]
     fn validates_secret_free_layout_projection() {
         assert_eq!(valid_layout().validate(), Ok(()));
+    }
+
+    #[test]
+    fn accepts_a_new_tab_after_thirty_two_saved_tabs() {
+        let mut layout = TerminalWorkspaceLayout {
+            schema_version: TERMINAL_WORKSPACE_LAYOUT_SCHEMA_VERSION,
+            active_tab_id: Some("tab-33".to_owned()),
+            tabs: Vec::new(),
+        };
+        for index in 1..=33 {
+            let tab_id = format!("tab-{index}");
+            let pane_id = format!("pane-{index}");
+            layout.tabs.push(TerminalWorkspaceTab {
+                tab_id,
+                layout: TerminalWorkspaceLayoutNode::Pane {
+                    pane_id: pane_id.clone(),
+                    terminal_id: pane_id.clone(),
+                },
+                active_pane_id: pane_id.clone(),
+                panes: vec![TerminalWorkspacePane::Launcher {
+                    pane_id,
+                    label: "New".to_owned(),
+                }],
+            });
+        }
+        assert_eq!(layout.validate(), Ok(()));
     }
 
     #[test]

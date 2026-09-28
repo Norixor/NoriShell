@@ -11,13 +11,18 @@ const client = vi.hoisted(() => ({
   secureChallenge: vi.fn(),
   decideMetricsHostKey: vi.fn(),
   fetchServerOverview: vi.fn(),
+  fetchSshSessionSnapshot: vi.fn(),
   prepareMetricsKeyboardInteractiveAnswer: vi.fn(),
   reconcileMetrics: vi.fn(),
   respondMetricsKeyboardInteractive: vi.fn(),
   retryMetrics: vi.fn(),
 }));
 const revealRoute = vi.hoisted(() => vi.fn());
+const terminalNavigation = vi.hoisted(() => ({ open: vi.fn(async () => undefined) }));
+const managedFocus = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("../routeReveal", () => ({ useRouteReveal: () => revealRoute }));
+vi.mock("../workspace-tab-shell-action", () => ({ openWorkspaceTerminalHost: terminalNavigation.open }));
+vi.mock("../workspace-tab-view-shell", () => ({ focusManagedTerminalSession: managedFocus }));
 
 vi.mock("../core-api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../core-api/client")>();
@@ -26,6 +31,7 @@ vi.mock("../core-api/client", async (importOriginal) => {
     canUseDesktopCore: () => true,
     decideMetricsHostKey: client.decideMetricsHostKey,
     fetchServerOverview: client.fetchServerOverview,
+    fetchSshSessionSnapshot: client.fetchSshSessionSnapshot,
     prepareMetricsKeyboardInteractiveAnswer: client.prepareMetricsKeyboardInteractiveAnswer,
     reconcileMetrics: client.reconcileMetrics,
     respondMetricsKeyboardInteractive: client.respondMetricsKeyboardInteractive,
@@ -166,11 +172,25 @@ describe("OverviewView Core operation boundaries", () => {
 
     await wrapper.get(".nvx-server-card__new-terminal").trigger("click");
     await flushPromises();
-    expect(router.currentRoute.value.path).toBe("/terminal");
-    expect(router.currentRoute.value.query.hostId).toBe(hostId);
-    expect(router.currentRoute.value.query.source).toBe("overview");
-    expect(router.currentRoute.value.query.connectOperationId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(router.currentRoute.value.path).toBe("/overview");
+    expect(terminalNavigation.open).toHaveBeenCalledWith({
+      hostId, source: "overview", connectOperationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
     wrapper.unmount();
+  });
+
+  it("focuses an existing Terminal through its Core generation and managed owner", async () => {
+    const existing = snapshot();
+    const sessionId = "019d0000-0000-7000-8000-000000000099";
+    existing.cards[0]!.terminalSessionIds = [sessionId];
+    client.fetchSshSessionSnapshot.mockResolvedValue({ sessions: [{ sessionId, generation: "7" }] });
+    const { router, wrapper } = await mountView(existing);
+    try {
+      await wrapper.get(".nvx-server-card__sessions button").trigger("click");
+      await flushPromises();
+      expect(managedFocus).toHaveBeenCalledWith({ kind: "focusSshSession", sessionId, generation: "7" });
+      expect(router.currentRoute.value.path).toBe("/overview");
+    } finally { wrapper.unmount(); }
   });
 
   it("requires an explicit decision for an unknown Metrics host key", async () => {

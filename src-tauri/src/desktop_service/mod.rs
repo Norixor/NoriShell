@@ -278,13 +278,10 @@ impl DesktopService {
             }
         }
         let mut sessions = self.sessions.lock().map_err(|_| EngineError::Protocol)?;
-        if let Some(session) = sessions.get(&request.operation_id) {
-            let existing = session.summary();
-            return if existing.profile == request.profile {
-                Ok(existing)
-            } else {
-                Err(EngineError::InvalidConfiguration)
-            };
+        // The owned open publishes this id to its Tab before creation; a replay
+        // must never attach a second Tab to an existing session.
+        if sessions.contains_key(&request.operation_id) {
+            return Err(EngineError::StaleInput);
         }
         if sessions.len() >= 16 {
             return Err(EngineError::ResourceLimit);

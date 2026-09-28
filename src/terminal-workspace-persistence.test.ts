@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   flushTerminalWorkspaceBeforeExit,
   registerTerminalWorkspaceFlush,
+  registerRemoteTerminalWorkspaceFlush,
   requestExitAfterTerminalWorkspaceFlush,
   resetTerminalWorkspaceFlushForTests,
 } from "./terminal-workspace-persistence";
@@ -41,5 +42,23 @@ describe("terminal workspace exit barrier", () => {
 
     await expect(requestExitAfterTerminalWorkspaceFlush(requestExit)).rejects.toBe(failure);
     expect(requestExit).not.toHaveBeenCalled();
+  });
+
+  it("waits for every Tab WebView layout before native exit", async () => {
+    let releaseRemote!: () => void;
+    const remotePending = new Promise<void>((resolve) => { releaseRemote = resolve; });
+    const local = vi.fn(async () => undefined);
+    const remote = vi.fn(() => remotePending);
+    registerTerminalWorkspaceFlush(local);
+    const unregisterRemote = registerRemoteTerminalWorkspaceFlush(remote);
+    const requestExit = vi.fn(async () => undefined);
+    const exit = requestExitAfterTerminalWorkspaceFlush(requestExit);
+    await vi.waitFor(() => expect(remote).toHaveBeenCalledOnce());
+    expect(local).toHaveBeenCalledOnce();
+    expect(requestExit).not.toHaveBeenCalled();
+    releaseRemote();
+    await exit;
+    expect(requestExit).toHaveBeenCalledOnce();
+    unregisterRemote();
   });
 });

@@ -1,6 +1,10 @@
-import { createRouter, createWebHashHistory } from "vue-router";
+import { createRouter, createWebHashHistory, START_LOCATION } from "vue-router";
 import { isTauri } from "@tauri-apps/api/core";
-import { focusWorkspaceWindowTarget, snapshotWorkspaceTabs, workspaceWindowLabel } from "./workspace-tab-windows";
+import { usePluginExtensionsStore } from "./stores/pluginExtensions";
+import { showWorkspaceTabFailure } from "./workspace-tab-errors";
+import { openManagedPluginPage } from "./workspace-tab-view-shell";
+import { workspaceWindowLabel } from "./workspace-tab-windows";
+import { isWorkspaceTabView } from "./workspace-window-context";
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -25,24 +29,33 @@ export const router = createRouter({
   ],
 });
 
-export async function guardPluginPageRoute(path: string): Promise<string | void> {
-  if (!isTauri()) return;
+/**
+ * A plugin page is a native Page Tab. In a window shell, navigating to its route
+ * opens or activates that Tab (or focuses the window that owns it) and never
+ * renders the page in the shell. The page's own Tab WebView renders it normally.
+ */
+export async function guardPluginPageRoute(path: string, initial = false): Promise<string | false | void> {
+  if (!isTauri() || isWorkspaceTabView()) return;
   const pluginPage = /^\/plugin\/([^/]+)\/([^/]+)$/.exec(path);
   if (!pluginPage) return;
-  let tabId: string;
+  const fallback = initial ? (workspaceWindowLabel() === "main" ? "/terminal" : "/workspace-window") : false;
+  let pluginId: string;
+  let pageId: string;
   try {
-    tabId = `page:plugin:${decodeURIComponent(pluginPage[1]!)}:${decodeURIComponent(pluginPage[2]!)}`;
-  } catch { return; }
-  const state = await snapshotWorkspaceTabs();
-  const fallback = workspaceWindowLabel() === "main" ? "/terminal" : "/workspace-window";
-  if (state.outgoing.some((entry) => entry.tab.id === tabId)
-    || state.incoming.some((entry) => entry.tab.id === tabId)) return fallback;
-  const otherOwner = state.others.find((tab) => tab.id === tabId)?.owner;
-  if (!otherOwner) return;
-  await focusWorkspaceWindowTarget(otherOwner).catch(() => undefined);
+    pluginId = decodeURIComponent(pluginPage[1]!);
+    pageId = decodeURIComponent(pluginPage[2]!);
+  } catch { return fallback; }
+  const extensions = usePluginExtensionsStore();
+  const find = () => extensions.navigation.find((item) => item.pluginId === pluginId && item.navigation.pageId === pageId);
+  if (!find()) await extensions.loadNavigation().catch(() => undefined);
+  const item = find();
+  if (!item) return "/plugins";
+  // The shell may still be starting; the Tab opens once its manager is ready.
+  void openManagedPluginPage(item)
+    .catch((error: unknown) => showWorkspaceTabFailure(error, "plugin-page-route", "workspace_tab.open_failed", "workspaceTabs.openFailed"));
   return fallback;
 }
 
-router.beforeEach(async (to) => {
-  return guardPluginPageRoute(to.path);
+router.beforeEach(async (to, from) => {
+  return guardPluginPageRoute(to.path, from === START_LOCATION);
 });

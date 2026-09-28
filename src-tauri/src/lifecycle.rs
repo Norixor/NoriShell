@@ -13,7 +13,7 @@ use norishell_core_api::{
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuItemKind, PredefinedMenuItem};
 use tauri::{
-    App, AppHandle, Emitter, Manager, Runtime, State, WebviewWindow, Window, WindowEvent,
+    App, AppHandle, Emitter, Manager, Runtime, State, Webview, WebviewWindow, Window, WindowEvent,
     menu::{Menu, MenuItem},
 };
 use uuid::Uuid;
@@ -555,7 +555,7 @@ pub async fn application_request_exit(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn release_update_prepare_install<R: Runtime>(
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     disconnect_active_resources: bool,
     app: AppHandle<R>,
     lifecycle: State<'_, LifecycleState>,
@@ -569,7 +569,10 @@ pub(crate) async fn release_update_prepare_install<R: Runtime>(
     hosts: State<'_, HostService>,
 ) -> CoreResult<ExitReadiness> {
     let request_id = RequestId::new();
-    if window.label() != MAIN_WINDOW_LABEL {
+    if !app
+        .state::<crate::workspace_windows::WorkspaceWindows>()
+        .is_main_or_page(&webview)
+    {
         return Err(Box::new(CoreApiError::safe_internal(
             request_id,
             Uuid::new_v4().to_string(),
@@ -646,11 +649,15 @@ pub(crate) async fn release_update_prepare_install<R: Runtime>(
 
 #[tauri::command]
 pub(crate) fn release_update_allow_relaunch<R: Runtime>(
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     lifecycle: State<'_, LifecycleState>,
     update_exit: State<'_, UpdateExitState>,
 ) -> Result<(), &'static str> {
-    if window.label() != MAIN_WINDOW_LABEL {
+    if !webview
+        .app_handle()
+        .state::<crate::workspace_windows::WorkspaceWindows>()
+        .is_main_or_page(&webview)
+    {
         return Err("unavailable");
     }
     if update_exit

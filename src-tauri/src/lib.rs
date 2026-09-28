@@ -51,6 +51,7 @@ mod ssh_sync_browser_store;
 mod ssh_sync_exchange;
 mod ssh_sync_exchange_local;
 mod ssh_sync_preferences;
+mod tab_boot_trace;
 #[allow(dead_code)]
 mod telnet_session_service;
 mod terminal_focus_broker;
@@ -66,6 +67,7 @@ mod window_frame;
 #[allow(dead_code)]
 mod windows_process_control;
 mod workspace_tab_drag;
+mod workspace_tab_views;
 mod workspace_windows;
 
 use tauri::{Emitter, Manager};
@@ -139,8 +141,6 @@ macro_rules! production_invoke_handler {
             plugin_service::plugin_contribution_invoke,
             plugin_service::plugin_contribution_copy,
             plugin_service::plugin_extension_target_list,
-            plugin_service::plugin_target_context_open,
-            plugin_service::plugin_target_context_close,
             plugin_service::plugin_ui_contribution_list,
             plugin_service::plugin_ui_action,
             plugin_service::settings::plugin_settings_get,
@@ -263,11 +263,6 @@ macro_rules! production_invoke_handler {
             sftp_session_service::sftp_session_snapshot,
             sftp_session_service::sftp_session_disconnect,
             sftp_session_service::sftp_local_boundary_register,
-            sftp_session_service::sftp_local_directory_register,
-            sftp_session_service::sftp_local_directory_list,
-            sftp_session_service::sftp_local_directory_open_child,
-            sftp_session_service::sftp_local_directory_create_child,
-            sftp_session_service::sftp_local_directory_release,
             sftp_session_service::sftp_directory_list,
             sftp_session_service::sftp_directory_list_cancel,
             sftp_session_service::sftp_file_preview,
@@ -284,6 +279,8 @@ macro_rules! production_invoke_handler {
             sftp_session_service::sftp_transfer_resume,
             sftp_session_service::sftp_remote_cleanup_retry,
             sftp_session_service::sftp_remote_cleanup_retain,
+            tab_boot_trace::tab_boot_trace_enabled,
+            tab_boot_trace::tab_boot_trace,
             vault_service::vault_status,
             vault_service::vault_create,
             vault_service::vault_unlock,
@@ -308,10 +305,10 @@ impl ProductionInvokeRuntime for tauri::Wry {
             desktop_service::desktop_availability,
             desktop_service::desktop_profile_save,
             desktop_service::desktop_profile_delete,
-            desktop_service::desktop_session_open,
+            desktop_service::desktop_session_open_owned,
             desktop_service::desktop_session_snapshot,
             desktop_service::desktop_session_disconnect,
-            desktop_service::desktop_session_close,
+            desktop_service::desktop_session_close_owned,
             desktop_service::desktop_frame_get,
             desktop_service::desktop_focus_change,
             desktop_service::desktop_input,
@@ -326,20 +323,28 @@ impl ProductionInvokeRuntime for tauri::Wry {
             window_frame::window_set_windows_maximize_hit_region,
             window_first_show::window_renderer_ready,
             workspace_windows::workspace_window_open,
-            workspace_windows::workspace_window_list,
-            workspace_windows::workspace_window_at_cursor,
             workspace_windows::workspace_window_focus,
             workspace_windows::workspace_window_close,
             workspace_windows::workspace_window_close_empty,
-            workspace_windows::workspace_tab_register,
-            workspace_windows::workspace_tab_update,
-            workspace_windows::workspace_tab_unregister,
-            workspace_windows::workspace_tab_prepare,
-            workspace_windows::workspace_tab_source_frozen,
-            workspace_windows::workspace_tab_target_ready,
-            workspace_windows::workspace_tab_commit,
-            workspace_windows::workspace_tab_abort,
+            workspace_windows::workspace_tab_projection_update,
             workspace_windows::workspace_tab_snapshot,
+            workspace_tab_views::create_tab_view,
+            workspace_tab_views::workspace_tab_view_get,
+            workspace_tab_views::workspace_tab_context_get,
+            workspace_tab_views::workspace_tab_bootstrap_take,
+            workspace_tab_views::set_tab_view_bounds,
+            workspace_tab_views::set_tab_view_visible,
+            workspace_tab_views::focus_tab_view,
+            workspace_tab_views::move_tab_view,
+            workspace_tab_views::close_tab_view,
+            workspace_tab_views::close_own_tab_view,
+            sftp_session_service::sftp_local_directory_register,
+            sftp_session_service::sftp_local_directory_list,
+            sftp_session_service::sftp_local_directory_open_child,
+            sftp_session_service::sftp_local_directory_create_child,
+            sftp_session_service::sftp_local_directory_release,
+            plugin_service::plugin_target_context_open,
+            plugin_service::plugin_target_context_close,
             workspace_tab_drag::workspace_tab_drag_begin,
             workspace_tab_drag::workspace_tab_drag_cancel,
             workspace_tab_drag::workspace_tab_drag_finish,
@@ -439,6 +444,7 @@ pub fn run() {
         .manage(UpdateExitState::default())
         .manage(window_first_show::WindowFirstShow::default())
         .manage(workspace_windows::WorkspaceWindows::default())
+        .manage(workspace_tab_views::WorkspaceTabViews::default())
         .manage(workspace_tab_drag::WorkspaceTabDrag::default())
         .setup(|app| {
             #[cfg(any(windows, target_os = "macos"))]
@@ -659,6 +665,8 @@ pub fn run() {
             workspace_windows::on_window_event(window, event);
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 workspace_tab_drag::on_window_destroyed(window.app_handle(), window.label());
+                workspace_tab_views::on_window_destroyed(window.app_handle(), window.label());
+                workspace_tab_views::release_webview_resources(window.app_handle(), window.label());
             }
             #[cfg(any(windows, target_os = "macos"))]
             if matches!(event, tauri::WindowEvent::Destroyed) {

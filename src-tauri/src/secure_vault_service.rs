@@ -20,7 +20,9 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, State, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -167,6 +169,18 @@ fn allowed_caller(app: &AppHandle, label: &str) -> bool {
             .is_prompt_window(label)
 }
 
+fn vault_caller_owner(app: &AppHandle, webview: &Webview) -> Option<String> {
+    let window = webview.window();
+    if webview.label() == window.label()
+        && app.get_webview_window(window.label()).is_some()
+        && allowed_caller(app, window.label())
+    {
+        Some(window.label().into())
+    } else {
+        crate::workspace_tab_views::ordinary_owner(app, webview).ok()
+    }
+}
+
 fn ordinary_owner_alive(app: &AppHandle, label: &str) -> bool {
     app.get_webview_window(label).is_some()
         && (label == "main"
@@ -221,14 +235,16 @@ pub async fn secure_vault_ensure_for_host(
     host_id: HostId,
     expected_host_state_version: WireSequence,
     include_optional_credentials: Option<bool>,
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     service: State<'_, SecureVaultService>,
     vault: State<'_, VaultService>,
     ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
     hosts: State<'_, HostService>,
 ) -> Result<bool, SecureVaultCommandError> {
-    if !ordinary_owner_alive(&app, window.label()) {
+    let owner = crate::workspace_tab_views::ordinary_owner(&app, &webview)
+        .map_err(|_| "secureVaultDenied")?;
+    if !ordinary_owner_alive(&app, &owner) {
         return Err("secureVaultDenied".into());
     }
     let initial =
@@ -243,7 +259,7 @@ pub async fn secure_vault_ensure_for_host(
     let revision_token = initial.connection.revision_token.clone();
     if !secure_vault_open(
         SecureVaultMode::EnsureUnlocked,
-        window,
+        webview,
         app,
         service,
         vault,
@@ -265,17 +281,15 @@ pub async fn secure_vault_ensure_for_host(
 #[tauri::command]
 pub async fn secure_vault_open(
     mode: SecureVaultMode,
-    window: WebviewWindow,
+    webview: Webview,
     app: AppHandle,
     service: State<'_, SecureVaultService>,
     vault: State<'_, VaultService>,
     ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
 ) -> Result<bool, SecureVaultCommandError> {
-    if app.get_webview_window(window.label()).is_none() || !allowed_caller(&app, window.label()) {
-        return Err("secureVaultDenied".into());
-    }
+    let owner = vault_caller_owner(&app, &webview).ok_or("secureVaultDenied")?;
     let mode = if matches!(mode, SecureVaultMode::UnlockSavedLocal) {
-        if window.label() != "main" {
+        if owner != "main" {
             return Err("secureVaultDenied".into());
         }
         if vault.unlock_with_saved_local_password().is_ok() {
@@ -321,7 +335,7 @@ pub async fn secure_vault_open(
                     can_reset: reset_fingerprint.is_some(),
                 },
                 sender,
-                owner_label: window.label().to_owned(),
+                owner_label: owner.clone(),
                 reset_fingerprint,
                 expires_at: Instant::now() + Duration::from_secs(180),
             },
@@ -383,8 +397,7 @@ pub async fn secure_vault_open(
     let deadline = tokio::time::sleep(Duration::from_secs(180));
     tokio::pin!(deadline);
     let mut owner_check = tokio::time::interval(Duration::from_millis(250));
-    let owner_valid =
-        || app.get_webview_window(window.label()).is_some() && allowed_caller(&app, window.label());
+    let owner_valid = || vault_caller_owner(&app, &webview).as_deref() == Some(owner.as_str());
     let answer = loop {
         tokio::select! {
             response = &mut receiver => {

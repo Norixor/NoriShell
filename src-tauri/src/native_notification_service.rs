@@ -11,7 +11,7 @@ use norishell_core_api::{
     WireSequence,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, Webview};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -1269,11 +1269,15 @@ fn delivery_error(error: NotificationError) -> NotificationDeliveryState {
     }
 }
 
-fn require_main<R: tauri::Runtime>(
-    window: &WebviewWindow<R>,
+fn require_main_or_page<R: tauri::Runtime>(
+    webview: &Webview<R>,
     request_id: &RequestId,
 ) -> CommandResult<()> {
-    if window.label() == "main" {
+    if webview
+        .app_handle()
+        .state::<crate::workspace_windows::WorkspaceWindows>()
+        .is_main_or_page(webview)
+    {
         Ok(())
     } else {
         Err(command_error(
@@ -1296,10 +1300,10 @@ fn command_error(
 #[tauri::command]
 pub async fn native_notification_permission_get<R: tauri::Runtime>(
     request: NotificationRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, NativeNotificationService>,
 ) -> CommandResult<NotificationPermissionSnapshot> {
-    require_main(&window, &request.meta.request_id)?;
+    require_main_or_page(&webview, &request.meta.request_id)?;
     service
         .permission()
         .await
@@ -1309,10 +1313,10 @@ pub async fn native_notification_permission_get<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn native_notification_permission_request<R: tauri::Runtime>(
     request: NotificationRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, NativeNotificationService>,
 ) -> CommandResult<NotificationPermissionSnapshot> {
-    require_main(&window, &request.meta.request_id)?;
+    require_main_or_page(&webview, &request.meta.request_id)?;
     service
         .request_permission()
         .await
@@ -1322,10 +1326,10 @@ pub async fn native_notification_permission_request<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn native_notification_test<R: tauri::Runtime>(
     request: NotificationTestRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, NativeNotificationService>,
 ) -> CommandResult<NotificationPermissionSnapshot> {
-    require_main(&window, &request.meta.request_id)?;
+    require_main_or_page(&webview, &request.meta.request_id)?;
     service
         .test(request.locale)
         .await
@@ -1335,10 +1339,10 @@ pub async fn native_notification_test<R: tauri::Runtime>(
 #[tauri::command]
 pub fn native_notification_context_set<R: tauri::Runtime>(
     request: NotificationContextRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, NativeNotificationService>,
 ) -> CommandResult<()> {
-    require_main(&window, &request.meta.request_id)?;
+    require_main_or_page(&webview, &request.meta.request_id)?;
     service
         .ensure_running()
         .map_err(|code| command_error(&request.meta.request_id, code))?;

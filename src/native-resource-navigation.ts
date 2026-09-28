@@ -1,11 +1,14 @@
 import { registerNativeTransferNavigation } from "./native-transfer-navigation";
+import type { NativeTransferNavigationTarget } from "./native-transfer-navigation";
 import type { Router } from "vue-router";
 import type { NativeResourceNotificationClick } from "./core-api/native-notifications";
 import type { NativeTrayAction } from "./core-api/generated/core-api";
 import { fetchSshSessionSnapshot, fetchTelnetSessionSnapshot, fetchForwardSessionSnapshot, fetchSftpSessionSnapshot, fetchSftpTransferIntentSnapshot } from "./core-api/client";
+import { canUseDesktopCore } from "./core-api/client";
 import { desktopClient } from "./core-api/desktop-client";
 import type { useWorkspaceTabsStore } from "./stores/workspaceTabs";
 import { navigateNativeTrayAction } from "./native-tray-navigation";
+import { openManagedTransferTarget } from "./workspace-tab-view-shell";
 
 /** A notification can be clicked long after its resource exits. Expired notifications finish silently and never reconnect. */
 export async function navigateNativeResourceNotification(
@@ -46,9 +49,15 @@ export async function navigateNativeResourceNotification(
         const old = legacy.transfers.find((item) => item.transferId === payload.transferId && item.stateRevision === payload.stateRevision);
         if (!old || !alive() || workspace.terminalActivationBlocked || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
         const operation = crypto.randomUUID();
-        registerNativeTransferNavigation(operation, { kind: "legacy", transferId: old.transferId, minimumRevision: old.stateRevision, sessionId: old.sessionId, generation: old.generation });
+        const target: NativeTransferNavigationTarget = { kind: "legacy", transferId: old.transferId, minimumRevision: old.stateRevision, sessionId: old.sessionId, generation: old.generation };
+        const query = { focusTransfers: "true", focusTransferId: old.transferId, focusOperation: operation };
+        if (canUseDesktopCore()) {
+          await openManagedTransferTarget(query, target);
+          return;
+        }
+        registerNativeTransferNavigation(operation, target);
         workspace.terminalController?.deactivate();
-        await router.push({ path: "/sftp", query: { focusTransfers: "true", focusTransferId: old.transferId, focusOperation: operation } });
+        await router.push({ path: "/sftp", query });
         return;
       }
     }

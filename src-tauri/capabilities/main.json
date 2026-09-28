@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
   "description": "Minimum Core capability for the NoriShell main window.",
-  "windows": [
+  "webviews": [
     "main"
   ],
   "permissions": [
@@ -13,6 +13,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-set-fullscreen",
     "dialog:allow-open",
+    "dialog:allow-ask",
     "dialog:allow-save",
     "clipboard-manager:allow-read-text",
     "updater:allow-check",

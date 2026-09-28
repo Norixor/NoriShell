@@ -39,6 +39,25 @@ describe("NvxDialog", () => {
       .toBe(true);
   });
 
+  it("places split navigation beside the content and focuses its requested field", async () => {
+    mount(NvxDialog, {
+      attachTo: document.body,
+      props: { modelValue: true, title: "History", closeLabel: "Close", layout: "split" },
+      slots: {
+        sidebar: () => h("button", "Current host"),
+        default: () => h("input", { "data-nvx-dialog-initial-focus": "", "aria-label": "Search history" }),
+        actions: () => h("button", "Done"),
+      },
+    });
+    await flushPromises();
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog?.classList.contains("nvx-dialog--split")).toBe(true);
+    expect(dialog?.classList.contains("nvx-dialog--md")).toBe(false);
+    expect(dialog?.querySelector(".nvx-dialog__sidebar")?.textContent).toContain("Current host");
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Search history");
+  });
+
   it("announces itself, focuses the requested action, and traps tab focus", async () => {
     mount(NvxDialog, {
       attachTo: document.body,

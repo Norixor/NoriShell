@@ -262,8 +262,8 @@ mod platform {
         NetworkManagement::IpHelper::{CancelMibChangeNotify2, NotifyIpInterfaceChange},
         Networking::WinSock::AF_UNSPEC,
         System::Power::{
-            DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, PowerRegisterSuspendResumeNotification,
-            PowerUnregisterSuspendResumeNotification,
+            DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, HPOWERNOTIFY,
+            PowerRegisterSuspendResumeNotification, PowerUnregisterSuspendResumeNotification,
         },
         UI::WindowsAndMessaging::{
             DEVICE_NOTIFY_CALLBACK, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND,
@@ -329,7 +329,7 @@ mod platform {
                 self.network = 0;
             }
             if self.power != 0 {
-                unsafe { PowerUnregisterSuspendResumeNotification(self.power as *mut c_void) };
+                unsafe { PowerUnregisterSuspendResumeNotification(self.power as HPOWERNOTIFY) };
                 self.power = 0;
             }
             // Windows may have queued a callback before unregistering it. The two tiny

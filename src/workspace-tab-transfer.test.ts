@@ -1,230 +1,107 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { hiddenOutgoingWorkspaceTabs, holdLocalWorkspaceTabClaim, moveWorkspaceTab, moveWorkspaceTabToNewWindow, registerWorkspaceHandoff, startWorkspaceTabTransfers, syncLocalWorkspaceTabRecords, visibleIncomingWorkspaceTabs } from "./workspace-tab-transfer";
+import { closeChildWorkspaceWindowIfEmpty, moveWorkspaceTab, moveWorkspaceTabToNewWindow } from "./workspace-tab-transfer";
 
-const ipc = vi.hoisted(() => {
-  const listeners = new Map<string, (event: { payload: unknown }) => void>();
-  return {
-    listeners,
-    listen: vi.fn(async (name: string, listener: (event: { payload: unknown }) => void) => {
-      listeners.set(name, listener);
-      return () => { listeners.delete(name); };
-    }),
-    emitTo: vi.fn(async () => undefined),
-    snapshot: vi.fn(),
-    register: vi.fn(),
-    update: vi.fn(),
-    unregister: vi.fn(),
-    prepare: vi.fn(),
-    freeze: vi.fn(),
-    ready: vi.fn(),
-    commit: vi.fn(),
-    abort: vi.fn(),
-    open: vi.fn(),
-    close: vi.fn(async () => undefined),
-    closeEmpty: vi.fn(async () => undefined),
-    hide: vi.fn(async () => undefined),
-    show: vi.fn(async () => undefined),
-    focus: vi.fn(async () => undefined),
-    ownerLabel: "main",
-  };
-});
-
-vi.mock("@tauri-apps/api/event", () => ({ listen: ipc.listen, emitTo: ipc.emitTo }));
-vi.mock("./workspace-tab-windows", () => ({
-  workspaceWindowLabel: () => ipc.ownerLabel,
-  snapshotWorkspaceTabs: ipc.snapshot,
-  registerWorkspaceTab: ipc.register,
-  updateWorkspaceTab: ipc.update,
-  unregisterWorkspaceTab: ipc.unregister,
-  prepareWorkspaceTabTransfer: ipc.prepare,
-  freezeWorkspaceTabTransfer: ipc.freeze,
-  readyWorkspaceTabTransfer: ipc.ready,
-  commitWorkspaceTabTransfer: ipc.commit,
-  abortWorkspaceTabTransfer: ipc.abort,
-  openWorkspaceWindow: ipc.open,
-  closeWorkspaceWindow: ipc.close,
-  closeEmptyWorkspaceWindow: ipc.closeEmpty,
-  hideWorkspaceWindow: ipc.hide,
-  showWorkspaceWindow: ipc.show,
-  focusWorkspaceWindow: ipc.focus,
+const native = vi.hoisted(() => ({
+  owner: "main",
+  snapshot: vi.fn(),
+  moveView: vi.fn(),
+  openWindow: vi.fn(),
+  closeWindow: vi.fn(),
+  closeEmpty: vi.fn(),
 }));
 
-describe("Workspace Tab owner handoff", () => {
-  let stop: (() => void) | null = null;
-  let dispose: (() => void) | null = null;
-  const payload = { groupId: "page:knownHosts", pageType: "knownHosts", route: "/known-hosts" };
-  const record = { id: "page:knownHosts", kind: "page", owner: "main", revision: 3, payload };
-  const handler = {
-    kind: "page" as const,
-    owns: vi.fn(() => true),
-    snapshot: vi.fn(async () => payload),
-    freeze: vi.fn(async () => undefined),
-    import: vi.fn(async () => undefined),
-    commit: vi.fn(),
-    rollback: vi.fn(async () => undefined),
-    discard: vi.fn(async () => undefined),
-    activate: vi.fn(),
-    activateExisting: vi.fn(),
-  };
-  const prepareKind = vi.fn(async () => undefined);
+vi.mock("./workspace-tab-windows", () => ({
+  workspaceWindowLabel: () => native.owner,
+  snapshotWorkspaceTabs: native.snapshot,
+  moveWorkspaceTabView: native.moveView,
+  openWorkspaceWindow: native.openWindow,
+  closeWorkspaceWindow: native.closeWindow,
+  closeEmptyWorkspaceWindow: native.closeEmpty,
+}));
 
-  beforeEach(async () => {
+const id = "page:knownHosts";
+const payload = { groupId: id, pageType: "knownHosts", route: "/known-hosts" };
+const record = { id, kind: "page" as const, owner: "main", payload };
+const view = { id, label: `workspace-tab-${id}`, ownerWindow: "main", created: false };
+
+describe("native Workspace Tab movement", () => {
+  beforeEach(() => {
     vi.clearAllMocks();
-    handler.owns.mockReturnValue(true);
-    ipc.ownerLabel = "main";
-    ipc.snapshot.mockResolvedValue({ owned: [record], incoming: [], outgoing: [], others: [] });
-    ipc.prepare.mockResolvedValue("ticket-1");
-    ipc.commit.mockResolvedValue({ ...record, owner: "workspace-a", revision: 4 });
-    ipc.abort.mockResolvedValue(undefined);
-    dispose = registerWorkspaceHandoff(handler);
-    stop = await startWorkspaceTabTransfers(prepareKind);
+    native.owner = "main";
+    native.snapshot.mockResolvedValue({ owned: [record], others: [] });
+    native.moveView.mockResolvedValue({ ...view, ownerWindow: "workspace-a" });
+    native.openWindow.mockResolvedValue("workspace-a");
+    native.closeWindow.mockResolvedValue(undefined);
+    native.closeEmpty.mockResolvedValue(undefined);
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("moves the existing renderer instead of replaying a projection", async () => {
+    expect(await moveWorkspaceTab(id, "workspace-a")).toBe(true);
+    expect(native.moveView).toHaveBeenCalledExactlyOnceWith(id, "workspace-a");
+    expect(native.snapshot).not.toHaveBeenCalled();
   });
 
-  afterEach(() => {
-    stop?.();
-    dispose?.();
-    stop = null;
-    dispose = null;
-    vi.useRealTimers();
+  it("lets Core reject a stale owner at the movement boundary", async () => {
+    native.moveView.mockRejectedValueOnce("workspace_tab.wrong_owner");
+    await expect(moveWorkspaceTab(id, "workspace-a"))
+      .rejects.toBe("workspace_tab.wrong_owner");
+    expect(native.snapshot).not.toHaveBeenCalled();
   });
 
-  it("does not recover a locally closed tab while its Core record awaits unregister", async () => {
-    vi.useFakeTimers();
-    await syncLocalWorkspaceTabRecords([{ id: record.id, kind: "page" }]);
-    handler.owns.mockReturnValue(false);
-    await syncLocalWorkspaceTabRecords([]);
-
-    ipc.listeners.get("workspace-tab-state-changed")?.({ payload: record.id });
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(prepareKind).not.toHaveBeenCalled();
-    expect(handler.import).not.toHaveBeenCalled();
-    expect(handler.activate).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(16_000);
-    expect(ipc.unregister).toHaveBeenCalledWith(record.id, record.revision);
+  it("does not ask native to move to the current owner", async () => {
+    expect(await moveWorkspaceTab(id, "main")).toBe(false);
+    expect(native.moveView).not.toHaveBeenCalled();
   });
 
-  it("still recovers a Core-owned tab not observed in this window", async () => {
-    handler.owns.mockReturnValue(false);
-    ipc.listeners.get("workspace-tab-state-changed")?.({ payload: record.id });
-
-    await vi.waitFor(() => expect(handler.activate).toHaveBeenCalledWith(record.id));
-    expect(prepareKind).toHaveBeenCalledWith("page");
-    expect(handler.import).toHaveBeenCalledWith(record.id, record.payload);
+  it("closes an emptied auxiliary window after the move succeeds", async () => {
+    native.owner = "workspace-a";
+    native.snapshot.mockResolvedValueOnce({ owned: [], others: [] });
+    await moveWorkspaceTab(id, "main");
+    await vi.waitFor(() => expect(native.closeWindow).toHaveBeenCalledOnce());
   });
 
-  it("does not recover a Page Tab before its local Core claim reaches Pinia", async () => {
-    handler.owns.mockReturnValue(false);
-    const release = holdLocalWorkspaceTabClaim(record.id);
-    ipc.listeners.get("workspace-tab-state-changed")?.({ payload: record.id });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(prepareKind).not.toHaveBeenCalled();
-    expect(handler.import).not.toHaveBeenCalled();
-    release();
+  it("does not misreport a completed reparent when source-window cleanup fails", async () => {
+    native.owner = "workspace-a";
+    native.snapshot.mockRejectedValueOnce("workspace_window.unavailable");
+    await expect(moveWorkspaceTab(id, "main")).resolves.toBe(true);
+    await vi.waitFor(() => expect(native.snapshot).toHaveBeenCalledOnce());
   });
 
-  it("freezes before target readiness and releases source only after Core commits", async () => {
-    ipc.freeze.mockImplementation(async () => {
-      expect(handler.freeze).toHaveBeenCalledOnce();
-      expect(handler.commit).not.toHaveBeenCalled();
-      ipc.listeners.get("workspace-tab-target-ready")?.({ payload: "ticket-1" });
-    });
-    await moveWorkspaceTab(record.id, "page", "workspace-a");
-    expect(ipc.prepare).toHaveBeenCalledWith(record.id, "workspace-a", 3, payload);
-    expect(ipc.commit).toHaveBeenCalledWith("ticket-1");
-    expect(handler.commit).toHaveBeenCalledOnce();
-    expect(handler.rollback).not.toHaveBeenCalled();
+  it("lets explicit window close own cleanup after moving its tabs", async () => {
+    native.owner = "workspace-a";
+    await moveWorkspaceTab(id, "main", false);
+    expect(native.snapshot).not.toHaveBeenCalled();
+    expect(native.closeWindow).not.toHaveBeenCalled();
   });
 
-  it("aborts ownership and restores the source if the target rejects import", async () => {
-    ipc.freeze.mockImplementation(async () => {
-      ipc.listeners.get("workspace-tab-import-failed")?.({ payload: { ticket: "ticket-1" } });
-    });
-    await expect(moveWorkspaceTab(record.id, "page", "workspace-a"))
-      .rejects.toThrow("workspace_tab.target_unavailable");
-    expect(ipc.commit).not.toHaveBeenCalled();
-    expect(ipc.abort).toHaveBeenCalledWith("ticket-1");
-    expect(handler.rollback).toHaveBeenCalledOnce();
+  it("closes an auxiliary window after its last Tab closes, but keeps occupied and main windows", async () => {
+    native.owner = "workspace-a";
+    await closeChildWorkspaceWindowIfEmpty();
+    expect(native.closeWindow).not.toHaveBeenCalled();
+    native.snapshot.mockResolvedValue({ owned: [], others: [] });
+    await closeChildWorkspaceWindowIfEmpty();
+    expect(native.closeWindow).toHaveBeenCalledOnce();
+    native.owner = "main";
+    await closeChildWorkspaceWindowIfEmpty();
+    expect(native.closeWindow).toHaveBeenCalledOnce();
   });
 
-  it("closes a child window after its final Tab has committed to main", async () => {
-    ipc.ownerLabel = "workspace-a";
-    ipc.snapshot.mockReset();
-    ipc.snapshot.mockResolvedValueOnce({ owned: [{ ...record, owner: "workspace-a" }], incoming: [], outgoing: [], others: [] });
-    ipc.snapshot.mockResolvedValueOnce({
-      owned: [{ ...record, owner: "workspace-a" }],
-      incoming: [],
-      outgoing: [{ ticket: "ticket-1", tab: record, source: "workspace-a", target: "main", phase: "offered" }],
-      others: [],
-    });
-    ipc.snapshot.mockResolvedValueOnce({ owned: [], incoming: [], outgoing: [], others: [] });
-    ipc.freeze.mockImplementation(async () => {
-      ipc.listeners.get("workspace-tab-target-ready")?.({ payload: "ticket-1" });
-    });
-    await moveWorkspaceTab(record.id, "page", "main");
-    expect(ipc.hide).toHaveBeenCalledOnce();
-    expect(ipc.close).toHaveBeenCalledOnce();
-    expect(ipc.show).not.toHaveBeenCalled();
-    expect(hiddenOutgoingWorkspaceTabs.value.size).toBe(0);
+  it("retains the source window if native rejects reparenting", async () => {
+    native.owner = "workspace-a";
+    native.moveView.mockRejectedValueOnce("workspace_tab.target_unavailable");
+    await expect(moveWorkspaceTab(id, "main"))
+      .rejects.toBe("workspace_tab.target_unavailable");
+    expect(native.closeWindow).not.toHaveBeenCalled();
   });
 
-  it("shows a hidden child again when the target rejects import", async () => {
-    ipc.ownerLabel = "workspace-a";
-    ipc.snapshot.mockReset();
-    ipc.snapshot.mockResolvedValueOnce({ owned: [{ ...record, owner: "workspace-a" }], incoming: [], outgoing: [], others: [] });
-    ipc.snapshot.mockResolvedValueOnce({
-      owned: [{ ...record, owner: "workspace-a" }],
-      incoming: [],
-      outgoing: [{ ticket: "ticket-1", tab: record, source: "workspace-a", target: "main", phase: "offered" }],
-      others: [],
-    });
-    ipc.freeze.mockImplementation(async () => {
-      ipc.listeners.get("workspace-tab-import-failed")?.({ payload: { ticket: "ticket-1" } });
-    });
-    await expect(moveWorkspaceTab(record.id, "page", "main")).rejects.toThrow("workspace_tab.target_unavailable");
-    expect(ipc.hide).toHaveBeenCalledOnce();
-    expect(ipc.show).toHaveBeenCalledOnce();
-    expect(handler.rollback).toHaveBeenCalledOnce();
-    expect(visibleIncomingWorkspaceTabs.value).toBe(0);
+  it("closes a newly opened empty window when the native move fails", async () => {
+    native.moveView.mockRejectedValueOnce("workspace_tab.target_unavailable");
+    await expect(moveWorkspaceTabToNewWindow(id, { x: 20, y: 30 }))
+      .rejects.toBe("workspace_tab.target_unavailable");
+    expect(native.openWindow).toHaveBeenCalledWith({ x: 20, y: 30 });
+    expect(native.closeEmpty).toHaveBeenCalledWith("workspace-a");
   });
 
-  it("shows incoming feedback while import is pending and clears it on failure", async () => {
-    ipc.ownerLabel = "workspace-a";
-    let rejectImport!: (error: Error) => void;
-    handler.import.mockImplementationOnce(() => new Promise<undefined>((_resolve, reject) => {
-      rejectImport = reject;
-    }));
-    ipc.snapshot.mockResolvedValue({
-      owned: [],
-      incoming: [{ ticket: "ticket-2", tab: record, source: "main", target: "workspace-a", phase: "offered" }],
-      outgoing: [],
-      others: [],
-    });
-    ipc.listeners.get("workspace-tab-offer")?.({ payload: null });
-    await vi.waitFor(() => expect(visibleIncomingWorkspaceTabs.value).toBe(1));
-    rejectImport(new Error("import failed"));
-    await vi.waitFor(() => expect(visibleIncomingWorkspaceTabs.value).toBe(0));
-  });
-
-  it("closes a new empty window when another transfer wins the same Tab", async () => {
-    let finishOpen!: (label: string) => void;
-    let finishFreeze!: () => void;
-    ipc.open.mockImplementationOnce(() => new Promise<string>((resolve) => { finishOpen = resolve; }));
-    ipc.freeze.mockImplementationOnce(async () => {
-      await new Promise<void>((resolve) => { finishFreeze = resolve; });
-      ipc.listeners.get("workspace-tab-target-ready")?.({ payload: "ticket-1" });
-    });
-
-    const newWindow = moveWorkspaceTabToNewWindow(record.id, "page");
-    await vi.waitFor(() => expect(ipc.open).toHaveBeenCalledOnce());
-    const existingWindow = moveWorkspaceTab(record.id, "page", "workspace-b");
-    await vi.waitFor(() => expect(ipc.freeze).toHaveBeenCalledOnce());
-    finishOpen("workspace-a");
-    await newWindow;
-    expect(ipc.closeEmpty).toHaveBeenCalledWith("workspace-a");
-    finishFreeze();
-    await existingWindow;
-  });
 });

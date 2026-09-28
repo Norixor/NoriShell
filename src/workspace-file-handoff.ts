@@ -1,9 +1,9 @@
-import { watch } from "vue";
 import type { Router } from "vue-router";
 
-import { fetchSftpSessionSnapshot, listSftpLocalDirectory } from "./core-api/client";
+import { fetchSftpSessionSnapshot, registerSftpLocalDirectory, releaseSftpLocalDirectory } from "./core-api/client";
+import type { SftpLocalDirectoryCapability } from "./core-api/generated/core-api";
 import type { useWorkspaceTabsStore } from "./stores/workspaceTabs";
-import type { WorkspaceTabHandoff } from "./workspace-tab-transfer";
+import type { WorkspaceTabRecovery } from "./workspace-tab-recovery";
 import { isFileTabHandoffSnapshot, type FileTabHandoffSnapshot } from "./views/fileTabHandoffSnapshot";
 
 type WorkspaceTabsStore = ReturnType<typeof useWorkspaceTabsStore>;
@@ -20,88 +20,101 @@ async function validateLiveResources(snapshot: FileTabHandoffSnapshot) {
         && session.state !== "closed")) throw new Error("workspace_tab.file_session_stale");
     }
   }
-  const local = snapshot.panes.flatMap((pane) => pane.endpoint.kind === "local" ? [
-    ...(pane.endpoint.directoryRef && pane.endpoint.revision
-      ? [{ directoryRef: pane.endpoint.directoryRef, revision: pane.endpoint.revision }] : []),
-    ...pane.localTrail.map((item) => ({ directoryRef: item.capability.directoryRef, revision: item.capability.revision })),
-  ] : []);
-  for (let index = 0; index < local.length; index += 8) {
-    await Promise.all(local.slice(index, index + 8).map(async (capability) => {
-      const listing = await listSftpLocalDirectory({
-        directoryRef: capability.directoryRef,
-        expectedRevision: capability.revision,
-        cursor: null,
-        pageSize: 1,
-      });
-      if (listing.directoryRef !== capability.directoryRef || listing.revision !== capability.revision) {
-        throw new Error("workspace_tab.file_capability_stale");
+  // Core validates each local capability when the target loads it. A directory
+  // listing can fail or expire without invalidating ownership of the File Tab.
+}
+
+async function restoreLocalCapabilities(snapshot: FileTabHandoffSnapshot): Promise<{
+  snapshot: FileTabHandoffSnapshot;
+  capabilities: SftpLocalDirectoryCapability[];
+}> {
+  const capabilities: SftpLocalDirectoryCapability[] = [];
+  const registerExact = async (path: string | null) => {
+    if (!path || path.length > 4096 || path.includes("\0")) throw new Error("workspace_tab.file_path_unavailable");
+    let capability: SftpLocalDirectoryCapability;
+    try {
+      capability = await registerSftpLocalDirectory(path);
+    } catch (cause) {
+      throw new Error("workspace_tab.file_path_unavailable", { cause });
+    }
+    capabilities.push(capability);
+    // A changed symlink or directory must not silently turn a recovered Pane
+    // into a different location. The Core returns its canonical path.
+    if (capability.rememberablePath !== path) throw new Error("workspace_tab.file_path_changed");
+    return capability;
+  };
+  try {
+    const panes = [] as FileTabHandoffSnapshot["panes"];
+    for (const pane of snapshot.panes) {
+      if (pane.endpoint.kind === "remote") {
+        panes.push(pane);
+        continue;
       }
-    }));
+      const localTrail = [] as typeof pane.localTrail;
+      for (const item of pane.localTrail) {
+        if (item.rememberedPath !== item.capability.rememberablePath) {
+          throw new Error("workspace_tab.file_path_unavailable");
+        }
+        localTrail.push({ ...item, capability: await registerExact(item.rememberedPath) });
+      }
+      if (!pane.endpoint.directoryRef) {
+        panes.push({ ...pane, localTrail });
+        continue;
+      }
+      const current = await registerExact(pane.localRememberedPath);
+      panes.push({
+        ...pane,
+        endpoint: { ...pane.endpoint, directoryRef: current.directoryRef, revision: current.revision },
+        localTrail,
+      });
+    }
+    return { snapshot: { ...snapshot, panes }, capabilities };
+  } catch (error) {
+    await Promise.all(capabilities.map((capability) => releaseSftpLocalDirectory({
+      directoryRef: capability.directoryRef, expectedRevision: capability.revision,
+    }).catch(() => undefined)));
+    throw error;
   }
 }
 
-/** A File Tab transfers opaque Core handles and a bounded view DTO; it never opens a new SFTP transport. */
-export function createFileHandoff(store: WorkspaceTabsStore, router: Router): WorkspaceTabHandoff<FileTabHandoffSnapshot> & {
-  observe(id: string, listener: (snapshot: FileTabHandoffSnapshot) => void): () => void;
-} {
-  const frozen = new Map<string, { wasActive: boolean }>();
+/** Crash recovery reopens recorded local directories and verifies SFTP sessions; it never reopens a transport. */
+export function createFileRecovery(store: WorkspaceTabsStore, router: Router): WorkspaceTabRecovery<FileTabHandoffSnapshot> {
   const staged = new Set<string>();
+  const recoveredCapabilities = new Map<string, SftpLocalDirectoryCapability[]>();
+  const release = (capabilities: readonly SftpLocalDirectoryCapability[]) => Promise.all(capabilities.map(
+    (capability) => releaseSftpLocalDirectory({
+      directoryRef: capability.directoryRef, expectedRevision: capability.revision,
+    }).catch(() => undefined)));
 
   return {
-    kind: "file",
-    owns: (id) => store.fileTabs.some((tab) => tab.groupId === id),
-    observe(id, listener) {
-      return watch(() => store.fileController(id), (controller, _previous, onCleanup) => {
-        if (controller) onCleanup(controller.observeHandoffSnapshot(listener));
-      }, { immediate: true });
-    },
-    async snapshot(id) {
-      const controller = store.fileController(id);
-      if (!controller) throw new Error("workspace_tab.file_view_unavailable");
-      return controller.snapshotHandoff();
-    },
-    async freeze(id) {
-      const controller = store.fileController(id);
-      if (!controller) throw new Error("workspace_tab.file_view_unavailable");
-      controller.freezeHandoff();
-      const wasActive = store.activeFileTabId === id;
-      frozen.set(id, { wasActive });
-      if (wasActive) {
-        store.showFileWelcome();
-      }
-    },
     async import(id, value) {
       if (!isFileTabHandoffSnapshot(value, id) || store.fileTabs.some((tab) => tab.groupId === id)) {
         throw new Error("workspace_tab.invalid_file");
       }
-      await validateLiveResources(value);
-      if (!store.stageImportedFileTab(value)) throw new Error("workspace_tab.file_duplicate");
-      staged.add(id);
-    },
-    commit(id) {
-      store.fileController(id)?.commitHandoff();
-      store.finishCloseFileTab(id);
-      frozen.delete(id);
-    },
-    async rollback(id) {
-      const previous = frozen.get(id);
-      if (!previous) return;
-      frozen.delete(id);
-      store.fileController(id)?.rollbackHandoff();
-      if (previous.wasActive) {
-        store.activateFileTab(id);
-        await router.push("/sftp");
+      const restored = await restoreLocalCapabilities(value);
+      try {
+        await validateLiveResources(restored.snapshot);
+        if (!store.stageImportedFileTab(restored.snapshot)) throw new Error("workspace_tab.file_duplicate");
+      } catch (error) {
+        await release(restored.capabilities);
+        throw error;
       }
+      recoveredCapabilities.set(id, restored.capabilities);
+      staged.add(id);
     },
     async discard(id) {
       if (!staged.delete(id)) return;
       store.discardImportedFileTab(id);
+      const capabilities = recoveredCapabilities.get(id) ?? [];
+      recoveredCapabilities.delete(id);
+      await release(capabilities);
     },
     async activate(id) {
       if (!staged.has(id)) return;
       if (!store.admitImportedFileTab(id)) throw new Error("workspace_tab.file_admission_failed");
       await router.push("/sftp");
       staged.delete(id);
+      recoveredCapabilities.delete(id);
     },
     async activateExisting(id) {
       if (!store.fileTabs.some((tab) => tab.groupId === id)) throw new Error("workspace_tab.not_found");

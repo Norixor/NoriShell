@@ -32,6 +32,22 @@ describe("isolated desktop credentials", () => {
     expect(mocks.close).not.toHaveBeenCalled(); wrapper.unmount();
   });
 
+  it("shows a submitted decision without trying to close the Core-owned secure window", async () => {
+    mocks.prompt.mockResolvedValue({ id: "prompt", sessionId: "session", label: "Fixture", prompt: { kind: "vaultUnlock" } });
+    mocks.decide.mockResolvedValue(undefined);
+    mocks.close.mockRejectedValue(new Error("window close denied"));
+    const wrapper = mount(SecureDesktop, { global: { plugins: [createI18n({ legacy: false, locale: "en", messages: { en: { desktop: desktopEn, window: { protected: "Protected" } } } })] } });
+    await flushPromises();
+    await wrapper.find('input[type="password"]').setValue("synthetic-fixture-value");
+    await wrapper.findAll("button").find((button) => button.text() === desktopEn.approve)!.trigger("click");
+    await flushPromises();
+    expect(mocks.decide).toHaveBeenCalledOnce();
+    expect(mocks.close).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain(desktopEn.done);
+    expect(wrapper.text()).not.toContain(desktopEn.error);
+    wrapper.unmount();
+  });
+
   it("creates a missing Vault with a confirmed UTF-8 password and clears both fields before Core replies", async () => {
     mocks.prompt.mockResolvedValue({ id: "prompt", sessionId: "session", label: "Fixture", prompt: { kind: "vaultCreate" } });
     const wrapper = mount(SecureDesktop, { global: { plugins: [createI18n({ legacy: false, locale: "en", messages: { en: { desktop: desktopEn, window: { protected: "Protected" } } } })] } });

@@ -2,7 +2,7 @@
 import { FileInput, FolderPlus, KeyRound, Network, Pencil, Plus, RefreshCw, Server, Star, Tag, Trash2, Workflow } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 import NvxHostMarker from "../components/hosts/NvxHostMarker.vue";
 import { useHostMarkersStore } from "../stores/hostMarkers";
 import { NvxPageHeader } from "../components/layout";
@@ -14,6 +14,8 @@ import { useTipsStore } from "../stores/tips";
 import { openToolWindow, onToolWindowChanged } from "../tool-windows";
 import { useRouteReveal } from "../routeReveal";
 import { onSavedConnectionsChanged } from "../saved-connections";
+import { openWorkspaceTerminalHost } from "../workspace-tab-shell-action";
+import { showWorkspaceTabFailure } from "../workspace-tab-errors";
 
 const { t } = useI18n();
 
@@ -23,7 +25,6 @@ const hostMarkers = useHostMarkersStore();
 
 const route = useRoute();
 
-const router = useRouter();
 const revealRoute = useRouteReveal();
 
 const catalog = ref<HostCatalogEntry[]>([]);
@@ -636,7 +637,8 @@ async function confirmClassificationDelete() {
 }
 
 function connect(host: HostSummary) {
-  void router.push({ path: "/terminal", query: { hostId: host.hostId } });
+  void openWorkspaceTerminalHost({ hostId: host.hostId })
+    .catch((error: unknown) => showWorkspaceTabFailure(error, "hosts-connect"));
 }
 
 onMounted(async () => {

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { requestSecureCredential } from "../core-api/secure-credential-client";
 import { requestSecureVault } from "../core-api/secure-vault-client";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   computed,
   nextTick,
@@ -15,6 +14,7 @@ import {
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { useRouteReveal } from "../routeReveal";
+import { isTauri } from "@tauri-apps/api/core";
 import { onSavedConnectionsChanged } from "../saved-connections";
 
 import {
@@ -59,8 +59,6 @@ import {
   canUseDesktopCore,
   createHost,
   createIdentity,
-  fetchLocalSessionSnapshot,
-  fetchSshSessionSnapshot,
   fetchTelnetSessionSnapshot,
   fetchTerminalWorkspaceLayout,
   fetchVaultStatus,
@@ -78,18 +76,15 @@ import type {
   HostCatalogEntry,
   HostSummary,
   LocalSessionId,
-  LocalSessionSnapshot,
   LocalSessionState,
   LocalSessionSummary,
   PluginApprovedTerminalChannelLaunch,
   SshSessionState,
   SshSessionId,
-  SshSessionSnapshot,
   SshSessionSummary,
   SshSessionTarget,
   TelnetEndpoint,
   TelnetSessionId,
-  TelnetSessionSnapshot,
   TelnetSessionState,
   TelnetSessionSummary,
   TelnetSocketId,
@@ -110,6 +105,7 @@ import type { NativeTerminalSessionScope } from "../core-api/generated/core-api"
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { useTipsStore } from "../stores/tips";
 import { applicationPreferenceFailure } from "../core-api/application-preferences";
+import { createManagedQuickConnect, createManagedTelnet, createManagedTerminalForHost, createManagedTerminalTab } from "../workspace-tab-view-shell";
 import type { ShortcutCommandId } from "../shortcuts";
 import NvxPluginToolPanel from "../components/plugins/NvxPluginToolPanel.vue";
 import NvxPluginFloatingControls from "../components/plugins/NvxPluginFloatingControls.vue";
@@ -122,8 +118,16 @@ import {
   type TerminalHandoffPane,
   type TerminalTabHandoffSnapshot,
 } from "../terminal-workspace-handoff";
-import { isWorkspaceChildWindow } from "../workspace-window-context";
-import { snapshotWorkspaceTabs } from "../workspace-tab-windows";
+import { isWorkspaceChildWindow, isWorkspaceTabView } from "../workspace-window-context";
+import { showWorkspaceTabFailure } from "../workspace-tab-errors";
+import {
+  isActiveLocalSession,
+  isActivePluginSession,
+  isActiveSshSession,
+  isActiveTelnetSession,
+  type TerminalRestoreLivePane,
+  type TerminalRestoreSeed,
+} from "../workspace-tab-terminal-restore";
 
 interface TerminalLauncherPane {
   kind: "launcher";
@@ -142,6 +146,8 @@ interface SshSessionPane {
   summary: SshSessionSummary | null;
   deferredStart: boolean;
   deferredRecovery: "reconnect" | "credential" | "vaultUnlock";
+  /** Started by startup restore, not a user action: authentication gaps wait for an explicit click. */
+  startupRestore?: boolean;
   initialDirectory?: string | null;
 }
 
@@ -151,7 +157,18 @@ interface LocalSessionPane {
   label: string;
   state: LocalSessionState;
   summary: LocalSessionSummary | null;
+  viewFailure?: { code: string; diagnosticId: string | null } | null;
   deferredStart: boolean;
+  initialOpen?: InitialLocalOpen;
+}
+
+interface InitialLocalOpen {
+  paneId: string;
+  openAttemptId: string;
+  operationId: string;
+  attachAttemptId: string;
+  initialRows: number;
+  initialCols: number;
 }
 
 interface TelnetSessionPane {
@@ -188,6 +205,7 @@ interface CloseCandidate {
   mode: "pane" | "tab" | "tabs";
   tabIds: string[];
   paneIds: string[];
+  confirmed?: boolean;
 }
 
 interface OptimisticCloseSnapshot {
@@ -244,9 +262,6 @@ const credentialSavedDuringAttempt = ref(false);
 const quickCommandsOpen = ref(false);
 const tabs = ref<TerminalWorkspaceTab[]>([]);
 const activeTabId = ref("");
-const frozenTabIds = ref<Set<string>>(new Set());
-const snapshottedHandoffs = new Map<string, TerminalTabHandoffSnapshot>();
-const preparedHandoffs = new Map<string, { snapshot: TerminalTabHandoffSnapshot; wasActive: boolean }>();
 const importedHandoffs = new Map<string, TerminalTabHandoffSnapshot>();
 const incomingPaneDimensions = new Map<string, { rows: number; cols: number }>();
 const incomingPaneOutputGeometry = new Map<string, Array<{ afterOutputSeq: string; rows: number; cols: number }>>();
@@ -256,6 +271,9 @@ const ownedTabIds = new Set<string>();
 const handoffSnapshotListeners = new Set<(snapshots: readonly TerminalTabHandoffSnapshot[]) => void>();
 let lastObservedHandoffProjection = "";
 const childWorkspace = isWorkspaceChildWindow();
+// A Tab WebView is hidden until its owner shell activates it; a hidden or background
+// Tab must never mark a Pane active, which would take the global input focus.
+const viewActive = ref(!isWorkspaceTabView());
 // BEL attention is renderer-only projection state: it never changes the session or workspace layout.
 const bellAttentionPaneIds = ref<Set<string>>(new Set());
 const requestedHost = ref<HostSummary | null>(null);
@@ -290,9 +308,8 @@ let workspaceInitializationPromise: Promise<void> | null = null;
 let workspaceWriteChain: Promise<void> = Promise.resolve();
 let unregisterWorkspaceFlush: (() => void) | null = null;
 let unregisterTerminalHeaderController: (() => void) | null = null;
-let unlistenPluginProtocolLaunch: UnlistenFn | null = null;
-let unlistenPluginTerminalChannel: UnlistenFn | null = null;
 const approvedPluginChannelOperations = new Set<string>();
+let requestedPluginProtocolLaunch: { launchId: string; revision: string; tabId: string; paneId: string } | null = null;
 
 const activeTab = computed(() => tabs.value.find((tab) => tab.tabId === activeTabId.value) ?? null);
 const activePane = computed(() => activeTab.value?.panes.find(
@@ -425,10 +442,12 @@ function terminalFocusIsBlocked() {
     || closeConfirmationVisible.value;
 }
 
+/** Leaving the view (Tab switch, hide, shell page) makes every Pane inactive until the next activation. */
 function deactivateTerminalWorkspace() {
-  void clearTerminalInputFocus();
+  viewActive.value = false;
   const tab = activeTab.value;
   if (tab) paneRefs.get(tab.activePaneId)?.deactivateFromTab();
+  return clearTerminalInputFocus();
 }
 
 function setPaneBellAttention(paneId: string, active: boolean) {
@@ -462,8 +481,7 @@ function handleTerminalVisibilityChange() {
 }
 
 function activateTab(tabId: string) {
-  if (frozenTabIds.value.has(tabId)
-    || pendingImportedTabIds.value.has(tabId)
+  if (pendingImportedTabIds.value.has(tabId)
     || !tabs.value.some((tab) => tab.tabId === tabId)) return;
   clearTabBellAttention(tabId);
   void clearTerminalInputFocus();
@@ -476,7 +494,7 @@ function activateTab(tabId: string) {
     if (activeTabId.value !== tabId || terminalFocusIsBlocked()) return;
     const tab = tabs.value.find((candidate) => candidate.tabId === tabId);
     const pane = tab?.panes.find((candidate) => candidate.paneId === tab.activePaneId);
-    if (pane && pane.kind !== "launcher") paneRefs.get(pane.paneId)?.activateFromTab();
+    if (viewActive.value && pane && pane.kind !== "launcher") paneRefs.get(pane.paneId)?.activateFromTab();
   });
   if (route.path !== "/terminal") {
     void router.push("/terminal").then(activateCurrentPane);
@@ -486,8 +504,7 @@ function activateTab(tabId: string) {
 }
 
 function activatePane(tabId: string, paneId: string) {
-  if (frozenTabIds.value.has(tabId)
-    || pendingImportedTabIds.value.has(tabId)) return;
+  if (pendingImportedTabIds.value.has(tabId)) return;
   const tab = tabs.value.find((candidate) => candidate.tabId === tabId);
   if (!tab || !findTerminalPane(tab.layout, paneId)) return;
   setPaneBellAttention(paneId, false);
@@ -504,13 +521,13 @@ function activatePane(tabId: string, paneId: string) {
   void nextTick(() => {
     if (activeTabId.value !== tabId || tab.activePaneId !== paneId || terminalFocusIsBlocked()) return;
     const pane = tab.panes.find((candidate) => candidate.paneId === paneId);
-    if (pane && pane.kind !== "launcher") paneRefs.get(paneId)?.activateFromTab();
+    if (viewActive.value && pane && pane.kind !== "launcher") paneRefs.get(paneId)?.activateFromTab();
   });
 }
 
-function createLauncherTab(refreshHosts = true) {
+function createLauncherTab(refreshHosts = true, initialTabId?: string) {
   reauthenticationPaneId.value = null;
-  const tabId = createUuidV7();
+  const tabId = initialTabId ?? createUuidV7();
   const paneId = createUuidV7();
   tabs.value.push({
     tabId,
@@ -523,10 +540,10 @@ function createLauncherTab(refreshHosts = true) {
   return paneId;
 }
 
-function createLocalTerminalTab() {
+function createLocalTerminalTab(initialTabId?: string, initialOpen?: InitialLocalOpen) {
   reauthenticationPaneId.value = null;
-  const tabId = createUuidV7();
-  const paneId = createUuidV7();
+  const tabId = initialTabId ?? createUuidV7();
+  const paneId = initialOpen?.paneId ?? createUuidV7();
   tabs.value.push({
     tabId,
     layout: createTerminalPane(paneId),
@@ -538,30 +555,97 @@ function createLocalTerminalTab() {
       state: "starting",
       summary: null,
       deferredStart: false,
+      ...(initialOpen ? { initialOpen } : {}),
     }],
   });
   activateTab(tabId);
   return paneId;
 }
 
-function createNewTerminalTab() {
-  return ui.newTerminalBehavior === "localTerminal"
-    ? createLocalTerminalTab()
-    : createLauncherTab();
+async function createInitialTab(id: string, behavior: "welcome" | "local", initialLocalOpen?: InitialLocalOpen): Promise<void> {
+  if (!isWorkspaceTabView() || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+    || tabs.value.length !== 0) throw new Error("workspace_tab.invalid_initial_tab");
+  if (behavior === "local") {
+    if (!initialLocalOpen?.paneId || !initialLocalOpen.openAttemptId || !initialLocalOpen.operationId
+      || !initialLocalOpen.attachAttemptId || initialLocalOpen.initialRows < 1 || initialLocalOpen.initialCols < 1) {
+      throw new Error("workspace_tab.invalid_initial_local_open");
+    }
+    createLocalTerminalTab(id, initialLocalOpen);
+  }
+  else createLauncherTab(true, id);
+  await nextTick();
+  if (!tabs.value.some((tab) => tab.tabId === id)) throw new Error("workspace_tab.initial_tab_failed");
 }
 
-function createLocalFromHeader() {
+async function createInitialPluginProtocolTab(
+  id: string,
+  request: { launchId: string; revision: string; paneId: string },
+): Promise<void> {
+  if (!isWorkspaceTabView() || tabs.value.length !== 0 || !request.launchId || !request.revision || !request.paneId) {
+    throw new Error("workspace_tab.invalid_plugin_launch");
+  }
+  requestedPluginProtocolLaunch = { ...request, tabId: id };
+  await reconcilePluginProtocolLaunches();
+  if (!tabs.value.some((tab) => tab.tabId === id && tab.panes.some((pane) => pane.paneId === request.paneId && pane.kind === "plugin"))) {
+    requestedPluginProtocolLaunch = null;
+    throw new Error("workspace_tab.plugin_launch_unavailable");
+  }
+}
+
+async function createInitialApprovedPluginChannel(id: string, payload: PluginApprovedTerminalChannelLaunch): Promise<void> {
+  if (!isWorkspaceTabView() || tabs.value.length !== 0 || !payload.operationId || !payload.authorizationToken) {
+    throw new Error("workspace_tab.invalid_plugin_channel");
+  }
+  if (approvedPluginChannelOperations.has(payload.operationId)) throw new Error("workspace_tab.plugin_channel_consumed");
+  approvedPluginChannelOperations.add(payload.operationId);
+  const paneId = createLauncherTab(false, id);
+  replaceWorkspacePane(paneId, {
+    kind: "session", paneId, label: payload.label, target: payload.target,
+    credentialRefId: null, pluginAuthorizationToken: payload.authorizationToken,
+    state: "connecting", summary: null, deferredStart: false, deferredRecovery: "reconnect",
+  });
+  await nextTick();
+}
+
+function quickConnectFromHeader(target = "") {
   if (terminalFocusIsBlocked()) return false;
-  createLocalTerminalTab();
+  const activePaneId = activeLauncherPane()?.paneId;
+  if (!activePaneId && isWorkspaceTabView()) return false;
+  const paneId = activePaneId ?? createLauncherTab(false);
+  openInlineQuickConnect(target, paneId);
   return true;
 }
 
-function quickConnectFromHeader() {
+function openTelnetFromHeader() {
   if (terminalFocusIsBlocked()) return false;
-  // This entry point explicitly creates a Launcher before opening the authentication form, ignoring the default-local-terminal preference.
-  const paneId = createLauncherTab(false);
-  openInlineQuickConnect("", paneId);
+  const paneId = activeLauncherPane()?.paneId;
+  if (!paneId && isWorkspaceTabView()) return false;
+  openTelnetLauncher(paneId ?? null);
   return true;
+}
+
+function launchManagedFromEmptyWorkspace(action: () => Promise<unknown>) {
+  void action().catch((error: unknown) => showWorkspaceTabFailure(error, "terminal-managed-launch"));
+}
+
+function openEmptyWorkspaceQuickConnect(target: string) {
+  if (isTauri() && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedQuickConnect(target));
+  else openInlineQuickConnect(target);
+}
+
+function openEmptyWorkspaceHost(hostId: string) {
+  if (isTauri() && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedTerminalForHost({ hostId, source: "launcher" }));
+  else void openRequestedHost(hostId);
+}
+
+function openEmptyWorkspaceLocalTerminal() {
+  if (isTauri() && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedTerminalTab("local"));
+  else createLocalTerminal(null);
+}
+
+function openEmptyWorkspaceTelnet() {
+  if (isTauri() && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(createManagedTelnet);
+  else openTelnetLauncher(null);
 }
 
 function activeLauncherPane() {
@@ -610,6 +694,10 @@ function removeTab(tabId: string) {
   }
 }
 
+function notifyCommittedTabClosures(tabIds: readonly string[]) {
+  window.dispatchEvent(new CustomEvent("norishell:terminal-tab-close-committed", { detail: tabIds }));
+}
+
 function paneIsClosed(pane: TerminalWorkspacePane) {
   return pane.kind === "launcher"
     || (pane.kind === "session" && ["closed", "failed"].includes(pane.state))
@@ -630,6 +718,7 @@ function closePaneView(tabId: string, paneId: string) {
   paneRefs.delete(paneId);
   if (tab.panes.length === 1) {
     removeTab(tabId);
+    notifyCommittedTabClosures([tabId]);
     return;
   }
   const closed = closeTerminalPane(tab.layout, paneId);
@@ -654,14 +743,15 @@ function requestClosePane(tabId: string, paneId: string) {
   closeConfirmationVisible.value = true;
 }
 
-function requestCloseTab(tabId: string) {
-  if (closeCandidate.value || closingTab.value) return;
+function requestCloseTab(tabId: string): boolean {
+  if (closeCandidate.value || closingTab.value) return false;
   const tab = tabs.value.find((candidate) => candidate.tabId === tabId);
-  if (!tab) return;
+  if (!tab) return false;
   const openPaneIds = tab.panes.filter((pane) => !paneIsClosed(pane)).map((pane) => pane.paneId);
   if (openPaneIds.length === 0) {
     removeTab(tabId);
-    return;
+    notifyCommittedTabClosures([tabId]);
+    return true;
   }
   activateTab(tabId);
   closeTabErrorVisible.value = false;
@@ -671,39 +761,58 @@ function requestCloseTab(tabId: string) {
   if (tab.panes.length === 1 && ui.singlePaneTabCloseBehavior === "closeDirectly") {
     closeConfirmationVisible.value = false;
     void confirmCloseTab();
-    return;
+    return true;
   }
   closeConfirmationVisible.value = true;
+  return true;
 }
 
-function requestCloseTabs(tabIds: readonly string[]) {
-  if (closeCandidate.value || closingTab.value) return;
+function requestCloseTabs(tabIds: readonly string[], confirmed = false): boolean {
+  if (closeCandidate.value || closingTab.value) return false;
   const targetIds = [...new Set(tabIds)].filter((tabId) => (
     tabs.value.some((tab) => tab.tabId === tabId)
   ));
-  if (!targetIds.length) return;
+  if (!targetIds.length) return false;
   const paneIds = tabs.value
     .filter((tab) => targetIds.includes(tab.tabId))
     .flatMap((tab) => tab.panes.filter((pane) => !paneIsClosed(pane)).map((pane) => pane.paneId));
   if (!paneIds.length) {
     for (const tabId of targetIds) removeTab(tabId);
-    return;
+    notifyCommittedTabClosures(targetIds);
+    return true;
   }
   activateTab(targetIds[0]!);
   closeTabErrorVisible.value = false;
   skipFutureSinglePaneTabClosePrompt.value = false;
-  closeCandidate.value = { mode: "tabs", tabIds: targetIds, paneIds };
-  closeConfirmationVisible.value = true;
+  closeCandidate.value = { mode: "tabs", tabIds: targetIds, paneIds, confirmed };
+  closeConfirmationVisible.value = !confirmed;
+  if (confirmed) void confirmCloseTab();
+  return true;
 }
 
 function cancelCloseTab() {
   if (closingTab.value) return;
+  const cancelled = closeCandidate.value;
   clearCloseTerminalsTimeout();
   closeCandidate.value = null;
   closeConfirmationVisible.value = false;
   skipFutureSinglePaneTabClosePrompt.value = false;
   closeTabErrorVisible.value = false;
+  if (cancelled && cancelled.mode !== "pane") {
+    window.dispatchEvent(new CustomEvent("norishell:terminal-tab-close-cancelled", { detail: cancelled.tabIds }));
+  }
   activateTab(activeTabId.value);
+}
+
+function failConfirmedClose(candidate: CloseCandidate, code: string) {
+  if (!candidate.confirmed || closeCandidate.value !== candidate) return;
+  closeCandidate.value = null;
+  closeConfirmationVisible.value = false;
+  closingTab.value = false;
+  tips.show({ scope: "terminal-close", tone: "error", title: t("sshTerminal.closeTerminalFailed"), message: code });
+  window.dispatchEvent(new CustomEvent("norishell:terminal-tab-close-failed", {
+    detail: { tabIds: candidate.tabIds, code },
+  }));
 }
 
 function clearCloseTerminalsTimeout() {
@@ -741,6 +850,7 @@ function restoreOptimisticClose(
   candidate: CloseCandidate,
   snapshot: OptimisticCloseSnapshot,
   attempt: number,
+  code = "workspace_tab.terminal_close_failed",
 ) {
   if (closeCandidate.value !== candidate || optimisticTabCloseAttempt !== attempt) return;
   clearCloseTerminalsTimeout();
@@ -759,6 +869,7 @@ function restoreOptimisticClose(
     (entry) => entry.tab.tabId === snapshot.activeTabId,
   ) ? snapshot.activeTabId : candidate.tabIds[0]!;
   void nextTick(() => activateTab(restoredActiveTabId));
+  failConfirmedClose(candidate, code);
 }
 
 function closeOperationForPane(paneId: string) {
@@ -792,6 +903,7 @@ async function confirmCloseTab() {
   } catch {
     closeTabErrorVisible.value = true;
     closeConfirmationVisible.value = true;
+    failConfirmedClose(candidate, "workspace_tab.terminal_pane_unavailable");
     return;
   }
 
@@ -806,7 +918,7 @@ async function confirmCloseTab() {
     for (const tabId of candidate.tabIds) removeTab(tabId);
     startCloseTerminalsTimeout(
       candidate,
-      () => restoreOptimisticClose(candidate, snapshot, attempt),
+      () => restoreOptimisticClose(candidate, snapshot, attempt, "workspace_tab.terminal_close_timeout"),
     );
     try {
       await Promise.all(closeOperations.map((close) => close()));
@@ -821,8 +933,10 @@ async function confirmCloseTab() {
       closingTab.value = false;
       skipFutureSinglePaneTabClosePrompt.value = false;
       queueWorkspaceSave(workspaceProjection.value);
-    } catch {
-      restoreOptimisticClose(candidate, snapshot, attempt);
+      notifyCommittedTabClosures(candidate.tabIds);
+    } catch (error) {
+      restoreOptimisticClose(candidate, snapshot, attempt,
+        parseCoreApiError(error)?.code ?? "workspace_tab.terminal_close_failed");
     }
     return;
   }
@@ -1317,6 +1431,15 @@ async function requestSessionAuthenticationRecovery(
 ) {
   const workspace = findWorkspacePane(paneId);
   if (!workspace || workspace.pane.kind !== "session") return;
+  if (workspace.pane.startupRestore) {
+    // Background restore never opens a Vault or credential prompt. The Pane shows the
+    // matching action; the user's click on it starts that prompt for this Pane only.
+    workspace.pane.startupRestore = false;
+    workspace.pane.deferredStart = true;
+    const state = await refreshVaultState();
+    workspace.pane.deferredRecovery = state === "locked" || state === "requiresReload" ? "vaultUnlock" : "credential";
+    return;
+  }
   activatePane(workspace.tab.tabId, paneId);
   workspace.pane.deferredStart = true;
   const state = await refreshVaultState();
@@ -1497,6 +1620,7 @@ function updateTabState(paneId: string, state: SshSessionState, summary: SshSess
   if (!target || target.pane.kind !== "session") return;
   target.pane.state = state;
   target.pane.summary = summary;
+  if (state === "running") target.pane.startupRestore = false;
   if (["closed", "failed"].includes(state)) void nextTick(resolvePendingClose);
 }
 
@@ -1511,6 +1635,14 @@ function updateLocalTabState(
   target.pane.summary = summary;
   if (summary?.shellName) target.pane.label = summary.shellName;
   if (paneIsClosed(target.pane)) void nextTick(resolvePendingClose);
+}
+
+function updateLocalViewFailure(
+  paneId: string,
+  failure: { code: string; diagnosticId: string | null } | null,
+) {
+  const target = findWorkspacePane(paneId);
+  if (target?.pane.kind === "local") target.pane.viewFailure = failure;
 }
 
 function updateTelnetTabState(
@@ -1543,27 +1675,18 @@ function updatePluginTabState(paneId: string, state: PluginTerminalSessionState,
   if (paneIsClosed(target.pane)) void nextTick(resolvePendingClose);
 }
 
-function projectPluginSession(summary: PluginTerminalSessionSummary) {
-  const pane: PluginSessionPane = { kind: "plugin", paneId: summary.paneId, label: summary.label,
-    profile: pluginProfile(summary), launch: null, state: summary.state, summary, deferredStart: false };
-  const existing = findWorkspacePane(summary.paneId);
-  if (existing) {
-    existing.tab.panes.splice(existing.tab.panes.findIndex((item) => item.paneId === summary.paneId), 1, pane);
-  } else {
-    tabs.value.push({ tabId: summary.tabId, activePaneId: summary.paneId,
-      layout: createTerminalPane(summary.paneId, summary.paneId), panes: [pane] });
-  }
-}
-
 let protocolLaunchReconciliation: Promise<void> | null = null;
 function reconcilePluginProtocolLaunches() {
-  if (childWorkspace || !canUseDesktopCore()) return Promise.resolve();
+  if (!childWorkspace || !requestedPluginProtocolLaunch || !canUseDesktopCore()) return Promise.resolve();
   if (protocolLaunchReconciliation) return protocolLaunchReconciliation;
   protocolLaunchReconciliation = (async () => {
     await ensureTerminalWorkspaceInitialized();
     const launches = await listPluginProtocolLaunches();
     pluginLaunchErrorVisible.value = false;
     for (const launch of launches) {
+      const requested = requestedPluginProtocolLaunch;
+      if (!requested || launch.launchId !== requested.launchId || launch.revision !== requested.revision
+        || launch.tabId !== requested.tabId || launch.paneId !== requested.paneId) continue;
       if (launch.claimed || launch.expiresAtUnixMs <= Date.now() || findWorkspacePane(launch.paneId)) continue;
       const pane: PluginSessionPane = { kind: "plugin", paneId: launch.paneId,
         label: launch.label, profile: null, launch, state: "connecting", summary: null, deferredStart: false };
@@ -1577,115 +1700,66 @@ function reconcilePluginProtocolLaunches() {
   return protocolLaunchReconciliation;
 }
 
-function activeLocalSessions(snapshot: LocalSessionSnapshot) {
-  return snapshot.sessions.filter((candidate) =>
-    !["exited", "closed"].includes(candidate.state)
-    && (candidate.state !== "failed"
-      || candidate.failureReason?.code === "processCleanupFailed"));
+function sshLabel(summary: SshSessionSummary) {
+  const endpoint = summary.endpoint;
+  return endpoint ? `${endpoint.username ? `${endpoint.username}@` : ""}${endpoint.address}` : summary.sessionId;
 }
 
-function activeSshSessions(snapshot: SshSessionSnapshot) {
-  return snapshot.sessions.filter(
-    (summary) => !["closed", "failed"].includes(summary.state),
-  );
+/** Rebuilds a Pane bound to a still-live Core Session; stale or ended Sessions return null. */
+async function restoreLivePane(live: TerminalRestoreLivePane, tabId: string): Promise<TerminalWorkspacePane | null> {
+  const { paneId } = live;
+  if (live.kind === "ssh") {
+    const summary = (await getSshSession(live.sessionId)).session;
+    if (summary.generation !== live.generation || !isActiveSshSession(summary)) return null;
+    return { kind: "session", paneId, label: sshLabel(summary), state: summary.state, target: summary.target,
+      credentialRefId: summary.credentialRefId, summary, deferredStart: false, deferredRecovery: "reconnect" };
+  }
+  if (live.kind === "local") {
+    const summary = (await getLocalSession(live.sessionId)).session;
+    if (summary.generation !== live.generation || !isActiveLocalSession(summary)) return null;
+    return { kind: "local", paneId, label: summary.shellName || t("localSession.defaultShell"),
+      state: summary.state, summary, deferredStart: false };
+  }
+  if (live.kind === "telnet") {
+    const summary = (await fetchTelnetSessionSnapshot()).sessions.find((item) => item.sessionId === live.sessionId);
+    if (!summary || summary.generation !== live.generation || !isActiveTelnetSession(summary)) return null;
+    return { kind: "telnet", paneId, label: `${summary.endpoint.address}:${summary.endpoint.port}`,
+      endpoint: summary.endpoint, state: summary.state, summary, deferredStart: false };
+  }
+  const summary = (await fetchPluginTerminalSessionSnapshot()).sessions.find((item) => item.sessionId === live.sessionId);
+  if (!summary || summary.generation !== live.generation || summary.tabId !== tabId
+    || summary.paneId !== paneId || !isActivePluginSession(summary)) return null;
+  return { kind: "plugin", paneId, label: summary.label, profile: pluginProfile(summary), launch: null,
+    state: summary.state, summary, deferredStart: false };
 }
 
-function activeTelnetSessions(snapshot: TelnetSessionSnapshot) {
-  return snapshot.sessions.filter(
-    (summary) => !["closed", "failed"].includes(summary.state),
-  );
-}
-
-function recoverRendererSessions(
-  sshSnapshot: SshSessionSnapshot,
-  localSnapshot: LocalSessionSnapshot,
-  telnetSnapshot: TelnetSessionSnapshot,
-  sshPaneBySessionId: ReadonlyMap<string, string> = new Map(),
-  localPaneBySessionId: ReadonlyMap<string, string> = new Map(),
-  telnetPaneBySessionId: ReadonlyMap<string, string> = new Map(),
-) {
-  const activeSessions = activeSshSessions(sshSnapshot);
-  for (const summary of activeSessions) {
-    const endpoint = summary.endpoint;
-    const label = endpoint
-      ? `${endpoint.username ? `${endpoint.username}@` : ""}${endpoint.address}`
-      : summary.sessionId;
-    const paneId = sshPaneBySessionId.get(summary.sessionId) ?? createUuidV7();
-    const recoveredPane: SshSessionPane = {
-      kind: "session",
-      paneId,
-      label,
-      state: summary.state,
-      target: summary.target,
-      credentialRefId: summary.credentialRefId,
-      summary,
-      deferredStart: false,
-      deferredRecovery: "reconnect",
-    };
-    const existing = findWorkspacePane(paneId);
-    if (existing) {
-      const paneIndex = existing.tab.panes.findIndex((pane) => pane.paneId === paneId);
-      existing.tab.panes.splice(paneIndex, 1, recoveredPane);
-      existing.tab.layout = setTerminalForPane(existing.tab.layout, paneId, paneId);
-      continue;
-    }
-    tabs.value.push({
-      tabId: createUuidV7(),
-      layout: createTerminalPane(paneId, paneId),
-      activePaneId: paneId,
-      panes: [recoveredPane],
-    });
+/** Restores this child's first Tab from the startup seed; live Sessions attach before any restart. */
+async function restoreInitialTab(id: string, seed: TerminalRestoreSeed): Promise<void> {
+  if (!isWorkspaceTabView() || tabs.value.length !== 0) throw new Error("workspace_tab.invalid_initial_tab");
+  const tab = parseTerminalWorkspaceLayout({ schemaVersion: 1, activeTabId: id, tabs: [seed?.tab] })?.tabs[0];
+  if (!tab || tab.tabId !== id || !Array.isArray(seed.live) || typeof seed.autoReconnect !== "boolean") {
+    throw new Error("workspace_tab.invalid_terminal");
   }
-  for (const summary of activeLocalSessions(localSnapshot)) {
-    const paneId = localPaneBySessionId.get(summary.sessionId) ?? createUuidV7();
-    const recoveredPane: LocalSessionPane = {
-      kind: "local",
-      paneId,
-      label: summary.shellName || t("localSession.defaultShell"),
-      state: summary.state,
-      summary,
-      deferredStart: false,
-    };
-    const existing = findWorkspacePane(paneId);
-    if (existing) {
-      const paneIndex = existing.tab.panes.findIndex((pane) => pane.paneId === paneId);
-      existing.tab.panes.splice(paneIndex, 1, recoveredPane);
-      existing.tab.layout = setTerminalForPane(existing.tab.layout, paneId, paneId);
-      continue;
+  let hostsById = new Map<string, HostSummary>();
+  if (tab.panes.some((pane) => pane.kind === "sshHost")) {
+    try { hostsById = new Map((await listHosts()).map((host) => [host.hostId, host])); }
+    catch {
+      // Without the Host catalog, saved Host Panes show as Launchers. Live Sessions
+      // still attach, but this view must not overwrite the saved history.
+      workspacePersistenceEnabled = false;
+      workspacePersistenceErrorVisible.value = true;
     }
-    tabs.value.push({
-      tabId: createUuidV7(),
-      layout: createTerminalPane(paneId, paneId),
-      activePaneId: paneId,
-      panes: [recoveredPane],
-    });
   }
-  for (const summary of activeTelnetSessions(telnetSnapshot)) {
-    const paneId = telnetPaneBySessionId.get(summary.sessionId) ?? createUuidV7();
-    const recoveredPane: TelnetSessionPane = {
-      kind: "telnet",
-      paneId,
-      label: `${summary.endpoint.address}:${summary.endpoint.port}`,
-      endpoint: summary.endpoint,
-      state: summary.state,
-      summary,
-      deferredStart: false,
-    };
-    const existing = findWorkspacePane(paneId);
-    if (existing) {
-      const paneIndex = existing.tab.panes.findIndex((pane) => pane.paneId === paneId);
-      existing.tab.panes.splice(paneIndex, 1, recoveredPane);
-      existing.tab.layout = setTerminalForPane(existing.tab.layout, paneId, paneId);
-      continue;
-    }
-    tabs.value.push({
-      tabId: createUuidV7(),
-      layout: createTerminalPane(paneId, paneId),
-      activePaneId: paneId,
-      panes: [recoveredPane],
-    });
+  const panes = tab.panes.map((pane) => restoreWorkspacePane(pane, hostsById, seed.autoReconnect));
+  for (const live of seed.live) {
+    const index = panes.findIndex((pane) => pane.paneId === live.paneId);
+    const pane = index < 0 ? null : await restoreLivePane(live, id).catch(() => null);
+    if (pane) panes.splice(index, 1, pane);
   }
-  if (!activeTabId.value) activeTabId.value = tabs.value[0]?.tabId ?? "";
+  tabs.value.push({ tabId: id, layout: tab.layout, activePaneId: tab.activePaneId, panes });
+  ownedTabIds.add(id);
+  activateTab(id);
+  await nextTick();
 }
 
 function restoreWorkspacePane(
@@ -1753,25 +1827,8 @@ function restoreWorkspacePane(
     summary: null,
     deferredStart: !canAutoReconnect,
     deferredRecovery,
+    startupRestore: canAutoReconnect,
   };
-}
-
-function restorePersistedWorkspace(
-  layout: PersistedTerminalWorkspaceLayout,
-  hostsById: ReadonlyMap<string, HostSummary>,
-  autoReconnectHistory: boolean,
-) {
-  tabs.value = layout.tabs.map((tab) => ({
-    tabId: tab.tabId,
-    layout: tab.layout,
-    activePaneId: tab.activePaneId,
-    panes: tab.panes.map((pane) => restoreWorkspacePane(
-      pane,
-      hostsById,
-      autoReconnectHistory,
-    )),
-  }));
-  activeTabId.value = layout.activeTabId ?? "";
 }
 
 async function persistOneWorkspaceProjection(serialized: string) {
@@ -1822,8 +1879,7 @@ function persistWorkspaceProjection(serialized: string): Promise<void> {
 }
 
 function queueWorkspaceSave(serialized: string) {
-  if (!workspaceInitialized || !workspacePersistenceEnabled || optimisticTabCloseInFlight
-    || preparedHandoffs.size > 0) return;
+  if (!workspaceInitialized || !workspacePersistenceEnabled || optimisticTabCloseInFlight) return;
   for (const tab of tabs.value) {
     if (!importedHandoffs.has(tab.tabId) || committedImportedTabIds.has(tab.tabId)) ownedTabIds.add(tab.tabId);
   }
@@ -1836,10 +1892,15 @@ function queueWorkspaceSave(serialized: string) {
 }
 
 async function flushTerminalWorkspaceLayout() {
-  if (optimisticTabCloseInFlight || preparedHandoffs.size > 0
+  // Only Tab WebViews own persisted Tabs; the shell's Launcher has nothing to write.
+  if (!workspaceInitialized) return;
+  if (optimisticTabCloseInFlight
     || [...importedHandoffs.keys()].some((id) => !committedImportedTabIds.has(id))) {
     throw new Error("terminal tab closure is still pending");
   }
+  // A child owns only its own Tab, so an explicit close may retry a transient
+  // SQLite failure without ever restoring or replacing another Tab's layout.
+  if (childWorkspace && !workspacePersistenceEnabled) workspacePersistenceEnabled = canUseDesktopCore();
   while (true) {
     if (workspaceSaveTimer !== null) {
       window.clearTimeout(workspaceSaveTimer);
@@ -1857,250 +1918,11 @@ async function flushTerminalWorkspaceLayout() {
 watch(workspaceProjection, queueWorkspaceSave);
 
 async function initializeTerminalWorkspace() {
-  if (childWorkspace) {
-    // Secondary WebViews receive Tabs only through handoff; global recovery
-    // would duplicate every live Session and race the SQLite owner.
-    workspacePersistenceEnabled = canUseDesktopCore();
-    workspaceInitialized = true;
-    return;
-  }
-  if (!canUseDesktopCore()) return;
-  const [rawSshSnapshot, rawLocalSnapshot, rawTelnetSnapshot, storedSnapshot, rawPluginSnapshot, ownerSnapshot] = await Promise.all([
-    fetchSshSessionSnapshot().catch(() => null),
-    fetchLocalSessionSnapshot().catch(() => null),
-    fetchTelnetSessionSnapshot().catch(() => null),
-    fetchTerminalWorkspaceLayout().catch(() => null),
-    fetchPluginTerminalSessionSnapshot().catch(() => null),
-    snapshotWorkspaceTabs().catch(() => null),
-  ]);
-  let persistedLayout = storedSnapshot
-    ? parseTerminalWorkspaceLayout(storedSnapshot.layout)
-    : null;
-  if (storedSnapshot && persistedLayout) {
-    workspacePersistenceEnabled = true;
-    lastPersistedProjection = JSON.stringify(persistedLayout);
-  } else {
-    workspacePersistenceErrorVisible.value = true;
-  }
-
-  // A failed Core snapshot is not evidence that no live session exists. Do
-  // not mount the restart-only SQLite projection or overwrite it from an
-  // uncertain renderer state; the next renderer launch may recover normally.
-  if (!rawSshSnapshot || !rawLocalSnapshot || !rawTelnetSnapshot || !rawPluginSnapshot || !ownerSnapshot) {
-    workspacePersistenceEnabled = false;
-    workspacePersistenceErrorVisible.value = true;
-    workspaceInitialized = true;
-    return;
-  }
-
-  const foreignTabs = ownerSnapshot.others
-    .filter((item) => item.kind === "terminal" && item.owner !== "main");
-  const foreignTabIds = new Set(foreignTabs.map((item) => item.id));
-  // An empty registry projection does not prove that the foreign window has
-  // no live Session. Its newest Pane may not have reached SQLite yet.
-  const hasUnidentifiedForeignTab = foreignTabs.some((tab) => tab.terminalPanes.length === 0);
-  const mainOwnedSnapshots = ownerSnapshot.owned.flatMap((record) => {
-    if (record.kind !== "terminal") return [];
-    const snapshot = parseTerminalTabHandoff(record.payload);
-    return snapshot?.tabId === record.id ? [snapshot] : [];
-  });
-  const mainLivePanes = mainOwnedSnapshots.flatMap((tab) => tab.panes);
-  const foreignLivePanes = foreignTabs.flatMap((item) => item.terminalPanes);
-  const registeredForeignPaneIds = new Set(foreignLivePanes.map((pane) => pane.paneId));
-  const foreignPanes = persistedLayout?.tabs
-    .filter((tab) => foreignTabIds.has(tab.tabId)).flatMap((tab) => tab.panes) ?? [];
-  const unregisteredPersistedPaneIds = new Set(foreignPanes
-    .filter((pane) => !registeredForeignPaneIds.has(pane.paneId))
-    .map((pane) => pane.paneId));
-  if (persistedLayout) {
-    const tabs = persistedLayout.tabs.filter((tab) => !foreignTabIds.has(tab.tabId));
-    persistedLayout = { ...persistedLayout, tabs,
-      activeTabId: tabs.some((tab) => tab.tabId === persistedLayout?.activeTabId)
-        ? persistedLayout.activeTabId : tabs[0]?.tabId ?? null };
-  }
-  const mainPersistedPaneIds = new Set(persistedLayout?.tabs
-    .flatMap((tab) => tab.panes.map((pane) => pane.paneId)) ?? []);
-  const [sshOwnership, localOwnership] = await Promise.all([
-    Promise.all(activeSshSessions(rawSshSnapshot).map(async (summary) => ({
-      sessionId: summary.sessionId,
-      details: await getSshSession(summary.sessionId).catch(() => null),
-    }))),
-    Promise.all(activeLocalSessions(rawLocalSnapshot).map(async (summary) => ({
-      sessionId: summary.sessionId,
-      details: await getLocalSession(summary.sessionId).catch(() => null),
-    }))),
-  ]);
-  if (sshOwnership.some((item) => !item.details) || localOwnership.some((item) => !item.details)) {
-    workspacePersistenceEnabled = false;
-    workspacePersistenceErrorVisible.value = true;
-    workspaceInitialized = true;
-    return;
-  }
-  const belongsToForeignPane = (
-    kind: "ssh" | "local", sessionId: string, generation: string,
-    attachments: readonly { viewId: string }[],
-  ) => foreignLivePanes.some((pane) => pane.kind === kind && (
-    pane.sessionId && pane.generation
-      ? pane.sessionId === sessionId && pane.generation === generation
-      : attachments.some((attachment) => attachment.viewId === pane.paneId)
-  )) || attachments.some((attachment) => unregisteredPersistedPaneIds.has(attachment.viewId));
-  const foreignSshSessionIds = new Set(sshOwnership.filter((item) => item.details && belongsToForeignPane(
-    "ssh", item.sessionId, item.details.session.generation, item.details.attachments,
-  )).map((item) => item.sessionId));
-  const foreignLocalSessionIds = new Set(localOwnership.filter((item) => item.details && belongsToForeignPane(
-    "local", item.sessionId, item.details.session.generation, item.details.attachments,
-  )).map((item) => item.sessionId));
-  const belongsToKnownMainPane = (
-    kind: "ssh" | "local" | "telnet", sessionId: string, generation: string,
-    attachments: readonly { viewId: string }[] = [],
-  ) => mainLivePanes.some((pane) => pane.kind === kind
-    && pane.sessionId === sessionId && pane.generation === generation)
-    || attachments.some((attachment) => mainPersistedPaneIds.has(attachment.viewId));
-  const knownMainSshSessionIds = new Set(sshOwnership.filter((item) => item.details && belongsToKnownMainPane(
-    "ssh", item.sessionId, item.details.session.generation, item.details.attachments,
-  )).map((item) => item.sessionId));
-  const knownMainLocalSessionIds = new Set(localOwnership.filter((item) => item.details && belongsToKnownMainPane(
-    "local", item.sessionId, item.details.session.generation, item.details.attachments,
-  )).map((item) => item.sessionId));
-  const sshSnapshot: SshSessionSnapshot = { ...rawSshSnapshot,
-    sessions: rawSshSnapshot.sessions.filter((item) => !foreignSshSessionIds.has(item.sessionId)
-      && (!hasUnidentifiedForeignTab || knownMainSshSessionIds.has(item.sessionId))) };
-  const localSnapshot: LocalSessionSnapshot = { ...rawLocalSnapshot,
-    sessions: rawLocalSnapshot.sessions.filter((item) => !foreignLocalSessionIds.has(item.sessionId)
-      && (!hasUnidentifiedForeignTab || knownMainLocalSessionIds.has(item.sessionId))) };
-  const telnetSnapshot: TelnetSessionSnapshot = { ...rawTelnetSnapshot,
-    sessions: rawTelnetSnapshot.sessions.filter((item) => !foreignLivePanes.some((pane) => pane.kind === "telnet"
-      && pane.sessionId === item.sessionId && pane.generation === item.generation)
-      && (!hasUnidentifiedForeignTab || belongsToKnownMainPane("telnet", item.sessionId, item.generation))) };
-  const pluginSnapshot = { ...rawPluginSnapshot,
-    sessions: rawPluginSnapshot.sessions.filter((item) => !foreignTabIds.has(item.tabId)) };
-
-  const hasLiveSessions = activeSshSessions(sshSnapshot).length > 0
-    || activeLocalSessions(localSnapshot).length > 0
-    || activeTelnetSessions(telnetSnapshot).length > 0
-    || pluginSnapshot.sessions.some((item) => item.cleanupBlocked || !["closed", "failed"].includes(item.state));
-  const shouldRestoreHistory = ui.terminalStartupBehavior === "restoreHistory";
-  const shouldAutoReconnectHistory = !hasLiveSessions && shouldRestoreHistory;
-  const restoreMainOwnedTabs = async () => {
-    if (!hasUnidentifiedForeignTab) return;
-    for (const snapshot of mainOwnedSnapshots) {
-      if (tabs.value.some((tab) => tab.tabId === snapshot.tabId)) continue;
-      try {
-        const panes = await Promise.all(snapshot.panes.map((pane) => restoreHandoffPane(pane, snapshot.tabId)));
-        tabs.value.push({ tabId: snapshot.tabId, layout: snapshot.layout,
-          activePaneId: snapshot.activePaneId, panes });
-      } catch {
-        // A stale live pointer or unavailable durable plugin profile cannot
-        // authorize this renderer to reconstruct the Tab.
-      }
-    }
-    if (!activeTabId.value) activeTabId.value = tabs.value[0]?.tabId ?? "";
-  };
-  let canRestorePersistedLayout = persistedLayout !== null;
-  let hostsById = new Map<string, HostSummary>();
-  if (persistedLayout && (hasLiveSessions || shouldRestoreHistory)) {
-    const hasSavedHostPane = persistedLayout.tabs.some((tab) =>
-      tab.panes.some((pane) => pane.kind === "sshHost"));
-    if (hasSavedHostPane) {
-      try {
-        const hosts = await listHosts();
-        hostsById = new Map(hosts.map((host) => [host.hostId, host]));
-      } catch {
-        workspacePersistenceEnabled = false;
-        canRestorePersistedLayout = false;
-        workspacePersistenceErrorVisible.value = true;
-        if (!hasLiveSessions) {
-          workspaceInitialized = true;
-          return;
-        }
-      }
-    }
-  }
-
-  if (hasLiveSessions) {
-    const sshPaneBySessionId = new Map<string, string>();
-    const localPaneBySessionId = new Map<string, string>();
-    const telnetPaneBySessionId = new Map<string, string>();
-    if (persistedLayout && canRestorePersistedLayout) {
-      const persistedPaneIds = new Set(
-        persistedLayout.tabs.flatMap((tab) => tab.panes.map((pane) => pane.paneId)),
-      );
-      await Promise.all([
-        ...activeSshSessions(sshSnapshot).map(async (summary) => {
-          const details = await getSshSession(summary.sessionId).catch(() => null);
-          const attachment = details?.attachments.find((candidate) =>
-            persistedPaneIds.has(candidate.viewId));
-          if (attachment) sshPaneBySessionId.set(summary.sessionId, attachment.viewId);
-        }),
-        ...activeLocalSessions(localSnapshot).map(async (summary) => {
-          const details = await getLocalSession(summary.sessionId).catch(() => null);
-          const attachment = details?.attachments.find((candidate) =>
-            persistedPaneIds.has(candidate.viewId));
-          if (attachment) localPaneBySessionId.set(summary.sessionId, attachment.viewId);
-        }),
-      ]);
-      const persistedTelnetPanes = persistedLayout.tabs
-        .flatMap((tab) => tab.panes)
-        .filter((pane): pane is Extract<PersistedTerminalWorkspacePane, { kind: "telnet" }> =>
-          pane.kind === "telnet");
-      const unused = new Set(persistedTelnetPanes.map((pane) => pane.paneId));
-      for (const summary of activeTelnetSessions(telnetSnapshot)) {
-        const match = persistedTelnetPanes.find((pane) => unused.has(pane.paneId)
-          && pane.address === summary.endpoint.address
-          && pane.port === summary.endpoint.port);
-        if (match) {
-          telnetPaneBySessionId.set(summary.sessionId, match.paneId);
-          unused.delete(match.paneId);
-        }
-      }
-    }
-    if (persistedLayout && canRestorePersistedLayout) {
-      // Publish the persisted tree and its live Pane replacements in one
-      // synchronous phase. Vue must never mount a deferred component and then
-      // reuse it for a late existingSession prop that setup did not attach.
-      restorePersistedWorkspace(persistedLayout, hostsById, false);
-    }
-    await restoreMainOwnedTabs();
-    for (const tab of mainOwnedSnapshots) {
-      for (const pane of tab.panes) {
-        if (pane.kind === "ssh" && sshSnapshot.sessions.some((item) => item.sessionId === pane.sessionId
-          && item.generation === pane.generation)) sshPaneBySessionId.set(pane.sessionId, pane.paneId);
-        if (pane.kind === "local" && localSnapshot.sessions.some((item) => item.sessionId === pane.sessionId
-          && item.generation === pane.generation)) localPaneBySessionId.set(pane.sessionId, pane.paneId);
-        if (pane.kind === "telnet" && telnetSnapshot.sessions.some((item) => item.sessionId === pane.sessionId
-          && item.generation === pane.generation)) telnetPaneBySessionId.set(pane.sessionId, pane.paneId);
-      }
-    }
-    recoverRendererSessions(
-      sshSnapshot,
-      localSnapshot,
-      telnetSnapshot,
-      sshPaneBySessionId,
-      localPaneBySessionId,
-      telnetPaneBySessionId,
-    );
-  } else if (persistedLayout && canRestorePersistedLayout && shouldRestoreHistory) {
-    restorePersistedWorkspace(
-      persistedLayout,
-      hostsById,
-      shouldAutoReconnectHistory,
-    );
-    await restoreMainOwnedTabs();
-  } else {
-    await restoreMainOwnedTabs();
-  }
-
-  for (const summary of pluginSnapshot.sessions.filter((item) => item.cleanupBlocked || !["closed", "failed"].includes(item.state))) projectPluginSession(summary);
-  for (const tab of tabs.value) ownedTabIds.add(tab.tabId);
+  // Each Tab WebView persists only the Tabs it owns. The main shell restores the
+  // workspace by creating one Tab WebView per Tab, so its own /terminal keeps none.
+  if (!childWorkspace) return;
+  workspacePersistenceEnabled = canUseDesktopCore();
   workspaceInitialized = true;
-  const currentProjection = workspaceProjection.value;
-  if (
-    currentProjection !== lastPersistedProjection
-    && (hasLiveSessions || shouldRestoreHistory)
-  ) {
-    queueWorkspaceSave(currentProjection);
-  }
-  if (activeTabId.value) activateTab(activeTabId.value);
 }
 
 function ensureTerminalWorkspaceInitialized() {
@@ -2108,14 +1930,13 @@ function ensureTerminalWorkspaceInitialized() {
   return workspaceInitializationPromise;
 }
 
-const tabItems = computed(() => tabs.value.filter((tab) => !frozenTabIds.value.has(tab.tabId)
-  && !pendingImportedTabIds.value.has(tab.tabId)).map((tab) => {
+const tabItems = computed(() => tabs.value.filter((tab) => !pendingImportedTabIds.value.has(tab.tabId)).map((tab) => {
   const pane = tab.panes.find((candidate) => candidate.paneId === tab.activePaneId)
     ?? tab.panes[0]!;
   const state = pane.kind === "launcher"
     ? t("sshTerminal.newTabState")
     : pane.kind === "local"
-      ? t(`localSession.states.${pane.state}`)
+      ? pane.viewFailure ? t("localSession.viewUnavailable") : t(`localSession.states.${pane.state}`)
       : pane.kind === "plugin"
         ? t(`pluginTerminal.states.${pane.state}`)
         : pane.kind === "telnet"
@@ -2126,6 +1947,7 @@ const tabItems = computed(() => tabs.value.filter((tab) => !frozenTabIds.value.h
     groupId: tab.tabId,
     label: pane.label,
     stateLabel: `${state} · ${t("sshTerminal.paneCount", { count: countTerminalPanes(tab.layout) })}`,
+    paneCount: countTerminalPanes(tab.layout),
     hostId: pane.kind === "session" && pane.target.kind === "host" ? pane.target.hostId : null,
     bellAttention,
   };
@@ -2134,8 +1956,7 @@ const tabItems = computed(() => tabs.value.filter((tab) => !frozenTabIds.value.h
 
 function focusExistingPane(matches: (pane: TerminalWorkspacePane) => boolean) {
   if (terminalFocusIsBlocked() || document.querySelector('[role="dialog"][aria-modal="true"]')) return false;
-  const match = tabs.value.filter((tab) => !frozenTabIds.value.has(tab.tabId)
-    && !pendingImportedTabIds.value.has(tab.tabId))
+  const match = tabs.value.filter((tab) => !pendingImportedTabIds.value.has(tab.tabId))
     .flatMap((tab) => tab.panes.map((pane) => ({ tab, pane }))).find(({ pane }) => matches(pane));
   if (!match) return false;
   activatePane(match.tab.tabId, match.pane.paneId);
@@ -2229,8 +2050,6 @@ function notifyHandoffSnapshotListeners() {
   if (!handoffSnapshotListeners.size) return;
   const snapshots = tabs.value.flatMap((tab) => {
     if (!ownedTabIds.has(tab.tabId)) return [];
-    const prepared = preparedHandoffs.get(tab.tabId);
-    if (prepared) return [prepared.snapshot];
     try { return [handoffSnapshotForTab(tab)]; } catch { return []; }
   });
   const projection = JSON.stringify(snapshots);
@@ -2308,10 +2127,10 @@ async function waitForHandoffAttachments(snapshot: TerminalTabHandoffSnapshot, a
 }
 
 async function snapshotTabHandoff(tabId: string): Promise<TerminalTabHandoffSnapshot> {
-  if (preparedHandoffs.size || optimisticTabCloseInFlight || preparing.value || closingTab.value
+  if (optimisticTabCloseInFlight || preparing.value || closingTab.value
     || terminalFocusIsBlocked()) throw handoffError("busy");
   const tab = tabs.value.find((item) => item.tabId === tabId);
-  if (!tab || frozenTabIds.value.has(tabId)) throw handoffError("tab-not-available");
+  if (!tab) throw handoffError("tab-not-available");
   await Promise.all(tab.panes.map((pane) => paneRefs.get(pane.paneId)?.waitForHandoffReplay?.()));
   const snapshot = handoffSnapshotForTab(tab);
   if (snapshot.panes.some((pane) => ["ssh", "local", "telnet", "plugin"].includes(pane.kind)
@@ -2319,32 +2138,7 @@ async function snapshotTabHandoff(tabId: string): Promise<TerminalTabHandoffSnap
       || !("outputGeometry" in pane && pane.outputGeometry?.length)))) {
     throw handoffError("renderer-not-ready");
   }
-  snapshottedHandoffs.set(tabId, snapshot);
   return snapshot;
-}
-
-async function freezeTabHandoff(tabId: string): Promise<void> {
-  const snapshot = snapshottedHandoffs.get(tabId);
-  const tab = tabs.value.find((item) => item.tabId === tabId);
-  if (!snapshot || !tab || JSON.stringify(handoffSnapshotForTab(tab)) !== JSON.stringify(snapshot)) {
-    throw handoffError("snapshot-changed");
-  }
-  if (preparedHandoffs.size || optimisticTabCloseInFlight || preparing.value || closingTab.value
-    || terminalFocusIsBlocked()) throw handoffError("busy");
-  await flushTerminalWorkspaceLayout();
-  await clearTerminalInputFocus();
-  for (const pane of tab.panes) paneRefs.get(pane.paneId)?.deactivateFromTab();
-  const wasActive = activeTabId.value === tabId;
-  preparedHandoffs.set(tabId, { snapshot, wasActive });
-  frozenTabIds.value = new Set([...frozenTabIds.value, tabId]);
-  if (wasActive) activeTabId.value = tabs.value.find((item) => !frozenTabIds.value.has(item.tabId))?.tabId ?? "";
-  try {
-    await nextTick();
-    await waitForHandoffAttachments(snapshot, false);
-  } catch (error) {
-    await rollbackTabHandoff(tabId);
-    throw error;
-  }
 }
 
 async function restoreHandoffPane(pane: TerminalHandoffPane, tabId: string): Promise<TerminalWorkspacePane> {
@@ -2429,46 +2223,6 @@ async function importTabHandoff(input: TerminalTabHandoffSnapshot): Promise<void
     await discardImportedTab(snapshot.tabId);
     throw error;
   }
-}
-
-function commitTabHandoff(tabId: string): void {
-  if (!preparedHandoffs.has(tabId) || !frozenTabIds.value.has(tabId)) throw handoffError("not-prepared");
-  ownedTabIds.delete(tabId);
-  removeTab(tabId);
-  frozenTabIds.value = new Set([...frozenTabIds.value].filter((id) => id !== tabId));
-  preparedHandoffs.delete(tabId);
-  snapshottedHandoffs.delete(tabId);
-  lastPersistedProjection = "";
-  queueWorkspaceSave(workspaceProjection.value);
-  notifyHandoffSnapshotListeners();
-}
-
-async function rollbackTabHandoff(tabId: string): Promise<void> {
-  const prepared = preparedHandoffs.get(tabId);
-  if (!prepared) return;
-  for (const pane of prepared.snapshot.panes) {
-    if ("initialDimensions" in pane && pane.initialDimensions) {
-      incomingPaneDimensions.set(pane.paneId, pane.initialDimensions);
-    }
-    if ("outputGeometry" in pane && pane.outputGeometry) {
-      incomingPaneOutputGeometry.set(pane.paneId, pane.outputGeometry);
-    }
-  }
-  frozenTabIds.value = new Set([...frozenTabIds.value].filter((id) => id !== tabId));
-  preparedHandoffs.delete(tabId);
-  snapshottedHandoffs.delete(tabId);
-  if (prepared.wasActive) activeTabId.value = tabId;
-  await nextTick();
-  try {
-    await waitForHandoffAttachments(prepared.snapshot, true);
-  } finally {
-    for (const pane of prepared.snapshot.panes) {
-      incomingPaneDimensions.delete(pane.paneId);
-      incomingPaneOutputGeometry.delete(pane.paneId);
-    }
-  }
-  if (prepared.wasActive) activateTab(tabId);
-  notifyHandoffSnapshotListeners();
 }
 
 async function discardImportedTab(tabId: string): Promise<void> {
@@ -2709,13 +2463,15 @@ async function openRequestedHost(
 }
 
 async function consumeRequestedHostRoute() {
+  if (route.path !== "/terminal") return;
   const hostId = typeof route.query.hostId === "string" ? route.query.hostId : null;
   if (!hostId) return;
   const operationId = typeof route.query.connectOperationId === "string"
     ? route.query.connectOperationId
     : undefined;
   const sftpDirectoryLaunch = route.query.source === "sftpDirectory";
-  const forceNewTab = route.query.source === "overview" || route.query.source === "plugin" || sftpDirectoryLaunch;
+  const forceNewTab = !isWorkspaceTabView()
+    && (route.query.source === "overview" || route.query.source === "plugin" || sftpDirectoryLaunch);
   const pluginAuthorizationToken = route.query.source === "plugin"
     && typeof route.query.pluginAuthorizationToken === "string"
     ? route.query.pluginAuthorizationToken
@@ -2755,30 +2511,12 @@ async function consumeRequestedHostRoute() {
   }
 }
 
-async function consumeRequestedSessionFocus() {
-  const sessionId = typeof route.query.focusSessionId === "string"
-    ? route.query.focusSessionId
-    : null;
-  if (!sessionId) return;
-  await ensureTerminalWorkspaceInitialized();
-  const match = tabs.value.flatMap((tab) => tab.panes.map((pane) => ({ tab, pane })))
-    .find(({ pane }) => pane.kind === "session" && pane.summary?.sessionId === sessionId);
-  if (match) activatePane(match.tab.tabId, match.pane.paneId);
-  await router.replace({ path: "/terminal" });
-}
-
 watch(
   () => [
     typeof route.query.hostId === "string" ? route.query.hostId : null,
     typeof route.query.connectOperationId === "string" ? route.query.connectOperationId : null,
   ],
   () => void consumeRequestedHostRoute(),
-  { immediate: true },
-);
-
-watch(
-  () => typeof route.query.focusSessionId === "string" ? route.query.focusSessionId : null,
-  () => void consumeRequestedSessionFocus(),
   { immediate: true },
 );
 
@@ -2798,7 +2536,7 @@ watch(
     }
     const tab = activeTab.value;
     const pane = tab?.panes.find((candidate) => candidate.paneId === tab.activePaneId);
-    if (pane && pane.kind !== "launcher") paneRefs.get(pane.paneId)?.activateFromTab();
+    if (viewActive.value && pane && pane.kind !== "launcher") paneRefs.get(pane.paneId)?.activateFromTab();
   },
 );
 
@@ -2811,7 +2549,6 @@ onActivated(() => {
   void reconcilePluginProtocolLaunches();
   void refreshSavedHosts();
   void consumeRequestedHostRoute();
-  void consumeRequestedSessionFocus();
   reconcileTerminalAfterForeground();
   if (initialRouteReady) revealRoute();
 });
@@ -2820,10 +2557,6 @@ onBeforeUnmount(() => {
   terminalViewDisposed = true;
   unlistenSavedConnections?.();
   vaultPromptMode.value = null;
-  unlistenPluginProtocolLaunch?.();
-  unlistenPluginProtocolLaunch = null;
-  unlistenPluginTerminalChannel?.();
-  unlistenPluginTerminalChannel = null;
   window.removeEventListener("focus", reconcileTerminalAfterForeground);
   document.removeEventListener("visibilitychange", handleTerminalVisibilityChange);
   unregisterTerminalHeaderController?.();
@@ -2846,20 +2579,23 @@ onMounted(async () => {
   try {
     await Promise.all([ensureTerminalWorkspaceInitialized(), refreshSavedHosts()]);
     unregisterTerminalHeaderController = workspaceTabs.registerTerminalController({
+      createInitialTab,
+      createInitialPluginProtocolTab,
+      createInitialApprovedPluginChannel,
+      restoreInitialTab,
       snapshotTabHandoff,
       observeTabHandoffSnapshots,
-      freezeTabHandoff,
       importTabHandoff,
       commitImportedTabHandoff,
-      commitTabHandoff,
-      rollbackTabHandoff,
       discardImportedTab,
-      activate: activateTab,
+      activate: (tabId: string) => {
+        viewActive.value = true;
+        activateTab(tabId);
+      },
       close: requestCloseTab,
       closeMany: requestCloseTabs,
-      create: createNewTerminalTab,
-      createLocal: createLocalFromHeader,
       quickConnect: quickConnectFromHeader,
+      openTelnet: openTelnetFromHeader,
       deactivate: deactivateTerminalWorkspace,
       toggleQuickCommands: () => { quickCommandsOpen.value = !quickCommandsOpen.value; },
       runShortcut: runTerminalShortcut,
@@ -2872,20 +2608,8 @@ onMounted(async () => {
     initialRouteReady = true;
     revealRoute();
   }
-  if (canUseDesktopCore() && !childWorkspace) {
-    unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => { void reconcilePluginProtocolLaunches(); });
-    await reconcilePluginProtocolLaunches();
-    unlistenPluginTerminalChannel = await listen<PluginApprovedTerminalChannelLaunch>("plugin-terminal-channel-approved", ({ payload }) => {
-      if (approvedPluginChannelOperations.has(payload.operationId)) return;
-      approvedPluginChannelOperations.add(payload.operationId);
-      const paneId = createLauncherTab(false);
-      replaceWorkspacePane(paneId, {
-        kind: "session", paneId, label: payload.label, target: payload.target,
-        credentialRefId: null, pluginAuthorizationToken: payload.authorizationToken,
-        state: "connecting", summary: null, deferredStart: false, deferredRecovery: "reconnect",
-      });
-    });
-  }
+  // Core launch and approval events are handled by the main shell. This child only
+  // receives the one launch bound to its native Tab during bootstrap.
 });
 </script>
 
@@ -2927,17 +2651,17 @@ onMounted(async () => {
       >
         <NvxTerminalLauncher
           :hosts="launcherHosts"
-          @quick-connect="openInlineQuickConnect($event)"
-          @connect-host="openRequestedHost($event)"
+          @quick-connect="openEmptyWorkspaceQuickConnect($event)"
+          @connect-host="openEmptyWorkspaceHost($event)"
           @add-host="openHosts"
-          @local-terminal="createLocalTerminal(null)"
+          @local-terminal="openEmptyWorkspaceLocalTerminal"
           @import-ssh-config="openSshConfigImport"
-          @telnet="openTelnetLauncher(null)"
+          @telnet="openEmptyWorkspaceTelnet"
           @show-all-hosts="showAllHosts"
         />
       </div>
       <template
-        v-for="tab in tabs.filter((item) => !frozenTabIds.has(item.tabId))"
+        v-for="tab in tabs"
         :key="tab.tabId"
       >
         <section
@@ -3001,7 +2725,7 @@ onMounted(async () => {
                   :deferred-start="pane.deferredStart"
                   :deferred-recovery="pane.deferredRecovery"
                   :initial-directory="pane.initialDirectory ?? null"
-                  :active="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :active="viewActive && route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
                   :visible="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
@@ -3026,13 +2750,16 @@ onMounted(async () => {
                   :initial-output-geometry="incomingPaneOutputGeometry.get(pane.paneId)"
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
-                  :active="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :initial-open="pane.initialOpen"
+                  :initial-tab-id="pane.initialOpen ? tab.tabId : undefined"
+                  :active="viewActive && route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
                   :visible="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
                   :can-split-workspace-right="canSplitWorkspaceRight"
                   @activate="activatePane(tab.tabId, pane.paneId)"
                   @state="(state, summary) => updateLocalTabState(pane.paneId, state, summary)"
+                  @view-failure="updateLocalViewFailure(pane.paneId, $event)"
                   @bell-attention="setPaneBellAttention(pane.paneId, $event)"
                   @split="splitActivePane"
                   @split-workspace-right="splitWorkspaceRight"
@@ -3050,7 +2777,7 @@ onMounted(async () => {
                   :launch="pane.launch"
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
-                  :active="route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :active="viewActive && route.path === '/terminal' && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
                   :can-split-workspace-right="canSplitWorkspaceRight"
@@ -3071,7 +2798,7 @@ onMounted(async () => {
                   :endpoint="pane.endpoint"
                   :existing-session="pane.summary"
                   :deferred-start="pane.deferredStart"
-                  :active="!pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
+                  :active="viewActive && !pendingImportedTabIds.has(tab.tabId) && tab.tabId === activeTabId && tab.activePaneId === pane.paneId"
                   :can-split-horizontal="canSplitHorizontal"
                   :can-split-vertical="canSplitVertical"
                   :can-split-workspace-right="canSplitWorkspaceRight"

@@ -12,10 +12,14 @@ import { SFTP_PREFERENCES_KEY } from "../stores/sftpPreferences";
 import { useTipsStore } from "../stores/tips";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { acceptSftpPluginNavigation, discardSftpPluginNavigations } from "./sftpPluginNavigation";
-import { takeSftpTerminalLaunch } from "./sftpTerminalLaunch";
 import type { FileTabHandoffSnapshot } from "./fileTabHandoffSnapshot";
 
 const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
+const terminalNavigation = vi.hoisted(() => ({ directory: vi.fn(async () => undefined), host: vi.fn(async () => undefined) }));
+vi.mock("../workspace-tab-shell-action", () => ({
+  openWorkspaceDirectoryTerminal: terminalNavigation.directory,
+  openWorkspaceTerminalHost: terminalNavigation.host,
+}));
 const pathApi = vi.hoisted(() => ({ homeDir: vi.fn(), sep: vi.fn(() => "/") }));
 const webview = vi.hoisted(() => ({
   handler: null as ((event: { payload: unknown }) => void) | null,
@@ -104,6 +108,12 @@ function readySnapshot(transfers: SftpSessionSnapshot["transfers"] = []): SftpSe
   };
 }
 
+function newFileTab(store: ReturnType<typeof useWorkspaceTabsStore>, kind: "local" | "remote"): string {
+  const id = `file:${crypto.randomUUID()}`;
+  expect(store.createInitialFileTab(id, kind, null, "")).toBe(true);
+  return id;
+}
+
 async function mountView(
   snapshot: SftpSessionSnapshot = { snapshotRevision: "0", sessions: [], transfers: [] },
   intentSnapshot: SftpTransferIntentSnapshot = { snapshotRevision: "0", transfers: [] },
@@ -120,6 +130,9 @@ async function mountView(
     keepAlive?: boolean;
     hosts?: Array<typeof host>;
     workspaceTab?: "local" | "remote";
+    initialHostId?: string;
+    initialSessionId?: string;
+    initialGeneration?: string;
     routeQuery?: Record<string, string>;
     setupStore?: (store: ReturnType<typeof useWorkspaceTabsStore>) => void;
     handoffSnapshot?: (id: string) => FileTabHandoffSnapshot;
@@ -149,6 +162,7 @@ async function mountView(
     return Promise.resolve(reconnected);
   });
   client.disconnectSftpSession.mockImplementation((input) => {
+    const closed = currentSnapshot.sessions.find((session) => session.sessionId === input.sessionId);
     currentSnapshot = {
       ...currentSnapshot,
       snapshotRevision: String(BigInt(currentSnapshot.snapshotRevision) + 1n),
@@ -156,7 +170,7 @@ async function mountView(
         ? { ...session, state: "closed" as const }
         : session),
     };
-    return Promise.resolve(undefined);
+    return Promise.resolve(closed ? { ...closed, state: "closed" as const } : undefined);
   });
   client.listHosts.mockResolvedValue(options.hosts ?? [host]);
   client.fetchSftpTransferIntentSnapshot.mockImplementation(() => Promise.resolve(currentIntentSnapshot));
@@ -192,13 +206,16 @@ async function mountView(
   const pinia = createPinia();
   const workspaceTabs = useWorkspaceTabsStore(pinia);
   options.setupStore?.(workspaceTabs);
-  const workspaceTabId = options.workspaceTab ? workspaceTabs.createFileTab(options.workspaceTab) : undefined;
+  const workspaceTabId = options.workspaceTab ? newFileTab(workspaceTabs, options.workspaceTab) : undefined;
   const cachedRoute = defineComponent({
     template: '<RouterView v-slot="{ Component, route }"><KeepAlive include="SftpView"><component :is="Component" :key="route.path" /></KeepAlive></RouterView>',
   });
   const wrapper = mount(options.keepAlive ? cachedRoute : SftpView, {
     props: workspaceTabId ? {
       workspaceTabId, initialKind: options.workspaceTab, active: true,
+      initialHostId: options.initialHostId ?? null,
+      initialSessionId: options.initialSessionId ?? null,
+      initialGeneration: options.initialGeneration ?? null,
       handoffSnapshot: options.handoffSnapshot?.(workspaceTabId) ?? null,
     } : {},
     global: {
@@ -231,7 +248,9 @@ async function openTransferActivity(wrapper: VueWrapper) {
 }
 
 async function openPaneActions(pane: DOMWrapper<Element>) {
-  const trigger = pane.find<HTMLButtonElement>('button[aria-label="More file actions"]');
+  const paneTrigger = pane.find<HTMLButtonElement>('button[aria-label="More file actions"]');
+  const topbarTrigger = pane.element.closest('.sftp-view')?.querySelector<HTMLButtonElement>('.sftp-view__topbar button[aria-label="More file actions"]');
+  const trigger = paneTrigger.exists() ? paneTrigger : topbarTrigger ? new DOMWrapper(topbarTrigger) : paneTrigger;
   expect(trigger.exists()).toBe(true);
   await trigger.trigger("click");
   await flushPromises();
@@ -278,19 +297,20 @@ describe("SftpView production boundaries", () => {
     await rows.find((row) => row.text().includes("new folder"))!.trigger("contextmenu");
     await wrapper.findAll('[role="menuitem"]').find((button) => button.text().includes("Open terminal here"))!.trigger("click");
     await flushPromises();
-    const { hostId, connectOperationId, source } = router.currentRoute.value.query;
-    expect(source).toBe("sftpDirectory");
-    expect(takeSftpTerminalLaunch(connectOperationId as string, hostId as string)).toBe("/new folder");
+    expect(router.currentRoute.value.path).toBe("/sftp");
+    expect(terminalNavigation.directory).toHaveBeenCalledWith(
+      host.hostId, Array.from(new TextEncoder().encode("/new folder")),
+    );
     wrapper.unmount();
   });
 
   it("uses the current directory for a file or list background right-click", async () => {
-    const { wrapper, router } = await mountView(readySnapshot(), undefined, "old.txt");
+    const { wrapper } = await mountView(readySnapshot(), undefined, "old.txt");
     const row = wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button');
     await row.trigger("contextmenu");
     await wrapper.findAll('[role="menuitem"]').find((button) => button.text().includes("Open terminal here"))!.trigger("click");
     await flushPromises();
-    expect(takeSftpTerminalLaunch(router.currentRoute.value.query.connectOperationId as string, host.hostId)).toBe("/");
+    expect(terminalNavigation.directory).toHaveBeenCalledWith(host.hostId, [47]);
     wrapper.unmount();
 
     const blank = await mountView(readySnapshot(), undefined, "old.txt");
@@ -298,7 +318,8 @@ describe("SftpView production boundaries", () => {
     await blank.wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries').trigger("contextmenu");
     await blank.wrapper.findAll('[role="menuitem"]').find((button) => button.text().includes("Open terminal here"))!.trigger("click");
     await flushPromises();
-    expect(takeSftpTerminalLaunch(blank.router.currentRoute.value.query.connectOperationId as string, host.hostId)).toBe("/");
+    expect(terminalNavigation.directory).toHaveBeenCalledTimes(2);
+    expect(terminalNavigation.directory).toHaveBeenLastCalledWith(host.hostId, [47]);
     blank.wrapper.unmount();
   });
   it("positions the measured menu inside the viewport and recomputes after resize", async () => {
@@ -354,6 +375,136 @@ describe("SftpView production boundaries", () => {
     }));
     expect(wrapper.text()).toContain("release.bin");
     wrapper.unmount();
+  });
+
+  it("keeps the connected server, address, response time, and disconnect action in one Pane header", async () => {
+    const { wrapper } = await mountView(readySnapshot());
+    const topbar = wrapper.get(".sftp-view__topbar");
+    const header = wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__pane-header');
+
+    expect(topbar.find(".sftp-view__title strong").exists()).toBe(false);
+    expect(topbar.text()).toContain("New file tab");
+    expect(topbar.text()).toContain("Transfers 0");
+    expect(topbar.findAll(".terminal-pane-controls__separator")).toHaveLength(1);
+    expect(header.find(".sftp-view__pane-identity strong").text()).toBe("Files");
+    expect(header.find(".sftp-view__pane-address").text()).toBe("files.example.test:22");
+    expect(header.find(".sftp-view__pane-status").text()).toMatch(/^\d+ms$/);
+    expect(header.find(".nvx-select").exists()).toBe(false);
+    expect(header.findAll(".sftp-view__pane-endpoint")).toHaveLength(1);
+    expect(header.find('button[aria-label="Disconnect"]').text()).toBe("");
+    wrapper.unmount();
+  });
+
+  it("uses a single top row for a lone remote Pane with labeled new tab and icon-only disconnect actions", async () => {
+    const { wrapper } = await mountView(readySnapshot());
+    const localPane = wrapper.find('[data-pane-id="sftp-local-pane"]');
+    await openPaneActions(localPane);
+    await paneAction(localPane, "Close current file Pane")?.trigger("click");
+    await flushPromises();
+
+    const topbar = wrapper.find(".sftp-view__topbar");
+    expect(wrapper.findAll(".sftp-view__pane-header")).toHaveLength(0);
+    expect(topbar.get(".sftp-view__title strong").text()).toBe("Files");
+    expect(topbar.get(".sftp-view__topbar-address").text()).toBe("files.example.test:22");
+    expect(topbar.get(".sftp-view__topbar-status").text()).toMatch(/^\d+ms$/);
+    expect(topbar.text()).toContain("New file tab");
+    expect(topbar.get('button[aria-label="Disconnect"]').text()).toBe("");
+    expect(topbar.find('button[aria-label="More file actions"]').exists()).toBe(true);
+    await topbar.get('button[aria-label="Disconnect"]').trigger("click");
+    await flushPromises();
+    expect(client.disconnectSftpSession).toHaveBeenCalledWith({
+      sessionId: readySnapshot().sessions[0]!.sessionId,
+      expectedGeneration: "1",
+    });
+    wrapper.unmount();
+  });
+
+  it("reattaches an exact initial File session without reopening that Host", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    const existing = readySnapshot();
+    const sessionId = existing.sessions[0]!.sessionId;
+    const { wrapper, workspaceTabs } = await mountView(existing, undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: sessionId,
+    });
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    expect(workspaceTabs.fileSessionOwner(sessionId)).toBeTruthy();
+    expect(client.listSftpDirectory).toHaveBeenCalledWith(expect.objectContaining({ sessionId }));
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+      kind: "file", tabId: workspaceTabs.activeFileTabId, resourceId: sessionId, safeToProject: true,
+    });
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("first opens a missing exact File session with the seed session ID", async () => {
+    const sessionId = "019d0000-0000-7000-8000-000000000393";
+    const { wrapper } = await mountView(undefined, undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: sessionId,
+    });
+    expect(client.openSftpSession).toHaveBeenCalledWith({
+      hostId: host.hostId, expectedHostStateVersion: host.stateVersion, sessionId,
+    });
+    wrapper.unmount();
+  });
+
+  it("keeps an exact closed initial File session closed until an explicit connect", async () => {
+    const existing = readySnapshot();
+    existing.sessions[0]!.state = "closed";
+    const sessionId = existing.sessions[0]!.sessionId;
+    const { wrapper } = await mountView(existing, undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: sessionId,
+    });
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("reattaches a plugin File session by exact ID and generation without a saved Host", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    const existing = readySnapshot();
+    existing.sessions[0]!.hostId = null;
+    const sessionId = existing.sessions[0]!.sessionId;
+    const { wrapper, workspaceTabs } = await mountView(existing, undefined, "release.bin", {
+      workspaceTab: "remote", initialSessionId: sessionId, initialGeneration: "1",
+    });
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    expect(workspaceTabs.fileSessionOwner(sessionId)).toBe(workspaceTabs.activeFileTabId);
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(true);
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("retains the plugin File seed when the exact generation is absent", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    const existing = readySnapshot();
+    existing.sessions[0]!.hostId = null;
+    existing.sessions[0]!.generation = "2";
+    const { wrapper, tips } = await mountView(existing, undefined, "release.bin", {
+      workspaceTab: "remote", initialSessionId: existing.sessions[0]!.sessionId, initialGeneration: "1",
+    });
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    expect(client.fetchSftpSessionSnapshot).toHaveBeenCalledTimes(2);
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(false);
+    expect(tips.items.some((item) => item.tone === "error")).toBe(true);
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
+  });
+
+  it("releases the File projection gate when Core confirms the failed initial ID is absent", async () => {
+    const settled = vi.fn();
+    window.addEventListener("norishell:initial-resource-settled", settled);
+    const sessionId = "019d0000-0000-7000-8000-000000000394";
+    const { wrapper, tips } = await mountView(undefined, undefined, "release.bin", {
+      workspaceTab: "remote", initialSessionId: sessionId, initialGeneration: "1",
+    });
+    expect(client.openSftpSession).not.toHaveBeenCalled();
+    expect(client.fetchSftpSessionSnapshot).toHaveBeenCalledTimes(2);
+    expect((settled.mock.calls[0]?.[0] as CustomEvent).detail.safeToProject).toBe(true);
+    expect(tips.items.some((item) => item.tone === "error")).toBe(true);
+    wrapper.unmount();
+    window.removeEventListener("norishell:initial-resource-settled", settled);
   });
 
   it("waits for an explicit Vault continuation before connecting and ignores cancellation", async () => {
@@ -462,10 +613,10 @@ describe("SftpView production boundaries", () => {
     await openPaneActions(wrapper.find('[data-pane-id="sftp-local-pane"]'));
     await paneAction(wrapper.find('[data-pane-id="sftp-local-pane"]'), "Add remote pane")?.trigger("click");
     await flushPromises();
-    const remotePanes = wrapper.findAll('[aria-label="SFTP Host for this Pane"]');
+    const remotePanes = wrapper.findAll(".sftp-view__pane")
+      .filter((pane) => pane.element.closest('[data-pane-id]')?.getAttribute("data-pane-id") !== "sftp-local-pane");
     expect(remotePanes).toHaveLength(2);
-    const freshPane = remotePanes.map((pane) => pane.element.closest('[data-pane-id]')!)
-      .find((pane) => pane.getAttribute('data-pane-id') !== 'sftp-remote-pane')!;
+    const freshPane = remotePanes.find((pane) => pane.element.closest('[data-pane-id]')?.getAttribute("data-pane-id") !== "sftp-remote-pane")!.element;
     const connect = Array.from(freshPane.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent?.includes("Connect SFTP"));
     connect?.click();
@@ -509,7 +660,7 @@ describe("SftpView production boundaries", () => {
         focusGeneration: session.generation,
       },
       setupStore: (store) => {
-        const owner = store.createFileTab("remote");
+        const owner = newFileTab(store, "remote");
         expect(store.claimFileSession(session.sessionId, owner)).toBe(true);
         expect(store.consumeFileFocusOperation("tray-focus-a")).toBe(true);
       },
@@ -539,6 +690,8 @@ describe("SftpView production boundaries", () => {
     const { wrapper } = await mountView({ snapshotRevision: "0", sessions: [], transfers: [] }, undefined, "notes.txt", { workspaceTab: "local" });
     const controls = wrapper.get(".sftp-view__topbar");
     expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(1);
+    expect(wrapper.find('[role="listbox"][aria-label="Local files"]').exists()).toBe(true);
+    expect(wrapper.find('[aria-label="Sort local files"]').exists()).toBe(true);
     await controls.get('button[aria-label="Split Pane to the right"]').trigger("click");
     await flushPromises();
     expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(2);
@@ -748,7 +901,7 @@ describe("SftpView production boundaries", () => {
     wrapper.unmount();
   });
 
-  it("preserves the exact local directory capability when a File Tab leaves this window", async () => {
+  it("projects the exact local directory capability and releases it when the Tab view is destroyed", async () => {
     pathApi.homeDir.mockResolvedValue("/Users/test");
     client.registerSftpLocalDirectory.mockResolvedValue({
       directoryRef: "moved-local", revision: "6", displayName: "Home", rememberablePath: "/Users/test",
@@ -765,15 +918,13 @@ describe("SftpView production boundaries", () => {
     });
 
     const localPane = wrapper.find(`[data-pane-id="${payload.panes[0]!.paneId}"]`);
-    await openPaneActions(localPane);
-    controller.freezeHandoff();
-    await paneAction(localPane, "Change local folder")?.trigger("click");
-    expect(dialog.open).not.toHaveBeenCalled();
-    controller.commitHandoff();
+    expect(wrapper.find(".sftp-view__topbar--local").exists()).toBe(true);
+    expect(localPane.find(".sftp-view__pane-header").exists()).toBe(false);
+    expect(localPane.find(".sftp-view__commandbar").exists()).toBe(true);
     workspaceTabs.finishCloseFileTab(id);
     wrapper.unmount();
     await flushPromises();
-    expect(client.releaseSftpLocalDirectory).not.toHaveBeenCalledWith({ directoryRef: "moved-local", expectedRevision: "6" });
+    expect(client.releaseSftpLocalDirectory).toHaveBeenCalledWith({ directoryRef: "moved-local", expectedRevision: "6" });
     expect(client.disconnectSftpSession).not.toHaveBeenCalled();
   });
 
@@ -846,7 +997,8 @@ describe("SftpView production boundaries", () => {
     snapshot.sessions = [shared];
     client.fetchSshSessionSnapshot.mockResolvedValue({ sessions: [{ sessionId: shared.parentSshSession.sessionId, generation: "3", state: "running", target: { kind: "quickConnect", endpoint: { address: "quick.example.test", port: 22, username: "ops" } } }] });
     client.previewSftpFile.mockResolvedValue({ sessionId: shared.sessionId, generation: shared.generation, displayName: "default", content: { kind: "text", text: "worker_processes auto;", endOffset: "22", editable: true, truncated: false, lineEnding: "lf" } });
-    const { wrapper } = await mountView(snapshot, undefined, [{ entryRef: "nginx-config", path: { bytes: [...new TextEncoder().encode("/etc/nginx/sites-available/default")] }, displayName: "default", kind: "file", size: 22, modifiedAtUnixMs: 1, permissionBits: null }]);
+    const { wrapper, workspaceTabs } = await mountView(snapshot, undefined, [{ entryRef: "nginx-config", path: { bytes: [...new TextEncoder().encode("/etc/nginx/sites-available/default")] }, displayName: "default", kind: "file", size: 22, modifiedAtUnixMs: 1, permissionBits: null }], { workspaceTab: "remote" });
+    expect(workspaceTabs.claimFileSession(shared.sessionId, workspaceTabs.fileTabs[0]!.groupId)).toBe(true);
     const event = { operationId: "019d0000-0000-7000-8000-000000000911", pluginId: "test.navigation", sftpSession: shared, request: { kind: "sftp", path: "/etc/nginx/sites-available/default", edit: true } };
     expect(acceptSftpPluginNavigation(event)).toBe(true);
     await flushPromises();
@@ -865,7 +1017,8 @@ describe("SftpView production boundaries", () => {
     const snapshot = readySnapshot();
     const shared = { ...snapshot.sessions[0]!, hostId: null, parentSshSession: { sessionId: "019d0000-0000-7000-8000-000000000921", generation: "1" } };
     snapshot.sessions = [{ ...shared, generation: "2" }];
-    const { tips, wrapper } = await mountView(snapshot);
+    const { tips, wrapper, workspaceTabs } = await mountView(snapshot, undefined, "release.bin", { workspaceTab: "remote" });
+    expect(workspaceTabs.claimFileSession(shared.sessionId, workspaceTabs.fileTabs[0]!.groupId)).toBe(true);
     expect(acceptSftpPluginNavigation({ operationId: "019d0000-0000-7000-8000-000000000922", pluginId: "test.navigation", sftpSession: shared, request: { kind: "sftp", path: "/etc", edit: false } })).toBe(true);
     await flushPromises();
     expect(client.openSftpSession).not.toHaveBeenCalled();
@@ -1033,6 +1186,7 @@ describe("SftpView production boundaries", () => {
       expect(wrapper.text()).toContain("moved to a new connection generation");
     }, { timeout: 1_500 });
     expect(wrapper.text()).not.toContain("release.bin");
+    expect(wrapper.get('[data-pane-id="sftp-remote-pane"] .sftp-view__pane-status').text()).toBe("—");
 
     const reopen = wrapper.findAll("button").find((button) => button.text().includes("Reopen root"));
     await reopen?.trigger("click");
@@ -1055,6 +1209,94 @@ describe("SftpView production boundaries", () => {
     expect(client.listSftpDirectory).toHaveBeenLastCalledWith(expect.objectContaining({
       path: { bytes: Array.from(new TextEncoder().encode("/var/www/releases")) },
     }));
+    wrapper.unmount();
+  });
+
+  it("navigates remote breadcrumbs, back, and forward only after a directory loads", async () => {
+    const { wrapper } = await mountView(readySnapshot());
+    const pane = wrapper.get('[data-pane-id="sftp-remote-pane"]');
+    const path = pane.get<HTMLInputElement>('[aria-label="Remote path"]');
+    await pane.get('button[aria-label="Edit path"]').trigger("click");
+    expect(path.isVisible()).toBe(true);
+    await path.setValue("/var");
+    await path.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(path.element.style.display).toBe("none");
+    await pane.get('button[aria-label="Edit path"]').trigger("click");
+    await path.setValue("/var/log");
+    await path.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    expect(pane.get('button[aria-label="Back"]').attributes("disabled")).toBeUndefined();
+    expect(pane.findAll(".sftp-view__breadcrumbs button").map((button) => button.text())).toEqual(["/", "var", "log"]);
+    await pane.get('button[aria-label="Back"]').trigger("click");
+    await flushPromises();
+    expect(path.element.value).toBe("/var");
+
+    client.listSftpDirectory.mockRejectedValueOnce(new Error("permission denied"));
+    await pane.get('button[aria-label="Forward"]').trigger("click");
+    await flushPromises();
+    expect(path.element.value).toBe("/var");
+    expect(pane.get('button[aria-label="Forward"]').attributes("disabled")).toBeUndefined();
+
+    await pane.get('button[aria-label="Forward"]').trigger("click");
+    await flushPromises();
+    expect(path.element.value).toBe("/var/log");
+    await pane.findAll(".sftp-view__breadcrumbs button")[0]!.trigger("click");
+    await flushPromises();
+    expect(path.element.value).toBe("/");
+    wrapper.unmount();
+  });
+
+  it("reopens released local history capabilities without changing history on failure", async () => {
+    pathApi.sep.mockReturnValue("\\");
+    let registration = 0;
+    client.registerSftpLocalDirectory.mockImplementation((path: string) => Promise.resolve({
+      directoryRef: `registered-${++registration}`, revision: "1", displayName: path, rememberablePath: path,
+    }));
+    client.openSftpLocalDirectoryChild.mockResolvedValue({
+      directoryRef: "child-1", revision: "1", displayName: "Program Files", rememberablePath: "C:\\Program Files",
+    });
+    client.listSftpLocalDirectory.mockImplementation((input) => Promise.resolve({
+      directoryRef: input.directoryRef, revision: input.expectedRevision,
+      entries: input.directoryRef === "registered-1" ? [{
+        entryRef: "program-files", displayName: "Program Files", kind: "directory",
+        size: null, modifiedAtUnixMs: null,
+      }] : [],
+      nextCursor: null,
+    }));
+    const { wrapper } = await mountView();
+    const pane = wrapper.get('[data-pane-id="sftp-local-pane"]');
+    expect(pane.findAll(".sftp-view__commandbar > button").slice(0, 3).map((button) => button.attributes("aria-label")))
+      .toEqual(["Up", "Back", "Forward"]);
+    await pane.get(".sftp-view__entries > button").trigger("dblclick");
+    await flushPromises();
+    await pane.get('button[aria-label="Up"]').trigger("click");
+    await flushPromises();
+    expect(client.releaseSftpLocalDirectory).toHaveBeenCalledWith({ directoryRef: "child-1", expectedRevision: "1" });
+    expect(pane.get<HTMLInputElement>('[aria-label="Local path"]').element.value).toBe("C:\\");
+
+    client.registerSftpLocalDirectory.mockRejectedValueOnce(new Error("directory removed"));
+    await pane.get('button[aria-label="Back"]').trigger("click");
+    await flushPromises();
+    expect(pane.get<HTMLInputElement>('[aria-label="Local path"]').element.value).toBe("C:\\");
+    expect(pane.get('button[aria-label="Back"]').attributes("disabled")).toBeUndefined();
+
+    await pane.get('button[aria-label="Back"]').trigger("click");
+    await flushPromises();
+    expect(client.registerSftpLocalDirectory).toHaveBeenLastCalledWith("C:\\Program Files");
+    expect(pane.get<HTMLInputElement>('[aria-label="Local path"]').element.value).toBe("C:\\Program Files");
+    expect(client.releaseSftpLocalDirectory).toHaveBeenCalledWith({ directoryRef: "registered-1", expectedRevision: "1" });
+
+    client.registerSftpLocalDirectory.mockRejectedValueOnce(new Error("parent unavailable"));
+    await pane.get('button[aria-label="Up"]').trigger("click");
+    await flushPromises();
+    expect(pane.get<HTMLInputElement>('[aria-label="Local path"]').element.value).toBe("C:\\Program Files");
+    await pane.get('button[aria-label="Up"]').trigger("click");
+    await flushPromises();
+    expect(client.registerSftpLocalDirectory).toHaveBeenLastCalledWith("C:\\");
+    expect(pane.get<HTMLInputElement>('[aria-label="Local path"]').element.value).toBe("C:\\");
+    expect(client.releaseSftpLocalDirectory).toHaveBeenCalledWith({ directoryRef: "registered-2", expectedRevision: "1" });
     wrapper.unmount();
   });
 
@@ -1083,6 +1325,33 @@ describe("SftpView production boundaries", () => {
     wrapper.unmount();
   });
 
+  it("keeps the local Pane usable and shows a visible error when opening a directory times out", async () => {
+    pathApi.homeDir.mockResolvedValue("/Users/test");
+    client.registerSftpLocalDirectory
+      .mockResolvedValueOnce({ directoryRef: "local-home", revision: "1", displayName: "~/" })
+      .mockRejectedValueOnce(JSON.stringify({
+        code: "sftp.local_directory_timeout",
+        messageKey: "errors.sftp.operationFailed",
+      }));
+    client.listSftpLocalDirectory.mockResolvedValue({
+      directoryRef: "local-home", revision: "1", entries: [], nextCursor: null,
+    });
+
+    const { wrapper, tips } = await mountView();
+    const path = wrapper.get<HTMLInputElement>('[aria-label="Local path"]');
+    await path.setValue("~/Documents");
+    await path.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+
+    expect(path.element.value).toBe("~/");
+    expect(client.releaseSftpLocalDirectory).not.toHaveBeenCalledWith({
+      directoryRef: "local-home", expectedRevision: "1",
+    });
+    expect(tips.items[0]?.title).toContain("Opening the directory timed out");
+    expect(wrapper.get<HTMLButtonElement>('button[aria-label="Refresh"]').element.disabled).toBe(false);
+    wrapper.unmount();
+  });
+
   it("opens a Windows local directory from its listing and shows a failure without losing the parent", async () => {
     pathApi.sep.mockReturnValue("\\");
     client.registerSftpLocalDirectory.mockResolvedValue({
@@ -1097,17 +1366,20 @@ describe("SftpView production boundaries", () => {
       }] : [],
       nextCursor: null,
     }));
-    client.openSftpLocalDirectoryChild.mockRejectedValueOnce(new Error("directory changed"))
+    client.openSftpLocalDirectoryChild.mockRejectedValueOnce(JSON.stringify({
+      code: "sftp.local_directory_timeout", messageKey: "errors.sftp.operationFailed",
+    }))
       .mockResolvedValueOnce({
         directoryRef: "program-files-dir", revision: "1", displayName: "Program Files",
         rememberablePath: "C:\\Program Files",
       });
 
-    const { wrapper } = await mountView();
+    const { wrapper, tips } = await mountView();
     const entry = wrapper.get('[data-pane-id="sftp-local-pane"] .sftp-view__entries > button');
     await entry.trigger("dblclick");
     await flushPromises();
-    expect(wrapper.text()).toContain("This local directory could not be opened");
+    expect(tips.items[0]?.title).toContain("Opening the directory timed out");
+    expect(wrapper.text()).toContain("Opening the directory timed out");
     expect(wrapper.text()).toContain("Program Files");
     expect(client.releaseSftpLocalDirectory).not.toHaveBeenCalledWith({
       directoryRef: "local-root", expectedRevision: "1",
@@ -1120,7 +1392,7 @@ describe("SftpView production boundaries", () => {
     }));
     expect(wrapper.get<HTMLInputElement>('[aria-label="Local path"]').element.value)
       .toBe("C:\\Program Files");
-    expect(wrapper.text()).not.toContain("This local directory could not be opened");
+    expect(wrapper.text()).not.toContain("Opening the directory timed out");
     wrapper.unmount();
   });
 
@@ -1316,11 +1588,10 @@ describe("SftpView production boundaries", () => {
       transfers: [],
     });
 
-    const remotePanes = wrapper.findAll(".sftp-view__pane").filter((pane) => (
-      pane.find('[aria-label="SFTP Host for this Pane"]').exists()
-    ));
+    const remotePanes = wrapper.findAll(".sftp-view__pane")
+      .filter((pane) => pane.element.closest('[data-pane-id]')?.getAttribute("data-pane-id") !== "sftp-local-pane");
     expect(remotePanes).toHaveLength(1);
-    expect(remotePanes[0]!.text()).toContain("Ready");
+    expect(remotePanes[0]!.find(".sftp-view__pane-status").text()).toMatch(/^\d+ms$/);
     wrapper.unmount();
   });
 
@@ -1342,7 +1613,7 @@ describe("SftpView production boundaries", () => {
     const connect = wrapper.findAll("button").find((button) => button.text().includes("Connect SFTP"));
     await connect?.trigger("click");
     await flushPromises();
-    expect(wrapper.get('[aria-label="SFTP Host for this Pane"]').text()).toContain(secondHost.label);
+    expect(wrapper.get('[data-pane-id="sftp-remote-pane"] .sftp-view__pane-identity strong').text()).toContain(secondHost.label);
     expect(wrapper.text()).toContain("release.bin");
 
     await router.push("/terminal");
@@ -1355,26 +1626,26 @@ describe("SftpView production boundaries", () => {
     });
     await router.push("/sftp");
     await flushPromises();
-    expect(wrapper.get('[aria-label="SFTP Host for this Pane"]').text()).toContain(secondHost.label);
+    expect(wrapper.get('[data-pane-id="sftp-remote-pane"] .sftp-view__pane-identity strong').text()).toContain(secondHost.label);
     client.openSftpSession.mockClear();
     await wrapper.findAll("button").find((button) => button.text().includes("Connect SFTP"))?.trigger("click");
     await flushPromises();
     expect(client.openSftpSession).toHaveBeenCalledWith(expect.objectContaining({
       hostId: secondHost.hostId,
     }));
-    expect(wrapper.get('[aria-label="SFTP Host for this Pane"]').text()).toContain(secondHost.label);
+    expect(wrapper.get('[data-pane-id="sftp-remote-pane"] .sftp-view__pane-identity strong').text()).toContain(secondHost.label);
     wrapper.unmount();
   });
 
   it("refreshes cached Host labels on activation without reopening SFTP", async () => {
     const { wrapper, router } = await mountView(readySnapshot(), undefined, "release.bin", { keepAlive: true });
-    expect(wrapper.get('[aria-label="SFTP Host for this Pane"]').text()).toContain("Files");
+    expect(wrapper.get('[data-pane-id="sftp-remote-pane"] .sftp-view__pane-identity strong').text()).toContain("Files");
     await router.push("/terminal");
     await flushPromises();
     client.listHosts.mockResolvedValue([{ ...host, label: "Synced files" }]);
     await router.push("/sftp");
     await flushPromises();
-    expect(wrapper.get('[aria-label="SFTP Host for this Pane"]').text()).toContain("Synced files");
+    expect(wrapper.get('[data-pane-id="sftp-remote-pane"] .sftp-view__pane-identity strong').text()).toContain("Synced files");
     expect(client.openSftpSession).not.toHaveBeenCalled();
     expect(client.disconnectSftpSession).not.toHaveBeenCalled();
     wrapper.unmount();
@@ -1612,6 +1883,115 @@ describe("SftpView production boundaries", () => {
       expectedGeneration: "1",
     });
     expect(wrapper.find('[data-pane-id="sftp-remote-pane"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps a File Tab and its session when Core cannot finish disconnecting", async () => {
+    const session = readySnapshot().sessions[0]!;
+    const { wrapper, workspaceTabs, tips } = await mountView(readySnapshot(), undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: session.sessionId, initialGeneration: "1",
+    });
+    client.disconnectSftpSession.mockResolvedValue({ ...session, state: "failed" });
+    const id = workspaceTabs.fileTabs[0]!.groupId;
+    const closing = workspaceTabs.fileController(id)!.requestClose();
+    await flushPromises();
+    const confirm = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Disconnect and close"));
+    expect(confirm).toBeDefined();
+    confirm?.click();
+    await flushPromises();
+
+    expect(workspaceTabs.fileTabs.some((tab) => tab.groupId === id)).toBe(true);
+    expect(workspaceTabs.fileSessionOwner(session.sessionId)).toBe(id);
+    expect(tips.items.some((item) => item.message === "workspace_tab.file_cleanup_incomplete")).toBe(true);
+    const cancel = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "Cancel");
+    cancel?.click();
+    expect(await closing).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("rejects a second File Tab close with a busy code while the confirmation is open", async () => {
+    const session = readySnapshot().sessions[0]!;
+    const { wrapper, workspaceTabs } = await mountView(readySnapshot(), undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: session.sessionId, initialGeneration: "1",
+    });
+    const id = workspaceTabs.fileTabs[0]!.groupId;
+    const closing = workspaceTabs.fileController(id)!.requestClose();
+    await flushPromises();
+
+    await expect(workspaceTabs.fileController(id)!.requestClose(true)).rejects.toThrow("workspace_tab.busy");
+    await expect(workspaceTabs.fileController(id)!.requestClose()).rejects.toThrow("workspace_tab.busy");
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "Cancel")?.click();
+    expect(await closing).toBe(false);
+    expect(client.disconnectSftpSession).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("closes a remote File Tab after a native batch confirmation", async () => {
+    const session = readySnapshot().sessions[0]!;
+    const { wrapper, workspaceTabs } = await mountView(readySnapshot(), undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: session.sessionId, initialGeneration: "1",
+    });
+    const id = workspaceTabs.fileTabs[0]!.groupId;
+
+    expect(await workspaceTabs.fileController(id)!.requestClose(true)).toBe(true);
+    await flushPromises();
+    expect(client.disconnectSftpSession).toHaveBeenCalledOnce();
+    expect(workspaceTabs.fileTabs.some((tab) => tab.groupId === id)).toBe(false);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("retains a remote File Tab when a confirmed native batch cannot disconnect it", async () => {
+    const session = readySnapshot().sessions[0]!;
+    const { wrapper, workspaceTabs } = await mountView(readySnapshot(), undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: session.sessionId, initialGeneration: "1",
+    });
+    client.disconnectSftpSession.mockResolvedValue({ ...session, state: "failed" });
+    const id = workspaceTabs.fileTabs[0]!.groupId;
+
+    await expect(workspaceTabs.fileController(id)!.requestClose(true)).rejects.toThrow("workspace_tab.file_cleanup_incomplete");
+    expect(workspaceTabs.fileTabs.some((tab) => tab.groupId === id)).toBe(true);
+    expect(workspaceTabs.fileSessionOwner(session.sessionId)).toBe(id);
+    wrapper.unmount();
+  });
+
+  it("keeps a remote Pane and session ownership after an incomplete close", async () => {
+    const session = readySnapshot().sessions[0]!;
+    const { wrapper, workspaceTabs } = await mountView(readySnapshot(), undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: session.sessionId, initialGeneration: "1",
+    });
+    client.disconnectSftpSession.mockResolvedValue({ ...session, state: "failed" });
+    const remotePane = wrapper.findAll('[data-pane-id]').find((pane) => pane.find('.sftp-view__pane-endpoint').exists())!;
+    expect(remotePane).toBeDefined();
+    await openPaneActions(remotePane);
+    await paneAction(remotePane, "Close current file Pane")?.trigger("click");
+    await flushPromises();
+    const confirm = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Disconnect and close"));
+    confirm?.click();
+    await flushPromises();
+
+    expect(wrapper.findAll('[data-pane-id]').some((pane) => pane.find('.sftp-view__pane-endpoint').exists())).toBe(true);
+    expect(workspaceTabs.fileSessionOwner(session.sessionId)).toBe(workspaceTabs.fileTabs[0]!.groupId);
+    wrapper.unmount();
+  });
+
+  it("keeps a remote Pane connected when manual disconnect is incomplete", async () => {
+    const session = readySnapshot().sessions[0]!;
+    const { wrapper, workspaceTabs } = await mountView(readySnapshot(), undefined, "release.bin", {
+      workspaceTab: "remote", initialHostId: host.hostId, initialSessionId: session.sessionId, initialGeneration: "1",
+    });
+    client.disconnectSftpSession.mockResolvedValue({ ...session, state: "failed" });
+    const remotePane = wrapper.findAll('[data-pane-id]').find((pane) => pane.find('.sftp-view__pane-endpoint').exists())!;
+    expect(remotePane).toBeDefined();
+    await remotePane.get<HTMLButtonElement>('button[aria-label="Disconnect"]').trigger("click");
+    await flushPromises();
+
+    expect(workspaceTabs.fileSessionOwner(session.sessionId)).toBe(workspaceTabs.fileTabs[0]!.groupId);
+    expect(wrapper.findAll('[data-pane-id]').some((pane) => pane.find('button[aria-label="Disconnect"]').exists())).toBe(true);
     wrapper.unmount();
   });
 

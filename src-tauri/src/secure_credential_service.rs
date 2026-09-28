@@ -190,7 +190,7 @@ fn valid_open_request(request: &SecureCredentialOpenRequest) -> bool {
 #[tauri::command]
 pub async fn secure_credential_open(
     request: SecureCredentialOpenRequest,
-    window: WebviewWindow,
+    webview: tauri::Webview,
     app: AppHandle,
     service: State<'_, SecureCredentialService>,
     hosts: State<'_, HostService>,
@@ -199,7 +199,9 @@ pub async fn secure_credential_open(
 ) -> Result<Option<String>, SecureCredentialCommandError> {
     // Only registered ordinary windows can open a prompt. The prompt itself
     // returns an opaque Core-issued reference through its isolated capability.
-    if !ordinary_owner_alive(&app, window.label()) {
+    let owner = crate::workspace_tab_views::ordinary_owner(&app, &webview)
+        .map_err(|_| "secureCredentialDenied")?;
+    if !ordinary_owner_alive(&app, &owner) {
         return Err("secureCredentialDenied".into());
     }
     if !valid_open_request(&request) {
@@ -278,7 +280,11 @@ pub async fn secure_credential_open(
     let deadline = tokio::time::sleep(Duration::from_secs(180));
     tokio::pin!(deadline);
     let mut owner_check = tokio::time::interval(Duration::from_millis(250));
-    let owner_valid = || ordinary_owner_alive(&app, window.label());
+    let owner_valid = || {
+        ordinary_owner_alive(&app, &owner)
+            && crate::workspace_tab_views::ordinary_owner(&app, &webview).as_deref()
+                == Ok(owner.as_str())
+    };
     let mut answer = loop {
         tokio::select! {
             response = &mut receiver => {

@@ -10,13 +10,16 @@ import type { DesktopProfile, DesktopSessionSummary } from "../core-api/generate
 import type { DesktopHeaderController } from "../stores/workspaceTabs";
 
 const mocks = vi.hoisted(() => ({
-  save: vi.fn(), snapshot: vi.fn(), profiles: vi.fn(), availability: vi.fn(), focus: vi.fn(), open: vi.fn(),
-  close: vi.fn(), disconnect: vi.fn(), invalidate: vi.fn(), remoteKey: vi.fn(),
+  save: vi.fn(), snapshot: vi.fn(), profiles: vi.fn(), availability: vi.fn(), focus: vi.fn(),
+  openOwned: vi.fn(),
+  closeOwned: vi.fn(), disconnect: vi.fn(), invalidate: vi.fn(), remoteKey: vi.fn(),
   register: vi.fn(), sync: vi.fn(), tips: vi.fn(), windowAction: vi.fn(), ownership: vi.fn(),
+  projectionUpdate: vi.fn(),
 }));
 const savedConnections = vi.hoisted(() => ({ changed: undefined as (() => void) | undefined }));
 vi.mock("../core-api/desktop-client", () => ({ desktopClient: mocks }));
-vi.mock("../workspace-tab-windows", () => ({ snapshotWorkspaceTabs: mocks.ownership, workspaceWindowLabel: () => "main" }));
+vi.mock("../workspace-tab-windows", () => ({ snapshotWorkspaceTabs: mocks.ownership,
+  updateOwnWorkspaceTabProjection: mocks.projectionUpdate, workspaceWindowLabel: () => "main" }));
 vi.mock("../saved-connections", () => ({ onSavedConnectionsChanged: vi.fn(async (callback: () => void) => {
   savedConnections.changed = callback;
   return () => { savedConnections.changed = undefined; };
@@ -39,7 +42,9 @@ let fullscreenElement: Element | null = null;
 let controller: DesktopHeaderController;
 const exit = vi.fn();
 const wrappers: ReturnType<typeof mount>[] = [];
-async function fixture(settings = false) {
+/** Mounts a Desktop Tab WebView; by default its Tab owns and has admitted the first snapshot session. */
+async function fixture(settings = false, admit = true) {
+  if (admit) window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:one");
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/desktop", component: { template: "<div/>" } }] });
   await router.push("/desktop");
   const wrapper = mount(DesktopView, {
@@ -51,6 +56,12 @@ async function fixture(settings = false) {
   });
   wrappers.push(wrapper);
   await flushPromises();
+  const [first] = await mocks.snapshot() as DesktopSessionSummary[];
+  if (admit && first) {
+    await controller.importHandoff?.(first);
+    await controller.admitHandoff?.("desktop:one");
+    await flushPromises();
+  }
   return wrapper;
 }
 function changed(element: Element | null, event = "fullscreenchange") {
@@ -71,12 +82,15 @@ beforeEach(() => {
   mocks.save.mockImplementation(async profile => ({ ...profile, revision: "2" }));
   mocks.disconnect.mockResolvedValue(undefined);
   mocks.focus.mockResolvedValue("1");
-  mocks.open.mockResolvedValue(session("new"));
+  mocks.openOwned.mockResolvedValue(session("new"));
   mocks.snapshot.mockResolvedValue([session()]);
-  mocks.ownership.mockResolvedValue({ owned: [], incoming: [], outgoing: [], others: [] });
+  mocks.ownership.mockResolvedValue({ owned: [{ id: "desktop:one", kind: "desktop", owner: "main",
+    payload: { schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" } }], others: [] });
   mocks.profiles.mockResolvedValue([session().profile]);
   mocks.availability.mockResolvedValue([{ protocol: "rdp", available: true }]);
   mocks.invalidate.mockResolvedValue(undefined);
+  mocks.closeOwned.mockResolvedValue(undefined);
+  mocks.projectionUpdate.mockResolvedValue(undefined);
   mocks.register.mockImplementation((value: DesktopHeaderController) => { controller = value; return () => undefined; });
   Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => fullscreenElement });
   Object.defineProperty(document, "exitFullscreen", { configurable: true, value: exit });
@@ -87,8 +101,16 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const key of ["fullscreenElement", "exitFullscreen", "webkitFullscreenElement", "webkitExitFullscreen"]) Reflect.deleteProperty(document, key);
   vi.useRealTimers();
+  window.history.replaceState({}, "", "/");
 });
 describe("desktop workspace layout", () => {
+  it("does not render a Core-owned native desktop session in the shell", async () => {
+    const wrapper = await fixture(false, false);
+    expect(wrapper.find("canvas").exists()).toBe(false);
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([]);
+    expect(mocks.closeOwned).not.toHaveBeenCalled();
+  });
+
   it("clears a session snapshot error after the next successful snapshot", async () => {
     const wrapper = await fixture();
     mocks.snapshot.mockRejectedValueOnce(new Error("snapshot unavailable"));
@@ -112,6 +134,8 @@ describe("desktop workspace layout", () => {
   it.each(["connecting", "needsInteraction", "disconnecting"] as const)("polls %s sooner and returns to the normal interval when running", async (state) => {
     mocks.snapshot.mockResolvedValue([{ ...session(), state }]);
     await fixture();
+    // The poll before the Tab admitted its session used the normal interval.
+    await vi.advanceTimersByTimeAsync(750);
     const calls = mocks.snapshot.mock.calls.length;
     await vi.advanceTimersByTimeAsync(249);
     expect(mocks.snapshot).toHaveBeenCalledTimes(calls);
@@ -123,36 +147,25 @@ describe("desktop workspace layout", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(mocks.snapshot).toHaveBeenCalledTimes(calls + 2);
   });
-  it("freezes and restores a live session without disconnecting it", async () => {
-    const wrapper = await fixture();
-    expect(controller.snapshotHandoff?.("desktop:one")).toEqual({ schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" });
-    await controller.freezeHandoff?.("desktop:one");
-    await flushPromises();
-    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([]);
-    expect(mocks.invalidate).toHaveBeenCalled();
-    expect(mocks.disconnect).not.toHaveBeenCalled();
-    expect(mocks.close).not.toHaveBeenCalled();
-    await controller.rollbackHandoff?.("desktop:one");
-    await flushPromises();
-    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([expect.objectContaining({ groupId: "desktop:one" })]);
-    expect(wrapper.find("canvas").exists()).toBe(true);
-  });
-
-  it("keeps an imported canvas read-only until admission", async () => {
-    const wrapper = await fixture();
-    await controller.importHandoff?.(session("two"));
+  it("stages the same Core session when ownership projected it before bootstrap", async () => {
+    window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:one");
+    const wrapper = await fixture(false, false);
+    await controller.importHandoff?.(session());
     await flushPromises();
     expect(wrapper.find("canvas").exists()).toBe(false);
-    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([expect.objectContaining({ groupId: "desktop:one" })]);
-    await controller.admitHandoff?.("desktop:two");
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([]);
+    await controller.admitHandoff?.("desktop:one");
     await flushPromises();
-    expect((wrapper.getComponent(canvas).props("session") as DesktopSessionSummary).id).toBe("two");
-    expect(wrapper.getComponent(canvas).props("active")).toBe(true);
-    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([
-      expect.objectContaining({ groupId: "desktop:one" }), expect.objectContaining({ groupId: "desktop:two" }),
-    ]);
-    expect(mocks.open).not.toHaveBeenCalled();
+    expect((wrapper.getComponent(canvas).props("session") as DesktopSessionSummary).id).toBe("one");
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([expect.objectContaining({ groupId: "desktop:one" })]);
+    expect(mocks.openOwned).not.toHaveBeenCalled();
     expect(mocks.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("rejects a different generation instead of accepting a stale desktop handoff", async () => {
+    await fixture();
+    await expect(controller.importHandoff?.({ ...session(), generation: "2" }))
+      .rejects.toThrow("workspace_tab.desktop_session_stale");
   });
 
   it("refreshes saved profile names without remounting or reconnecting the active desktop", async () => {
@@ -165,7 +178,7 @@ describe("desktop workspace layout", () => {
     expect(wrapper.get("#desktop-profiles").text()).toContain("Synced desktop");
     expect(wrapper.get("#desktop-profiles").text()).toContain("Added desktop");
     expect(wrapper.get("canvas").element).toBe(originalCanvas);
-    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
     expect(mocks.disconnect).not.toHaveBeenCalled();
     mocks.profiles.mockResolvedValue([]);
     savedConnections.changed?.();
@@ -195,7 +208,7 @@ describe("desktop workspace layout", () => {
     await wrapper.get('[aria-label="Expand saved desktops"]').trigger("click");
     expect(wrapper.get("#desktop-profiles").isVisible()).toBe(true);
     expect(wrapper.get("canvas").element).toBe(originalCanvas);
-    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
     expect(mocks.disconnect).not.toHaveBeenCalled();
   });
   it("keeps the sidebar toggle available without an active session", async () => {
@@ -223,7 +236,7 @@ describe("desktop workspace layout", () => {
     expect(fullscreenElement).toBeNull();
     expect(wrapper.get("#desktop-profiles").isVisible()).toBe(false);
     expect(document.activeElement).toBe(wrapper.get('[aria-label="Fullscreen desktop"]').element);
-    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
     expect(mocks.disconnect).not.toHaveBeenCalled();
   });
   it("consumes both Escape key edges before they reach remote desktop input", async () => {
@@ -269,17 +282,6 @@ describe("desktop workspace layout", () => {
     expect(wrapper.find('[aria-label="Exit desktop fullscreen"]').exists()).toBe(false);
     expect(mocks.disconnect).not.toHaveBeenCalled();
   });
-  it("leaves fullscreen when another session is selected", async () => {
-    mocks.snapshot.mockResolvedValue([session(), session("two")]);
-    const wrapper = await fixture();
-    mockEntry(wrapper);
-    await wrapper.get('[aria-label="Fullscreen desktop"]').trigger("click");
-    controller.activate("desktop:two");
-    await flushPromises();
-    expect(exit).toHaveBeenCalledOnce();
-    expect(wrapper.get(".desktop-toolbar__identity").text()).toContain("Desktop two");
-    expect(mocks.open).not.toHaveBeenCalled();
-  });
   it("supports the prefixed WebKit element fullscreen entry and exit", async () => {
     const wrapper = await fixture();
     const target = wrapper.get(".desktop-screen").element;
@@ -312,6 +314,159 @@ describe("desktop display settings", () => {
     await wrapper.findAll("button").find(button => button.text() === desktopEn.applyDisplaySettings)!.trigger("click");
     await flushPromises();
   }
+  it("replaces the session inside the same native desktop Tab", async () => {
+    window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:one");
+    mocks.ownership.mockResolvedValue({
+      owned: [{ id: "desktop:one", kind: "desktop", owner: "main", 
+        payload: { schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" } }],
+      others: [],
+    });
+    const wrapper = await fixture(true, false);
+    await controller.importHandoff?.(session());
+    await controller.admitHandoff?.("desktop:one");
+    await flushPromises();
+    await wrapper.get('[aria-label="Display settings"]').trigger("click");
+    await flushPromises();
+    await apply(wrapper);
+    expect(mocks.projectionUpdate).toHaveBeenNthCalledWith(1, { schemaVersion: 1,
+      tabId: "desktop:one", profileId: "one" });
+    expect(mocks.projectionUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.closeOwned).toHaveBeenCalledWith(expect.objectContaining({ id: "one" }));
+    expect(mocks.closeOwned.mock.invocationCallOrder[0]).toBeLessThan(mocks.openOwned.mock.invocationCallOrder[0]!);
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([expect.objectContaining({ groupId: "desktop:one" })]);
+    expect((wrapper.getComponent(canvas).props("session") as DesktopSessionSummary).id).toBe("new");
+  });
+  it("waits for Core to create a session before acknowledging a new Desktop Tab", async () => {
+    window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:new");
+    await fixture(false, false);
+    await controller.importIdle?.("desktop:new", "one");
+    await controller.admitHandoff?.("desktop:new");
+    let rejectOpen!: (error: Error) => void;
+    mocks.openOwned.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOpen = reject; }));
+    const pending = controller.beginOpenProfile("one");
+    await flushPromises();
+    expect(mocks.projectionUpdate).toHaveBeenCalledWith({ schemaVersion: 1,
+      tabId: "desktop:new", profileId: "one" });
+    expect(mocks.openOwned).toHaveBeenCalledOnce();
+    expect(controller.isBusy()).toBe(true);
+    rejectOpen(new Error("desktop.connection_failed"));
+    await expect(pending).rejects.toThrow("desktop.connection_failed");
+    expect(controller.isBusy()).toBe(false);
+  });
+  it("keeps the old native session bound if Core cleanup fails", async () => {
+    window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:one");
+    mocks.ownership.mockResolvedValue({
+      owned: [{ id: "desktop:one", kind: "desktop", owner: "main", 
+        payload: { schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" } }],
+      others: [],
+    });
+    mocks.closeOwned.mockRejectedValueOnce(new Error("desktop.cleanup_failed"));
+    const wrapper = await fixture(true, false);
+    await controller.importHandoff?.(session());
+    await controller.admitHandoff?.("desktop:one");
+    await flushPromises();
+    await wrapper.get('[aria-label="Display settings"]').trigger("click");
+    await flushPromises();
+    await apply(wrapper);
+    expect(mocks.closeOwned).toHaveBeenCalledWith(expect.objectContaining({ id: "one" }));
+    expect(mocks.openOwned).not.toHaveBeenCalled();
+    expect(mocks.projectionUpdate).not.toHaveBeenCalled();
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([expect.objectContaining({ groupId: "desktop:one" })]);
+    expect(wrapper.text()).toContain(desktopEn.displaySettingsConnectFailed);
+  });
+  it("keeps a reconnect action in the same Tab when opening a replacement fails", async () => {
+    window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:one");
+    mocks.ownership.mockResolvedValue({
+      owned: [{ id: "desktop:one", kind: "desktop", owner: "main", 
+        payload: { schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" } }],
+      others: [],
+    });
+    mocks.openOwned.mockRejectedValueOnce(new Error("desktop.connection_failed"));
+    const wrapper = await fixture(true, false);
+    await controller.importHandoff?.(session());
+    await controller.admitHandoff?.("desktop:one");
+    await flushPromises();
+    await wrapper.get('[aria-label="Display settings"]').trigger("click");
+    await flushPromises();
+    await apply(wrapper);
+    expect(mocks.projectionUpdate).toHaveBeenCalledWith({ schemaVersion: 1,
+      tabId: "desktop:one", profileId: "one" });
+    expect(wrapper.find('[aria-label="Reconnect"]').exists()).toBe(true);
+    mocks.openOwned.mockResolvedValue(session("new"));
+    await wrapper.get('[aria-label="Reconnect"]').trigger("click");
+    await flushPromises();
+    expect(mocks.openOwned).toHaveBeenCalledTimes(2);
+    expect(mocks.projectionUpdate).toHaveBeenCalledWith({ schemaVersion: 1,
+      tabId: "desktop:one", profileId: "one" });
+  });
+  it("does not open a replacement if the idle projection fails", async () => {
+    window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:one");
+    mocks.ownership.mockResolvedValue({
+      owned: [{ id: "desktop:one", kind: "desktop", owner: "main", 
+        payload: { schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" } }],
+      others: [],
+    });
+    mocks.projectionUpdate.mockRejectedValueOnce(new Error("workspace_tab.projection_failed"));
+    const wrapper = await fixture(true, false);
+    await controller.importHandoff?.(session());
+    await controller.admitHandoff?.("desktop:one");
+    await flushPromises();
+    await wrapper.get('[aria-label="Display settings"]').trigger("click");
+    await flushPromises();
+    await apply(wrapper);
+    expect(mocks.openOwned).not.toHaveBeenCalled();
+    expect(mocks.closeOwned).toHaveBeenCalledTimes(1);
+    expect(wrapper.find('[aria-label="Reconnect"]').exists()).toBe(true);
+  });
+  it("rejects closing the Tab while a replacement is still opening", async () => {
+    window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:one");
+    mocks.ownership.mockResolvedValue({
+      owned: [{ id: "desktop:one", kind: "desktop", owner: "main", 
+        payload: { schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" } }],
+      others: [],
+    });
+    let finishOpen!: (value: DesktopSessionSummary) => void;
+    mocks.openOwned.mockImplementationOnce(() => new Promise(resolve => { finishOpen = resolve; }));
+    const wrapper = await fixture(true, false);
+    await controller.importHandoff?.(session());
+    await controller.admitHandoff?.("desktop:one");
+    await flushPromises();
+    await wrapper.get('[aria-label="Display settings"]').trigger("click");
+    await flushPromises();
+    const pending = wrapper.findAll("button").find(button => button.text() === desktopEn.applyDisplaySettings)!.trigger("click");
+    await flushPromises();
+    expect(controller.isBusy()).toBe(true);
+    await expect(controller.close("desktop:one")).rejects.toThrow("workspace_tab.busy");
+    finishOpen(session("new"));
+    await pending;
+    await flushPromises();
+  });
+  it("does not reconnect while closing the previous native session", async () => {
+    window.history.replaceState({}, "", "/workspace-tab.html?tabId=desktop:one");
+    const failed = { ...session(), state: "failed" } as DesktopSessionSummary;
+    mocks.snapshot.mockResolvedValue([failed]);
+    mocks.ownership.mockResolvedValue({
+      owned: [{ id: "desktop:one", kind: "desktop", owner: "main", 
+        payload: { schemaVersion: 1, tabId: "desktop:one", sessionId: "one", generation: "1" } }],
+      others: [],
+    });
+    let finishClose!: () => void;
+    mocks.closeOwned.mockImplementationOnce(() => new Promise<void>(resolve => { finishClose = resolve; }));
+    const wrapper = await fixture(false, false);
+    await controller.importHandoff?.(failed);
+    await controller.admitHandoff?.("desktop:one");
+    await flushPromises();
+    const pending = controller.close("desktop:one");
+    await flushPromises();
+    expect(controller.isBusy()).toBe(true);
+    await wrapper.get('[aria-label="Reconnect"]').trigger("click");
+    await flushPromises();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
+    finishClose();
+    await pending;
+    await flushPromises();
+    expect(controller.isBusy()).toBe(false);
+  });
   it("shows actual negotiated modes separately and saves before reconnecting", async () => {
     mocks.snapshot.mockResolvedValue([{ ...session(), rdpTransportActual: "tcp", rdpGraphicsActual: "remoteFxProgressive" }]);
     const wrapper = await settingsFixture();
@@ -321,9 +476,9 @@ describe("desktop display settings", () => {
     fields.vm.$emit("update:modelValue", { ...fields.props("modelValue"), width: 1920, height: 1080, rdpTransportMode: "tcpOnly" });
     await apply(wrapper);
     expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ width: 1920, height: 1080, rdpTransportMode: "tcpOnly", revision: "1" }));
-    expect(mocks.open).toHaveBeenCalledWith(expect.objectContaining({ revision: "2", width: 1920 }));
+    expect(mocks.openOwned).toHaveBeenCalledWith(expect.objectContaining({ revision: "2", width: 1920 }));
     expect(mocks.save.mock.invocationCallOrder[0]).toBeLessThan(mocks.disconnect.mock.invocationCallOrder[0]!);
-    expect(mocks.disconnect.mock.invocationCallOrder[0]).toBeLessThan(mocks.open.mock.invocationCallOrder[0]!);
+    expect(mocks.disconnect.mock.invocationCallOrder[0]).toBeLessThan(mocks.openOwned.mock.invocationCallOrder[0]!);
   });
   it("offers VNC protocol and remote resolution in the session toolbar", async () => {
     const vnc = { ...session(), profile: { ...session().profile, protocol: "vnc", vncProtocolVersion: "auto", vncResolutionMode: "server", width: 1280, height: 800 } };
@@ -336,36 +491,35 @@ describe("desktop display settings", () => {
     fields.vm.$emit("update:modelValue", { ...fields.props("modelValue"), vncResolutionMode: "fixed", width: 1600, height: 900 });
     await apply(wrapper);
     expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ protocol: "vnc", vncResolutionMode: "fixed", width: 1600, height: 900 }));
-    expect(mocks.open).toHaveBeenCalledWith(expect.objectContaining({ protocol: "vnc", vncResolutionMode: "fixed" }));
+    expect(mocks.openOwned).toHaveBeenCalledWith(expect.objectContaining({ protocol: "vnc", vncResolutionMode: "fixed" }));
   });
   it("does not disconnect when saving fails", async () => {
     mocks.save.mockRejectedValue(new Error("failed"));
     const wrapper = await settingsFixture();
     await apply(wrapper);
     expect(mocks.disconnect).not.toHaveBeenCalled();
-    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain(desktopEn.displaySettingsSaveFailed);
   });
   it("does not reconnect when disconnecting fails and keeps the saved revision for retry", async () => {
     mocks.disconnect.mockRejectedValue(new Error("failed"));
     const wrapper = await settingsFixture();
     await apply(wrapper);
-    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain(desktopEn.displaySettingsDisconnectFailed);
     expect(wrapper.getComponent(NvxDesktopDisplaySettings).props("modelValue").revision).toBe("2");
   });
-  it("does not stop or reconnect a different session after a delayed save", async () => {
-    mocks.snapshot.mockResolvedValue([session(), session("two")]);
+  it("does not stop or reconnect after the Tab was deactivated during a delayed save", async () => {
     let finish!: (value: unknown) => void;
     mocks.save.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const wrapper = await settingsFixture();
     await apply(wrapper);
-    controller.activate("desktop:two");
+    controller.deactivate();
     await flushPromises();
     finish({ ...session().profile, revision: "2" });
     await flushPromises();
     expect(mocks.disconnect).not.toHaveBeenCalled();
-    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain(desktopEn.displaySettingsSessionChanged);
   });
   it("reports resize failures with their concrete code and ignores stale resize requests", async () => {

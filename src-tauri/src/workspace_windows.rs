@@ -1,22 +1,20 @@
 //! Core-owned ordinary windows and in-process Tab ownership. Payloads are non-secret UI
 //! projections; terminal output, input, and credentials remain with their Core owners.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
 };
 use tauri::{
-    AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    WindowEvent,
+    AppHandle, Emitter, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 const PAGE: &str = "workspace-window.html";
 const CLOSE_REQUESTED: &str = "workspace-window-close-requested";
 const TAB_CHANGED: &str = "workspace-tab-state-changed";
-const TAB_OFFER: &str = "workspace-tab-offer";
-const TARGET_READY: &str = "workspace-tab-target-ready";
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -25,42 +23,13 @@ pub(crate) struct TabRecord {
     id: String,
     kind: String,
     owner: String,
-    revision: u64,
     payload: Value,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct NewTab {
-    id: String,
-    kind: String,
-    payload: Value,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-enum TransferPhase {
-    Prepared,
-    Offered,
-    Ready,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PendingTransfer {
-    ticket: String,
-    tab: TabRecord,
-    source: String,
-    target: String,
-    phase: TransferPhase,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TabSnapshot {
     owned: Vec<TabRecord>,
-    incoming: Vec<PendingTransfer>,
-    outgoing: Vec<PendingTransfer>,
     others: Vec<TabOwner>,
 }
 
@@ -71,6 +40,8 @@ pub(crate) struct TabOwner {
     kind: String,
     owner: String,
     terminal_panes: Vec<TerminalPaneOwner>,
+    file_sessions: Vec<FileSessionOwner>,
+    desktop_sessions: Vec<DesktopSessionOwner>,
 }
 
 #[derive(Serialize)]
@@ -80,6 +51,90 @@ pub(crate) struct TerminalPaneOwner {
     kind: String,
     session_id: Option<String>,
     generation: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileSessionOwner {
+    session_id: String,
+    generation: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionOwner {
+    session_id: String,
+    generation: String,
+}
+
+fn desktop_session_owners(tab: &TabRecord) -> Vec<DesktopSessionOwner> {
+    if tab.kind != "desktop"
+        || tab.payload.get("schemaVersion") != Some(&Value::from(1))
+        || tab.payload.get("tabId").and_then(Value::as_str) != Some(tab.id.as_str())
+        || tab
+            .payload
+            .as_object()
+            .is_none_or(|payload| payload.len() != 4)
+    {
+        return Vec::new();
+    }
+    let Some(session_id) = tab.payload.get("sessionId").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let Some(generation) = tab.payload.get("generation").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || session_id.chars().any(char::is_control)
+        || generation.is_empty()
+        || generation.len() > 20
+        || !generation.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Vec::new();
+    }
+    vec![DesktopSessionOwner {
+        session_id: session_id.into(),
+        generation: generation.into(),
+    }]
+}
+
+fn file_session_owners(tab: &TabRecord) -> Vec<FileSessionOwner> {
+    if tab.kind != "file"
+        || tab.payload.get("version") != Some(&Value::from(1))
+        || tab.payload.pointer("/tab/groupId").and_then(Value::as_str) != Some(tab.id.as_str())
+    {
+        return Vec::new();
+    }
+    let Some(panes) = tab.payload.get("panes").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    panes
+        .iter()
+        .filter_map(|pane| {
+            let endpoint = pane.get("endpoint")?;
+            if endpoint.get("kind")?.as_str()? != "remote" {
+                return None;
+            }
+            let session_id = endpoint.get("sessionId")?.as_str()?;
+            let generation = endpoint.get("generation")?.as_str()?;
+            if session_id.is_empty()
+                || session_id.len() > 128
+                || session_id.chars().any(char::is_control)
+                || generation.is_empty()
+                || generation.len() > 128
+                || generation.chars().any(char::is_control)
+                || !seen.insert(session_id.to_owned())
+            {
+                return None;
+            }
+            Some(FileSessionOwner {
+                session_id: session_id.into(),
+                generation: generation.into(),
+            })
+        })
+        .collect()
 }
 
 fn terminal_pane_owners(tab: &TabRecord) -> Vec<TerminalPaneOwner> {
@@ -124,7 +179,9 @@ struct Registry {
     windows: BTreeSet<String>,
     closing: BTreeSet<String>,
     tabs: BTreeMap<String, TabRecord>,
-    transfers: BTreeMap<String, PendingTransfer>,
+    native_moves: BTreeMap<String, (String, String)>,
+    native_creates: BTreeMap<String, String>,
+    native_closes: BTreeMap<String, String>,
 }
 
 impl Registry {
@@ -133,201 +190,54 @@ impl Registry {
     }
 
     fn pending(&self, id: &str) -> bool {
-        self.transfers
-            .values()
-            .any(|transfer| transfer.tab.id == id)
+        self.native_creates.contains_key(id)
+            || self.native_closes.contains_key(id)
+            || self.native_moves.contains_key(id)
     }
 
-    fn register(&mut self, caller: &str, tab: NewTab) -> Result<TabRecord, String> {
-        if !self.allows(caller) {
-            return Err("workspace_tab.denied".into());
-        }
-        validate_identity(&tab.id, &tab.kind)?;
-        validate_payload(&tab.payload)?;
-        if let Some(current) = self.tabs.get(&tab.id) {
-            if current.owner == caller
-                && current.kind == tab.kind
-                && current.payload == tab.payload
-                && !self.pending(&tab.id)
-            {
-                return Ok(current.clone());
-            }
-            return Err("workspace_tab.conflict".into());
-        }
-        let record = TabRecord {
-            id: tab.id,
-            kind: tab.kind,
-            owner: caller.into(),
-            revision: 1,
-            payload: tab.payload,
-        };
-        self.tabs.insert(record.id.clone(), record.clone());
-        Ok(record)
-    }
-
-    fn owned(&self, caller: &str, id: &str, expected_revision: u64) -> Result<&TabRecord, String> {
-        if !self.allows(caller) {
-            return Err("workspace_tab.denied".into());
-        }
-        let record = self.tabs.get(id).ok_or("workspace_tab.missing")?;
-        if record.owner != caller {
-            return Err("workspace_tab.wrong_owner".into());
-        }
-        if record.revision != expected_revision {
-            return Err("workspace_tab.stale_revision".into());
-        }
-        Ok(record)
-    }
-
-    fn update(
+    /// Returns whether the stored projection changed.
+    fn update_child_projection(
         &mut self,
-        caller: &str,
+        owner: &str,
         id: &str,
-        expected_revision: u64,
+        kind: &str,
         payload: Value,
-    ) -> Result<TabRecord, String> {
-        self.owned(caller, id, expected_revision)?;
+    ) -> Result<bool, String> {
+        if !self.allows(owner) {
+            return Err("workspace_tab.denied".into());
+        }
+        validate_identity(id, kind)?;
         validate_payload(&payload)?;
         if self.pending(id) {
             return Err("workspace_tab.transfer_pending".into());
         }
         let record = self.tabs.get_mut(id).ok_or("workspace_tab.missing")?;
-        record.revision = next_revision(record.revision)?;
-        record.payload = payload;
-        Ok(record.clone())
-    }
-
-    fn unregister(&mut self, caller: &str, id: &str, expected_revision: u64) -> Result<(), String> {
-        self.owned(caller, id, expected_revision)?;
-        if self.pending(id) {
-            return Err("workspace_tab.transfer_pending".into());
+        if record.owner != owner {
+            return Err("workspace_tab.wrong_owner".into());
         }
-        self.tabs.remove(id);
-        Ok(())
+        if record.kind != kind {
+            return Err("workspace_tab.invalid_identity".into());
+        }
+        if record.payload == payload {
+            return Ok(false);
+        }
+        record.payload = payload;
+        Ok(true)
     }
 
-    fn prepare(
+    fn swap_child_projection(
         &mut self,
-        caller: &str,
+        owner: &str,
         id: &str,
-        target: &str,
-        expected_revision: u64,
+        kind: &str,
+        expected: &Value,
         payload: Value,
-    ) -> Result<String, String> {
-        self.owned(caller, id, expected_revision)?;
-        if !self.allows(target) {
-            return Err("workspace_tab.target_missing".into());
+    ) -> Result<bool, String> {
+        let current = self.tabs.get(id).ok_or("workspace_tab.missing")?;
+        if current.payload != *expected {
+            return Err("workspace_tab.projection_changed".into());
         }
-        if caller == target {
-            return Err("workspace_tab.same_owner".into());
-        }
-        validate_payload(&payload)?;
-        if self.pending(id) {
-            return Err("workspace_tab.transfer_pending".into());
-        }
-        // The prepared view is also the crash-recovery checkpoint. A source window can
-        // disappear before the target commits, so keeping it only in the ticket would
-        // leave Core with an older Tab payload when ownership returns to main.
-        let record = self.tabs.get_mut(id).ok_or("workspace_tab.missing")?;
-        record.revision = next_revision(record.revision)?;
-        record.payload = payload;
-        let tab = record.clone();
-        let ticket = uuid::Uuid::now_v7().to_string();
-        self.transfers.insert(
-            ticket.clone(),
-            PendingTransfer {
-                ticket: ticket.clone(),
-                tab,
-                source: caller.into(),
-                target: target.into(),
-                phase: TransferPhase::Prepared,
-            },
-        );
-        Ok(ticket)
-    }
-
-    fn transfer(
-        &self,
-        caller: &str,
-        ticket: &str,
-        source: bool,
-    ) -> Result<&PendingTransfer, String> {
-        if !self.allows(caller) {
-            return Err("workspace_tab.denied".into());
-        }
-        let transfer = self
-            .transfers
-            .get(ticket)
-            .ok_or("workspace_tab.ticket_missing")?;
-        if (source && transfer.source != caller) || (!source && transfer.target != caller) {
-            return Err("workspace_tab.wrong_owner".into());
-        }
-        Ok(transfer)
-    }
-
-    fn transfer_mut(
-        &mut self,
-        caller: &str,
-        ticket: &str,
-        source: bool,
-    ) -> Result<&mut PendingTransfer, String> {
-        if !self.allows(caller) {
-            return Err("workspace_tab.denied".into());
-        }
-        let transfer = self
-            .transfers
-            .get_mut(ticket)
-            .ok_or("workspace_tab.ticket_missing")?;
-        if (source && transfer.source != caller) || (!source && transfer.target != caller) {
-            return Err("workspace_tab.wrong_owner".into());
-        }
-        Ok(transfer)
-    }
-
-    fn source_frozen(&mut self, caller: &str, ticket: &str) -> Result<PendingTransfer, String> {
-        let transfer = self.transfer_mut(caller, ticket, true)?;
-        if transfer.phase == TransferPhase::Prepared {
-            transfer.phase = TransferPhase::Offered;
-        }
-        Ok(transfer.clone())
-    }
-
-    fn target_ready(&mut self, caller: &str, ticket: &str) -> Result<PendingTransfer, String> {
-        let transfer = self.transfer_mut(caller, ticket, false)?;
-        if transfer.phase == TransferPhase::Prepared {
-            return Err("workspace_tab.not_offered".into());
-        }
-        transfer.phase = TransferPhase::Ready;
-        Ok(transfer.clone())
-    }
-
-    fn commit(&mut self, caller: &str, ticket: &str) -> Result<TabRecord, String> {
-        let transfer = self.transfer(caller, ticket, true)?.clone();
-        if transfer.phase != TransferPhase::Ready {
-            return Err("workspace_tab.target_not_ready".into());
-        }
-        if !self.allows(&transfer.target) {
-            return Err("workspace_tab.target_missing".into());
-        }
-        let record = self
-            .tabs
-            .get_mut(&transfer.tab.id)
-            .ok_or("workspace_tab.missing")?;
-        if record.owner != caller || record.revision != transfer.tab.revision {
-            return Err("workspace_tab.stale_revision".into());
-        }
-        record.revision = next_revision(record.revision)?;
-        record.owner = transfer.target;
-        record.payload = transfer.tab.payload;
-        let committed = record.clone();
-        self.transfers.remove(ticket);
-        Ok(committed)
-    }
-
-    fn abort(&mut self, caller: &str, ticket: &str) -> Result<String, String> {
-        let id = self.transfer(caller, ticket, true)?.tab.id.clone();
-        self.transfers.remove(ticket);
-        Ok(id)
+        self.update_child_projection(owner, id, kind, payload)
     }
 
     fn snapshot(&self, caller: &str) -> Result<TabSnapshot, String> {
@@ -341,18 +251,6 @@ impl Registry {
                 .filter(|tab| tab.owner == caller)
                 .cloned()
                 .collect(),
-            incoming: self
-                .transfers
-                .values()
-                .filter(|transfer| transfer.target == caller)
-                .cloned()
-                .collect(),
-            outgoing: self
-                .transfers
-                .values()
-                .filter(|transfer| transfer.source == caller)
-                .cloned()
-                .collect(),
             others: self
                 .tabs
                 .values()
@@ -362,29 +260,48 @@ impl Registry {
                     kind: tab.kind.clone(),
                     owner: tab.owner.clone(),
                     terminal_panes: terminal_pane_owners(tab),
+                    file_sessions: file_session_owners(tab),
+                    desktop_sessions: desktop_session_owners(tab),
                 })
                 .collect(),
         })
     }
 
-    fn begin_close(&mut self, label: &str) -> Result<(), String> {
+    fn reserve_close(&mut self, label: &str) -> Result<(), String> {
         if !self.windows.contains(label) {
             return Err("workspace_window.denied".into());
         }
         if self.closing.contains(label) {
             return Err("workspace_window.close_in_progress".into());
         }
-        if self.tabs.values().any(|tab| tab.owner == label) {
+        self.closing.insert(label.into());
+        Ok(())
+    }
+
+    fn confirm_close(
+        &mut self,
+        label: &str,
+        native_views: &BTreeSet<String>,
+    ) -> Result<(), String> {
+        if !self.windows.contains(label) || !self.closing.contains(label) {
+            return Err("workspace_window.denied".into());
+        }
+        if self
+            .tabs
+            .values()
+            .any(|tab| tab.owner == label && native_views.contains(&tab.id))
+        {
             return Err("workspace_window.tabs_owned".into());
         }
         if self
-            .transfers
+            .native_moves
             .values()
-            .any(|transfer| transfer.source == label || transfer.target == label)
+            .any(|(source, target)| source == label || target == label)
+            || self.native_creates.values().any(|owner| owner == label)
+            || self.native_closes.values().any(|owner| owner == label)
         {
             return Err("workspace_window.transfer_pending".into());
         }
-        self.closing.insert(label.into());
         Ok(())
     }
 
@@ -394,17 +311,9 @@ impl Registry {
             return Vec::new();
         }
         self.closing.remove(label);
-        let mut changed: Vec<String> = self
-            .transfers
-            .values()
-            .filter(|transfer| transfer.source == label || transfer.target == label)
-            .map(|transfer| transfer.tab.id.clone())
-            .collect();
-        self.transfers
-            .retain(|_, transfer| transfer.source != label && transfer.target != label);
+        let mut changed = Vec::new();
         for tab in self.tabs.values_mut().filter(|tab| tab.owner == label) {
             tab.owner = "main".into();
-            tab.revision = tab.revision.saturating_add(1);
             changed.push(tab.id.clone());
         }
         changed.sort();
@@ -415,7 +324,7 @@ impl Registry {
 
 fn validate_identity(id: &str, kind: &str) -> Result<(), String> {
     if id.is_empty()
-        || id.len() > 128
+        || id.len() > 512
         || id.chars().any(char::is_control)
         || !matches!(kind, "terminal" | "file" | "desktop" | "page")
     {
@@ -435,16 +344,271 @@ fn validate_payload(payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn next_revision(revision: u64) -> Result<u64, String> {
-    revision
-        .checked_add(1)
-        .ok_or_else(|| "workspace_tab.revision_exhausted".into())
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct WorkspaceWindows(Arc<Mutex<Registry>>);
 
 impl WorkspaceWindows {
+    pub(crate) fn swap_child_projection(
+        &self,
+        app: &AppHandle,
+        owner: &str,
+        id: &str,
+        kind: &str,
+        expected: &Value,
+        payload: Value,
+    ) -> Result<(), String> {
+        let changed = with_registry(self, |registry| {
+            registry.swap_child_projection(owner, id, kind, expected, payload)
+        })?;
+        if changed {
+            notify_tab(app, self, id);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_live_desktop_session(
+        &self,
+        owner: &str,
+        id: &str,
+        service: &crate::desktop_service::DesktopService,
+    ) -> Result<bool, String> {
+        let registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+        let tab = registry.tabs.get(id).ok_or("workspace_tab.missing")?;
+        if tab.owner != owner {
+            return Err("workspace_tab.wrong_owner".into());
+        }
+        let sessions = desktop_session_owners(tab);
+        drop(registry);
+        Ok(service.snapshot().iter().any(|session| {
+            sessions.iter().any(|owned| {
+                owned.session_id == session.id
+                    && owned.generation == session.generation.get().to_string()
+            })
+        }))
+    }
+
+    pub(crate) fn owns_desktop_session(
+        &self,
+        owner: &str,
+        id: &str,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<bool, String> {
+        let registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+        let tab = registry.tabs.get(id).ok_or("workspace_tab.missing")?;
+        if tab.owner != owner || tab.kind != "desktop" || registry.pending(id) {
+            return Err("workspace_tab.wrong_owner".into());
+        }
+        Ok(desktop_session_owners(tab).iter().any(|owned| {
+            owned.session_id == session_id && owned.generation == generation.to_string()
+        }))
+    }
+
+    pub(crate) fn begin_close_with_views(
+        &self,
+        label: &str,
+        views: &crate::workspace_tab_views::WorkspaceTabViews,
+    ) -> Result<(), String> {
+        self.0
+            .lock()
+            .map_err(|_| "workspace_window.unavailable")?
+            .reserve_close(label)?;
+        let native_views = match views.owned_ids(label) {
+            Ok(ids) => ids,
+            Err(error) => {
+                if let Ok(mut registry) = self.0.lock() {
+                    registry.closing.remove(label);
+                }
+                return Err(error);
+            }
+        };
+        let mut registry = self.0.lock().map_err(|_| "workspace_window.unavailable")?;
+        let result = registry.confirm_close(label, &native_views);
+        if result.is_err() {
+            registry.closing.remove(label);
+        }
+        result
+    }
+
+    pub(crate) fn is_main_or_page<R: Runtime>(&self, webview: &Webview<R>) -> bool {
+        let window = webview.window();
+        if webview.label() == "main" && window.label() == "main" {
+            return true;
+        }
+        let Some(id) = crate::workspace_tab_views::tab_id_from_view_label(webview.label()) else {
+            return false;
+        };
+        self.0.lock().is_ok_and(|registry| {
+            registry.allows(window.label())
+                && !registry.pending(&id)
+                && registry
+                    .tabs
+                    .get(&id)
+                    .is_some_and(|tab| tab.kind == "page" && tab.owner == window.label())
+        })
+    }
+
+    pub(crate) fn begin_native_create(
+        &self,
+        owner: &str,
+        id: &str,
+        kind: &str,
+        payload: &Value,
+    ) -> Result<bool, String> {
+        validate_identity(id, kind)?;
+        validate_payload(payload)?;
+        let mut registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+        if !registry.allows(owner) {
+            return Err("workspace_tab.denied".into());
+        }
+        if registry.pending(id) {
+            return Err("workspace_tab.transfer_pending".into());
+        }
+        let existing = match registry.tabs.get(id) {
+            Some(tab) if tab.owner != owner || tab.kind != kind => {
+                return Err("workspace_tab.conflict".into());
+            }
+            Some(_) => true,
+            None => false,
+        };
+        registry.native_creates.insert(id.into(), owner.into());
+        Ok(existing)
+    }
+
+    pub(crate) fn finish_native_create(
+        &self,
+        owner: &str,
+        id: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), String> {
+        let mut registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+        if registry.native_creates.remove(id).as_deref() != Some(owner) {
+            return Err("workspace_tab.create_not_pending".into());
+        }
+        if !registry.allows(owner) {
+            return Err("workspace_tab.denied".into());
+        }
+        if let Some(tab) = registry.tabs.get(id) {
+            return if tab.owner == owner && tab.kind == kind {
+                Ok(())
+            } else {
+                Err("workspace_tab.conflict".into())
+            };
+        }
+        registry.tabs.insert(
+            id.into(),
+            TabRecord {
+                id: id.into(),
+                kind: kind.into(),
+                owner: owner.into(),
+                payload,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn abort_native_create(&self, id: &str) {
+        if let Ok(mut registry) = self.0.lock() {
+            registry.native_creates.remove(id);
+        }
+    }
+
+    /// Verifies that `caller` still owns a settled native view of `kind`.
+    pub(crate) fn check_native_view(
+        &self,
+        caller: &str,
+        id: &str,
+        kind: &str,
+    ) -> Result<(), String> {
+        let registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+        if !registry.allows(caller) {
+            return Err("workspace_tab.denied".into());
+        }
+        let tab = registry.tabs.get(id).ok_or("workspace_tab.missing")?;
+        if tab.owner != caller {
+            return Err("workspace_tab.wrong_owner".into());
+        }
+        if tab.kind != kind {
+            return Err("workspace_tab.invalid_identity".into());
+        }
+        if registry.pending(id) {
+            return Err("workspace_tab.transfer_pending".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn move_native_view(
+        &self,
+        source: &str,
+        target: &str,
+        id: &str,
+        reparent: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        {
+            let mut registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+            if !registry.allows(source) || !registry.allows(target) {
+                return Err("workspace_tab.target_missing".into());
+            }
+            if registry.pending(id) {
+                return Err("workspace_tab.transfer_pending".into());
+            }
+            let tab = registry.tabs.get(id).ok_or("workspace_tab.missing")?;
+            if tab.owner != source {
+                return Err("workspace_tab.wrong_owner".into());
+            }
+            if source == target {
+                return Ok(());
+            }
+            registry
+                .native_moves
+                .insert(id.into(), (source.into(), target.into()));
+        }
+        // Native dispatch waits for the main thread. Never hold the registry
+        // mutex here: a concurrent WindowEvent may need it on that thread.
+        let result = reparent();
+        let mut registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+        registry.native_moves.remove(id);
+        result?;
+        if !registry.allows(target) {
+            if let Some(tab) = registry.tabs.get_mut(id) {
+                tab.owner = "main".into();
+            }
+            return Err("workspace_tab.target_lost".into());
+        }
+        let tab = registry.tabs.get_mut(id).ok_or("workspace_tab.missing")?;
+        tab.owner = target.into();
+        Ok(())
+    }
+
+    pub(crate) fn close_native_view(
+        &self,
+        owner: &str,
+        id: &str,
+        close: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        {
+            let mut registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+            if !registry.allows(owner) {
+                return Err("workspace_tab.denied".into());
+            }
+            if registry.pending(id) {
+                return Err("workspace_tab.transfer_pending".into());
+            }
+            let tab = registry.tabs.get(id).ok_or("workspace_tab.missing")?;
+            if tab.owner != owner {
+                return Err("workspace_tab.wrong_owner".into());
+            }
+            registry.native_closes.insert(id.into(), owner.into());
+        }
+        let result = close();
+        let mut registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
+        registry.native_closes.remove(id);
+        result?;
+        registry.tabs.remove(id);
+        Ok(())
+    }
+
     pub(crate) fn owns_tab(&self, label: &str, id: &str) -> Result<(), String> {
         let registry = self.0.lock().map_err(|_| "workspace_tab.unavailable")?;
         if !registry.allows(label) {
@@ -465,15 +629,17 @@ impl WorkspaceWindows {
             .is_ok_and(|registry| registry.windows.contains(label))
     }
 
-    fn labels(&self) -> Result<Vec<String>, String> {
+    pub(crate) fn native_move_pending(&self, id: &str) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|registry| registry.native_moves.contains_key(id))
+    }
+
+    pub(crate) fn window_labels(&self) -> Result<Vec<String>, String> {
         self.0
             .lock()
             .map(|registry| registry.windows.iter().cloned().collect())
             .map_err(|_| "workspace_window.unavailable".to_owned())
-    }
-
-    pub(crate) fn window_labels(&self) -> Result<Vec<String>, String> {
-        self.labels()
     }
 
     fn forget(&self, label: &str) -> Vec<String> {
@@ -485,7 +651,7 @@ impl WorkspaceWindows {
 }
 
 fn notify_tab<R: Runtime>(app: &AppHandle<R>, state: &WorkspaceWindows, id: &str) {
-    let mut recipients = state.labels().unwrap_or_default();
+    let mut recipients = state.window_labels().unwrap_or_default();
     recipients.push("main".into());
     for recipient in recipients {
         let _ = app.emit_to(&recipient, TAB_CHANGED, id);
@@ -496,8 +662,10 @@ fn caller_allowed(state: &WorkspaceWindows, label: &str) -> bool {
     state.0.lock().is_ok_and(|registry| registry.allows(label))
 }
 
+// Async keeps window creation off the Windows main thread, where a sync
+// command that builds a WebView deadlocks (wry#583).
 #[tauri::command]
-pub(crate) fn workspace_window_open(
+pub(crate) async fn workspace_window_open(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, WorkspaceWindows>,
@@ -518,7 +686,7 @@ pub(crate) fn workspace_window_open(
     {
         return Err("workspace_window.exit_in_progress".into());
     }
-    let label = format!("workspace-{}", uuid::Uuid::now_v7());
+    let label = format!("workspace-window-{}", uuid::Uuid::now_v7());
     state
         .0
         .lock()
@@ -615,78 +783,26 @@ pub(crate) fn workspace_window_open(
 }
 
 #[tauri::command]
-pub(crate) fn workspace_window_list(
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-) -> Result<Vec<String>, String> {
-    if !caller_allowed(&state, window.label()) {
-        return Err("workspace_window.denied".into());
-    }
-    state.labels()
-}
-
-#[tauri::command]
-pub(crate) fn workspace_window_at_cursor(
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-) -> Result<Option<String>, String> {
-    if !caller_allowed(&state, window.label()) {
-        return Err("workspace_window.denied".into());
-    }
-    let cursor = window
-        .cursor_position()
-        .map_err(|_| "workspace_window.cursor_unavailable")?;
-    let app = window.app_handle();
-    let mut labels = state.labels()?;
-    labels.push("main".into());
-    let mut hits = Vec::new();
-    for label in labels {
-        let Some(candidate) = app.get_webview_window(&label) else {
-            continue;
-        };
-        if candidate.is_visible().ok() != Some(true) || candidate.is_minimized().ok() == Some(true)
-        {
-            continue;
-        }
-        let (Ok(position), Ok(size)) = (candidate.outer_position(), candidate.outer_size()) else {
-            continue;
-        };
-        let left = f64::from(position.x);
-        let top = f64::from(position.y);
-        if cursor.x >= left
-            && cursor.x < left + f64::from(size.width)
-            && cursor.y >= top
-            && cursor.y < top + f64::from(size.height)
-        {
-            let strip_bottom = top + 64.0 * candidate.scale_factor().unwrap_or(1.0);
-            hits.push((
-                label,
-                candidate.is_focused().ok() == Some(true),
-                cursor.y < strip_bottom,
-            ));
-        }
-    }
-    Ok(hits
-        .iter()
-        .find(|(label, focused, strip)| label != window.label() && *focused && *strip)
-        .or_else(|| {
-            hits.iter()
-                .find(|(label, _, strip)| label != window.label() && *strip)
-        })
-        .or_else(|| hits.iter().find(|(label, _, _)| label == window.label()))
-        .map(|(label, _, _)| label.clone()))
-}
-
-#[tauri::command]
 pub(crate) fn workspace_window_focus(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     label: Option<String>,
 ) -> Result<(), String> {
+    let window = webview.window();
     if !caller_allowed(&state, window.label()) {
         return Err("workspace_window.denied".into());
     }
     let target_label = label.as_deref().unwrap_or(window.label());
+    if webview.label() != window.label() {
+        let id = crate::workspace_tab_views::tab_id_from_view_label(webview.label())
+            .ok_or("workspace_window.denied")?;
+        if target_label != window.label()
+            || views.child_owner(&webview, &state, &id)? != window.label()
+        {
+            return Err("workspace_window.denied".into());
+        }
+    }
     if !caller_allowed(&state, target_label) {
         return Err("workspace_window.denied".into());
     }
@@ -704,12 +820,9 @@ pub(crate) fn workspace_window_focus(
 pub(crate) fn workspace_window_close(
     window: WebviewWindow,
     state: State<'_, WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
 ) -> Result<(), String> {
-    state
-        .0
-        .lock()
-        .map_err(|_| "workspace_window.unavailable")?
-        .begin_close(window.label())?;
+    state.begin_close_with_views(window.label(), &views)?;
     if window.destroy().is_err() {
         if let Ok(mut registry) = state.0.lock() {
             registry.closing.remove(window.label());
@@ -724,6 +837,7 @@ pub(crate) fn workspace_window_close_empty(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     label: String,
 ) -> Result<(), String> {
     if !caller_allowed(&state, window.label()) {
@@ -732,11 +846,7 @@ pub(crate) fn workspace_window_close_empty(
     let target = app
         .get_webview_window(&label)
         .ok_or("workspace_window.missing")?;
-    state
-        .0
-        .lock()
-        .map_err(|_| "workspace_window.unavailable")?
-        .begin_close(&label)?;
+    state.begin_close_with_views(&label, &views)?;
     if target.destroy().is_err() {
         if let Ok(mut registry) = state.0.lock() {
             registry.closing.remove(&label);
@@ -755,125 +865,59 @@ fn with_registry<T>(
 }
 
 #[tauri::command]
-pub(crate) fn workspace_tab_register(
+pub(crate) async fn workspace_tab_projection_update(
     app: AppHandle,
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, WorkspaceWindows>,
-    tab: NewTab,
-) -> Result<TabRecord, String> {
-    let record = with_registry(&state, |registry| registry.register(window.label(), tab))?;
-    notify_tab(&app, &state, &record.id);
-    Ok(record)
-}
-
-#[tauri::command]
-pub(crate) fn workspace_tab_update(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-    id: String,
-    expected_revision: u64,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     payload: Value,
-) -> Result<TabRecord, String> {
-    let record = with_registry(&state, |registry| {
-        registry.update(window.label(), &id, expected_revision, payload)
-    })?;
-    notify_tab(&app, &state, &id);
-    Ok(record)
-}
-
-#[tauri::command]
-pub(crate) fn workspace_tab_unregister(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-    id: String,
-    expected_revision: u64,
 ) -> Result<(), String> {
-    with_registry(&state, |registry| {
-        registry.unregister(window.label(), &id, expected_revision)
-    })?;
-    notify_tab(&app, &state, &id);
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn workspace_tab_prepare(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-    id: String,
-    target: String,
-    expected_revision: u64,
-    payload: Value,
-) -> Result<String, String> {
-    let ticket = with_registry(&state, |registry| {
-        registry.prepare(window.label(), &id, &target, expected_revision, payload)
-    })?;
-    notify_tab(&app, &state, &id);
-    Ok(ticket)
-}
-
-#[tauri::command]
-pub(crate) fn workspace_tab_source_frozen(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-    ticket: String,
-) -> Result<(), String> {
-    let transfer = with_registry(&state, |registry| {
-        registry.source_frozen(window.label(), &ticket)
-    })?;
-    let _ = app.emit_to(&transfer.target, TAB_OFFER, &transfer);
-    notify_tab(&app, &state, &transfer.tab.id);
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn workspace_tab_target_ready(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-    ticket: String,
-) -> Result<(), String> {
-    let transfer = with_registry(&state, |registry| {
-        registry.target_ready(window.label(), &ticket)
-    })?;
-    let _ = app.emit_to(&transfer.source, TARGET_READY, &ticket);
-    notify_tab(&app, &state, &transfer.tab.id);
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) fn workspace_tab_commit(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-    ticket: String,
-) -> Result<TabRecord, String> {
-    let record = with_registry(&state, |registry| registry.commit(window.label(), &ticket))?;
-    notify_tab(&app, &state, &record.id);
-    Ok(record)
-}
-
-#[tauri::command]
-pub(crate) fn workspace_tab_abort(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: State<'_, WorkspaceWindows>,
-    ticket: String,
-) -> Result<(), String> {
-    let id = with_registry(&state, |registry| registry.abort(window.label(), &ticket))?;
-    notify_tab(&app, &state, &id);
+    let (id, changed) = {
+        let (operation, live) = views.projection_operation(&webview)?;
+        // Native reparenting holds this lock until the Core owner is committed.
+        // Wait without holding the view table or the Registry mutex.
+        let _operation = operation.lock().map_err(|_| "workspace_tab.unavailable")?;
+        if !live.load(Ordering::Acquire) {
+            return Err("workspace_tab.view_missing".into());
+        }
+        let (id, kind, owner) = views.projection_identity(&webview)?;
+        // A Desktop Tab cannot drop the handle of a session that is still live;
+        // the session must be closed first so it never becomes unreachable.
+        if kind == "desktop"
+            && payload.get("sessionId").is_none()
+            && let Some(desktop) = app.try_state::<crate::desktop_service::DesktopService>()
+            && state.has_live_desktop_session(&owner, &id, &desktop)?
+        {
+            return Err("workspace_tab.desktop_session_active".into());
+        }
+        let changed = with_registry(&state, |registry| {
+            registry.update_child_projection(&owner, &id, &kind, payload)
+        })?;
+        (id, changed)
+    };
+    if changed {
+        notify_tab(&app, &state, &id);
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn workspace_tab_snapshot(
-    window: WebviewWindow,
+    webview: Webview,
     state: State<'_, WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
 ) -> Result<TabSnapshot, String> {
-    with_registry(&state, |registry| registry.snapshot(window.label()))
+    let window = webview.window();
+    if webview.label() == window.label() {
+        return with_registry(&state, |registry| registry.snapshot(window.label()));
+    }
+    let id = crate::workspace_tab_views::tab_id_from_view_label(webview.label())
+        .ok_or("workspace_tab.denied")?;
+    let owner = views.child_owner(&webview, &state, &id)?;
+    let mut snapshot = with_registry(&state, |registry| registry.snapshot(&owner))?;
+    snapshot.owned.retain(|tab| tab.id == id);
+    snapshot.others.clear();
+    Ok(snapshot)
 }
 
 pub(crate) fn on_window_event<R: Runtime>(window: &tauri::Window<R>, event: &WindowEvent) {
@@ -910,160 +954,374 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn tab(id: &str) -> NewTab {
-        NewTab {
-            id: id.into(),
-            kind: "terminal".into(),
-            payload: json!({"paneIds":["one"]}),
-        }
+    fn insert(registry: &mut Registry, owner: &str, id: &str, kind: &str, payload: Value) {
+        registry.tabs.insert(
+            id.into(),
+            TabRecord {
+                id: id.into(),
+                kind: kind.into(),
+                owner: owner.into(),
+                payload,
+            },
+        );
+    }
+
+    fn terminal(registry: &mut Registry, owner: &str, id: &str) {
+        insert(registry, owner, id, "terminal", json!({"paneIds":["one"]}));
     }
 
     #[test]
-    fn transfer_requires_both_handoffs_and_blocks_racing_mutations() {
+    fn desktop_claim_requires_current_idle_projection_before_session_creation() {
         let mut registry = Registry::default();
-        registry.windows.insert("workspace-a".into());
-        let initial = registry.register("main", tab("one")).unwrap();
-        let ticket = registry
-            .prepare(
+        let idle = json!({"schemaVersion":1,"tabId":"desktop:one","profileId":"profile-one"});
+        let owned = json!({"schemaVersion":1,"tabId":"desktop:one","sessionId":"session-one","generation":"1"});
+        insert(
+            &mut registry,
+            "main",
+            "desktop:one",
+            "desktop",
+            idle.clone(),
+        );
+        assert_eq!(
+            registry.swap_child_projection(
                 "main",
-                "one",
-                "workspace-a",
-                initial.revision,
-                json!({"paneIds":["two"]}),
-            )
-            .unwrap();
-        assert_eq!(
-            registry.update("main", "one", 2, json!({})),
-            Err("workspace_tab.transfer_pending".into())
+                "desktop:one",
+                "desktop",
+                &json!({"schemaVersion":1,"tabId":"desktop:one","profileId":"other"}),
+                owned.clone()
+            ),
+            Err("workspace_tab.projection_changed".into())
         );
+        assert_eq!(registry.tabs["desktop:one"].payload, idle);
         assert_eq!(
-            registry.unregister("main", "one", 2),
-            Err("workspace_tab.transfer_pending".into())
+            registry.swap_child_projection("main", "desktop:one", "desktop", &idle, owned.clone()),
+            Ok(true)
         );
+        assert_eq!(registry.tabs["desktop:one"].payload, owned);
         assert_eq!(
-            registry.commit("main", &ticket),
-            Err("workspace_tab.target_not_ready".into())
+            registry.swap_child_projection(
+                "main",
+                "desktop:one",
+                "desktop",
+                &idle,
+                json!({"schemaVersion":1,"tabId":"desktop:one","sessionId":"second","generation":"1"})
+            ),
+            Err("workspace_tab.projection_changed".into())
         );
-        registry.source_frozen("main", &ticket).unwrap();
-        registry.target_ready("workspace-a", &ticket).unwrap();
-        let moved = registry.commit("main", &ticket).unwrap();
-        assert_eq!(moved.owner, "workspace-a");
-        assert_eq!(moved.revision, 3);
-        assert_eq!(moved.payload, json!({"paneIds":["two"]}));
-        let main_snapshot = registry.snapshot("main").unwrap();
-        assert!(main_snapshot.owned.is_empty());
-        assert_eq!(
-            serde_json::to_value(main_snapshot.others).unwrap(),
-            json!([{"id":"one","kind":"terminal","owner":"workspace-a","terminalPanes":[]}])
-        );
-        assert_eq!(registry.snapshot("workspace-a").unwrap().owned, vec![moved]);
+        assert_eq!(registry.tabs["desktop:one"].payload, owned);
     }
 
     #[test]
-    fn invalid_caller_and_abort_preserve_original_owner() {
-        let mut registry = Registry::default();
-        registry.windows.insert("workspace-a".into());
-        let initial = registry.register("main", tab("one")).unwrap();
-        assert_eq!(
-            registry.prepare("secure-vault-x", "one", "workspace-a", 1, json!({})),
-            Err("workspace_tab.denied".into())
+    fn desktop_close_handle_must_match_registry_generation() {
+        let state = WorkspaceWindows::default();
+        insert(
+            &mut state.0.lock().unwrap(),
+            "main",
+            "desktop:one",
+            "desktop",
+            json!({"schemaVersion":1,"tabId":"desktop:one","sessionId":"session-one","generation":"7"}),
         );
         assert_eq!(
-            registry.prepare("main", "one", "workspace-forged", 1, json!({})),
-            Err("workspace_tab.target_missing".into())
-        );
-        let ticket = registry
-            .prepare("main", "one", "workspace-a", 1, json!({}))
-            .unwrap();
-        assert_eq!(
-            registry.target_ready("workspace-a", &ticket).map(|_| ()),
-            Err("workspace_tab.not_offered".into())
+            state.owns_desktop_session("main", "desktop:one", "session-one", 7),
+            Ok(true)
         );
         assert_eq!(
-            registry.source_frozen("workspace-a", &ticket).map(|_| ()),
+            state.owns_desktop_session("main", "desktop:one", "session-one", 8),
+            Ok(false)
+        );
+        assert_eq!(
+            state.owns_desktop_session("main", "desktop:one", "other", 7),
+            Ok(false)
+        );
+        assert_eq!(
+            state.owns_desktop_session("other", "desktop:one", "session-one", 7),
             Err("workspace_tab.wrong_owner".into())
         );
-        registry.source_frozen("main", &ticket).unwrap();
-        registry.abort("main", &ticket).unwrap();
-        let after_abort = registry.snapshot("main").unwrap().owned[0].clone();
-        assert_eq!(after_abort.owner, initial.owner);
-        assert_eq!(after_abort.revision, initial.revision + 1);
-        assert_eq!(after_abort.payload, json!({}));
-        assert!(
-            registry
-                .snapshot("workspace-a")
-                .unwrap()
-                .incoming
-                .is_empty()
+    }
+
+    #[test]
+    fn native_move_commits_owner_only_after_reparent_succeeds() {
+        let state = WorkspaceWindows::default();
+        {
+            let mut registry = state.0.lock().unwrap();
+            registry.windows.insert("workspace-a".into());
+            terminal(&mut registry, "main", "one");
+        }
+        assert_eq!(
+            state.move_native_view("main", "workspace-a", "one", || {
+                Err("workspace_tab.reparent_failed".into())
+            }),
+            Err("workspace_tab.reparent_failed".into())
         );
-        registry
-            .update(
-                "main",
-                "one",
-                after_abort.revision,
-                json!({"restored":true}),
-            )
-            .unwrap();
+        assert_eq!(state.check_native_view("main", "one", "terminal"), Ok(()));
+        let during_reparent = state.clone();
+        assert_eq!(
+            state.move_native_view("main", "workspace-a", "one", || {
+                assert_eq!(
+                    during_reparent.check_native_view("main", "one", "terminal"),
+                    Err("workspace_tab.transfer_pending".into())
+                );
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            state.check_native_view("workspace-a", "one", "terminal"),
+            Ok(())
+        );
+        assert_eq!(
+            state.check_native_view("main", "one", "terminal"),
+            Err("workspace_tab.wrong_owner".into())
+        );
+        assert_eq!(
+            state.move_native_view("main", "workspace-a", "one", || Ok(())),
+            Err("workspace_tab.wrong_owner".into())
+        );
+    }
+
+    #[test]
+    fn lost_target_keeps_tab_record_for_main_attach() {
+        let state = WorkspaceWindows::default();
+        {
+            let mut registry = state.0.lock().unwrap();
+            registry.windows.insert("workspace-a".into());
+            terminal(&mut registry, "main", "one");
+        }
+        let during_reparent = state.clone();
+        assert_eq!(
+            state.move_native_view("main", "workspace-a", "one", || {
+                assert!(during_reparent.native_move_pending("one"));
+                during_reparent
+                    .0
+                    .lock()
+                    .unwrap()
+                    .windows
+                    .remove("workspace-a");
+                Ok(())
+            }),
+            Err("workspace_tab.target_lost".into())
+        );
+        let recovered = state.0.lock().unwrap().tabs["one"].clone();
+        assert_eq!(recovered.owner, "main");
+        assert_eq!(recovered.payload, json!({"paneIds":["one"]}));
+        assert!(!state.native_move_pending("one"));
+    }
+
+    #[test]
+    fn lost_source_after_failed_reparent_keeps_record_for_main_attach() {
+        let state = WorkspaceWindows::default();
+        {
+            let mut registry = state.0.lock().unwrap();
+            registry.windows.insert("workspace-a".into());
+            registry.windows.insert("workspace-b".into());
+            terminal(&mut registry, "workspace-a", "one");
+        }
+        let during_reparent = state.clone();
+        assert_eq!(
+            state.move_native_view("workspace-a", "workspace-b", "one", || {
+                assert!(during_reparent.native_move_pending("one"));
+                assert_eq!(
+                    during_reparent
+                        .0
+                        .lock()
+                        .unwrap()
+                        .recover_destroyed("workspace-a"),
+                    vec!["one"]
+                );
+                Err("workspace_tab.reparent_failed".into())
+            }),
+            Err("workspace_tab.reparent_failed".into())
+        );
+        let recovered = state.0.lock().unwrap().tabs["one"].clone();
+        assert_eq!(recovered.owner, "main");
+        assert_eq!(recovered.payload, json!({"paneIds":["one"]}));
+        assert!(!state.native_move_pending("one"));
+    }
+
+    #[test]
+    fn native_create_and_close_keep_core_record_atomic_with_webview() {
+        let state = WorkspaceWindows::default();
+        let seed = json!({"id":"one"});
+        assert_eq!(
+            state.begin_native_create("main", "one", "terminal", &seed),
+            Ok(false)
+        );
+        assert_eq!(
+            state.check_native_view("main", "one", "terminal"),
+            Err("workspace_tab.missing".into())
+        );
+        assert_eq!(
+            state.begin_native_create("main", "one", "terminal", &seed),
+            Err("workspace_tab.transfer_pending".into())
+        );
+        state.abort_native_create("one");
+        assert_eq!(
+            state.begin_native_create("main", "one", "terminal", &seed),
+            Ok(false)
+        );
+        assert_eq!(
+            state.finish_native_create("main", "one", "terminal", seed.clone()),
+            Ok(())
+        );
+        assert_eq!(
+            state.begin_native_create("main", "one", "terminal", &seed),
+            Ok(true)
+        );
+        state.abort_native_create("one");
+        assert_eq!(
+            state.close_native_view("main", "one", || Err(
+                "workspace_tab.view_close_failed".into()
+            )),
+            Err("workspace_tab.view_close_failed".into())
+        );
+        assert_eq!(state.check_native_view("main", "one", "terminal"), Ok(()));
+        assert_eq!(state.close_native_view("main", "one", || Ok(())), Ok(()));
+        assert_eq!(
+            state.check_native_view("main", "one", "terminal"),
+            Err("workspace_tab.missing".into())
+        );
     }
 
     #[test]
     fn foreign_terminal_projection_exposes_only_live_session_identity() {
         let mut registry = Registry::default();
         registry.windows.insert("workspace-a".into());
-        registry
-            .register(
-                "workspace-a",
-                NewTab {
-                    id: "terminal-one".into(),
-                    kind: "terminal".into(),
-                    payload: json!({
-                        "schemaVersion": 1,
-                        "tabId": "terminal-one",
-                        "secret": "must-not-leak",
-                        "panes": [
-                            {"kind":"ssh","paneId":"pane-one","sessionId":"session-one","generation":"7","label":"Host"},
-                            {"kind":"launcher","paneId":"pane-two","label":"New"}
-                        ]
-                    }),
-                },
-            )
-            .unwrap();
+        insert(
+            &mut registry,
+            "workspace-a",
+            "terminal-one",
+            "terminal",
+            json!({
+                "schemaVersion": 1,
+                "tabId": "terminal-one",
+                "secret": "must-not-leak",
+                "panes": [
+                    {"kind":"ssh","paneId":"pane-one","sessionId":"session-one","generation":"7","label":"Host"},
+                    {"kind":"launcher","paneId":"pane-two","label":"New"}
+                ]
+            }),
+        );
         let snapshot = serde_json::to_value(registry.snapshot("main").unwrap().others).unwrap();
         assert_eq!(
             snapshot,
             json!([{
                 "id":"terminal-one", "kind":"terminal", "owner":"workspace-a",
-                "terminalPanes":[{"paneId":"pane-one","kind":"ssh","sessionId":"session-one","generation":"7"}]
+                "terminalPanes":[{"paneId":"pane-one","kind":"ssh","sessionId":"session-one","generation":"7"}],
+                "fileSessions":[], "desktopSessions":[]
             }])
         );
     }
 
     #[test]
-    fn close_blocks_owned_or_pending_tabs_and_destroy_recovers_to_main() {
+    fn foreign_file_projection_exposes_only_remote_session_identity() {
         let mut registry = Registry::default();
         registry.windows.insert("workspace-a".into());
-        registry.windows.insert("workspace-b".into());
-        let initial = registry.register("workspace-a", tab("one")).unwrap();
-        let ticket = registry
-            .prepare("workspace-a", "one", "workspace-b", 1, json!({}))
-            .unwrap();
+        insert(
+            &mut registry,
+            "workspace-a",
+            "file:one",
+            "file",
+            json!({
+                "version": 1,
+                "tab": {"groupId": "file:one"},
+                "secret": "must-not-leak",
+                "panes": [
+                    {"endpoint": {"kind":"remote","hostId":"private-host","sessionId":"session-one","generation":"7"}},
+                    {"endpoint": {"kind":"local","directoryRef":"private-directory"}},
+                    {"endpoint": {"kind":"remote","sessionId":"session-one","generation":"7"}}
+                ]
+            }),
+        );
+        let snapshot = serde_json::to_value(registry.snapshot("main").unwrap().others).unwrap();
         assert_eq!(
-            registry.begin_close("workspace-a"),
+            snapshot,
+            json!([{
+                "id":"file:one", "kind":"file", "owner":"workspace-a",
+                "terminalPanes":[], "fileSessions":[{"sessionId":"session-one","generation":"7"}],
+                "desktopSessions":[]
+            }])
+        );
+    }
+
+    #[test]
+    fn foreign_desktop_projection_exposes_only_bounded_session_handle() {
+        let mut registry = Registry::default();
+        registry.windows.insert("workspace-a".into());
+        insert(
+            &mut registry,
+            "workspace-a",
+            "desktop:stable-tab",
+            "desktop",
+            json!({
+                "schemaVersion": 1,
+                "tabId": "desktop:stable-tab",
+                "sessionId": "reconnected-session",
+                "generation": "7"
+            }),
+        );
+        let snapshot = serde_json::to_value(registry.snapshot("main").unwrap().others).unwrap();
+        assert_eq!(
+            snapshot,
+            json!([{
+                "id":"desktop:stable-tab", "kind":"desktop", "owner":"workspace-a",
+                "terminalPanes":[], "fileSessions":[],
+                "desktopSessions":[{"sessionId":"reconnected-session","generation":"7"}]
+            }])
+        );
+        registry
+            .update_child_projection(
+                "workspace-a",
+                "desktop:stable-tab",
+                "desktop",
+                json!({
+                    "schemaVersion": 1,
+                    "tabId": "desktop:stable-tab",
+                    "sessionId": "next-session",
+                    "generation": "8"
+                }),
+            )
+            .unwrap();
+        let latest = serde_json::to_value(registry.snapshot("main").unwrap().others).unwrap();
+        assert_eq!(
+            latest[0]["desktopSessions"],
+            json!([{"sessionId":"next-session","generation":"8"}])
+        );
+        let tab = registry.tabs.get_mut("desktop:stable-tab").unwrap();
+        tab.payload["generation"] = Value::from("not-a-generation");
+        assert!(desktop_session_owners(tab).is_empty());
+    }
+
+    #[test]
+    fn close_blocks_native_views_but_recovers_native_less_tabs_to_main() {
+        let state = WorkspaceWindows::default();
+        let mut registry = state.0.lock().unwrap();
+        registry.windows.insert("workspace-a".into());
+        registry.windows.insert("workspace-b".into());
+        terminal(&mut registry, "workspace-a", "one");
+        let initial = registry.tabs["one"].clone();
+        registry.reserve_close("workspace-a").unwrap();
+        assert_eq!(
+            registry.confirm_close("workspace-a", &BTreeSet::from(["one".into()])),
             Err("workspace_window.tabs_owned".into())
         );
+        registry.closing.remove("workspace-a");
+        registry.reserve_close("workspace-a").unwrap();
+        assert_eq!(
+            registry.confirm_close("workspace-a", &BTreeSet::new()),
+            Ok(())
+        );
+        registry.closing.remove("workspace-a");
         assert_eq!(registry.recover_destroyed("workspace-a"), vec!["one"]);
         let recovered = &registry.snapshot("main").unwrap().owned[0];
         assert_eq!(recovered.owner, "main");
-        assert_eq!(recovered.revision, initial.revision + 2);
-        assert_eq!(recovered.payload, json!({}));
-        assert!(registry.transfers.is_empty());
+        assert_eq!(recovered.payload, initial.payload);
+        registry.reserve_close("workspace-b").unwrap();
+        registry
+            .confirm_close("workspace-b", &BTreeSet::new())
+            .unwrap();
+        drop(registry);
         assert_eq!(
-            registry.commit("main", &ticket),
-            Err("workspace_tab.ticket_missing".into())
-        );
-        registry.begin_close("workspace-b").unwrap();
-        assert_eq!(
-            registry.register("workspace-b", tab("two")).map(|_| ()),
+            state.begin_native_create("workspace-b", "two", "terminal", &json!({})),
             Err("workspace_tab.denied".into())
         );
     }
@@ -1075,5 +1333,62 @@ mod tests {
             validate_payload(&json!({"value":"x".repeat(MAX_PAYLOAD_BYTES)})),
             Err("workspace_tab.payload_too_large".into())
         );
+    }
+
+    #[test]
+    fn child_projection_reports_change_and_keeps_owner_fence() {
+        let mut registry = Registry::default();
+        terminal(&mut registry, "main", "one");
+        registry.windows.insert("workspace-other".into());
+        let initial = registry.tabs["one"].payload.clone();
+        assert_eq!(
+            registry.update_child_projection("main", "one", "terminal", initial),
+            Ok(false)
+        );
+
+        let next = json!({"paneIds":["one","two"]});
+        assert_eq!(
+            registry.update_child_projection("main", "one", "terminal", next.clone()),
+            Ok(true)
+        );
+        assert_eq!(registry.tabs["one"].payload, next);
+        assert_eq!(
+            registry.update_child_projection("main", "one", "file", json!({})),
+            Err("workspace_tab.invalid_identity".into())
+        );
+        assert_eq!(
+            registry.update_child_projection("workspace-other", "one", "terminal", json!({})),
+            Err("workspace_tab.wrong_owner".into())
+        );
+
+        registry
+            .native_moves
+            .insert("one".into(), ("main".into(), "workspace-other".into()));
+        assert_eq!(
+            registry.update_child_projection("main", "one", "terminal", json!({})),
+            Err("workspace_tab.transfer_pending".into())
+        );
+        registry.native_moves.remove("one");
+        assert_eq!(
+            registry.update_child_projection(
+                "main",
+                "one",
+                "terminal",
+                json!({"value":"x".repeat(MAX_PAYLOAD_BYTES)})
+            ),
+            Err("workspace_tab.payload_too_large".into())
+        );
+        assert_eq!(registry.tabs["one"].payload, next);
+        registry.tabs.get_mut("one").unwrap().owner = "workspace-other".into();
+        assert_eq!(
+            registry.update_child_projection(
+                "workspace-other",
+                "one",
+                "terminal",
+                json!({"moved":true})
+            ),
+            Ok(true)
+        );
+        assert_eq!(registry.tabs["one"].payload, json!({"moved":true}));
     }
 }

@@ -2,21 +2,20 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { useI18n } from "vue-i18n";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 
 import { NvxPluginExtensionTarget } from "../components/plugins";
 import NvxPluginSettingsDialog from "../components/plugins/NvxPluginSettingsDialog.vue";
 import { NvxInlineNotice } from "../components/ui";
 import { listInstalledPlugins } from "../core-api/client";
 import { usePluginExtensionsStore } from "../stores/pluginExtensions";
-import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { pluginPageTab, useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { useRouteReveal } from "../routeReveal";
-import { holdLocalWorkspaceTabClaim } from "../workspace-tab-transfer";
-import { focusWorkspaceWindowTarget, registerWorkspaceTab, snapshotWorkspaceTabs, unregisterWorkspaceTab, workspaceWindowLabel } from "../workspace-tab-windows";
+import { isWorkspaceTabView } from "../workspace-window-context";
+import { snapshotWorkspaceTabs } from "../workspace-tab-windows";
 
 const { t } = useI18n();
 const route = useRoute();
-const router = useRouter();
 const extensions = usePluginExtensionsStore();
 const workspaceTabs = useWorkspaceTabsStore();
 const revealRoute = useRouteReveal();
@@ -47,55 +46,11 @@ async function openOwnedPage() {
   const key = instanceKey.value;
   const item = navigationItem.value;
   if (!item || !isCurrentPage(key)) return;
+  // Only the page's own Tab WebView renders it; the router opens shells' requests as a Page Tab.
   if (isTauri()) {
-    const groupId = `page:plugin:${item.pluginId}:${item.navigation.pageId}`;
-    const tab = {
-      groupId,
-      pageType: "plugin" as const,
-      route: `/plugin/${encodeURIComponent(item.pluginId)}/${encodeURIComponent(item.navigation.pageId)}`,
-      labelKey: null,
-      label: item.navigation.label,
-      iconName: item.navigation.icon,
-    };
-    const state = await snapshotWorkspaceTabs();
-    if (!isCurrentPage(key)) return;
-    const otherOwner = state.others.find((record) => record.id === groupId)?.owner;
-    if (otherOwner || state.outgoing.some((entry) => entry.tab.id === groupId)
-      || state.incoming.some((entry) => entry.tab.id === groupId)) {
-      if (otherOwner) await focusWorkspaceWindowTarget(otherOwner).catch(() => undefined);
-      if (isCurrentPage(key)) await router.replace(workspaceWindowLabel() === "main" ? "/terminal" : "/workspace-window");
-      return;
-    }
-    const owned = state.owned.find((record) => record.id === groupId);
-    if (owned && owned.kind !== "page") throw new Error("workspace_tab.kind_conflict");
-    if (!owned) {
-      // Claim ownership before adding a visible Tab; Core rejects a concurrent window.
-      const releaseClaim = holdLocalWorkspaceTabClaim(groupId);
-      try {
-        let registered: Awaited<ReturnType<typeof registerWorkspaceTab>>;
-        try {
-          registered = await registerWorkspaceTab({ id: groupId, kind: "page", payload: tab });
-        } catch (error) {
-          const latest = await snapshotWorkspaceTabs().catch(() => null);
-          const currentOwner = latest?.others.find((record) => record.id === groupId)?.owner;
-          if (currentOwner) {
-            await focusWorkspaceWindowTarget(currentOwner).catch(() => undefined);
-            if (isCurrentPage(key)) await router.replace(workspaceWindowLabel() === "main" ? "/terminal" : "/workspace-window");
-            return;
-          }
-          throw error;
-        }
-        if (!isCurrentPage(key)) {
-          await unregisterWorkspaceTab(groupId, registered.revision).catch(() => undefined);
-          return;
-        }
-        workspaceTabs.ensurePluginPageTab(item);
-        pageReady.value = true;
-        return;
-      } finally {
-        releaseClaim();
-      }
-    }
+    const owned = (await snapshotWorkspaceTabs()).owned.find((record) => record.id === pluginPageTab(item).groupId);
+    if (!owned) throw new Error("workspace_tab.not_found");
+    if (owned.kind !== "page") throw new Error("workspace_tab.kind_conflict");
   }
   if (!isCurrentPage(key)) return;
   workspaceTabs.ensurePluginPageTab(item);
@@ -126,11 +81,21 @@ async function load() {
     loadPermissionState().catch(() => { sshSyncPermissionDenied.value = false; }),
   ]);
   if (!isCurrentPage(key)) return;
+  if (!navigationItem.value && isWorkspaceTabView()) {
+    window.dispatchEvent(new CustomEvent("norishell:plugin-page-unavailable", { detail: pluginId.value }));
+    return;
+  }
   await openOwnedPage();
 }
 
 function handlePermissionChanged() {
   void loadPermissionState().catch(() => undefined);
+}
+
+function retryAfterTabMove() {
+  if (isWorkspaceTabView() && !pageReady.value && !disposed) {
+    void load().catch((error: unknown) => { pageError.value = pageFailureCode(error); });
+  }
 }
 
 watch([pluginId, pageId, navigationItem], () => {
@@ -144,6 +109,7 @@ watch([pluginId, pageId, navigationItem], () => {
 });
 onMounted(() => {
   window.addEventListener("norishell:plugin-special-permission-changed", handlePermissionChanged);
+  window.addEventListener("norishell:workspace-tab-context-changed", retryAfterTabMove);
   void load().catch((error: unknown) => {
     if (disposed) return;
     pageError.value = pageFailureCode(error);
@@ -152,6 +118,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   disposed = true;
   window.removeEventListener("norishell:plugin-special-permission-changed", handlePermissionChanged);
+  window.removeEventListener("norishell:workspace-tab-context-changed", retryAfterTabMove);
 });
 </script>
 

@@ -4,16 +4,18 @@ use norishell_core_api::*;
 use norishell_desktop_protocol::{
     DesktopFrame, DesktopInput, DesktopRect, EngineCommand, EngineError,
 };
-use tauri::{State, WebviewWindow, ipc::Response};
+use tauri::{AppHandle, State, Webview, WebviewWindow, ipc::Response};
 use tokio::sync::oneshot;
 
 type CoreResult<T> = Result<T, Box<CoreApiError>>;
 
 fn ordinary_window(
-    window: &WebviewWindow,
+    webview: &Webview,
     workspaces: &State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: &State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
+    expected_owner: &str,
 ) -> bool {
-    window.label() == "main" || workspaces.contains(window.label())
+    views.ordinary_owner(webview, workspaces).as_deref() == Ok(expected_owner)
 }
 #[tauri::command]
 pub(crate) fn desktop_availability() -> Vec<DesktopAvailability> {
@@ -172,6 +174,19 @@ fn map_error(meta: &RequestMeta, error: EngineError) -> Box<CoreApiError> {
     })
 }
 
+fn map_tab_error(meta: &RequestMeta, code: String) -> Box<CoreApiError> {
+    Box::new(CoreApiError {
+        code,
+        category: ErrorCategory::Conflict,
+        retry_strategy: RetryStrategy::RefreshSnapshot,
+        message_key: "desktop.errors.StaleInput".into(),
+        request_id: Some(meta.request_id.clone()),
+        diagnostic_id: None,
+        params: Default::default(),
+        conflict: None,
+    })
+}
+
 fn map_profile_error(
     meta: &RequestMeta,
     error: norishell_app_persistence::AppPersistenceError,
@@ -257,16 +272,69 @@ pub(crate) fn desktop_profile_delete(
         .map_err(|error| map_profile_error(&request.meta, error))
 }
 #[tauri::command]
-pub(crate) fn desktop_session_open(
+pub(crate) async fn desktop_session_open_owned(
     request: DesktopOpenRequest,
+    app: AppHandle,
+    webview: Webview,
     service: State<'_, DesktopService>,
     lifecycle: State<'_, crate::lifecycle::LifecycleState>,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
 ) -> CoreResult<DesktopSessionSummary> {
     let _permit = lifecycle.acquire_resource_creation(request.meta.request_id.clone())?;
-    let meta = request.meta.clone();
-    service
-        .open(request)
-        .map_err(|error| map_error(&meta, error))
+    norishell_app_persistence::validate_desktop_profile(&request.profile)
+        .map_err(|_| map_error(&request.meta, EngineError::InvalidConfiguration))?;
+    uuid::Uuid::parse_str(&request.operation_id)
+        .map_err(|_| map_error(&request.meta, EngineError::InvalidConfiguration))?;
+
+    // Serialize with native move/close and other child projection writes. The
+    // registry owns the handle before DesktopService can create the session.
+    let (operation, live) = views
+        .projection_operation(&webview)
+        .map_err(|error| map_tab_error(&request.meta, error))?;
+    let _operation = operation
+        .lock()
+        .map_err(|_| map_tab_error(&request.meta, "workspace_tab.unavailable".into()))?;
+    if !live.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(map_tab_error(
+            &request.meta,
+            "workspace_tab.view_missing".into(),
+        ));
+    }
+    let (id, kind, owner) = views
+        .projection_identity(&webview)
+        .map_err(|error| map_tab_error(&request.meta, error))?;
+    if kind != "desktop" || workspaces.owns_tab(&owner, &id).is_err() {
+        return Err(map_tab_error(
+            &request.meta,
+            "workspace_tab.wrong_owner".into(),
+        ));
+    }
+    let idle = serde_json::json!({
+        "schemaVersion": 1, "tabId": id, "profileId": request.profile.id,
+    });
+    let owned = serde_json::json!({
+        "schemaVersion": 1, "tabId": id, "sessionId": request.operation_id,
+        "generation": "1",
+    });
+    workspaces
+        .swap_child_projection(&app, &owner, &id, &kind, &idle, owned.clone())
+        .map_err(|error| map_tab_error(&request.meta, error))?;
+    match service.open(request.clone()) {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            if let Err(rollback) =
+                workspaces.swap_child_projection(&app, &owner, &id, &kind, &owned, idle)
+            {
+                eprintln!("desktop owned open rollback failed: open={error}, rollback={rollback}");
+                return Err(map_tab_error(
+                    &request.meta,
+                    "workspace_tab.projection_rollback_failed".into(),
+                ));
+            }
+            Err(map_error(&request.meta, error))
+        }
+    }
 }
 #[tauri::command]
 pub(crate) fn desktop_session_snapshot(
@@ -277,18 +345,49 @@ pub(crate) fn desktop_session_snapshot(
 #[tauri::command]
 pub(crate) async fn desktop_session_disconnect(
     request: DesktopSessionRequest,
+    webview: Webview,
     service: State<'_, DesktopService>,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
 ) -> CoreResult<()> {
+    require_owned_session(&request, &webview, &workspaces, &views)?;
     service
         .disconnect(&request.session_id, request.generation.get())
         .await
         .map_err(|error| map_error(&request.meta, error))
 }
-#[tauri::command]
-pub(crate) async fn desktop_session_close(
-    request: DesktopSessionRequest,
-    service: State<'_, DesktopService>,
+/// Only the Tab WebView whose Core record holds this session handle may end it.
+fn require_owned_session(
+    request: &DesktopSessionRequest,
+    webview: &Webview,
+    workspaces: &crate::workspace_windows::WorkspaceWindows,
+    views: &crate::workspace_tab_views::WorkspaceTabViews,
 ) -> CoreResult<()> {
+    let (id, kind, owner) = views
+        .projection_identity(webview)
+        .map_err(|error| map_tab_error(&request.meta, error))?;
+    if kind != "desktop"
+        || !workspaces
+            .owns_desktop_session(&owner, &id, &request.session_id, request.generation.get())
+            .map_err(|error| map_tab_error(&request.meta, error))?
+    {
+        return Err(map_tab_error(
+            &request.meta,
+            "workspace_tab.wrong_owner".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_session_close_owned(
+    request: DesktopSessionRequest,
+    webview: Webview,
+    service: State<'_, DesktopService>,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
+) -> CoreResult<()> {
+    require_owned_session(&request, &webview, &workspaces, &views)?;
     service
         .disconnect(&request.session_id, request.generation.get())
         .await
@@ -353,19 +452,21 @@ pub(crate) fn desktop_frame_get(
 #[tauri::command]
 pub(crate) async fn desktop_focus_change(
     request: DesktopFocusRequest,
-    window: WebviewWindow,
+    webview: Webview,
     workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     service: State<'_, DesktopService>,
     ssh: State<'_, crate::ssh_session_service::SshSessionService>,
 ) -> CoreResult<WireSequence> {
-    if !ordinary_window(&window, &workspaces) {
+    let window = webview.window();
+    if !ordinary_window(&webview, &workspaces, &views, window.label()) {
         return Err(map_error(&request.meta, EngineError::StaleInput));
     }
     let broker = ssh.focus_broker();
     broker
         .linearize(async {
             let mut focus = service.focus.lock().await;
-            if !ordinary_window(&window, &workspaces) {
+            if !ordinary_window(&webview, &workspaces, &views, window.label()) {
                 return Err(map_error(&request.meta, EngineError::StaleInput));
             }
             // A blur from a former window cannot revoke a newer window's input lease.
@@ -423,19 +524,21 @@ pub(crate) async fn desktop_focus_change(
 #[tauri::command]
 pub(crate) async fn desktop_input(
     request: DesktopInputRequest,
-    window: WebviewWindow,
+    webview: Webview,
     workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     service: State<'_, DesktopService>,
     ssh: State<'_, crate::ssh_session_service::SshSessionService>,
 ) -> CoreResult<()> {
-    if !ordinary_window(&window, &workspaces) {
+    let window = webview.window();
+    if !ordinary_window(&webview, &workspaces, &views, window.label()) {
         return Err(map_error(&request.meta, EngineError::StaleInput));
     }
     let broker = ssh.focus_broker();
     broker
         .linearize(async {
             let mut focus = service.focus.lock().await;
-            if !ordinary_window(&window, &workspaces) {
+            if !ordinary_window(&webview, &workspaces, &views, window.label()) {
                 return Err(map_error(&request.meta, EngineError::StaleInput));
             }
             let session = service
@@ -547,14 +650,16 @@ pub(crate) async fn desktop_input(
 #[tauri::command]
 pub(crate) async fn desktop_resolution_set(
     request: DesktopResolutionRequest,
-    window: WebviewWindow,
+    webview: Webview,
     workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     service: State<'_, DesktopService>,
 ) -> CoreResult<()> {
+    let window = webview.window();
     let session = service
         .session(&request.session_id, request.generation.get())
         .map_err(|error| map_error(&request.meta, error))?;
-    if !ordinary_window(&window, &workspaces) {
+    if !ordinary_window(&webview, &workspaces, &views, window.label()) {
         return Err(map_error(&request.meta, EngineError::StaleInput));
     }
     let summary = session.summary();
@@ -613,14 +718,16 @@ pub(crate) async fn desktop_resolution_set(
 #[tauri::command]
 pub(crate) fn desktop_clipboard_get(
     request: DesktopSessionRequest,
-    window: WebviewWindow,
+    webview: Webview,
     workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     service: State<'_, DesktopService>,
 ) -> CoreResult<Option<String>> {
+    let window = webview.window();
     let session = service
         .session(&request.session_id, request.generation.get())
         .map_err(|error| map_error(&request.meta, error))?;
-    if !ordinary_window(&window, &workspaces)
+    if !ordinary_window(&webview, &workspaces, &views, window.label())
         || !window.is_focused().unwrap_or(false)
         || !session.summary().profile.clipboard_enabled
     {

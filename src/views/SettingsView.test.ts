@@ -280,7 +280,7 @@ describe("Settings", () => {
     wrapper.unmount();
   });
 
-  it("persists startup, new-terminal, and single-Pane tab-close behavior choices", async () => {
+  it("persists startup, header density, new-terminal, and single-Pane tab-close choices", async () => {
     localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ locale: "en" }));
     const wrapper = await mountSettings();
 
