@@ -14,6 +14,7 @@ const native = vi.hoisted(() => ({
   flush: vi.fn(),
   emit: vi.fn(),
   take: vi.fn(async () => null as unknown),
+  autoHandoff: true,
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ label: viewLabel }) }));
@@ -70,7 +71,13 @@ describe("WorkspaceTabApp committed terminal close", () => {
     native.handlers.clear();
     native.closeOwn.mockReset().mockResolvedValue(undefined);
     native.flush.mockReset().mockResolvedValue(undefined);
-    native.emit.mockReset().mockResolvedValue(undefined);
+    native.emit.mockReset().mockImplementation(async (_target: string, event: string, payload: Record<string, unknown>) => {
+      // The owner shell hides this view and answers before the view tears down.
+      if (event === "workspace-tab-view-closing" && native.autoHandoff) {
+        native.handlers.get("workspace-tab-view-closing-ready")?.({ payload });
+      }
+    });
+    native.autoHandoff = true;
     native.take.mockReset().mockResolvedValue(null);
   });
 
@@ -101,6 +108,36 @@ describe("WorkspaceTabApp committed terminal close", () => {
     await flushPromises();
     expect(native.closeOwn).toHaveBeenCalledTimes(1);
     wrapper.unmount();
+  });
+
+  it("lets the shell show the next content before destroying its native view", async () => {
+    const { wrapper } = await mountTabApp();
+    native.autoHandoff = false;
+    window.dispatchEvent(new CustomEvent("norishell:terminal-tab-close-committed", { detail: [tabId] }));
+    await flushPromises();
+    const request = native.emit.mock.calls.find(([, event]) => event === "workspace-tab-view-closing");
+    expect(request?.[0]).toBe("main");
+    expect(request?.[2]).toMatchObject({ id: tabId, viewLabel });
+    expect(native.closeOwn).not.toHaveBeenCalled();
+    native.handlers.get("workspace-tab-view-closing-ready")?.({ payload: request![2] });
+    await flushPromises();
+    expect(native.closeOwn).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("still closes when the shell does not answer the handoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const { wrapper } = await mountTabApp();
+      native.autoHandoff = false;
+      window.dispatchEvent(new CustomEvent("norishell:terminal-tab-close-committed", { detail: [tabId] }));
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(native.closeOwn).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await flushPromises();
+      expect(native.closeOwn).toHaveBeenCalledTimes(1);
+      wrapper.unmount();
+    } finally { vi.useRealTimers(); }
   });
 
   it("ignores a committed notice while the Tab still has a Pane", async () => {

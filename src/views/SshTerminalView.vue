@@ -120,6 +120,7 @@ import {
 } from "../terminal-workspace-handoff";
 import { isWorkspaceChildWindow, isWorkspaceTabView } from "../workspace-window-context";
 import { showWorkspaceTabFailure } from "../workspace-tab-errors";
+import { handOffClosingWorkspaceTabs, restoreClosedWorkspaceTabs } from "../workspace-tab-close-handoff";
 import {
   isActiveLocalSession,
   isActivePluginSession,
@@ -694,6 +695,18 @@ function removeTab(tabId: string) {
   }
 }
 
+/**
+ * Removes Tabs that have nothing left to close. In a Tab WebView the shell first shows
+ * the next content and hides this view, so the empty workspace never flashes.
+ */
+function removeClosedTabs(tabIds: readonly string[]) {
+  void handOffClosingWorkspaceTabs(tabIds).then(() => {
+    const present = tabIds.filter((tabId) => tabs.value.some((tab) => tab.tabId === tabId));
+    for (const tabId of present) removeTab(tabId);
+    if (present.length) notifyCommittedTabClosures(present);
+  });
+}
+
 function notifyCommittedTabClosures(tabIds: readonly string[]) {
   window.dispatchEvent(new CustomEvent("norishell:terminal-tab-close-committed", { detail: tabIds }));
 }
@@ -717,8 +730,7 @@ function closePaneView(tabId: string, paneId: string) {
   if (tab.activePaneId === paneId) void clearTerminalInputFocus();
   paneRefs.delete(paneId);
   if (tab.panes.length === 1) {
-    removeTab(tabId);
-    notifyCommittedTabClosures([tabId]);
+    removeClosedTabs([tabId]);
     return;
   }
   const closed = closeTerminalPane(tab.layout, paneId);
@@ -749,8 +761,7 @@ function requestCloseTab(tabId: string): boolean {
   if (!tab) return false;
   const openPaneIds = tab.panes.filter((pane) => !paneIsClosed(pane)).map((pane) => pane.paneId);
   if (openPaneIds.length === 0) {
-    removeTab(tabId);
-    notifyCommittedTabClosures([tabId]);
+    removeClosedTabs([tabId]);
     return true;
   }
   activateTab(tabId);
@@ -777,8 +788,7 @@ function requestCloseTabs(tabIds: readonly string[], confirmed = false): boolean
     .filter((tab) => targetIds.includes(tab.tabId))
     .flatMap((tab) => tab.panes.filter((pane) => !paneIsClosed(pane)).map((pane) => pane.paneId));
   if (!paneIds.length) {
-    for (const tabId of targetIds) removeTab(tabId);
-    notifyCommittedTabClosures(targetIds);
+    removeClosedTabs(targetIds);
     return true;
   }
   activateTab(targetIds[0]!);
@@ -869,6 +879,8 @@ function restoreOptimisticClose(
     (entry) => entry.tab.tabId === snapshot.activeTabId,
   ) ? snapshot.activeTabId : candidate.tabIds[0]!;
   void nextTick(() => activateTab(restoredActiveTabId));
+  // The shell hid this view for the close; show the restored Tab and its retry prompt.
+  void restoreClosedWorkspaceTabs(candidate.tabIds);
   failConfirmedClose(candidate, code);
 }
 
@@ -911,10 +923,12 @@ async function confirmCloseTab() {
   closeTabErrorVisible.value = false;
 
   if (candidate.mode !== "pane") {
+    closeConfirmationVisible.value = false;
+    // Show the next content before this Tab turns into an empty workspace.
+    await handOffClosingWorkspaceTabs(candidate.tabIds);
     const snapshot = captureOptimisticClose(candidate);
     const attempt = ++optimisticTabCloseAttempt;
     optimisticTabCloseInFlight = true;
-    closeConfirmationVisible.value = false;
     for (const tabId of candidate.tabIds) removeTab(tabId);
     startCloseTerminalsTimeout(
       candidate,

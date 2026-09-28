@@ -10,6 +10,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { useRouteReveal } from "../routeReveal";
+import { handOffClosingWorkspaceTabs } from "../workspace-tab-close-handoff";
 import { onSavedConnectionsChanged } from "../saved-connections";
 import { recordRecentFileHost } from "../recent-file-hosts";
 
@@ -1051,6 +1052,8 @@ async function requestCloseFileTab(confirmed = false): Promise<boolean> {
     }
   }
   if (!currentTabSessions().length) {
+    // The shell shows the next content before this Tab's workspace empties.
+    await handOffClosingWorkspaceTabs([props.workspaceTabId]);
     workspaceTabs.finishCloseFileTab(props.workspaceTabId);
     return true;
   }
@@ -1077,6 +1080,7 @@ async function closeFileTabSessions(): Promise<void> {
     for (const session of currentTabSessions()) {
       await disconnectClosedSftpSession(session.sessionId, session.generation);
     }
+    await handOffClosingWorkspaceTabs([props.workspaceTabId]);
     closeFileTabConfirm.value = false;
     const resolve = settleFileTabClose;
     settleFileTabClose = null;

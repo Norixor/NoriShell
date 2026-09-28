@@ -13,6 +13,7 @@ import type {
 import NvxTerminalTabBar from "../components/terminal/NvxTerminalTabBar.vue";
 import { createUuidV7 } from "../core-api/ids";
 import { i18n } from "../locales";
+import { registerWorkspaceTabCloseHandoff } from "../workspace-tab-close-handoff";
 import { useUiStore } from "../stores/ui";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { planTerminalWorkspaceRestore } from "../workspace-tab-terminal-restore";
@@ -1982,6 +1983,42 @@ describe("SshTerminalView route and Header behavior", () => {
     expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
     expect(document.body.textContent).toContain("至少一个终端未能关闭");
     wrapper.unmount();
+  });
+
+  it("keeps the closing Tab on screen until the shell took over, and hands it back on rollback", async () => {
+    client.fetchSshSessionSnapshot.mockResolvedValue({
+      snapshotRevision: "9",
+      sessions: [runningSession],
+    });
+    const { wrapper } = await mountShell("/terminal", { restore: true });
+    const handoff = deferred<void>();
+    const closing = vi.fn<(tabIds: readonly string[]) => Promise<void>>(() => handoff.promise);
+    const restored = vi.fn(async () => undefined);
+    const stop = registerWorkspaceTabCloseHandoff({ closing, restored });
+    try {
+      disconnectForClose.mockImplementationOnce(() => new Promise<void>(() => undefined));
+      document.querySelector<HTMLButtonElement>('button[aria-label^="关闭标签页："]')?.click();
+      await flushPromises();
+      Array.from(document.querySelectorAll<HTMLButtonElement>(".nvx-dialog__actions button"))
+        .find((candidate) => candidate.textContent?.includes("断开 1 个会话"))?.click();
+      await flushPromises();
+      // The shell has not shown the next content yet: the Tab must not turn into an empty workspace.
+      expect(closing).toHaveBeenCalledTimes(1);
+      expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
+      expect(disconnectForClose).not.toHaveBeenCalled();
+      vi.useFakeTimers();
+      handoff.resolve(undefined);
+      await flushPromises();
+      expect(document.querySelectorAll('[role="tab"]')).toHaveLength(0);
+      expect(disconnectForClose).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await flushPromises();
+      expect(document.querySelectorAll('[role="tab"]')).toHaveLength(1);
+      expect(restored).toHaveBeenCalledWith(closing.mock.calls[0]![0]);
+    } finally {
+      stop();
+      wrapper.unmount();
+    }
   });
 
   it("closes only the confirmed active Pane and keeps the sibling session visible", async () => {
