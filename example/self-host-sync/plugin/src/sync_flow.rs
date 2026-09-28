@@ -26,8 +26,18 @@ pub enum Phase {
     Checkpoint,
 }
 
+/// Object counts behind a Refresh "different" result, as the current policies
+/// would resolve them. Review counts need an explicit decision before sync.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pending {
+    pub upload: usize,
+    pub download: usize,
+    pub review: usize,
+}
+
 pub struct Flow {
     pub intent: Intent,
+    pub pending: Option<Pending>,
     pub phase: Phase,
     pub local: Value,
     pub remote: Value,
@@ -64,6 +74,7 @@ impl Flow {
     pub fn new(intent: Intent, url: String, conflict: &str, deletion: &str) -> Self {
         Self {
             intent,
+            pending: None,
             phase: Phase::Snapshot,
             local: Value::Null,
             remote: Value::Null,
@@ -178,14 +189,28 @@ impl Flow {
         let Ok(remote) = items(&self.remote) else {
             return invalid_response();
         };
-        let equal = same_content(&local, &remote);
         if self.intent == Intent::Refresh {
+            // Clock-only drift (for example a no-op save) is not a change to sync.
+            if same_content(&local, &remote) {
+                return Transition::Finished {
+                    difference: "equal",
+                    review: false,
+                };
+            }
+            let Ok(pending) =
+                pending_changes(&local, &remote, self.conflict_policy, self.deletion_policy)
+            else {
+                return invalid_response();
+            };
+            self.pending = Some(pending);
             return Transition::Finished {
-                difference: if equal { "equal" } else { "different" },
+                difference: "different",
                 review: false,
             };
         }
-        if equal && self.remote["migrationRequired"] != true {
+        // Core's baseline covers per-object clocks, so only an exact match can be
+        // checkpointed directly; clock drift is converged through compose.
+        if same_exact(&local, &remote) && self.remote["migrationRequired"] != true {
             self.phase = Phase::Checkpoint;
             let Some(download) = &self.download else {
                 return invalid_response();
@@ -451,7 +476,7 @@ impl Flow {
             ) else {
                 return invalid_response();
             };
-            if same_content(&composed, &remote) {
+            if same_exact(&composed, &remote) {
                 self.phase = Phase::Apply;
                 return Transition::Call(json!({"kind":"dataApply","request":{
                     "profileId":"primary","categories":sync_policy::CATEGORIES,
@@ -545,6 +570,7 @@ pub fn display_rows(value: &Value) -> Vec<Value> {
         .collect()
 }
 
+/// Same objects, content and tombstones; update clocks are ignored.
 pub fn same_content(local: &[Item], remote: &[Item]) -> bool {
     local.len() == remote.len()
         && local.iter().all(|left| {
@@ -552,9 +578,57 @@ pub fn same_content(local: &[Item], remote: &[Item]) -> bool {
                 left.id == right.id
                     && left.equality_tag == right.equality_tag
                     && left.deleted == right.deleted
-                    && left.updated_at == right.updated_at
             })
         })
+}
+
+/// Same content and the same update clocks, as Core's baseline digest requires.
+pub fn same_exact(local: &[Item], remote: &[Item]) -> bool {
+    same_content(local, remote)
+        && local.iter().all(|left| {
+            remote
+                .iter()
+                .any(|right| left.id == right.id && left.updated_at == right.updated_at)
+        })
+}
+
+fn pending_changes(
+    local: &[Item],
+    remote: &[Item],
+    conflict_policy: Policy,
+    deletion_policy: Policy,
+) -> Result<Pending, ()> {
+    let selection = sync_policy::select(local, remote, &[], conflict_policy, deletion_policy)
+        .map_err(|_| ())?;
+    let changed = |source: Source, handle: &str| {
+        let (chosen, other) = match source {
+            Source::Local => (local, remote),
+            Source::Remote => (remote, local),
+        };
+        chosen
+            .iter()
+            .find(|item| item.handle == handle)
+            .is_some_and(|item| {
+                !other.iter().any(|peer| {
+                    peer.id == item.id
+                        && peer.equality_tag == item.equality_tag
+                        && peer.deleted == item.deleted
+                })
+            })
+    };
+    let mut pending = Pending {
+        review: selection.conflicts.len(),
+        ..Pending::default()
+    };
+    for chosen in selection.objects.iter().chain(&selection.deletions) {
+        if changed(chosen.source, &chosen.handle) {
+            match chosen.source {
+                Source::Local => pending.upload += 1,
+                Source::Remote => pending.download += 1,
+            }
+        }
+    }
+    Ok(pending)
 }
 
 fn objects_empty(value: &Value) -> bool {
@@ -594,6 +668,83 @@ mod tests {
         json!({"category":"hosts","kind":"host","stableId":"one","objectHandle":"same-identity",
             "equalityTag":tag,"updateTimeUnixMs":time,"tombstone":false,"dependency":false,
             "display":{"kind":"host","label":"One","address":"example.org","port":22}})
+    }
+
+    fn refresh_flow(local: Value, remote: Value) -> Flow {
+        let mut flow = Flow::new(
+            Intent::Refresh,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
+        );
+        flow.local = json!({"snapshotHandle":"local","objects":[local]});
+        flow.remote = json!({"inspectionHandle":"remote","objects":[remote]});
+        flow
+    }
+
+    #[test]
+    fn refresh_ignores_clock_only_drift() {
+        let mut flow = refresh_flow(object("same", 30), object("same", 10));
+        assert!(matches!(
+            flow.decide(),
+            Transition::Finished {
+                difference: "equal",
+                ..
+            }
+        ));
+        assert!(flow.pending.is_none());
+    }
+
+    #[test]
+    fn refresh_counts_the_side_that_would_change() {
+        let mut flow = refresh_flow(object("edited", 30), object("old", 10));
+        assert!(matches!(
+            flow.decide(),
+            Transition::Finished {
+                difference: "different",
+                ..
+            }
+        ));
+        assert_eq!(
+            flow.pending,
+            Some(Pending {
+                upload: 1,
+                download: 0,
+                review: 0
+            })
+        );
+        let mut flow = refresh_flow(object("old", 10), object("edited", 30));
+        flow.decide();
+        assert_eq!(flow.pending.map(|pending| pending.download), Some(1));
+        let mut flow = refresh_flow(object("left", 10), object("right", 10));
+        flow.decide();
+        assert_eq!(flow.pending.map(|pending| pending.review), Some(1));
+    }
+
+    #[test]
+    fn clock_only_drift_with_newer_remote_applies_without_upload() {
+        let mut flow = Flow::new(
+            Intent::Sync,
+            "https://example.org/exchange".into(),
+            "newest",
+            "newest",
+        );
+        flow.local = json!({"snapshotHandle":"local","objects":[object("same",10)]});
+        flow.remote = json!({"inspectionHandle":"remote","objects":[object("same",20)],"migrationRequired":false});
+        flow.download = Some(Receipt {
+            handle: "get-receipt".into(),
+            status: 200,
+            blob: Some("get-blob".into()),
+            etag: Some("\"v1\"".into()),
+        });
+        let Transition::Call(compose) = flow.decide() else {
+            panic!("clock drift must be composed");
+        };
+        assert_eq!(compose["request"]["decisions"][0]["source"], "remote");
+        assert!(matches!(
+            flow.receive(json!({"kind":"dataCompose","composedHandle":"composed","objects":[object("same",20)]})),
+            Transition::Call(call) if call["kind"] == "dataApply"
+        ));
     }
 
     #[test]

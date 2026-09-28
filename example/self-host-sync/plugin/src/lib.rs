@@ -29,6 +29,9 @@ struct SelfHostSync {
     api: api_chain::ApiChain,
     flow: Option<sync_flow::Flow>,
     pending_terminal: Option<sync_flow::Transition>,
+    /// A data flow waiting for the account status of the same action. Core
+    /// registers the account session only through that status request.
+    pending_intent: Option<(String, sync_flow::Intent)>,
     cache_dirty: bool,
 }
 
@@ -46,6 +49,7 @@ struct Summary {
     local_credentials: u64,
     remote_credentials: Option<u64>,
     remote_counts_stale: bool,
+    pending: Option<sync_flow::Pending>,
     error: Option<String>,
     diagnostic: Option<String>,
     http_status: Option<u16>,
@@ -91,11 +95,21 @@ impl Plugin for SelfHostSync {
                 self.action(&request.request_id, &body)
             }
             PluginHostMessageKind::SshSyncResult => {
-                if matches!(
-                    body["actionId"].as_str(),
-                    Some("sync.pageOpened" | "sync.status" | "sync.login" | "sync.logout")
-                ) {
+                let action = body["actionId"].as_str();
+                let awaiting_status = self
+                    .pending_intent
+                    .as_ref()
+                    .is_some_and(|(pending, _)| Some(pending.as_str()) == action);
+                if awaiting_status
+                    || matches!(
+                        action,
+                        Some("sync.pageOpened" | "sync.status" | "sync.login" | "sync.logout")
+                    )
+                {
                     self.record_account_result(&body);
+                    if let Some(outputs) = self.continue_after_status(&request.request_id, &body)? {
+                        return Ok(outputs);
+                    }
                 } else {
                     self.record_result(&body);
                 }
@@ -151,34 +165,32 @@ impl SelfHostSync {
             .get("actionId")
             .and_then(Value::as_str)
             .ok_or(PluginError::InvalidRequest)?;
+        self.pending_intent = None;
+        // Core admits one action per instance at a time, so a new action proves any
+        // earlier chain has ended. A chain cut off by leaving the page or a fence
+        // never gets a callback; its handles expire in Core by TTL.
+        if self.flow.take().is_some() || self.pending_terminal.take().is_some() {
+            self.api = api_chain::ApiChain::default();
+            self.browser.stale = true;
+        }
         if action == "sync.pageOpened" && self.origin.is_none() {
             return self.document_output(request_id);
         }
-        if action == "sync.pageOpened" {
+        if matches!(action, "sync.pageOpened" | "sync.refresh" | "sync.run") {
+            // Opening the page refreshes like the button does. Core keeps the page
+            // hook in background mode, so it reports Vault or key steps instead of
+            // prompting; an explicit click can then continue them.
+            let intent = if action == "sync.run" {
+                sync_flow::Intent::Sync
+            } else {
+                sync_flow::Intent::Refresh
+            };
+            self.pending_intent = Some((action.to_owned(), intent));
             return Ok(vec![output(
                 request_id,
                 "ssh.sync.request",
                 &json!({"action":"status", "profileId":PROFILE, "auth":self.auth()?}),
             )?]);
-        }
-        if matches!(action, "sync.refresh" | "sync.run") {
-            if self.flow.is_some() {
-                return self.document_output(request_id);
-            }
-            self.api = api_chain::ApiChain::default();
-            self.flow = Some(sync_flow::Flow::new(
-                if action == "sync.refresh" {
-                    sync_flow::Intent::Refresh
-                } else {
-                    sync_flow::Intent::Sync
-                },
-                self.endpoint("exchange")?,
-                &self.conflict_policy,
-                &self.deletion_policy,
-            ));
-            return self
-                .api
-                .request(request_id, sync_flow::Flow::snapshot_request());
         }
         let request = match action {
             "sync.status" => json!({
@@ -198,6 +210,52 @@ impl SelfHostSync {
             self.cache_dirty = true;
         }
         Ok(vec![output(request_id, "ssh.sync.request", &request)?])
+    }
+
+    /// Starts the waiting data flow once the account is known to be usable.
+    /// Core accepts this continuation only after an error-free status.
+    fn continue_after_status(
+        &mut self,
+        request_id: &str,
+        body: &Value,
+    ) -> Result<Option<Vec<PluginRuntimeOutput>>, PluginError> {
+        let Some((action, intent)) = self.pending_intent.take() else {
+            return Ok(None);
+        };
+        if body["actionId"].as_str() != Some(action.as_str()) {
+            return Ok(None);
+        }
+        let result = &body["result"];
+        if !result["stableErrorCode"].is_null() {
+            return Ok(None);
+        }
+        if result["accountState"] == "connected" && self.flow.is_none() {
+            self.api = api_chain::ApiChain::default();
+            self.flow = Some(sync_flow::Flow::new(
+                intent,
+                self.endpoint("exchange")?,
+                &self.conflict_policy,
+                &self.deletion_policy,
+            ));
+            return self
+                .api
+                .request(request_id, sync_flow::Flow::snapshot_request())
+                .map(Some);
+        }
+        // An explicit click explains why nothing ran; opening the page stays quiet.
+        if action != "sync.pageOpened"
+            && let Some(summary) = self.last.as_mut()
+        {
+            summary.error = Some(
+                if result["accountState"] == "expired" {
+                    "authorizationExpired"
+                } else {
+                    "accountNotConnected"
+                }
+                .to_owned(),
+            );
+        }
+        Ok(None)
     }
 
     fn broker_result(
@@ -281,6 +339,9 @@ impl SelfHostSync {
                     "remoteHostCount":count(&remote_rows,"hosts"),"remoteCredentialCount":count(&remote_rows,"credentials"),
                     "remoteDesktopProfileCount":count(&remote_rows,"desktopProfiles")
                 }}));
+                if let Some(last) = self.last.as_mut() {
+                    last.pending = flow.pending;
+                }
                 self.document_output(request_id)
             }
             sync_flow::Transition::Failed { code, http_status } => {
@@ -396,6 +457,7 @@ impl SelfHostSync {
             local_credentials: result["localCredentialCount"].as_u64().unwrap_or(0),
             remote_credentials: result["remoteCredentialCount"].as_u64(),
             remote_counts_stale: false,
+            pending: None,
             error: result["stableErrorCode"].as_str().map(str::to_owned),
             diagnostic: result["diagnosticCode"].as_str().map(str::to_owned),
             http_status: result["httpStatus"]
@@ -424,8 +486,10 @@ impl SelfHostSync {
                     || next.remote_credentials.is_some();
             }
         }
-        if body["actionId"] == "sync.refresh"
-            && let Some(previous) = &self.last
+        if matches!(
+            body["actionId"].as_str(),
+            Some("sync.refresh" | "sync.pageOpened")
+        ) && let Some(previous) = &self.last
             && previous.remote_updated
         {
             next.remote_updated = true;
@@ -623,9 +687,12 @@ impl SelfHostSync {
             } else {
                 self.error_message(error)
             };
-            nodes.push(
-                json!({"kind":"status","nodeId":"errorNotice","label":label,"tone":"danger"}),
-            );
+            let tone = if !remote_updated && expected_state(error) {
+                "warning"
+            } else {
+                "danger"
+            };
+            nodes.push(json!({"kind":"status","nodeId":"errorNotice","label":label,"tone":tone}));
         }
         json!({"schemaVersion":1,"rootNodeId":"root","nodes":nodes})
     }
@@ -660,6 +727,8 @@ impl SelfHostSync {
                     "云端已更新，本机尚未完成",
                     "Cloud updated; local completion pending",
                 )
+            } else if last.error.as_deref().is_some_and(expected_state) {
+                self.t("需要你继续操作", "Action needed")
             } else {
                 self.t("操作未完成", "Action incomplete")
             };
@@ -712,6 +781,22 @@ impl SelfHostSync {
         } else {
             ""
         };
+        let pending = last
+            .pending
+            .filter(|_| last.difference == "different" && last.error.is_none())
+            .map_or_else(String::new, |pending| {
+                if self.locale == "en" {
+                    format!(
+                        " · To upload {} · To download {} · To confirm {}",
+                        pending.upload, pending.download, pending.review
+                    )
+                } else {
+                    format!(
+                        " · 待上传 {} · 待下载 {} · 需确认 {}",
+                        pending.upload, pending.download, pending.review
+                    )
+                }
+            });
         let stale = if last.remote_counts_stale {
             self.t(
                 " · 云端数量来自上次成功读取",
@@ -722,10 +807,11 @@ impl SelfHostSync {
         };
         if self.locale == "en" {
             format!(
-                "Account: {} · Operation: {} · Difference: {} · Hosts {} / {} · Desktops {} / {} · Credentials {} / {}{}{}{}",
+                "Account: {} · Operation: {} · Difference: {}{} · Hosts {} / {} · Desktops {} / {} · Credentials {} / {}{}{}{}",
                 self.account_label(&last.account),
                 self.operation_label(&last.operation),
                 self.difference_label(&last.difference),
+                pending,
                 last.local_hosts,
                 remote(last.remote_hosts),
                 last.local_desktops,
@@ -741,10 +827,11 @@ impl SelfHostSync {
             )
         } else {
             format!(
-                "账户：{} · 操作：{} · 差异：{} · 主机 {} / {} · 远程桌面 {} / {} · 凭据 {} / {}{}{}{}",
+                "账户：{} · 操作：{} · 差异：{}{} · 主机 {} / {} · 远程桌面 {} / {} · 凭据 {} / {}{}{}{}",
                 self.account_label(&last.account),
                 self.operation_label(&last.operation),
                 self.difference_label(&last.difference),
+                pending,
                 last.local_hosts,
                 remote(last.remote_hosts),
                 last.local_desktops,
@@ -972,6 +1059,20 @@ impl SelfHostSync {
     }
 }
 
+/// States that need a user step rather than signalling a failure, for example a
+/// background page refresh that may not unlock the Vault or recover a key.
+fn expected_state(code: &str) -> bool {
+    matches!(
+        code,
+        "vaultMissing"
+            | "vaultLocked"
+            | "vaultRequiresReload"
+            | "interactionRequired"
+            | "accountNotConnected"
+            | "authorizationExpired"
+    )
+}
+
 fn canonical_origin(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     let value = if trimmed.contains("://") {
@@ -1001,7 +1102,7 @@ norishell_plugin_sdk::export_plugin!(SelfHostSync);
 #[cfg(test)]
 mod tests {
     use super::{SelfHostSync, canonical_origin, sync_flow};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn failed_exchange_releases_its_handles_before_showing_the_error() {
@@ -1255,10 +1356,160 @@ mod tests {
             .action("request", &json!({"actionId":"sync.run"}))
             .unwrap();
         assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].kind, "ssh.sync.request");
+        assert!(plugin.flow.is_none());
+        let outputs = plugin
+            .continue_after_status(
+                "callback",
+                &json!({"actionId":"sync.run","result":{"accountState":"connected","operationState":"idle"}}),
+            )
+            .unwrap()
+            .expect("data flow after status");
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].kind, "api.request");
         assert!(matches!(
             plugin.flow.as_ref().expect("new flow").phase,
             sync_flow::Phase::Snapshot
         ));
+    }
+
+    #[test]
+    fn page_open_refreshes_only_after_an_error_free_connected_status() {
+        let mut plugin = SelfHostSync {
+            locale: "en".to_owned(),
+            origin: Some("https://example.org".to_owned()),
+            ..Default::default()
+        };
+        let status = |state: &str, error: Value| {
+            json!({"actionId":"sync.pageOpened","result":{
+                "accountState":state,"operationState":"idle","stableErrorCode":error}})
+        };
+        for (state, error) in [
+            ("connected", json!("vaultLocked")),
+            ("disconnected", Value::Null),
+        ] {
+            plugin
+                .action("request", &json!({"actionId":"sync.pageOpened"}))
+                .unwrap();
+            plugin.record_account_result(&status(state, error.clone()));
+            assert!(
+                plugin
+                    .continue_after_status("callback", &status(state, error))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(plugin.flow.is_none());
+        }
+        // Opening the page while signed out is not an error.
+        assert!(plugin.last.as_ref().unwrap().error.is_none());
+
+        // A stale intent never follows a different action's status.
+        plugin
+            .action("request", &json!({"actionId":"sync.pageOpened"}))
+            .unwrap();
+        plugin
+            .action("request", &json!({"actionId":"sync.status"}))
+            .unwrap();
+        assert!(
+            plugin
+                .continue_after_status(
+                    "callback",
+                    &json!({"actionId":"sync.status","result":{"accountState":"connected"}})
+                )
+                .unwrap()
+                .is_none()
+        );
+
+        plugin
+            .action("request", &json!({"actionId":"sync.pageOpened"}))
+            .unwrap();
+        let outputs = plugin
+            .continue_after_status("callback", &status("connected", Value::Null))
+            .unwrap()
+            .expect("page open refresh");
+        assert_eq!(outputs[0].kind, "api.request");
+        assert!(
+            plugin
+                .flow
+                .as_ref()
+                .is_some_and(|flow| flow.intent == sync_flow::Intent::Refresh)
+        );
+    }
+
+    #[test]
+    fn a_new_action_recovers_from_an_interrupted_chain() {
+        let mut plugin = SelfHostSync {
+            origin: Some("https://example.org".to_owned()),
+            ..Default::default()
+        };
+        plugin
+            .action("request", &json!({"actionId":"sync.pageOpened"}))
+            .unwrap();
+        plugin
+            .continue_after_status(
+                "callback",
+                &json!({"actionId":"sync.pageOpened","result":{"accountState":"connected"}}),
+            )
+            .unwrap()
+            .expect("refresh chain");
+        // The page closed mid-chain: no broker callback ever arrives.
+        let outputs = plugin
+            .action("request", &json!({"actionId":"sync.refresh"}))
+            .unwrap();
+        assert_eq!(outputs[0].kind, "ssh.sync.request");
+        assert!(plugin.flow.is_none());
+        let outputs = plugin
+            .continue_after_status(
+                "callback",
+                &json!({"actionId":"sync.refresh","result":{"accountState":"connected"}}),
+            )
+            .unwrap()
+            .expect("fresh chain");
+        assert_eq!(outputs[0].kind, "api.request");
+    }
+
+    #[test]
+    fn expected_states_are_warnings_not_failures() {
+        let mut plugin = SelfHostSync {
+            locale: "en".to_owned(),
+            origin: Some("https://example.org".to_owned()),
+            ..Default::default()
+        };
+        plugin.record_result(&json!({"actionId":"sync.pageOpened","result":{
+            "accountState":"connected","operationState":"failed","stableErrorCode":"vaultLocked"}}));
+        let document = plugin.document();
+        let notice = document["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["nodeId"] == "errorNotice")
+            .unwrap();
+        assert_eq!(notice["tone"], "warning");
+        assert_eq!(plugin.sync_state_label(), "Action needed");
+    }
+
+    #[test]
+    fn explicit_refresh_explains_a_missing_sign_in() {
+        let mut plugin = SelfHostSync {
+            locale: "en".to_owned(),
+            origin: Some("https://example.org".to_owned()),
+            ..Default::default()
+        };
+        plugin
+            .action("request", &json!({"actionId":"sync.refresh"}))
+            .unwrap();
+        let body = json!({"actionId":"sync.refresh","result":{"accountState":"disconnected","operationState":"idle"}});
+        plugin.record_account_result(&body);
+        assert!(
+            plugin
+                .continue_after_status("callback", &body)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            plugin.last.as_ref().unwrap().error.as_deref(),
+            Some("accountNotConnected")
+        );
     }
 
     #[test]

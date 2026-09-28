@@ -118,7 +118,7 @@ fn describe_text(request: &PluginHostRequest) -> Result<String, PluginError> {
 | `protocolEvent` | protocol provider 生命周期 | 用 SDK `protocol_event` / `protocol_response` 处理字节与状态 |
 | `terminalObservation` | 已获准的终端观察 | 只处理授权范围内的观察结果 |
 | `invoke` | 宿主分派的插件调用 | 按该功能的 payload 契约处理，不等同于任意用户授权 |
-| `sshSyncResult` | SSH 同步专用结果 | 仅实现相应集成的插件需要处理 |
+| `sshSyncResult` | SSH 同步专用结果 | 仅实现相应集成的插件需要处理；通常返回一个替换 document。Core API 1.90 起，错误为空的 `status` 结果也可只返回一个 `api.request`，在同一动作内继续 broker 调用链，沿用原动作的前台/后台权限 |
 
 同一 Wasm 实例的 `handle` 调用由宿主串行执行。插件内不需要自行创建事件循环或网络线程；把需要跨消息的状态保存在插件结构体中，并处理禁用、重启、资源关闭等生命周期变化。
 
