@@ -38,6 +38,15 @@ export interface WorkspacePageTab {
   iconName: string | null;
 }
 
+/** A saved Host to open in the Terminal: from a route query or a new Tab's bootstrap intent. */
+export interface TerminalHostOpenRequest {
+  hostId: string;
+  /** Consumed once; a repeated id never opens a second connection. */
+  operationId?: string;
+  source?: string;
+  pluginAuthorizationToken?: string;
+}
+
 export interface TerminalHeaderController {
   /** Create this child WebView's first Tab with the id reserved by the native manager. */
   createInitialTab?(id: string, behavior: "welcome" | "local", initialLocalOpen?: {
@@ -73,6 +82,8 @@ export interface TerminalHeaderController {
   closeMany(tabIds: readonly string[], confirmed?: boolean): boolean;
   quickConnect(target?: string): boolean;
   openTelnet(): boolean;
+  /** Resolves once the Pane shows the Host's connecting or interactive step, not after it connects. */
+  openHost?(request: TerminalHostOpenRequest): Promise<void>;
   deactivate(): Promise<boolean> | void;
   toggleQuickCommands(): void;
   runShortcut?(commandId: ShortcutCommandId): void;

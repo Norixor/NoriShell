@@ -1,6 +1,7 @@
 import { createPinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createMemoryHistory, createRouter } from "vue-router";
+import { defineComponent, h } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18n } from "../locales";
@@ -31,6 +32,7 @@ vi.mock("../workspace-tab-windows", async (importOriginal) => ({
   getWorkspaceTabContext: vi.fn(async () => ({ id: tabId, ownerWindow: "main" })),
   takeWorkspaceTabBootstrap: native.take,
   closeOwnWorkspaceTabView: native.closeOwn,
+  updateOwnWorkspaceTabProjection: vi.fn(async () => undefined),
 }));
 vi.mock("../terminal-workspace-persistence", async (importOriginal) => ({
   ...await importOriginal<typeof import("../terminal-workspace-persistence")>(),
@@ -159,6 +161,77 @@ describe("WorkspaceTabApp committed terminal close", () => {
     expect(native.closeOwn).not.toHaveBeenCalled();
     expect(native.emit).toHaveBeenCalledWith("main", "workspace-tab-view-close-failed",
       expect.objectContaining({ id: tabId, code: "workspace_tab.layout_not_durable" }));
+    wrapper.unmount();
+  });
+});
+
+describe("WorkspaceTabApp new Terminal intent", () => {
+  beforeEach(() => {
+    window.history.replaceState({}, "", `/workspace-tab.html?tabId=${tabId}`);
+    native.handlers.clear();
+    native.emit.mockReset().mockResolvedValue(undefined);
+    native.take.mockReset().mockResolvedValue(null);
+  });
+  afterEach(() => { window.history.replaceState({}, "", "/"); });
+
+  async function mountWithTerminal(openHost: (request: unknown) => Promise<void>) {
+    const pinia = createPinia();
+    const store = useWorkspaceTabsStore(pinia);
+    const rendered: string[] = [];
+    const project = (label: string) => store.syncTerminalState({ tabs: [{ groupId: tabId, label, stateLabel: "" }],
+      activeTabId: tabId, busy: false, activationBlocked: false, quickCommandsOpen: false });
+    const TerminalStub = defineComponent({
+      setup() {
+        store.registerTerminalController({
+          createInitialTab: async () => { rendered.push("welcome"); project("New connection"); },
+          snapshotTabHandoff: async () => ({}) as never,
+          openHost: async (request: unknown) => { await openHost(request); rendered.push("host"); project("prod-db"); },
+        } as unknown as Parameters<typeof store.registerTerminalController>[0]);
+        return () => h("div");
+      },
+    });
+    const router = createRouter({ history: createMemoryHistory(), routes: [
+      { path: "/workspace-tab-idle", component: { template: "<div />" } },
+      { path: "/terminal", component: TerminalStub },
+    ] });
+    await router.push("/workspace-tab-idle");
+    await router.isReady();
+    const wrapper = mount(WorkspaceTabApp, { global: { plugins: [pinia, router, i18n] } });
+    await flushPromises();
+    return { wrapper, rendered };
+  }
+
+  const bootstrapWith = (intent: unknown) => native.handlers.get("workspace-tab-view-bootstrap")?.({ payload: {
+    id: tabId, kind: "terminal", mode: "new", route: "/terminal", ownerWindow: "main", seed: { behavior: "welcome", intent },
+  } });
+  const events = () => native.emit.mock.calls.map(([, event, payload]) => ({ event, payload: payload as Record<string, unknown> }));
+
+  it("opens the Host before reporting bootstrapped, and publishes the Host title first", async () => {
+    const openHost = vi.fn(async () => undefined);
+    const { wrapper, rendered } = await mountWithTerminal(openHost);
+    bootstrapWith({ type: "open-host", hostId: "host-1", connectOperationId: "op-1", source: "overview" });
+    await flushPromises();
+    expect(openHost).toHaveBeenCalledWith({ hostId: "host-1", operationId: "op-1", source: "overview",
+      pluginAuthorizationToken: undefined });
+    const all = events();
+    const summary = all.findIndex((item) => item.event === "workspace-tab-view-summary" && item.payload.label === "prod-db");
+    const ready = all.findIndex((item) => item.event === "workspace-tab-view-bootstrapped");
+    expect(summary).toBeGreaterThanOrEqual(0);
+    expect(summary).toBeLessThan(ready);
+    expect(all[ready]!.payload.intentCode).toBeUndefined();
+    // The welcome Tab existed only inside the hidden view; the Host step replaced it before display.
+    expect(rendered).toEqual(["welcome", "host"]);
+    expect(all.some((item) => item.event === "workspace-tab-view-summary" && item.payload.label === "New connection")).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("reports an intent it cannot apply without failing the Tab bootstrap", async () => {
+    const { wrapper } = await mountWithTerminal(vi.fn(async () => undefined));
+    bootstrapWith({ type: "open-host", hostId: "host-1", connectOperationId: "op-2", source: "overview", directoryPathBytes: [47] });
+    await flushPromises();
+    const ready = events().find((item) => item.event === "workspace-tab-view-bootstrapped");
+    expect(ready?.payload.intentCode).toBe("workspace_tab.invalid_directory");
+    expect(events().some((item) => item.event === "workspace-tab-view-bootstrap-failed")).toBe(false);
     wrapper.unmount();
   });
 });
