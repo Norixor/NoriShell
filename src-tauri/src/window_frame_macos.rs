@@ -10,7 +10,7 @@ use objc2::{MainThreadMarker, rc::Retained, runtime::ProtocolObject};
 use objc2_app_kit::{
     NSView, NSViewFrameDidChangeNotification, NSWindow, NSWindowButton,
     NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
-    NSWindowStyleMask, NSWindowWillCloseNotification,
+    NSWindowDidResizeNotification, NSWindowStyleMask, NSWindowWillCloseNotification,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSObjectProtocol, NSOperationQueue, NSPoint,
@@ -20,6 +20,7 @@ use tauri::WebviewWindow;
 thread_local! {
     static BRIDGES: RefCell<HashMap<String, HeaderBridge>> = RefCell::new(HashMap::new());
     static QUEUED: Cell<bool> = const { Cell::new(false) };
+    static ALIGNING: Cell<bool> = const { Cell::new(false) };
 }
 
 struct HeaderBridge {
@@ -41,6 +42,30 @@ impl Drop for HeaderBridge {
     }
 }
 
+fn align_now() {
+    // Our own frame changes post nested notifications; those take the deferred path
+    // instead of re-borrowing the bridges.
+    if ALIGNING.replace(true) {
+        return;
+    }
+    BRIDGES.with_borrow_mut(|bridges| {
+        for bridge in bridges.values_mut() {
+            bridge.align();
+        }
+    });
+    ALIGNING.set(false);
+}
+
+/// During live resize AppKit re-lays out the titlebar every step and would draw the
+/// buttons at their default position before a deferred pass runs, so align in place.
+fn align_for_layout_change(in_live_resize: bool) {
+    if in_live_resize && !ALIGNING.get() {
+        align_now();
+    } else {
+        schedule_alignment();
+    }
+}
+
 fn schedule_alignment() {
     if QUEUED.replace(true) {
         return;
@@ -48,11 +73,7 @@ fn schedule_alignment() {
     // Defer until AppKit has finished its current layout. Frame notifications
     // caused by our own adjustment are coalesced while QUEUED remains true.
     let callback = RcBlock::new(|| {
-        BRIDGES.with_borrow_mut(|bridges| {
-            for bridge in bridges.values_mut() {
-                bridge.align();
-            }
-        });
+        align_now();
         QUEUED.set(false);
     });
     // SAFETY: this capture-free block executes only on the AppKit main queue.
@@ -99,7 +120,10 @@ impl HeaderBridge {
         }
         let originally_enabled = view.postsFrameChangedNotifications();
         view.setPostsFrameChangedNotifications(true);
-        let callback = RcBlock::new(|_: NonNull<NSNotification>| schedule_alignment());
+        let observed = view.clone();
+        let callback = RcBlock::new(move |_: NonNull<NSNotification>| {
+            align_for_layout_change(observed.inLiveResize());
+        });
         // SAFETY: the view and observer are retained until bridge teardown;
         // AppKit view frame notifications are delivered on the main thread.
         let observer = unsafe {
@@ -244,6 +268,20 @@ pub(super) fn install(window: &WebviewWindow) -> Result<(), String> {
             )
         });
     }
+    let resized = bridge.window.clone();
+    let callback = RcBlock::new(move |_: NonNull<NSNotification>| {
+        align_for_layout_change(resized.inLiveResize());
+    });
+    // SAFETY: delivered on main for this retained NSWindow; the observer is
+    // removed when the bridge is dropped.
+    bridge.observers.push(unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(NSWindowDidResizeNotification),
+            Some(&bridge.window),
+            None,
+            &callback,
+        )
+    });
     let label = window.label().to_owned();
     let closing_label = label.clone();
     let callback = RcBlock::new(move |_: NonNull<NSNotification>| {
@@ -276,7 +314,9 @@ pub(super) fn set_height(label: &str, height: f64) -> Result<(), String> {
             .ok_or("window.native_header_unavailable")?;
         bridge.height = height;
         // Publish the actual horizontal inset only after the native alignment.
+        let nested = ALIGNING.replace(true);
         bridge.align();
+        ALIGNING.set(nested);
         Ok::<_, String>(())
     })?;
     schedule_alignment();
