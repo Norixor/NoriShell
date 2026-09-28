@@ -10,6 +10,7 @@ Thumbs.db
 
 # Local project guidance and design documents
 /AGENTS.md
+/CLAUDE.md
 /.build
 /docs/*
 !/docs/guides/
