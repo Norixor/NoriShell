@@ -67,7 +67,7 @@ Open **Settings → About** and click “Check for updates”. The macOS and Win
 
 ## Key features
 
-- **Terminal workspace.** Use SSH and local terminals in tabs and split panes, with search, reconnect, quick commands, keyword highlighting, and custom shortcuts.
+- **Terminal workspace.** Use SSH and local terminals in tabs and split panes, with search, reconnect, quick commands, keyword highlighting, and custom shortcuts. Drag any tab out into its own window, or back again, without reconnecting.
 - **Hosts and connection routes.** Organize hosts with groups, tags, favorites, and OpenSSH import. Connect with passwords, keys, or an SSH Agent through HTTP CONNECT / SOCKS5 proxies or SSH jump chains, with per-host algorithm settings.
 - **Files and remote access.** Browse, transfer, preview, and edit files over SFTP. Open local, remote, or dynamic port forwarding, or connect to RDP / VNC desktops.
 - **Server overview.** See host connection status and enable CPU, memory, network, and disk metrics where needed. Terminal, SFTP, forwarding, and monitoring connections remain independent.

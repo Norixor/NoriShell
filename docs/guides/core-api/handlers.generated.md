@@ -1,6 +1,6 @@
 # Generated Tauri handler and main-window ACL directory
 
-Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the trusted-main allowlist in `src-tauri/permissions/app.toml`. It lists **275 registered command handlers**. Registration does not grant plugin access.
+Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the trusted-main allowlist in `src-tauri/permissions/app.toml`. It lists **302 registered command handlers**. Registration does not grant plugin access.
 
 | Handler | Stable Core symbol | Main-window ACL |
 | --- | --- | --- |
@@ -59,8 +59,6 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `plugin_contribution_invoke` | `COMMAND_PLUGIN_CONTRIBUTION_INVOKE` | allowed |
 | `plugin_contribution_copy` | `COMMAND_PLUGIN_CONTRIBUTION_COPY` | allowed |
 | `plugin_extension_target_list` | `COMMAND_PLUGIN_EXTENSION_TARGET_LIST` | allowed |
-| `plugin_target_context_open` | `COMMAND_PLUGIN_TARGET_CONTEXT_OPEN` | allowed |
-| `plugin_target_context_close` | `COMMAND_PLUGIN_TARGET_CONTEXT_CLOSE` | allowed |
 | `plugin_ui_contribution_list` | `COMMAND_PLUGIN_UI_CONTRIBUTION_LIST` | allowed |
 | `plugin_ui_action` | `COMMAND_PLUGIN_UI_ACTION` | allowed |
 | `plugin_settings_get` | `COMMAND_PLUGIN_SETTINGS_GET` | allowed |
@@ -132,8 +130,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `native_notification_context_set` | internal | allowed |
 | `native_terminal_settings_get` | `COMMAND_NATIVE_TERMINAL_SETTINGS_GET` | allowed |
 | `native_terminal_settings_replace` | `COMMAND_NATIVE_TERMINAL_SETTINGS_REPLACE` | allowed |
-| `native_terminal_enable` | `COMMAND_NATIVE_TERMINAL_ENABLE` | allowed |
-| `native_terminal_snapshot` | `COMMAND_NATIVE_TERMINAL_SNAPSHOT` | allowed |
+| `native_terminal_history_record` | `COMMAND_NATIVE_TERMINAL_HISTORY_RECORD` | allowed |
 | `native_terminal_history_list` | `COMMAND_NATIVE_TERMINAL_HISTORY_LIST` | allowed |
 | `native_terminal_history_delete` | `COMMAND_NATIVE_TERMINAL_HISTORY_DELETE` | allowed |
 | `native_terminal_history_clear` | `COMMAND_NATIVE_TERMINAL_HISTORY_CLEAR` | allowed |
@@ -146,6 +143,10 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `desktop_preferences_replace` | `COMMAND_DESKTOP_PREFERENCES_REPLACE` | allowed |
 | `application_preferences_get` | `COMMAND_APPLICATION_PREFERENCES_GET` | allowed |
 | `application_preferences_replace` | `COMMAND_APPLICATION_PREFERENCES_REPLACE` | allowed |
+| `release_check` | internal | allowed |
+| `release_update_readiness` | internal | allowed |
+| `release_update_prepare_install` | internal | allowed |
+| `release_update_allow_relaunch` | internal | allowed |
 | `telnet_terminal_open` | `COMMAND_TELNET_TERMINAL_OPEN` | allowed |
 | `telnet_terminal_snapshot` | `COMMAND_TELNET_TERMINAL_SNAPSHOT` | allowed |
 | `plugin_protocol_launch_list` | `COMMAND_PLUGIN_PROTOCOL_LAUNCH_LIST` | allowed |
@@ -177,15 +178,9 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `forward_session_snapshot` | `COMMAND_FORWARD_SESSION_SNAPSHOT` | allowed |
 | `forward_session_stop` | `COMMAND_FORWARD_SESSION_STOP` | allowed |
 | `forward_cleanup_retain` | `COMMAND_FORWARD_CLEANUP_RETAIN` | allowed |
-| `sftp_session_open` | `COMMAND_SFTP_SESSION_OPEN` | allowed |
 | `sftp_session_snapshot` | `COMMAND_SFTP_SESSION_SNAPSHOT` | allowed |
 | `sftp_session_disconnect` | `COMMAND_SFTP_SESSION_DISCONNECT` | allowed |
 | `sftp_local_boundary_register` | `COMMAND_SFTP_LOCAL_BOUNDARY_REGISTER` | allowed |
-| `sftp_local_directory_register` | `COMMAND_SFTP_LOCAL_DIRECTORY_REGISTER` | allowed |
-| `sftp_local_directory_list` | `COMMAND_SFTP_LOCAL_DIRECTORY_LIST` | allowed |
-| `sftp_local_directory_open_child` | `COMMAND_SFTP_LOCAL_DIRECTORY_OPEN_CHILD` | allowed |
-| `sftp_local_directory_create_child` | `COMMAND_SFTP_LOCAL_DIRECTORY_CREATE_CHILD` | allowed |
-| `sftp_local_directory_release` | `COMMAND_SFTP_LOCAL_DIRECTORY_RELEASE` | allowed |
 | `sftp_directory_list` | `COMMAND_SFTP_DIRECTORY_LIST` | allowed |
 | `sftp_directory_list_cancel` | `COMMAND_SFTP_DIRECTORY_LIST_CANCEL` | allowed |
 | `sftp_file_preview` | `COMMAND_SFTP_FILE_PREVIEW` | allowed |
@@ -202,6 +197,8 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `sftp_transfer_resume` | `COMMAND_SFTP_TRANSFER_RESUME` | allowed |
 | `sftp_remote_cleanup_retry` | `COMMAND_SFTP_REMOTE_CLEANUP_RETRY` | allowed |
 | `sftp_remote_cleanup_retain` | `COMMAND_SFTP_REMOTE_CLEANUP_RETAIN` | allowed |
+| `tab_boot_trace_enabled` | internal | allowed |
+| `tab_boot_trace` | internal | allowed |
 | `vault_status` | `COMMAND_VAULT_STATUS` | allowed |
 | `vault_create` | `COMMAND_VAULT_CREATE` | not allowed |
 | `vault_unlock` | `COMMAND_VAULT_UNLOCK` | not allowed |
@@ -213,20 +210,49 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `desktop_availability` | internal | allowed |
 | `desktop_profile_save` | internal | allowed |
 | `desktop_profile_delete` | internal | allowed |
-| `desktop_session_open` | internal | allowed |
+| `desktop_session_open_owned` | internal | allowed |
 | `desktop_session_snapshot` | internal | allowed |
 | `desktop_session_disconnect` | internal | allowed |
-| `desktop_session_close` | internal | allowed |
+| `desktop_session_close_owned` | internal | allowed |
 | `desktop_frame_get` | internal | allowed |
 | `desktop_focus_change` | internal | allowed |
 | `desktop_input` | internal | allowed |
+| `desktop_resolution_set` | internal | allowed |
 | `desktop_clipboard_get` | internal | allowed |
 | `desktop_audio_mute` | internal | allowed |
 | `desktop_prompt_get` | internal | not allowed |
 | `desktop_prompt_decide` | internal | not allowed |
 | `window_native_controls_inset` | internal | allowed |
+| `window_standalone_action` | internal | not allowed |
 | `window_set_native_header_height` | internal | allowed |
 | `window_set_windows_maximize_hit_region` | internal | allowed |
+| `window_renderer_ready` | internal | allowed |
+| `workspace_window_open` | internal | allowed |
+| `workspace_window_focus` | internal | allowed |
+| `workspace_window_close` | internal | allowed |
+| `workspace_window_close_empty` | internal | allowed |
+| `workspace_tab_projection_update` | internal | allowed |
+| `workspace_tab_snapshot` | internal | allowed |
+| `create_tab_view` | internal | allowed |
+| `workspace_tab_view_get` | internal | allowed |
+| `workspace_tab_context_get` | internal | allowed |
+| `workspace_tab_bootstrap_take` | internal | allowed |
+| `set_tab_view_bounds` | internal | allowed |
+| `set_tab_view_visible` | internal | allowed |
+| `focus_tab_view` | internal | allowed |
+| `move_tab_view` | internal | allowed |
+| `close_tab_view` | internal | allowed |
+| `close_own_tab_view` | internal | allowed |
+| `sftp_local_directory_register` | `COMMAND_SFTP_LOCAL_DIRECTORY_REGISTER` | allowed |
+| `sftp_local_directory_list` | `COMMAND_SFTP_LOCAL_DIRECTORY_LIST` | allowed |
+| `sftp_local_directory_open_child` | `COMMAND_SFTP_LOCAL_DIRECTORY_OPEN_CHILD` | allowed |
+| `sftp_local_directory_create_child` | `COMMAND_SFTP_LOCAL_DIRECTORY_CREATE_CHILD` | allowed |
+| `sftp_local_directory_release` | `COMMAND_SFTP_LOCAL_DIRECTORY_RELEASE` | allowed |
+| `plugin_target_context_open` | `COMMAND_PLUGIN_TARGET_CONTEXT_OPEN` | allowed |
+| `plugin_target_context_close` | `COMMAND_PLUGIN_TARGET_CONTEXT_CLOSE` | allowed |
+| `workspace_tab_drag_begin` | internal | allowed |
+| `workspace_tab_drag_cancel` | internal | allowed |
+| `workspace_tab_drag_finish` | internal | allowed |
 | `plugin_local_package_prepare` | `COMMAND_PLUGIN_LOCAL_PACKAGE_PREPARE` | allowed |
 | `plugin_host_approval_open` | `COMMAND_PLUGIN_HOST_APPROVAL_OPEN` | allowed |
 | `plugin_host_approval_get` | `COMMAND_PLUGIN_HOST_APPROVAL_GET` | not allowed |
@@ -245,6 +271,8 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `ssh_sync_secure_prompt_get` | internal | not allowed |
 | `ssh_sync_secure_prompt_decide` | internal | not allowed |
 | `private_key_file_import` | `COMMAND_PRIVATE_KEY_FILE_IMPORT` | not allowed |
+| `window_request_close` | `COMMAND_WINDOW_REQUEST_CLOSE` | allowed |
+| `application_request_exit` | `COMMAND_APPLICATION_REQUEST_EXIT` | allowed |
 | `native_json_export` | internal | allowed |
 | `offline_backup_export` | internal | allowed |
 | `offline_backup_open` | internal | allowed |
@@ -262,6 +290,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `secure_ssh_challenge_get` | internal | not allowed |
 | `secure_ssh_challenge_submit` | internal | not allowed |
 | `secure_ssh_challenge_cancel` | internal | not allowed |
+| `sftp_session_open` | `COMMAND_SFTP_SESSION_OPEN` | allowed |
 | `secure_vault_open` | internal | allowed |
 | `secure_vault_ensure_for_host` | internal | allowed |
 | `secure_vault_get` | internal | not allowed |
@@ -277,5 +306,3 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `tool_file_tail` | internal | not allowed |
 | `tool_file_save` | internal | not allowed |
 | `tray_panel_execute` | `COMMAND_TRAY_PANEL_EXECUTE` | not allowed |
-| `window_request_close` | `COMMAND_WINDOW_REQUEST_CLOSE` | allowed |
-| `application_request_exit` | `COMMAND_APPLICATION_REQUEST_EXIT` | allowed |
