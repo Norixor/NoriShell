@@ -7,10 +7,25 @@ body,
 #app,
 #workspace-window-app,
 #workspace-tab-app {
-  min-width: calc(1024px / var(--nvx-ui-zoom, 1));
-  min-height: calc(720px / var(--nvx-ui-zoom, 1));
   height: 100%;
   margin: 0;
+}
+
+/* Minimums mirror each native window's minimum inner size so content never
+   overflows past the window controls. Tab views fill the bounds the shell
+   gives them and have no minimum of their own. */
+html:has(#app),
+html:has(#app) body,
+#app {
+  min-width: calc(1024px / var(--nvx-ui-zoom, 1));
+  min-height: calc(720px / var(--nvx-ui-zoom, 1));
+}
+
+html:has(#workspace-window-app),
+html:has(#workspace-window-app) body,
+#workspace-window-app {
+  min-width: calc(800px / var(--nvx-ui-zoom, 1));
+  min-height: calc(560px / var(--nvx-ui-zoom, 1));
 }
 
 body {
