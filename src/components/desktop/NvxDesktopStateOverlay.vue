@@ -106,9 +106,7 @@ const detail = computed(() => {
 
 .desktop-state__spinner {
   color: var(--nvx-color-accent);
-}
-
-.desktop-state__spinner :deep(svg) {
+  /* NvxIcon renders the svg itself, so the animation belongs on the icon element. */
   animation: desktop-state-spin 0.8s linear infinite;
 }
 
@@ -139,7 +137,7 @@ const detail = computed(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .desktop-state__spinner :deep(svg) {
+  .desktop-state__spinner {
     animation: none;
   }
 }

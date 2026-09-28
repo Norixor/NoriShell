@@ -86,6 +86,11 @@ function editConnectionProtocol() {
 function setSessionVncVersion(version: string) {
   if (settingsDraft.value && (version === "auto" || version === "rfb33" || version === "rfb37" || version === "rfb38")) settingsDraft.value.vncProtocolVersion = version;
 }
+function frameFailure(error: unknown) {
+  const parsed = parseCoreApiError(error);
+  const detail = parsed ? [parsed.code, parsed.diagnosticId].filter(Boolean).join(" · ") : undefined;
+  tips.show({ scope: "desktop-frame", tone: "error", title: t("desktop.frameFailed"), message: detail });
+}
 function resolutionFailure(error: unknown) {
   const parsed = parseCoreApiError(error);
   if (parsed?.code === "desktop.staleInput") return;
@@ -399,6 +404,10 @@ function activate(tabId: string) {
   if (!session && !(nativeViewTabId === tabId && reconnectProfileId.value)) return;
   workspace.terminalController?.deactivate();
   activeId.value = session?.id ?? "";
+  // A Tab WebView stays on /desktop, so keep-alive never re-fires onActivated after a controller
+  // deactivate; explicit activation must resume frame pulls and snapshot polling itself.
+  active.value = true;
+  void refresh();
   void router.push("/desktop");
 }
 function snapshotHandoff(tabId: string): DesktopTabHandoffSnapshot {
@@ -792,6 +801,7 @@ onBeforeUnmount(() => {
             :command-as-control="local.commandAsControlAvailable && local.preferences.commandAsControl"
             :hi-dpi="local.preferences.hiDpi"
             @error="notice('inputFailed')"
+            @frame-error="frameFailure"
             @resolution-error="resolutionFailure"
           />
           <NvxDesktopStateOverlay
