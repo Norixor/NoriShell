@@ -10,6 +10,7 @@ export { default as NvxInput } from "./NvxInput.vue";
 export { default as NvxInlineNotice } from "./NvxInlineNotice.vue";
 export { default as NvxProgress } from "./NvxProgress.vue";
 export { default as NvxSelect } from "./NvxSelect.vue";
+export { default as NvxSparkline } from "./NvxSparkline.vue";
 export { default as NvxStatusLabel } from "./NvxStatusLabel.vue";
 export { default as NvxTextAction } from "./NvxTextAction.vue";
 export { default as NvxTextarea } from "./NvxTextarea.vue";

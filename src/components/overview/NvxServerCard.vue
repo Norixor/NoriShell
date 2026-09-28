@@ -3,12 +3,10 @@ import {
   ArrowDown,
   ArrowUp,
   Clock3,
-  Cpu,
-  HardDrive,
   KeyRound,
-  MemoryStick,
   RefreshCcw,
   ShieldCheck,
+  Star,
   TerminalSquare,
 } from "lucide-vue-next";
 import { computed } from "vue";
@@ -20,10 +18,12 @@ import {
   NvxCard,
   NvxIcon,
   NvxIconButton,
+  NvxSparkline,
 } from "../ui";
 import NvxPluginContributionSlot from "../terminal/NvxPluginContributionSlot.vue";
+import { metricPercents, type MetricHistory } from "./overview-metrics";
 
-const props = defineProps<{ card: ServerOverviewCard }>();
+const props = defineProps<{ card: ServerOverviewCard; history?: MetricHistory }>();
 defineEmits<{
   connect: [hostId: string];
   focusTerminal: [sessionId: string];
@@ -111,18 +111,29 @@ const metricStatus = computed(() => {
   if (!latest.value) return { state: "loading" as const, label: t("overview.loading") };
   return { state: "available" as const, label: "" };
 });
-const cpuPercent = computed(() => latest.value?.cpu.basisPoints == null
-  ? null
-  : latest.value.cpu.basisPoints / 100);
-const memoryPercent = computed(() => ratioPercent(
-  latest.value?.memory.usedBytes,
-  latest.value?.memory.totalBytes,
-));
-const disk = computed(() => latest.value?.disks[0] ?? null);
-const diskPercent = computed(() => ratioPercent(disk.value?.usedBytes, disk.value?.totalBytes));
-const cpuStatus = computed(() => statusForField(latest.value?.cpu.state));
-const memoryStatus = computed(() => statusForField(latest.value?.memory.state));
-const diskStatus = computed(() => statusForField(disk.value?.state));
+const percents = computed(() => (latest.value
+  ? metricPercents(latest.value)
+  : { cpu: null, memory: null, disk: null }));
+const percentMetrics = computed(() => ([
+  { key: "cpu", label: t("overview.cpu"), fieldState: latest.value?.cpu.state },
+  { key: "memory", label: t("overview.memory"), fieldState: latest.value?.memory.state },
+  { key: "disk", label: t("overview.disk"), fieldState: latest.value?.disks[0]?.state },
+] as const).map((metric) => {
+  const value = percents.value[metric.key];
+  const status = statusForField(metric.fieldState);
+  const history = props.history?.[metric.key] ?? [];
+  const exposesTrend = status.state === "available" || status.state === "stale";
+  return {
+    ...metric,
+    status,
+    text: formatPercent(value, status),
+    trend: exposesTrend ? (history.length ? history : value === null ? [] : [value]) : [],
+    // A card-wide reason is shown once in the footer; only field-specific reasons stay in the cell.
+    caption: metricStatus.value.state === "available" && !exposesTrend && status.state !== "loading"
+      ? status.label
+      : "",
+  };
+}));
 const networkStatus = computed(() => statusForField(latest.value?.network.state));
 const networkExposesRate = computed(() => (
   networkStatus.value.state === "available" || networkStatus.value.state === "stale"
@@ -184,13 +195,6 @@ const metricsActionIcon = computed(() => {
 const terminalSessionCountLabel = computed(() => t("overview.terminalSessionCount", {
   count: props.card.terminalSessionIds.length,
 }));
-
-function ratioPercent(used: string | null | undefined, total: string | null | undefined) {
-  if (used == null || total == null) return null;
-  const denominator = BigInt(total);
-  if (denominator === 0n) return null;
-  return Number((BigInt(used) * 10_000n) / denominator) / 100;
-}
 
 function statusForField(fieldState: MetricFieldState | undefined) {
   if (metricStatus.value.state !== "available") return metricStatus.value;
@@ -300,12 +304,25 @@ function formatBytes(value: string) {
   >
     <header class="nvx-server-card__header">
       <div class="nvx-server-card__identity">
-        <h2
-          :id="`server-card-${host.hostId}`"
-          :title="host.label"
-        >
-          {{ host.label }}
-        </h2>
+        <div class="nvx-server-card__title">
+          <h2
+            :id="`server-card-${host.hostId}`"
+            :title="host.label"
+          >
+            {{ host.label }}
+          </h2>
+          <span
+            v-if="host.favorite"
+            class="nvx-server-card__favorite"
+            :title="t('sshTerminal.favoriteHost')"
+            aria-hidden="true"
+          >
+            <NvxIcon
+              :icon="Star"
+              :size="16"
+            />
+          </span>
+        </div>
         <div class="nvx-server-card__metadata">
           <span
             v-if="card.catalogEntry.group"
@@ -343,49 +360,30 @@ function formatBytes(value: string) {
       :aria-label="t('overview.resources')"
     >
       <div
+        v-for="metric in percentMetrics"
+        :key="metric.key"
         class="nvx-server-card__metric"
-        :data-status="cpuStatus.state"
-        :aria-label="metricAriaLabel(t('overview.cpu'), formatPercent(cpuPercent, cpuStatus), cpuStatus)"
+        :data-status="metric.status.state"
+        :aria-label="metricAriaLabel(metric.label, metric.text, metric.status)"
         role="status"
       >
-        <span class="nvx-server-card__metric-label">
-          <NvxIcon
-            :icon="Cpu"
-            :size="16"
-          />
-          {{ t('overview.cpu') }}
-        </span>
-        <strong>{{ formatPercent(cpuPercent, cpuStatus) }}</strong>
-      </div>
-      <div
-        class="nvx-server-card__metric"
-        :data-status="memoryStatus.state"
-        :aria-label="metricAriaLabel(t('overview.memory'), formatPercent(memoryPercent, memoryStatus), memoryStatus)"
-        role="status"
-      >
-        <span class="nvx-server-card__metric-label">
-          <NvxIcon
-            :icon="MemoryStick"
-            :size="16"
-          />
-          {{ t('overview.memory') }}
-        </span>
-        <strong>{{ formatPercent(memoryPercent, memoryStatus) }}</strong>
-      </div>
-      <div
-        class="nvx-server-card__metric"
-        :data-status="diskStatus.state"
-        :aria-label="metricAriaLabel(t('overview.disk'), formatPercent(diskPercent, diskStatus), diskStatus)"
-        role="status"
-      >
-        <span class="nvx-server-card__metric-label">
-          <NvxIcon
-            :icon="HardDrive"
-            :size="16"
-          />
-          {{ t('overview.disk') }}
-        </span>
-        <strong>{{ formatPercent(diskPercent, diskStatus) }}</strong>
+        <span class="nvx-server-card__metric-label">{{ metric.label }}</span>
+        <strong>{{ metric.text }}</strong>
+        <NvxSparkline
+          v-if="metric.trend.length"
+          :values="metric.trend"
+          :tone="metric.status.state === 'stale' ? 'muted' : 'accent'"
+        />
+        <span
+          v-else-if="metric.status.state === 'loading'"
+          class="nvx-server-card__metric-skeleton"
+          aria-hidden="true"
+        />
+        <span
+          v-else-if="metric.caption"
+          class="nvx-server-card__metric-caption"
+          aria-hidden="true"
+        >{{ metric.caption }}</span>
       </div>
       <div
         class="nvx-server-card__metric nvx-server-card__network"
@@ -490,17 +488,22 @@ function formatBytes(value: string) {
 .nvx-server-card {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(44px, 1fr) 32px;
+  grid-template-rows: auto minmax(0, 1fr) 32px;
   height: 168px;
   padding: 0 var(--nvx-space-3);
   overflow: hidden;
+  transition: border-color var(--nvx-motion-fast);
+}
+
+.nvx-server-card:hover {
+  border-color: var(--nvx-color-border-strong);
 }
 
 .nvx-server-card__header,
+.nvx-server-card__title,
 .nvx-server-card__metadata,
 .nvx-server-card__footer,
 .nvx-server-card__primary-actions,
-.nvx-server-card__metric-label,
 .nvx-server-card__network-values,
 .nvx-server-card__actions,
 .nvx-server-card__sessions,
@@ -513,15 +516,30 @@ function formatBytes(value: string) {
 
 .nvx-server-card__header {
   gap: var(--nvx-space-3);
+  align-items: flex-start;
   justify-content: space-between;
-  min-height: 62px;
-  padding: var(--nvx-space-2) 0;
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+  padding-top: var(--nvx-space-3);
 }
 
 .nvx-server-card__identity {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.nvx-server-card__title {
+  gap: var(--nvx-space-1);
+}
+
+.nvx-server-card__favorite {
+  display: flex;
+  flex: 0 0 auto;
+  color: var(--nvx-color-accent);
+}
+
+.nvx-server-card__favorite :deep(svg) {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
 }
 
 .nvx-server-card__metadata {
@@ -531,6 +549,7 @@ function formatBytes(value: string) {
 }
 
 .nvx-server-card__identity h2 {
+  min-width: 0;
   margin: 0;
   font-size: var(--nvx-font-size-body);
   line-height: 18px;
@@ -571,40 +590,44 @@ function formatBytes(value: string) {
 
 .nvx-server-card__metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 0.78fr)) minmax(74px, 1.15fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(72px, 1.1fr);
+  gap: var(--nvx-space-3);
   align-items: center;
   min-width: 0;
-  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+  min-height: 0;
+  margin: var(--nvx-space-2) 0;
+  overflow: hidden;
+  padding: 6px var(--nvx-space-3);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-subtle);
 }
 
 .nvx-server-card__metric {
   display: grid;
   gap: 2px;
+  align-content: center;
   min-width: 0;
-  padding: 0 var(--nvx-space-2);
   color: var(--nvx-color-text-secondary);
 }
 
-.nvx-server-card__metric:first-child {
-  padding-inline-start: 0;
-}
-
-.nvx-server-card__metric + .nvx-server-card__metric {
-  border-inline-start: var(--nvx-border-width) solid var(--nvx-color-border);
-}
-
 .nvx-server-card__metric-label {
-  gap: 3px;
+  overflow: hidden;
+  color: var(--nvx-color-text-tertiary);
   font-size: 10px;
+  font-weight: var(--nvx-font-weight-semibold);
   line-height: 14px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.nvx-server-card__metric-label :deep(svg),
 .nvx-server-card__session-count :deep(svg),
 .nvx-server-card__sample :deep(svg) {
   width: 14px;
   height: 14px;
+}
+
+.nvx-server-card__metric :deep(.nvx-sparkline) {
+  height: 16px;
 }
 
 .nvx-server-card__metric strong {
@@ -616,6 +639,33 @@ function formatBytes(value: string) {
   line-height: var(--nvx-line-height-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.nvx-server-card__metric-skeleton {
+  height: 16px;
+  border-radius: var(--nvx-radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--nvx-color-bg-hover) 25%,
+    var(--nvx-color-border) 37%,
+    var(--nvx-color-bg-hover) 63%
+  );
+  background-size: 400% 100%;
+  animation: nvx-server-card-shimmer 1.6s ease infinite;
+}
+
+.nvx-server-card__metric-caption {
+  overflow: hidden;
+  color: var(--nvx-color-text-tertiary);
+  font-size: 10px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes nvx-server-card-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
 }
 
 .nvx-server-card__metric[data-status="stale"] strong,
@@ -634,6 +684,7 @@ function formatBytes(value: string) {
   gap: var(--nvx-space-1);
   justify-content: space-between;
   min-width: 0;
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
 }
 
 .nvx-server-card__sample {
@@ -658,7 +709,9 @@ function formatBytes(value: string) {
 }
 
 .nvx-server-card__network-values {
-  gap: var(--nvx-space-1);
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
   color: var(--nvx-color-text-primary);
   font-family: var(--nvx-font-mono);
   font-size: 10px;

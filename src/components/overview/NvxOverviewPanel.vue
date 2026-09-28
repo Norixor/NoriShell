@@ -1,12 +1,18 @@
 <script setup lang="ts">
-import { Search } from "lucide-vue-next";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Activity, CircleCheck, Power, Search, Server, TriangleAlert } from "lucide-vue-next";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import type { ServerOverviewSnapshot } from "../../core-api/generated/core-api";
 import { NvxPluginExtensionTarget } from "../plugins";
-import { NvxButton, NvxIcon, NvxInput, NvxInlineNotice, NvxSelect } from "../ui";
+import { NvxButton, NvxIcon, NvxInput, NvxInlineNotice, NvxProgress, NvxSelect } from "../ui";
 import NvxServerCard from "./NvxServerCard.vue";
+import {
+  freshMetricPercents,
+  nextMetricHistory,
+  type MetricHistoryMap,
+  type MetricPercents,
+} from "./overview-metrics";
 
 const props = defineProps<{ snapshot: ServerOverviewSnapshot }>();
 const emit = defineEmits<{
@@ -80,8 +86,42 @@ const summary = computed(() => {
     total: all.length,
     online: all.filter((card) => ["connected", "monitoringOnly"].includes(card.connectionState)).length,
     issues: all.filter((card) => ["degraded", "failed"].includes(card.connectionState)).length,
+    offline: all.filter((card) => card.connectionState === "disconnected").length,
   };
 });
+const summaryTiles = computed(() => [
+  { key: "total", tone: "accent", icon: Server, value: summary.value.total, suffix: "", label: t("overview.kpi.total") },
+  {
+    key: "online",
+    tone: "success",
+    icon: CircleCheck,
+    value: summary.value.online,
+    suffix: `/ ${summary.value.total}`,
+    label: t("overview.kpi.online"),
+  },
+  { key: "issues", tone: "warning", icon: TriangleAlert, value: summary.value.issues, suffix: "", label: t("overview.kpi.issues") },
+  { key: "offline", tone: "neutral", icon: Power, value: summary.value.offline, suffix: "", label: t("overview.kpi.offline") },
+]);
+function average(values: (number | null)[]) {
+  const present = values.filter((value): value is number => value !== null);
+  return present.length ? present.reduce((sum, value) => sum + value, 0) / present.length : null;
+}
+const averageLoads = computed(() => {
+  const fresh = props.snapshot.cards
+    .map(freshMetricPercents)
+    .filter((percents): percents is MetricPercents => percents !== null);
+  return [
+    { key: "cpu", label: t("overview.kpi.averageCpu"), value: average(fresh.map((item) => item.cpu)) },
+    { key: "memory", label: t("overview.kpi.averageMemory"), value: average(fresh.map((item) => item.memory)) },
+    { key: "disk", label: t("overview.kpi.averageDisk"), value: average(fresh.map((item) => item.disk)) },
+  ];
+});
+const metricHistory = shallowRef<MetricHistoryMap>(new Map());
+watch(
+  () => props.snapshot,
+  (snapshot) => { metricHistory.value = nextMetricHistory(metricHistory.value, snapshot.cards); },
+  { immediate: true },
+);
 
 const cards = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase();
@@ -243,7 +283,6 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
     <header class="nvx-overview-panel__topbar">
       <div class="nvx-overview-panel__heading">
         <h1>{{ t('overview.title') }}</h1>
-        <p>{{ t('overview.summary', summary) }}</p>
       </div>
       <div class="nvx-overview-panel__toolbar">
         <NvxPluginExtensionTarget
@@ -289,6 +328,61 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
       </div>
     </header>
 
+    <section
+      class="nvx-overview-panel__summary"
+      :aria-label="t('overview.kpi.label')"
+    >
+      <div
+        v-for="tile in summaryTiles"
+        :key="tile.key"
+        class="nvx-overview-panel__kpi"
+        :class="`nvx-overview-panel__kpi--${tile.tone}`"
+        role="status"
+        :aria-label="`${tile.label}: ${tile.value}${tile.suffix ? ` ${tile.suffix}` : ''}`"
+      >
+        <span
+          class="nvx-overview-panel__kpi-icon"
+          aria-hidden="true"
+        >
+          <NvxIcon
+            :icon="tile.icon"
+            :size="20"
+          />
+        </span>
+        <span class="nvx-overview-panel__kpi-body">
+          <strong>{{ tile.value }}<small v-if="tile.suffix">{{ tile.suffix }}</small></strong>
+          <span>{{ tile.label }}</span>
+        </span>
+      </div>
+      <div
+        class="nvx-overview-panel__kpi nvx-overview-panel__kpi--load"
+        role="group"
+        :aria-label="t('overview.kpi.averageLoad')"
+        :title="t('overview.kpi.averageLoad')"
+      >
+        <span
+          class="nvx-overview-panel__kpi-icon"
+          aria-hidden="true"
+        >
+          <NvxIcon
+            :icon="Activity"
+            :size="20"
+          />
+        </span>
+        <span class="nvx-overview-panel__loads">
+          <NvxProgress
+            v-for="load in averageLoads"
+            :key="load.key"
+            size="sm"
+            :label="load.label"
+            :value="load.value"
+            :status="load.value === null ? 'disabled' : 'available'"
+            :status-label="load.value === null ? t('overview.unavailable') : undefined"
+          />
+        </span>
+      </div>
+    </section>
+
     <NvxInlineNotice v-if="cards.length === 0">
       {{ t('overview.empty') }}
     </NvxInlineNotice>
@@ -312,6 +406,7 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
         >
           <NvxServerCard
             :card="card"
+            :history="metricHistory.get(card.catalogEntry.host.hostId)"
             @connect="emit('connect', $event)"
             @focus-terminal="emit('focusTerminal', $event)"
             @metrics-action="emit('metricsAction', $event)"
@@ -345,6 +440,7 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
           >
             <NvxServerCard
               :card="card"
+              :history="metricHistory.get(card.catalogEntry.host.hostId)"
               @connect="emit('connect', $event)"
               @focus-terminal="emit('focusTerminal', $event)"
               @metrics-action="emit('metricsAction', $event)"
@@ -379,22 +475,92 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
   min-width: 164px;
 }
 
-.nvx-overview-panel__heading h1,
-.nvx-overview-panel__heading p {
-  margin: 0;
-}
-
 .nvx-overview-panel__heading h1 {
+  margin: 0;
   font-size: var(--nvx-font-size-lg);
   line-height: var(--nvx-line-height-lg);
 }
 
-.nvx-overview-panel__heading p {
-  margin-top: 2px;
+.nvx-overview-panel__summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(0, 2fr);
+  gap: var(--nvx-space-3);
+  margin-bottom: var(--nvx-space-4);
+}
+
+.nvx-overview-panel__kpi {
+  display: flex;
+  gap: var(--nvx-space-3);
+  align-items: center;
+  min-width: 0;
+  padding: var(--nvx-space-3);
+  border: var(--nvx-border-width) solid var(--nvx-color-border);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-surface);
+}
+
+.nvx-overview-panel__kpi-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-accent-soft);
+  color: var(--nvx-color-accent);
+}
+
+.nvx-overview-panel__kpi--success .nvx-overview-panel__kpi-icon {
+  background: var(--nvx-color-success-soft);
+  color: var(--nvx-color-success);
+}
+
+.nvx-overview-panel__kpi--warning .nvx-overview-panel__kpi-icon {
+  background: var(--nvx-color-warning-soft);
+  color: var(--nvx-color-warning);
+}
+
+.nvx-overview-panel__kpi--neutral .nvx-overview-panel__kpi-icon {
+  background: var(--nvx-color-bg-subtle);
+  color: var(--nvx-color-text-secondary);
+}
+
+.nvx-overview-panel__kpi-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.nvx-overview-panel__kpi-body strong {
+  color: var(--nvx-color-text-primary);
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--nvx-font-weight-semibold);
+  line-height: 26px;
+}
+
+.nvx-overview-panel__kpi-body small {
+  margin-inline-start: var(--nvx-space-1);
+  color: var(--nvx-color-text-tertiary);
+  font-size: var(--nvx-font-size-xs);
+  font-weight: var(--nvx-font-weight-medium);
+}
+
+.nvx-overview-panel__kpi-body > span {
+  overflow: hidden;
   color: var(--nvx-color-text-secondary);
   font-size: var(--nvx-font-size-xs);
   line-height: var(--nvx-line-height-xs);
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.nvx-overview-panel__loads {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--nvx-space-4);
+  min-width: 0;
 }
 
 .nvx-overview-panel__toolbar {
@@ -465,17 +631,10 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
 }
 
 .nvx-overview-panel__grid {
-  --nvx-overview-card-min-width: 312px;
-  --nvx-overview-card-width: 328px;
-
   display: grid;
-  grid-template-columns: repeat(
-    auto-fill,
-    minmax(min(100%, var(--nvx-overview-card-min-width)), var(--nvx-overview-card-width))
-  );
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 312px), 1fr));
   gap: var(--nvx-space-3);
   align-items: start;
-  justify-content: start;
 }
 
 .nvx-overview-panel__grid--virtual {
@@ -515,6 +674,14 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
     width: 100%;
     grid-template-columns: minmax(144px, 180px) minmax(220px, 1fr) max-content;
   }
+
+  .nvx-overview-panel__summary {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .nvx-overview-panel__kpi--load {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 760px) {
@@ -525,6 +692,15 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
   .nvx-overview-panel__status-filters {
     grid-column: 1 / -1;
     flex-wrap: wrap;
+  }
+
+  .nvx-overview-panel__summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .nvx-overview-panel__loads {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--nvx-space-2);
   }
 }
 </style>
