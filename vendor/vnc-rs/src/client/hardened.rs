@@ -10,7 +10,7 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::timeout,
@@ -27,6 +27,20 @@ const EVENT_QUEUE_CAPACITY: usize = 32;
 const INPUT_QUEUE_CAPACITY: usize = 1;
 const MAX_SERVER_NAME_BYTES: usize = 4 * 1024;
 const TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Rectangle headers and codec prefixes are read field by field; buffering
+/// keeps each of those small reads from becoming a separate socket read.
+const READ_BUFFER_BYTES: usize = 64 * 1024;
+/// Cursor shapes larger than this are consumed and reported without pixels.
+/// Consumers fall back to their default pointer instead of failing the session.
+const MAX_CURSOR_DIMENSION: u16 = 1_024;
+
+/// The client always negotiates 32-bit little-endian true colour with red at
+/// bit 0, green at 8 and blue at 16, so Raw/ZRLE/Tight pixels arrive in RGBX
+/// byte order. The padding byte is undefined on the wire; consumers must force
+/// alpha themselves.
+fn wire_format() -> PixelFormat {
+    PixelFormat::rgba()
+}
 
 pub struct HardenedVncOptions {
     /// Owned only for the initial VNC challenge-response exchange.
@@ -121,6 +135,7 @@ impl HardenedVncClient {
         let dimensions = handshake(&mut stream, options, &mut cancellation).await?;
 
         let (reader, writer) = tokio::io::split(stream);
+        let reader = BufReader::with_capacity(READ_BUFFER_BYTES, reader);
         let (normal_tx, normal_rx) = mpsc::channel(INPUT_QUEUE_CAPACITY);
         let (priority_tx, priority_rx) = mpsc::channel(INPUT_QUEUE_CAPACITY);
         let (update_tx, update_rx) = mpsc::channel(INPUT_QUEUE_CAPACITY);
@@ -319,7 +334,7 @@ where
         let dimensions = read_server_init(stream, cancellation).await?;
         write_message(
             stream,
-            ClientMsg::SetPixelFormat(PixelFormat::bgra()),
+            ClientMsg::SetPixelFormat(wire_format()),
             cancellation,
         )
         .await?;
@@ -332,6 +347,7 @@ where
                 VncEncoding::Raw,
                 VncEncoding::DesktopSizePseudo,
                 VncEncoding::ExtendedDesktopSizePseudo,
+                VncEncoding::CursorPseudo,
             ]),
             cancellation,
         )
@@ -494,6 +510,7 @@ where
     let mut raw = codec::RawDecoder::new();
     let mut zrle = codec::ZrleDecoder::new();
     let mut tight = codec::TightDecoder::new();
+    let format = wire_format();
     let emit = |event: VncEvent| {
         let event_tx = event_tx.clone();
         async move { event_tx.send(Ok(event)).await.map_err(|_| VncError::Closed) }
@@ -510,11 +527,8 @@ where
                     match encoding {
                         VncEncoding::Raw => {
                             validate_rect(rect, dimensions)?;
-                            cancelable(
-                                raw.decode(&PixelFormat::bgra(), &rect, &mut reader, &emit),
-                                &stop,
-                            )
-                            .await?;
+                            cancelable(raw.decode(&format, &rect, &mut reader, &emit), &stop)
+                                .await?;
                         }
                         VncEncoding::CopyRect => {
                             validate_rect(rect, dimensions)?;
@@ -529,19 +543,13 @@ where
                         }
                         VncEncoding::Tight => {
                             validate_rect(rect, dimensions)?;
-                            cancelable(
-                                tight.decode(&PixelFormat::bgra(), &rect, &mut reader, &emit),
-                                &stop,
-                            )
-                            .await?;
+                            cancelable(tight.decode(&format, &rect, &mut reader, &emit), &stop)
+                                .await?;
                         }
                         VncEncoding::Zrle => {
                             validate_rect(rect, dimensions)?;
-                            cancelable(
-                                zrle.decode(&PixelFormat::bgra(), &rect, &mut reader, &emit),
-                                &stop,
-                            )
-                            .await?;
+                            cancelable(zrle.decode(&format, &rect, &mut reader, &emit), &stop)
+                                .await?;
                         }
                         VncEncoding::DesktopSizePseudo => {
                             if rect.x != 0 || rect.y != 0 {
@@ -599,11 +607,13 @@ where
                                 emit(VncEvent::ResizeResult { applied, status }).await?;
                             }
                         }
-                        // Cursor is intentionally not negotiated because the
-                        // shared desktop contract has no cursor-shape event.
-                        VncEncoding::CursorPseudo
-                        | VncEncoding::LastRectPseudo
-                        | VncEncoding::Trle => return Err(VncError::UnsupportedOperation),
+                        VncEncoding::CursorPseudo => {
+                            let cursor = read_cursor(&mut reader, rect, &mut stop).await?;
+                            emit(cursor).await?;
+                        }
+                        VncEncoding::LastRectPseudo | VncEncoding::Trle => {
+                            return Err(VncError::UnsupportedOperation);
+                        }
                     }
                 }
                 emit(VncEvent::FramebufferUpdateComplete).await?;
@@ -883,6 +893,36 @@ where
         width: read_u16(reader, cancellation).await?,
         height: read_u16(reader, cancellation).await?,
     })
+}
+
+/// Reads one Cursor pseudo-rectangle (RFC 6143 section 7.8.1). The rectangle
+/// position is the hotspot and is not bounded by the framebuffer. The emitted
+/// payload is `width * height` wire pixels followed by the 1-bpp row-padded
+/// mask; an oversized shape is discarded and emitted with an empty payload so
+/// the stream stays aligned without buffering it.
+async fn read_cursor<R>(
+    reader: &mut R,
+    rect: Rect,
+    cancellation: &mut watch::Receiver<bool>,
+) -> Result<VncEvent, VncError>
+where
+    R: AsyncRead + Unpin,
+{
+    let width = usize::from(rect.width);
+    let height = usize::from(rect.height);
+    let bytes_per_pixel = usize::from(wire_format().bits_per_pixel / 8);
+    let length = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+        .and_then(|pixels| pixels.checked_add(width.div_ceil(8) * height))
+        .ok_or(VncError::ResourceLimit)?;
+    if rect.width > MAX_CURSOR_DIMENSION || rect.height > MAX_CURSOR_DIMENSION {
+        discard_exact(reader, length, cancellation).await?;
+        return Ok(VncEvent::SetCursor(rect, Vec::new()));
+    }
+    let mut payload = vec![0_u8; length];
+    read_exact(reader, &mut payload, cancellation).await?;
+    Ok(VncEvent::SetCursor(rect, payload))
 }
 
 async fn read_extended_screens<R>(

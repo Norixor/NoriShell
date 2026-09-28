@@ -74,6 +74,10 @@ pub enum VncEvent {
     ///
     /// According to [RFC6143, section-7.8.1](https://www.rfc-editor.org/rfc/rfc6143.html#section-7.8.1)
     ///
+    /// The rect position is the hotspot. The payload holds `width * height`
+    /// pixels in the negotiated format followed by the row-padded 1-bpp mask,
+    /// or is empty when the hardened client discarded an oversized shape.
+    ///
     SetCursor(Rect, ImageData),
     /// Just ring a bell
     ///

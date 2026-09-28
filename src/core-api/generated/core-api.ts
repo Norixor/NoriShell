@@ -43,7 +43,11 @@ export type DesktopAudioMuteRequest = { meta: RequestMeta, sessionId: string, ge
 
 export type DesktopSessionRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, };
 
-export type DesktopResolutionRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, width: number, height: number, };
+export type DesktopResolutionRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, width: number, height: number,
+/**
+ * Remote UI scale in percent, 100..=500. RDP applies it through Display Control; VNC ignores it.
+ */
+scalePercent: number, };
 
 export type DesktopInputEvent = { "kind": "key", scanCode: number, keysym: number, down: boolean, } | { "kind": "pointer", x: number, y: number, buttons: number, } | { "kind": "wheel", x: number, y: number, deltaX: number, deltaY: number, } | { "kind": "text", text: string, } | { "kind": "clipboard", text: string, } | { "kind": "resize", width: number, height: number, } | { "kind": "releaseAll" };
 
@@ -51,7 +55,11 @@ export type DesktopInputRequest = { meta: RequestMeta, sessionId: string, genera
 
 export type DesktopFocusRequest = { meta: RequestMeta, sessionId: string | null, generation: WireSequence | null, };
 
-export type DesktopFrameRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, afterSequence: WireSequence, };
+export type DesktopFrameRequest = { meta: RequestMeta, sessionId: string, generation: WireSequence, afterSequence: WireSequence,
+/**
+ * Last cursor revision the view applied; a newer revision adds the cursor block to the response.
+ */
+afterCursorSequence: WireSequence, };
 
 export type DesktopPromptKind = { "kind": "vaultCreate" } | { "kind": "vaultUnlock" } | { "kind": "credentials", username: string, domain: string, passwordOnly: boolean, } | { "kind": "hostKey", address: string, port: number, algorithm: string, fingerprint: string, } | { "kind": "certificate", address: string, fingerprint: string, } | { "kind": "unencryptedVnc", address: string, gateway: boolean, } | { "kind": "keyboardInteractive", name: string, instruction: string, prompts: Array<string>, echo: Array<boolean>, };
 

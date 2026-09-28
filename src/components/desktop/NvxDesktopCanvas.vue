@@ -1,16 +1,22 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { parseCoreApiError } from "../../core-api/client";
 import { desktopClient } from "../../core-api/desktop-client";
 import type { DesktopInputEvent, DesktopSessionSummary } from "../../core-api/generated/core-api";
+import { detectDesktopPlatform } from "../../platform";
 import { preparePluginProtectedMount } from "../../plugins/hostDomBroker";
-import { decodeDesktopFrame, desktopPointerButtons, desktopKey, reservedDesktopKey } from "./input";
-const props = defineProps<{
+import { decodeDesktopFrame, desktopPointerButtons, desktopKey, reservedDesktopKey, type DesktopCursorShape, type DesktopFramePatch } from "./input";
+const props = withDefaults(defineProps<{
   session: DesktopSessionSummary;
   active: boolean;
   fit: boolean;
   panning: boolean;
-}>();
+  /** macOS device preference: deliver ⌘ as the remote Control key. */
+  commandAsControl?: boolean;
+  /** Device preference: request device-pixel resolution and show actual size at one device pixel per remote pixel. */
+  hiDpi?: boolean;
+}>(), { commandAsControl: false, hiDpi: false });
 const emit = defineEmits<{ error: []; resolutionError: [error: unknown] }>();
 const { t } = useI18n();
 
@@ -23,24 +29,94 @@ const controlled = ref(false);
 const panningNow = ref(false);
 const frameSize = ref({ width: 0, height: 0 });
 const viewportSize = ref({ width: 0, height: 0 });
+const devicePixelRatioValue = ref(1);
+const cursorShape = shallowRef<DesktopCursorShape>({ kind: "default" });
+// CSS pixels per remote pixel for the current display mode.
+const displayScale = computed(() => {
+  if (!frameSize.value.width || !frameSize.value.height) return 1;
+  if (props.fit && !props.panning) {
+    if (!viewportSize.value.width || !viewportSize.value.height) return 1;
+    return Math.min(viewportSize.value.width / frameSize.value.width, viewportSize.value.height / frameSize.value.height);
+  }
+  return props.hiDpi ? 1 / devicePixelRatioValue.value : 1;
+});
+const canvasSize = computed(() => {
+  const scale = displayScale.value;
+  if (scale === 1 || !frameSize.value.width || !frameSize.value.height) return undefined;
+  return { width: `${frameSize.value.width * scale}px`, height: `${frameSize.value.height * scale}px` };
+});
+const MAX_CURSOR_CSS_PX = 128;
+/**
+ * Renders the remote cursor bitmap as a PNG at device resolution. `scale` is CSS pixels per remote pixel;
+ * on HiDPI screens the image carries the device pixel ratio through image-set so the pointer stays sharp.
+ */
+function cursorImage(shape: Extract<DesktopCursorShape, { kind: "bitmap" }>, scale: number, ratio: number) {
+  try {
+    const cssScale = Math.min(scale, MAX_CURSOR_CSS_PX / Math.max(shape.width, shape.height));
+    const cssWidth = Math.max(1, Math.round(shape.width * cssScale)), cssHeight = Math.max(1, Math.round(shape.height * cssScale));
+    const width = Math.max(1, Math.round(cssWidth * ratio)), height = Math.max(1, Math.round(cssHeight * ratio));
+    const source = document.createElement("canvas");
+    source.width = shape.width; source.height = shape.height;
+    const sourceContext = source.getContext("2d");
+    if (!sourceContext) return null;
+    sourceContext.putImageData(new ImageData(shape.rgba, shape.width, shape.height), 0, 0);
+    let image = source;
+    if (width !== shape.width || height !== shape.height) {
+      const target = document.createElement("canvas");
+      target.width = width; target.height = height;
+      const targetContext = target.getContext("2d");
+      if (!targetContext) return null;
+      targetContext.drawImage(source, 0, 0, width, height);
+      image = target;
+    }
+    const url = image.toDataURL("image/png");
+    if (!url.startsWith("data:image/png")) return null;
+    // Cursor hotspots are expressed in CSS pixels regardless of the image resolution.
+    const hotspotX = Math.min(cssWidth - 1, Math.round(shape.hotspotX * (cssWidth / shape.width)));
+    const hotspotY = Math.min(cssHeight - 1, Math.round(shape.hotspotY * (cssHeight / shape.height)));
+    if (ratio !== 1) {
+      const set = `-webkit-image-set(url("${url}") ${ratio}x) ${hotspotX} ${hotspotY}, default`;
+      if (typeof CSS !== "undefined" && CSS.supports?.("cursor", set)) return set;
+      // Without image-set support fall back to a CSS-pixel image of the same size.
+      const plain = document.createElement("canvas");
+      plain.width = cssWidth; plain.height = cssHeight;
+      const plainContext = plain.getContext("2d");
+      if (!plainContext) return null;
+      plainContext.drawImage(source, 0, 0, cssWidth, cssHeight);
+      return `url("${plain.toDataURL("image/png")}") ${hotspotX} ${hotspotY}, default`;
+    }
+    return `url("${url}") ${hotspotX} ${hotspotY}, default`;
+  } catch {
+    return null;
+  }
+}
+// Resizing in fit mode changes the scale continuously; quantising it keeps PNG encoding off the resize path.
+let cursorCache: { shape: DesktopCursorShape; key: string; css: string } | null = null;
+const cursorCss = computed(() => {
+  const shape = cursorShape.value;
+  if (shape.kind === "hidden") return "none";
+  if (shape.kind !== "bitmap") return "default";
+  const scale = Math.round(displayScale.value * 20) / 20 || 0.05;
+  const ratio = Math.round(devicePixelRatioValue.value * 4) / 4 || 1;
+  const key = `${scale}:${ratio}`;
+  if (cursorCache?.shape === shape && cursorCache.key === key) return cursorCache.css;
+  const css = cursorImage(shape, scale, ratio) ?? "default";
+  cursorCache = { shape, key, css };
+  return css;
+});
 const canvasStyle = computed(() => {
-  if (!props.fit || props.panning || !frameSize.value.width || !frameSize.value.height
-    || !viewportSize.value.width || !viewportSize.value.height) return undefined;
-  const scale = Math.min(
-    viewportSize.value.width / frameSize.value.width,
-    viewportSize.value.height / frameSize.value.height,
-  );
-  return {
-    width: `${frameSize.value.width * scale}px`,
-    height: `${frameSize.value.height * scale}px`,
-  };
+  // Pan mode keeps the grab cursors from the stylesheet.
+  const cursor = props.panning ? undefined : cursorCss.value;
+  return { ...canvasSize.value, cursor };
 });
 
 let reportedFrameError = false;
 let mounted = false;
 let frameBusy = false;
 let after = 0n;
-let timer: ReturnType<typeof setTimeout> | undefined;
+let afterCursor = 0n;
+let pullTimer: ReturnType<typeof setTimeout> | undefined;
+let pullFrame: number | undefined;
 
 let intent = 0;
 let epoch: string | null = null;
@@ -56,9 +132,21 @@ let pan: {
   left: number;
   top: number;
 } | null = null;
+const metaChorded = new Set<string>();
+let pendingMove: DesktopInputEvent | null = null;
+let pendingWheel: { x: number; y: number; deltaX: number; deltaY: number } | null = null;
+let inputFrame: number | undefined;
 
 const canRun = computed(() => props.active && props.session.state === "running");
 const identity = computed(() => `${props.session.id}:${props.session.generation}`);
+
+function requestFrame(callback: () => void): number {
+  return typeof requestAnimationFrame === "function" ? requestAnimationFrame(callback) : Number(setTimeout(callback, 16));
+}
+function cancelFrame(handle: number) {
+  if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(handle);
+  else clearTimeout(handle);
+}
 
 function available() {
   return mounted
@@ -77,8 +165,16 @@ function stopPanning() {
   panningNow.value = false;
 }
 
+function discardPendingInput() {
+  if (inputFrame !== undefined) { cancelFrame(inputFrame); inputFrame = undefined; }
+  pendingMove = null;
+  pendingWheel = null;
+}
+
 function invalidate() {
   stopPanning();
+  metaChorded.clear();
+  discardPendingInput();
   intent++;
   epoch = null;
   controlled.value = false;
@@ -121,9 +217,14 @@ async function acquire() {
   await focusChain;
 }
 
-function send(input: DesktopInputEvent) {
+/**
+ * Queues one input event behind the previous ones. Droppable events (pointer moves and wheel) are
+ * discarded when Core's queue is full instead of revoking control; every other failure invalidates.
+ */
+function send(input: DesktopInputEvent, droppable = false) {
   if (!available() || !epoch) return Promise.resolve(false);
   if (pending >= 32) {
+    if (droppable) return Promise.resolve(false);
     void invalidate();
     emit("error");
     return Promise.resolve(false);
@@ -151,11 +252,11 @@ function send(input: DesktopInputEvent) {
       });
       return true;
     })
-    .catch(() => {
-      if (ticket === intent) {
-        void invalidate();
-        emit("error");
-      }
+    .catch((error: unknown) => {
+      if (ticket !== intent) return false;
+      if (droppable && parseCoreApiError(error)?.code === "desktop.resourceLimit") return false;
+      void invalidate();
+      emit("error");
       return false;
     })
     .finally(() => {
@@ -163,6 +264,21 @@ function send(input: DesktopInputEvent) {
     });
   chain = result.then(() => undefined);
   return result;
+}
+
+function scheduleInputFlush() {
+  if (inputFrame !== undefined) return;
+  inputFrame = requestFrame(() => { inputFrame = undefined; flushPendingInput(); });
+}
+
+/** Sends the coalesced move and wheel before any button or key event so remote ordering is preserved. */
+function flushPendingInput() {
+  if (inputFrame !== undefined) { cancelFrame(inputFrame); inputFrame = undefined; }
+  const move = pendingMove, wheel = pendingWheel;
+  pendingMove = null;
+  pendingWheel = null;
+  if (move) void send(move, true);
+  if (wheel) void send({ kind: "wheel", ...wheel }, true);
 }
 
 function point(event: MouseEvent) {
@@ -225,8 +341,18 @@ async function pointer(event: PointerEvent) {
       return;
     }
   }
-  if (event.type === "pointermove" && pending > 1) return;
-  void send({ kind: "pointer", ...point(event), buttons: desktopPointerButtons(event) });
+  const input: DesktopInputEvent = { kind: "pointer", ...point(event), buttons: desktopPointerButtons(event) };
+  if (event.type === "pointermove") {
+    if (!epoch) return;
+    // Only the latest position of an animation frame is sent; buttons come from the same event.
+    pendingMove = input;
+    // A pending wheel is sent after the move, so it must carry the newest position too.
+    if (pendingWheel) pendingWheel = { ...pendingWheel, x: input.x, y: input.y };
+    scheduleInputFlush();
+    return;
+  }
+  flushPendingInput();
+  void send(input);
 }
 
 function pointerCancel(event: PointerEvent) {
@@ -242,91 +368,138 @@ function key(event: KeyboardEvent, down: boolean) {
   if (reservedDesktopKey(event)) return;
   if (event.isComposing || event.key === "Process") return;
   event.preventDefault();
-  const input = desktopKey(event, down);
-  if (!input) return;
-  if (epoch) { void send(input); return; }
+  const input = desktopKey(event, down, { commandAsControl: props.commandAsControl });
+  if (!input || input.kind !== "key") return;
+  // macOS WebKit does not deliver keyup for keys pressed while ⌘ is held, which would leave the remote key
+  // stuck and auto-repeating. Such chords are sent as an immediate press and release; their late keyups are ignored.
+  let inputs: DesktopInputEvent[] = [input];
+  if (event.metaKey && detectDesktopPlatform() === "macos" && !/^(Meta|Control|Alt|Shift)/.test(event.code)) {
+    if (!down) {
+      if (metaChorded.delete(event.code)) return;
+    } else {
+      metaChorded.add(event.code);
+      inputs = [input, { ...input, down: false }];
+    }
+  } else if (!down) {
+    metaChorded.delete(event.code);
+  }
+  if (!down && /^Meta/.test(event.code)) metaChorded.clear();
+  const deliver = () => { flushPendingInput(); for (const item of inputs) void send(item); };
+  if (epoch) { deliver(); return; }
   if (!available() || document.activeElement !== inputSink.value) return;
   // A moved WebView may keep DOM focus after its old Core input lease is revoked.
   keyboardAcquire ??= acquire().finally(() => { keyboardAcquire = null; });
-  void keyboardAcquire.then(() => send(input));
+  void keyboardAcquire.then(deliver);
 }
 
 function composed(event: CompositionEvent) {
   if (props.panning) return;
   if (event.data) {
     const input: DesktopInputEvent = { kind: "text", text: event.data };
-    if (epoch) void send(input);
+    if (epoch) { flushPendingInput(); void send(input); }
     else if (available() && document.activeElement === inputSink.value) {
       keyboardAcquire ??= acquire().finally(() => { keyboardAcquire = null; });
-      void keyboardAcquire.then(() => send(input));
+      void keyboardAcquire.then(() => { flushPendingInput(); return send(input); });
     }
   }
   if (inputSink.value) inputSink.value.value = "";
 }
 
+const clampDelta = (value: number) => Math.max(-32768, Math.min(32767, Math.round(value)));
 function wheel(event: WheelEvent) {
   if (props.panning) return;
   event.preventDefault();
+  if (!epoch) return;
   const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
-  void send({
-    kind: "wheel",
-    ...point(event),
-    deltaX: Math.max(-32768, Math.min(32767, Math.round(event.deltaX * scale))),
-    deltaY: Math.max(-32768, Math.min(32767, Math.round(event.deltaY * scale))),
-  });
+  const position = point(event);
+  const deltaX = event.deltaX * scale, deltaY = event.deltaY * scale;
+  // Deltas accumulate within one animation frame and travel with the latest pointer position.
+  pendingWheel = pendingWheel
+    ? { ...position, deltaX: clampDelta(pendingWheel.deltaX + deltaX), deltaY: clampDelta(pendingWheel.deltaY + deltaY) }
+    : { ...position, deltaX: clampDelta(deltaX), deltaY: clampDelta(deltaY) };
+  scheduleInputFlush();
 }
 
 function canPull() {
   return mounted && canRun.value && !document.hidden;
 }
 
-function syncFramePolling() {
-  if (!canPull()) {
-    clearTimeout(timer);
-    timer = undefined;
-  } else if (!frameBusy && timer === undefined) {
-    void pull();
-  }
+function cancelScheduledPull() {
+  clearTimeout(pullTimer);
+  pullTimer = undefined;
+  if (pullFrame !== undefined) { cancelFrame(pullFrame); pullFrame = undefined; }
 }
 
+function schedulePull(delay: "frame" | number) {
+  cancelScheduledPull();
+  if (!canPull()) return;
+  if (delay === "frame") pullFrame = requestFrame(() => { pullFrame = undefined; void pull(); });
+  else pullTimer = setTimeout(() => { pullTimer = undefined; void pull(); }, delay);
+}
+
+function syncFramePolling() {
+  if (!canPull()) cancelScheduledPull();
+  else if (!frameBusy && pullTimer === undefined && pullFrame === undefined) void pull();
+}
+
+/** Paints every rect and reports whether the image now continues from this frame. */
+function paint(frame: DesktopFramePatch) {
+  const target = canvas.value;
+  const context = target?.getContext("2d");
+  if (!target || !context) return false;
+  if (frame.base !== 0n && (frame.base !== after || target.width !== frame.width || target.height !== frame.height)) {
+    // The patch does not continue our image; ask for a full frame instead of painting a corrupt one.
+    after = 0n;
+    return false;
+  }
+  if (target.width !== frame.width || target.height !== frame.height) {
+    target.width = frame.width;
+    target.height = frame.height;
+  }
+  if (frameSize.value.width !== frame.width || frameSize.value.height !== frame.height) {
+    frameSize.value = { width: frame.width, height: frame.height };
+  }
+  for (const rect of frame.rects) context.putImageData(new ImageData(rect.rgba, rect.width, rect.height), rect.x, rect.y);
+  return true;
+}
+
+/** One long-poll request at a time; the next one starts after painting (next animation frame) or right after an empty reply. */
 async function pull() {
   if (!canPull() || frameBusy) return;
   frameBusy = true;
   const started = performance.now();
   const key = identity.value;
   const session = props.session;
+  let next: "frame" | number = "frame";
   try {
-    const data = await desktopClient.frame(session, String(after));
+    const data = await desktopClient.frame(session, String(after), String(afterCursor));
     if (!mounted || !canRun.value || document.hidden || key !== identity.value) return;
-    const frame = decodeDesktopFrame(data, after);
-    if (frame && canvas.value) {
-      reportedFrameError = false;
-      const context = canvas.value.getContext("2d");
-      if (!context) return;
-      if (frame.base !== 0n && (frame.base !== after || canvas.value.width !== frame.width || canvas.value.height !== frame.height)) {
-        after = 0n;
-        return;
-      }
-      if (canvas.value.width !== frame.width || canvas.value.height !== frame.height) {
-        canvas.value.width = frame.width;
-        canvas.value.height = frame.height;
-      }
-      if (frameSize.value.width !== frame.width || frameSize.value.height !== frame.height) {
-        frameSize.value = { width: frame.width, height: frame.height };
-      }
-      context.putImageData(new ImageData(frame.rgba, frame.rectWidth, frame.rectHeight), frame.x, frame.y);
-      after = frame.sequence;
+    const decoded = decodeDesktopFrame(data, after);
+    reportedFrameError = false;
+    if (!decoded) {
+      // Core already waited for new data; a reply that returned at once did not, so avoid a hot loop.
+      next = performance.now() - started < 20 ? 50 : 0;
+      return;
     }
-  } catch {
-    if (key === identity.value && canRun.value && !reportedFrameError) {
+    if (decoded.frame && paint(decoded.frame)) after = decoded.frameSequence;
+    if (decoded.cursor) {
+      cursorShape.value = decoded.cursor.kind === "bitmap" ? { ...decoded.cursor, rgba: decoded.cursor.rgba.slice() } : decoded.cursor;
+      afterCursor = decoded.cursorSequence;
+    }
+  } catch (error) {
+    if (key !== identity.value || !canRun.value) return;
+    next = 250;
+    // Tab ownership is still being projected; the next snapshot or retry resolves it without user action.
+    if (parseCoreApiError(error)?.code.startsWith("workspace_tab.")) return;
+    if (!reportedFrameError) {
       reportedFrameError = true;
       emit("error");
     }
   } finally {
     frameBusy = false;
     if (canPull()) {
-      const delay = Math.max(0, 16 - (performance.now() - started));
-      timer = setTimeout(() => { timer = undefined; void pull(); }, delay);
+      if (next === 0) void pull();
+      else schedulePull(next);
     }
   }
 }
@@ -352,15 +525,18 @@ function desiredResolution() {
   const profile = props.session.profile;
   const adaptive = profile.protocol === "rdp" ? profile.rdpResolutionMode === "adaptive" : profile.vncResolutionMode === "adaptive";
   if (!mounted || !canRun.value || document.hidden || !adaptive || size.width <= 0 || size.height <= 0) return null;
-  let width = Math.min(8192, Math.max(200, Math.floor(size.width)));
-  let height = Math.min(8192, Math.max(200, Math.floor(size.height)));
+  const factor = props.hiDpi ? devicePixelRatioValue.value : 1;
+  let width = Math.min(8192, Math.max(200, Math.floor(size.width * factor)));
+  let height = Math.min(8192, Math.max(200, Math.floor(size.height * factor)));
   if (width * height > 16_777_216) {
     const scale = Math.sqrt(16_777_216 / (width * height));
     width = Math.floor(width * scale);
     height = Math.floor(height * scale);
   }
   if (profile.protocol === "rdp") width -= width % 2;
-  return { width, height, key: `${identity.value}:${width}x${height}` };
+  // Only RDP Display Control carries a UI scale; VNC ignores it and always receives 100.
+  const scalePercent = profile.protocol === "rdp" && props.hiDpi ? Math.min(500, Math.max(100, Math.round(factor * 100))) : 100;
+  return { width, height, scalePercent, key: `${identity.value}:${width}x${height}@${scalePercent}` };
 }
 function scheduleResolution() {
   clearTimeout(resolutionTimer);
@@ -377,10 +553,11 @@ async function requestResolution() {
   attemptedResolution = desired.key;
   const currentWidth = frameSize.value.width || session.width;
   const currentHeight = frameSize.value.height || session.height;
-  if (currentWidth === desired.width && currentHeight === desired.height) return;
+  // A matching pixel size still needs a request when a HiDPI scale must be applied remotely.
+  if (currentWidth === desired.width && currentHeight === desired.height && desired.scalePercent === 100) return;
   resolutionBusy = true;
   try {
-    await desktopClient.resolution(session, desired.width, desired.height);
+    await desktopClient.resolution(session, desired.width, desired.height, desired.scalePercent);
     // Only server frames and snapshots may change the displayed remote size.
   } catch (error) {
     if (mounted && key === identity.value && canRun.value && desiredResolution()?.key === desired.key) emit("resolutionError", error);
@@ -389,10 +566,19 @@ async function requestResolution() {
     scheduleResolution();
   }
 }
-watch([identity, canRun, () => props.session.profile.rdpResolutionMode, () => props.session.profile.vncResolutionMode, viewportSize], scheduleResolution);
+watch([identity, canRun, () => props.session.profile.rdpResolutionMode, () => props.session.profile.vncResolutionMode, () => props.hiDpi, viewportSize], scheduleResolution);
 let observer: MutationObserver | null = null;
 let resizeObserver: ResizeObserver | null = null;
+let ratioQuery: MediaQueryList | null = null;
+function watchPixelRatio() {
+  ratioQuery?.removeEventListener("change", measureViewport);
+  ratioQuery = typeof window.matchMedia === "function" ? window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`) : null;
+  ratioQuery?.addEventListener?.("change", measureViewport);
+}
 function measureViewport() {
+  const ratio = window.devicePixelRatio || 1;
+  // Moving to a display with another scale keeps the window size, so resize events alone miss it.
+  if (ratio !== devicePixelRatioValue.value || !ratioQuery) { devicePixelRatioValue.value = ratio; if (mounted) watchPixelRatio(); }
   if (viewport.value) viewportSize.value = { width: viewport.value.clientWidth, height: viewport.value.clientHeight };
 }
 watch(identity, () => {
@@ -401,6 +587,8 @@ watch(identity, () => {
   stopPanning();
   reportedFrameError = false;
   after = 0n;
+  afterCursor = 0n;
+  cursorShape.value = { kind: "default" };
   frameSize.value = { width: 0, height: 0 };
   canvas.value?.getContext("2d")?.clearRect(0, 0, canvas.value.width, canvas.value.height);
   void invalidate();
@@ -443,12 +631,14 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   mounted = false;
-  clearTimeout(timer);
+  cancelScheduledPull();
   clearTimeout(resolutionTimer);
   void invalidate();
   observer?.disconnect();
   resizeObserver?.disconnect();
   window.removeEventListener("resize", measureViewport);
+  ratioQuery?.removeEventListener?.("change", measureViewport);
+  ratioQuery = null;
   window.removeEventListener("blur", visibility);
   document.removeEventListener("visibilitychange", visibility);
 });
@@ -459,7 +649,17 @@ async function clipboard(text: string) {
   return send({ kind: "clipboard", text });
 }
 
-defineExpose({ invalidate, clipboard });
+/** Sends a prepared key sequence in order after acquiring control the same way the clipboard path does. */
+async function sendKeys(events: DesktopInputEvent[]) {
+  if (props.panning || !events.length) return false;
+  await acquire();
+  if (!epoch) return false;
+  flushPendingInput();
+  const results = await Promise.all(events.map((event) => send(event)));
+  return results.every(Boolean);
+}
+
+defineExpose({ invalidate, clipboard, sendKeys });
 </script>
 <template>
   <div

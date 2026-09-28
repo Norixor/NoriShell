@@ -7,8 +7,9 @@ use std::{collections::BTreeSet, io::Cursor, sync::Arc, time::Duration};
 
 use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat as JpegPixelFormat};
 use norishell_desktop_protocol::{
-    BoxedDesktopIo, DesktopFrame, DesktopInput, EngineCommand, EngineControl, EngineError,
-    EngineEvent, EventSink, Result, frame_len,
+    BoxedDesktopIo, CursorBitmap, DesktopCursor, DesktopFrame, DesktopInput, DesktopRect,
+    DirtyRegion, EngineCommand, EngineControl, EngineError, EngineEvent, EventSink,
+    MAX_CURSOR_DIMENSION, PUBLISH_INTERVAL, Result, frame_len,
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -40,9 +41,10 @@ pub struct VncOptions {
 
 /// Runs one already-connected VNC RFB session.
 ///
-/// Cursor pseudo-encoding is not negotiated because `DesktopFrame` has no
-/// cursor-shape channel. Remote resize requires a server ExtendedDesktopSize
-/// advertisement and a matching server result.
+/// The server-side cursor shape is negotiated through the Cursor
+/// pseudo-encoding and forwarded as `EngineEvent::Cursor`; it is never
+/// composited into frame pixels. Remote resize requires a server
+/// ExtendedDesktopSize advertisement and a matching server result.
 pub async fn run(
     stream: BoxedDesktopIo,
     options: VncOptions,
@@ -70,8 +72,17 @@ pub async fn run(
     .await
     .map_err(map_error)?;
 
+    let mut publisher = FramePublisher::default();
     let result = if let Some((width, height)) = initial_resize {
-        await_initial_resize(&mut client, &mut control, &events, width, height).await
+        await_initial_resize(
+            &mut client,
+            &mut control,
+            &mut publisher,
+            &events,
+            width,
+            height,
+        )
+        .await
     } else {
         Ok(())
     };
@@ -81,6 +92,7 @@ pub async fn run(
             &mut client,
             &mut commands,
             &mut control,
+            &mut publisher,
             clipboard_enabled,
             Arc::clone(&events),
         )
@@ -101,12 +113,11 @@ pub async fn run(
 async fn await_initial_resize(
     client: &mut HardenedVncClient,
     control: &mut EngineControl,
+    publisher: &mut FramePublisher,
     events: &EventSink,
     width: u16,
     height: u16,
 ) -> Result<()> {
-    let mut frame = None;
-    let mut dirty = false;
     // The first non-incremental update must contain ExtendedDesktopSize if
     // the server supports SetDesktopSize. A stalled initial update is not a
     // resize capability advertisement.
@@ -117,7 +128,7 @@ async fn await_initial_resize(
                 event = client.next_event() => {
                     let event = event.map_err(map_error)?;
                     let complete = matches!(event, VncEvent::FramebufferUpdateComplete);
-                    handle_server_event(event, &mut frame, &mut dirty, events)?;
+                    handle_server_event(event, publisher, events)?;
                     if complete { break; }
                 }
             }
@@ -139,7 +150,7 @@ async fn await_initial_resize(
                     if let VncEvent::ResizeResult { applied, status } = event {
                         return resize_result(applied, status);
                     }
-                    handle_server_event(event, &mut frame, &mut dirty, events)?;
+                    handle_server_event(event, publisher, events)?;
                 }
             }
         }
@@ -173,11 +184,10 @@ async fn run_connected(
     client: &mut HardenedVncClient,
     commands: &mut mpsc::Receiver<EngineCommand>,
     control: &mut EngineControl,
+    publisher: &mut FramePublisher,
     clipboard_enabled: bool,
     events: EventSink,
 ) -> Result<()> {
-    let mut frame: Option<DesktopFrame> = None;
-    let mut dirty = false;
     let mut input = InputState::default();
     let mut commands_open = true;
     let mut focus_open = true;
@@ -210,6 +220,16 @@ async fn run_connected(
                 // late server result cannot be mistaken for a later resize.
                 return Err(EngineError::VncResolutionNotApplied);
             }
+            // Flushes coalesced updates that arrived inside the publish
+            // interval; it runs only between complete framebuffer updates.
+            () = tokio::time::sleep_until(publisher.deadline()), if publisher.flush_ready() => {
+                if let Err(error) = publisher.publish(Instant::now(), &events) {
+                    if let Some(pending) = pending_resize.take() {
+                        let _ = pending.completion.send(Err(error));
+                    }
+                    return Err(error);
+                }
+            }
             server_event = client.next_event() => {
                 let server_event = match server_event {
                     Ok(event) => event,
@@ -226,7 +246,7 @@ async fn run_connected(
                         let _ = pending.completion.send(resize_result(applied, status));
                     }
                 } else {
-                    if let Err(error) = handle_server_event(server_event, &mut frame, &mut dirty, &events) {
+                    if let Err(error) = handle_server_event(server_event, publisher, &events) {
                         if let Some(pending) = pending_resize.take() {
                             let _ = pending.completion.send(Err(error));
                         }
@@ -237,7 +257,8 @@ async fn run_connected(
             command = commands.recv(), if commands_open => {
                 match command {
                     Some(command) => {
-                        if let DesktopInput::Resize { width, height } = command.input {
+                        // VNC SetDesktopSize has no UI scale field; `scale_percent` is RDP-only.
+                        if let DesktopInput::Resize { width, height, .. } = command.input {
                             if !control.accepts(&command) || command.input.validate().is_err() {
                                 let error = if !control.accepts(&command) { rejection_for(control) } else { command.input.validate().unwrap_err() };
                                 let _ = command.completion.send(Err(error));
@@ -273,29 +294,26 @@ async fn run_connected(
 
 fn handle_server_event(
     event: VncEvent,
-    frame: &mut Option<DesktopFrame>,
-    dirty: &mut bool,
+    publisher: &mut FramePublisher,
     sink: &EventSink,
 ) -> Result<()> {
     match event {
-        VncEvent::SetResolution(screen) => {
-            *frame = Some(DesktopFrame::new(screen.width, screen.height)?);
-            *dirty = true;
-        }
-        VncEvent::RawImage(rect, bytes) => {
-            let image = frame.as_mut().ok_or(EngineError::Protocol)?;
-            image.write_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                &bgra_to_rgba(rect, &bytes)?,
-            )?;
-            *dirty = true;
+        VncEvent::SetResolution(screen) => publisher.set_resolution(screen.width, screen.height)?,
+        VncEvent::RawImage(rect, mut bytes) => {
+            if bytes.len() != frame_len(rect.width, rect.height)? {
+                return Err(EngineError::Protocol);
+            }
+            // The negotiated RGBX wire format leaves the fourth byte undefined.
+            for pixel in bytes.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+            publisher
+                .frame_mut()?
+                .write_rect(rect.x, rect.y, rect.width, rect.height, &bytes)?;
+            publisher.mark(rect);
         }
         VncEvent::Copy(destination, source) => {
-            let image = frame.as_mut().ok_or(EngineError::Protocol)?;
-            image.copy_rect(
+            publisher.frame_mut()?.copy_rect(
                 source.x,
                 source.y,
                 destination.x,
@@ -303,43 +321,174 @@ fn handle_server_event(
                 destination.width,
                 destination.height,
             )?;
-            *dirty = true;
+            publisher.mark(destination);
         }
         VncEvent::JpegImage(rect, bytes) => {
-            let image = frame.as_mut().ok_or(EngineError::Protocol)?;
-            image.write_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                &decode_jpeg(rect, &bytes)?,
-            )?;
-            *dirty = true;
+            write_jpeg(publisher.frame_mut()?, rect, &bytes)?;
+            publisher.mark(rect);
         }
-        VncEvent::FramebufferUpdateComplete => {
-            if *dirty {
-                let image = frame.as_ref().ok_or(EngineError::Protocol)?;
-                // EventSink is Core's one-frame replacement callback. The
-                // adapter never queues snapshots or retains prior display frames.
-                sink(EngineEvent::Frame(Arc::new(DesktopFrame {
-                    width: image.width,
-                    height: image.height,
-                    rgba: image.rgba.clone(),
-                })));
-                *dirty = false;
-            }
+        VncEvent::FramebufferUpdateComplete => publisher.complete(Instant::now(), sink)?,
+        VncEvent::SetCursor(rect, bytes) => {
+            sink(EngineEvent::Cursor(cursor_from_rfb(rect, &bytes)))
         }
         VncEvent::Text(text) => sink(EngineEvent::Clipboard(text)),
         VncEvent::Bell => {}
         VncEvent::ResizeResult { .. } => {}
-        // The hardened vendor path never emits these for this negotiation;
-        // retain failure-closed behavior if that invariant changes.
-        VncEvent::SetPixelFormat(_) | VncEvent::SetCursor(_, _) => {
-            return Err(EngineError::UnsupportedOperation);
-        }
+        // The hardened vendor path always sends SetPixelFormat and never
+        // emits this; retain failure-closed behavior if that invariant changes.
+        VncEvent::SetPixelFormat(_) => return Err(EngineError::UnsupportedOperation),
         _ => return Err(EngineError::UnsupportedOperation),
     }
     Ok(())
+}
+
+/// Owns the decode surface and turns completed RFB updates into bounded,
+/// rate-limited `Frame`/`FramePatch` events. Core keeps its own projection, so
+/// the full surface is copied only for the first frame, a size change, or an
+/// update covering most of the frame.
+#[derive(Default)]
+struct FramePublisher {
+    frame: Option<DesktopFrame>,
+    /// Rectangles written by the FramebufferUpdate currently being received.
+    in_progress: DirtyRegion,
+    /// Rectangles from completed updates that have not been published yet.
+    committed: DirtyRegion,
+    /// The next publish must replace Core's frame (first frame or new size).
+    requires_full: bool,
+    /// Set only by a FramebufferUpdateComplete, so neither a blank surface
+    /// after a size change nor a half-received update is ever published.
+    ready: bool,
+    last_publish: Option<Instant>,
+}
+
+impl FramePublisher {
+    fn set_resolution(&mut self, width: u16, height: u16) -> Result<()> {
+        if self
+            .frame
+            .as_ref()
+            .is_some_and(|frame| frame.width == width && frame.height == height)
+        {
+            // An ExtendedDesktopSize echo of the current size keeps pixels.
+            return Ok(());
+        }
+        self.frame = Some(DesktopFrame::new(width, height)?);
+        self.in_progress.clear();
+        self.committed.clear();
+        self.requires_full = true;
+        self.ready = false;
+        Ok(())
+    }
+
+    fn frame_mut(&mut self) -> Result<&mut DesktopFrame> {
+        self.frame.as_mut().ok_or(EngineError::Protocol)
+    }
+
+    fn mark(&mut self, rect: Rect) {
+        self.in_progress.add(DesktopRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        });
+    }
+
+    fn has_pending(&self) -> bool {
+        self.ready && self.frame.is_some()
+    }
+
+    /// A timer flush publishes only complete updates; while a later update is
+    /// still arriving, its FramebufferUpdateComplete publishes instead.
+    fn flush_ready(&self) -> bool {
+        self.has_pending() && self.in_progress.is_empty()
+    }
+
+    fn deadline(&self) -> Instant {
+        self.last_publish
+            .map_or_else(Instant::now, |last| last + PUBLISH_INTERVAL)
+    }
+
+    fn complete(&mut self, now: Instant, sink: &EventSink) -> Result<()> {
+        self.committed.extend(&self.in_progress);
+        self.in_progress.clear();
+        self.ready = self.frame.is_some() && (self.requires_full || !self.committed.is_empty());
+        // The first frame is never delayed; later ones wait for the interval.
+        if self
+            .last_publish
+            .is_none_or(|last| now >= last + PUBLISH_INTERVAL)
+        {
+            self.publish(now, sink)?;
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self, now: Instant, sink: &EventSink) -> Result<()> {
+        if !self.has_pending() {
+            return Ok(());
+        }
+        let frame = self.frame.as_ref().ok_or(EngineError::Protocol)?;
+        let total = u64::from(frame.width) * u64::from(frame.height);
+        if self.requires_full || self.committed.area() * 10 >= total * 6 {
+            sink(EngineEvent::Frame(Arc::new(frame.clone())));
+        } else {
+            sink(EngineEvent::FramePatch(
+                frame.extract_patch(&self.committed)?,
+            ));
+        }
+        self.requires_full = false;
+        self.ready = false;
+        self.committed.clear();
+        self.last_publish = Some(now);
+        Ok(())
+    }
+}
+
+/// Converts an RFB Cursor pseudo-rectangle (RGBX pixels plus a 1-bpp mask)
+/// into a straight-alpha bitmap. A 0x0 or fully transparent shape hides the
+/// pointer; any malformed or oversized shape falls back to the default arrow
+/// instead of failing the session.
+fn cursor_from_rfb(rect: Rect, bytes: &[u8]) -> DesktopCursor {
+    if rect.width == 0 || rect.height == 0 {
+        return DesktopCursor::Hidden;
+    }
+    if rect.width > MAX_CURSOR_DIMENSION || rect.height > MAX_CURSOR_DIMENSION {
+        return DesktopCursor::Default;
+    }
+    let width = usize::from(rect.width);
+    let height = usize::from(rect.height);
+    let pixel_len = width * height * 4;
+    let mask_row = width.div_ceil(8);
+    if bytes.len() != pixel_len + mask_row * height {
+        return DesktopCursor::Default;
+    }
+    let (pixels, mask) = bytes.split_at(pixel_len);
+    let mut rgba = vec![0_u8; pixel_len];
+    let mut visible = false;
+    for (y, (target_row, source_row)) in rgba
+        .chunks_exact_mut(width * 4)
+        .zip(pixels.chunks_exact(width * 4))
+        .enumerate()
+    {
+        let mask_bits = &mask[y * mask_row..(y + 1) * mask_row];
+        for (x, (target, source)) in target_row
+            .chunks_exact_mut(4)
+            .zip(source_row.chunks_exact(4))
+            .enumerate()
+        {
+            // Transparent pixels stay all-zero so the bitmap is straight alpha.
+            if mask_bits[x / 8] & (0x80 >> (x % 8)) != 0 {
+                target[..3].copy_from_slice(&source[..3]);
+                target[3] = 255;
+                visible = true;
+            }
+        }
+    }
+    if !visible {
+        return DesktopCursor::Hidden;
+    }
+    match CursorBitmap::new(rect.width, rect.height, rect.x, rect.y, rgba) {
+        Ok(bitmap) => DesktopCursor::Bitmap(Arc::new(bitmap)),
+        Err(_) => DesktopCursor::Default,
+    }
 }
 
 async fn handle_command(
@@ -447,21 +596,20 @@ fn complete_queued_commands(commands: &mut mpsc::Receiver<EngineCommand>, error:
     }
 }
 
-fn bgra_to_rgba(rect: Rect, bytes: &[u8]) -> Result<Vec<u8>> {
-    let expected = frame_len(rect.width, rect.height)?;
-    if bytes.len() != expected {
-        return Err(EngineError::Protocol);
-    }
-    let mut rgba = Vec::with_capacity(expected);
-    for pixel in bytes.chunks_exact(4) {
-        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
-    }
-    Ok(rgba)
-}
-
-fn decode_jpeg(rect: Rect, bytes: &[u8]) -> Result<Vec<u8>> {
+/// Decodes a Tight JPEG rectangle straight into the frame rows, avoiding an
+/// intermediate RGBA buffer beyond the decoder's own output.
+fn write_jpeg(frame: &mut DesktopFrame, rect: Rect, bytes: &[u8]) -> Result<()> {
     if bytes.len() > MAX_JPEG_BYTES {
         return Err(EngineError::ResourceLimit);
+    }
+    let target = DesktopRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    };
+    if !target.fits(frame.width, frame.height) {
+        return Err(EngineError::Protocol);
     }
     let mut decoder = JpegDecoder::new(Cursor::new(bytes));
     // Parse dimensions before JPEG allocates its decoded planes. The RFB
@@ -472,42 +620,39 @@ fn decode_jpeg(rect: Rect, bytes: &[u8]) -> Result<Vec<u8>> {
     if info.width != rect.width || info.height != rect.height {
         return Err(EngineError::Protocol);
     }
-    let target_len = frame_len(rect.width, rect.height)?;
-    match info.pixel_format {
-        JpegPixelFormat::RGB24 | JpegPixelFormat::L8 => {}
+    let channels = match info.pixel_format {
+        JpegPixelFormat::RGB24 => 3,
+        JpegPixelFormat::L8 => 1,
         JpegPixelFormat::L16 | JpegPixelFormat::CMYK32 => {
             return Err(EngineError::UnsupportedOperation);
         }
-    }
+    };
     // jpeg-decoder limits its decoded component planes by this value. RGBA
     // output needs four bytes per RFB pixel, which bounds all supported JPEG
     // source formats at the negotiated frame size.
-    decoder.set_max_decoding_buffer_size(target_len);
+    decoder.set_max_decoding_buffer_size(frame_len(rect.width, rect.height)?);
     let pixels = decoder.decode().map_err(|_| EngineError::Protocol)?;
-    let mut rgba = Vec::with_capacity(target_len);
-    match info.pixel_format {
-        JpegPixelFormat::RGB24 => {
-            if pixels.len() != usize::from(rect.width) * usize::from(rect.height) * 3 {
-                return Err(EngineError::Protocol);
-            }
-            for pixel in pixels.chunks_exact(3) {
-                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
-            }
-        }
-        JpegPixelFormat::L8 => {
-            if pixels.len() != usize::from(rect.width) * usize::from(rect.height) {
-                return Err(EngineError::Protocol);
-            }
-            for value in pixels {
-                rgba.extend_from_slice(&[value, value, value, 255]);
-            }
-        }
-        JpegPixelFormat::L16 | JpegPixelFormat::CMYK32 => unreachable!(),
-    }
-    if rgba.len() != target_len {
+    let width = usize::from(rect.width);
+    if pixels.len() != width * usize::from(rect.height) * channels {
         return Err(EngineError::Protocol);
     }
-    Ok(rgba)
+    let stride = usize::from(frame.width) * 4;
+    for (row, source) in pixels.chunks_exact(width * channels).enumerate() {
+        let start = (usize::from(rect.y) + row) * stride + usize::from(rect.x) * 4;
+        let target = &mut frame.rgba[start..start + width * 4];
+        for (pixel, source) in target
+            .chunks_exact_mut(4)
+            .zip(source.chunks_exact(channels))
+        {
+            if channels == 3 {
+                pixel[..3].copy_from_slice(source);
+            } else {
+                pixel[..3].fill(source[0]);
+            }
+            pixel[3] = 255;
+        }
+    }
+    Ok(())
 }
 
 fn map_error(error: VncError) -> EngineError {
@@ -728,19 +873,12 @@ mod tests {
     const TEST_TIMEOUT: Duration = Duration::from_secs(2);
 
     #[test]
-    fn jpeg_is_preflighted_and_converted_to_rgba() {
+    fn jpeg_is_preflighted_and_written_as_rgba() {
         let jpeg = include_bytes!("testdata/red-1x1.jpg");
-        let rgba = decode_jpeg(
-            Rect {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            },
-            jpeg,
-        )
-        .unwrap();
-        assert_eq!(rgba.len(), 4);
+        let mut frame = DesktopFrame::new(2, 1).unwrap();
+        write_jpeg(&mut frame, rect(1, 0, 1, 1), jpeg).unwrap();
+        assert_eq!(frame.rgba[..4], [0, 0, 0, 0]);
+        let rgba = &frame.rgba[4..];
         assert!(rgba[0] > 200);
         assert!(rgba[1] < 32);
         assert!(rgba[2] < 32);
@@ -750,17 +888,192 @@ mod tests {
     #[test]
     fn jpeg_dimensions_must_match_the_rfb_rectangle() {
         let jpeg = include_bytes!("testdata/red-1x1.jpg");
+        let mut frame = DesktopFrame::new(2, 1).unwrap();
         assert_eq!(
-            decode_jpeg(
-                Rect {
-                    x: 0,
-                    y: 0,
-                    width: 2,
-                    height: 1,
-                },
-                jpeg,
-            ),
+            write_jpeg(&mut frame, rect(0, 0, 2, 1), jpeg),
             Err(EngineError::Protocol)
+        );
+        assert_eq!(
+            write_jpeg(&mut frame, rect(2, 0, 1, 1), jpeg),
+            Err(EngineError::Protocol)
+        );
+    }
+
+    fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[derive(Default)]
+    struct Recorded {
+        frames: Vec<(u16, u16)>,
+        patches: Vec<Vec<(DesktopRect, Vec<u8>)>>,
+        cursors: Vec<DesktopCursor>,
+    }
+
+    fn recording_sink() -> (EventSink, Arc<Mutex<Recorded>>) {
+        let recorded = Arc::new(Mutex::new(Recorded::default()));
+        let target = Arc::clone(&recorded);
+        let sink: EventSink = Arc::new(move |event| {
+            let mut recorded = target.lock().unwrap();
+            match event {
+                EngineEvent::Frame(frame) => recorded.frames.push((frame.width, frame.height)),
+                EngineEvent::FramePatch(patch) => recorded.patches.push(patch.rects),
+                EngineEvent::Cursor(cursor) => recorded.cursors.push(cursor),
+                _ => {}
+            }
+        });
+        (sink, recorded)
+    }
+
+    fn raw(x: u16, y: u16, width: u16, height: u16, value: u8) -> VncEvent {
+        VncEvent::RawImage(
+            rect(x, y, width, height),
+            vec![value; usize::from(width) * usize::from(height) * 4],
+        )
+    }
+
+    #[test]
+    fn publisher_sends_first_frame_immediately_then_rate_limited_patches() {
+        let (sink, recorded) = recording_sink();
+        let mut publisher = FramePublisher::default();
+        let start = Instant::now();
+        publisher.set_resolution(10, 10).unwrap();
+        // A blank surface is never flushed before its first update completes.
+        assert!(!publisher.flush_ready());
+        publisher.mark(rect(0, 0, 10, 10));
+        publisher.complete(start, &sink).unwrap();
+        assert_eq!(recorded.lock().unwrap().frames, [(10, 10)]);
+        assert!(!publisher.flush_ready());
+
+        // Two small updates inside one interval coalesce into one patch.
+        handle_server_event(raw(1, 1, 2, 2, 7), &mut publisher, &sink).unwrap();
+        publisher
+            .complete(start + Duration::from_millis(1), &sink)
+            .unwrap();
+        handle_server_event(raw(8, 8, 1, 1, 9), &mut publisher, &sink).unwrap();
+        assert!(
+            !publisher.flush_ready(),
+            "an update in flight defers the timer flush"
+        );
+        publisher
+            .complete(start + Duration::from_millis(2), &sink)
+            .unwrap();
+        assert!(recorded.lock().unwrap().patches.is_empty());
+        assert!(publisher.flush_ready());
+        assert_eq!(publisher.deadline(), start + PUBLISH_INTERVAL);
+
+        publisher.publish(start + PUBLISH_INTERVAL, &sink).unwrap();
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded.frames.len(), 1);
+        assert_eq!(recorded.patches.len(), 1);
+        let patch = &recorded.patches[0];
+        assert_eq!(patch.len(), 2);
+        let (first, pixels) = patch.iter().find(|(rect, _)| rect.x == 1).unwrap();
+        assert_eq!((first.width, first.height), (2, 2));
+        // Raw pixels keep RGB and force opaque alpha.
+        assert_eq!(pixels[..4], [7, 7, 7, 255]);
+        assert!(
+            patch
+                .iter()
+                .any(|(rect, pixels)| rect.x == 8 && pixels[..] == [9, 9, 9, 255])
+        );
+        assert!(!publisher.flush_ready());
+    }
+
+    #[test]
+    fn publisher_sends_full_frames_for_large_regions_and_size_changes() {
+        let (sink, recorded) = recording_sink();
+        let mut publisher = FramePublisher::default();
+        let start = Instant::now();
+        publisher.set_resolution(10, 10).unwrap();
+        publisher.complete(start, &sink).unwrap();
+
+        handle_server_event(raw(0, 0, 10, 6, 1), &mut publisher, &sink).unwrap();
+        publisher.complete(start + PUBLISH_INTERVAL, &sink).unwrap();
+        assert_eq!(recorded.lock().unwrap().frames.len(), 2);
+        assert!(recorded.lock().unwrap().patches.is_empty());
+
+        // CopyRect marks only its destination.
+        handle_server_event(
+            VncEvent::Copy(rect(5, 5, 2, 2), rect(0, 0, 2, 2)),
+            &mut publisher,
+            &sink,
+        )
+        .unwrap();
+        publisher
+            .complete(start + PUBLISH_INTERVAL * 2, &sink)
+            .unwrap();
+        let patch = recorded.lock().unwrap().patches.pop().unwrap();
+        assert_eq!(
+            patch[0].0,
+            DesktopRect {
+                x: 5,
+                y: 5,
+                width: 2,
+                height: 2
+            }
+        );
+        assert_eq!(patch[0].1[..4], [1, 1, 1, 255]);
+
+        // The same size keeps the surface; a new size forces a full frame.
+        publisher.set_resolution(10, 10).unwrap();
+        assert!(!publisher.flush_ready());
+        publisher.set_resolution(4, 3).unwrap();
+        publisher
+            .complete(start + PUBLISH_INTERVAL * 3, &sink)
+            .unwrap();
+        assert_eq!(recorded.lock().unwrap().frames.last(), Some(&(4, 3)));
+    }
+
+    fn cursor_payload(pixels: &[[u8; 4]], mask: &[u8]) -> Vec<u8> {
+        let mut payload = pixels.concat();
+        payload.extend_from_slice(mask);
+        payload
+    }
+
+    #[test]
+    fn cursor_mask_becomes_straight_alpha() {
+        let payload = cursor_payload(
+            &[[10, 20, 30, 0], [40, 50, 60, 0], [1, 2, 3, 0], [4, 5, 6, 0]],
+            &[0b1000_0000, 0b0100_0000],
+        );
+        let DesktopCursor::Bitmap(bitmap) = cursor_from_rfb(rect(1, 9, 2, 2), &payload) else {
+            panic!("expected a bitmap cursor");
+        };
+        assert_eq!((bitmap.width, bitmap.height), (2, 2));
+        // Hotspot comes from the rectangle position and is clamped to the shape.
+        assert_eq!((bitmap.hotspot_x, bitmap.hotspot_y), (1, 1));
+        assert_eq!(
+            bitmap.rgba,
+            [10, 20, 30, 255, 0, 0, 0, 0, 0, 0, 0, 0, 4, 5, 6, 255]
+        );
+    }
+
+    #[test]
+    fn empty_invalid_and_oversized_cursors_do_not_fail_the_session() {
+        assert_eq!(
+            cursor_from_rfb(rect(0, 0, 0, 0), &[]),
+            DesktopCursor::Hidden
+        );
+        let transparent = cursor_payload(&[[9, 9, 9, 9]], &[0]);
+        assert_eq!(
+            cursor_from_rfb(rect(0, 0, 1, 1), &transparent),
+            DesktopCursor::Hidden
+        );
+        assert_eq!(
+            cursor_from_rfb(rect(0, 0, 1, 1), &[1, 2, 3]),
+            DesktopCursor::Default
+        );
+        let big = MAX_CURSOR_DIMENSION + 1;
+        // The vendor discards shapes it will not buffer and reports no payload.
+        assert_eq!(
+            cursor_from_rfb(rect(0, 0, big, 1), &[]),
+            DesktopCursor::Default
         );
     }
 
@@ -917,6 +1230,7 @@ mod tests {
                 input: DesktopInput::Resize {
                     width: 2,
                     height: 2,
+                    scale_percent: 150,
                 },
                 focus_epoch: None,
                 completion: completion_tx,
@@ -1121,6 +1435,185 @@ mod tests {
         assert!(frame.rgba[1] < 32);
         assert!(frame.rgba[2] < 32);
         assert_eq!(frame.rgba[3], 255);
+
+        stop_tx.send(true).unwrap();
+        assert_eq!(
+            timeout(TEST_TIMEOUT, task).await.unwrap().unwrap(),
+            Err(EngineError::Cancelled)
+        );
+        timeout(TEST_TIMEOUT, server).await.unwrap().unwrap();
+    }
+
+    enum Observed {
+        Frame(Arc<DesktopFrame>),
+        Patch(norishell_desktop_protocol::FramePatch),
+        Cursor(DesktopCursor),
+    }
+
+    /// Runs a session against a scripted loopback server and forwards frame
+    /// and cursor events.
+    async fn start_loopback<F, Fut>(
+        width: u16,
+        height: u16,
+        script: F,
+    ) -> (
+        tokio::task::JoinHandle<Result<()>>,
+        tokio::task::JoinHandle<()>,
+        mpsc::UnboundedReceiver<Observed>,
+        watch::Sender<bool>,
+    )
+    where
+        F: FnOnce(TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            server_handshake_none(&mut stream, width, height).await;
+            script(stream).await;
+        });
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (_epoch_tx, epoch_rx) = watch::channel(0_u64);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (observed_tx, observed_rx) = mpsc::unbounded_channel();
+        let sink: EventSink = Arc::new(move |event| {
+            let observed = match event {
+                EngineEvent::Frame(frame) => Observed::Frame(frame),
+                EngineEvent::FramePatch(patch) => Observed::Patch(patch),
+                EngineEvent::Cursor(cursor) => Observed::Cursor(cursor),
+                _ => return,
+            };
+            let _ = observed_tx.send(observed);
+        });
+        let task = tokio::spawn(run(
+            Box::new(TcpStream::connect(address).await.unwrap()),
+            VncOptions {
+                password: Zeroizing::new(String::new()),
+                allow_unauthenticated: true,
+                clipboard_enabled: false,
+                version: None,
+                initial_resize: None,
+            },
+            command_rx,
+            EngineControl {
+                stop: stop_rx,
+                focus_epoch: epoch_rx,
+            },
+            sink,
+        ));
+        (task, server, observed_rx, stop_tx)
+    }
+
+    async fn next_observed(observed: &mut mpsc::UnboundedReceiver<Observed>) -> Observed {
+        timeout(TEST_TIMEOUT, observed.recv())
+            .await
+            .expect("session did not publish")
+            .expect("session ended")
+    }
+
+    async fn read_incremental_request(stream: &mut TcpStream) {
+        let mut request = [0_u8; 10];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(request[0..2], [3, 1]);
+    }
+
+    #[tokio::test]
+    async fn loopback_cursor_and_small_update_publish_cursor_then_patch() {
+        let (task, server, mut observed, stop_tx) = start_loopback(2, 1, |mut stream| async move {
+            let mut update = vec![0, 0];
+            update.extend_from_slice(&2_u16.to_be_bytes());
+            append_rect_header(&mut update, 0, 0, 2, 1, 0);
+            update.extend_from_slice(&[255, 0, 0, 0, 255, 0, 0, 0]);
+            // Cursor pseudo-rectangle: position is the hotspot, 1x1 RGBX
+            // pixel followed by a one-byte row mask.
+            append_rect_header(&mut update, 0, 0, 1, 1, -239);
+            update.extend_from_slice(&[1, 2, 3, 0, 0x80]);
+            stream.write_all(&update).await.unwrap();
+            read_incremental_request(&mut stream).await;
+
+            let mut update = vec![0, 0];
+            update.extend_from_slice(&1_u16.to_be_bytes());
+            append_rect_header(&mut update, 1, 0, 1, 1, 0);
+            update.extend_from_slice(&[0, 255, 0, 0]);
+            stream.write_all(&update).await.unwrap();
+            read_incremental_request(&mut stream).await;
+            sleep(Duration::from_millis(500)).await;
+        })
+        .await;
+
+        // Cursor shapes are forwarded as decoded; frames wait for the end of
+        // the FramebufferUpdate.
+        let Observed::Cursor(DesktopCursor::Bitmap(cursor)) = next_observed(&mut observed).await
+        else {
+            panic!("expected a bitmap cursor");
+        };
+        assert_eq!(cursor.rgba, [1, 2, 3, 255]);
+        let Observed::Frame(frame) = next_observed(&mut observed).await else {
+            panic!("expected the first full frame");
+        };
+        // The cursor is not composited into frame pixels.
+        assert_eq!(frame.rgba, [255, 0, 0, 255, 255, 0, 0, 255]);
+        let Observed::Patch(patch) = next_observed(&mut observed).await else {
+            panic!("expected a patch for the small update");
+        };
+        assert_eq!((patch.width, patch.height), (2, 1));
+        assert_eq!(patch.rects.len(), 1);
+        assert_eq!(
+            patch.rects[0].0,
+            DesktopRect {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 1
+            }
+        );
+        assert_eq!(patch.rects[0].1, [0, 255, 0, 255]);
+
+        stop_tx.send(true).unwrap();
+        assert_eq!(
+            timeout(TEST_TIMEOUT, task).await.unwrap().unwrap(),
+            Err(EngineError::Cancelled)
+        );
+        timeout(TEST_TIMEOUT, server).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_zrle_tiles_compose_into_one_rectangle() {
+        let (task, server, mut observed, stop_tx) =
+            start_loopback(65, 1, |mut stream| async move {
+                // Two raw true-colour ZRLE tiles (64 px + 1 px) with 3-byte CPIXELs.
+                let mut tiles = vec![0_u8];
+                for index in 0..64_u8 {
+                    tiles.extend_from_slice(&[index, 1, 2]);
+                }
+                tiles.push(0);
+                tiles.extend_from_slice(&[200, 201, 202]);
+                // One uncompressed, non-final deflate block keeps the shared zlib
+                // stream open exactly like a real server's sync-flushed output.
+                let mut zlib = vec![0x78, 0x01, 0x00];
+                let length = u16::try_from(tiles.len()).unwrap();
+                zlib.extend_from_slice(&length.to_le_bytes());
+                zlib.extend_from_slice(&(!length).to_le_bytes());
+                zlib.extend_from_slice(&tiles);
+
+                let mut update = vec![0, 0];
+                update.extend_from_slice(&1_u16.to_be_bytes());
+                append_rect_header(&mut update, 0, 0, 65, 1, 16);
+                update.extend_from_slice(&u32::try_from(zlib.len()).unwrap().to_be_bytes());
+                update.extend_from_slice(&zlib);
+                stream.write_all(&update).await.unwrap();
+                read_incremental_request(&mut stream).await;
+                sleep(Duration::from_millis(500)).await;
+            })
+            .await;
+
+        let Observed::Frame(frame) = next_observed(&mut observed).await else {
+            panic!("expected a full frame");
+        };
+        assert_eq!((frame.width, frame.height), (65, 1));
+        assert_eq!(frame.rgba[..8], [0, 1, 2, 255, 1, 1, 2, 255]);
+        assert_eq!(frame.rgba[64 * 4..], [200, 201, 202, 255]);
 
         stop_tx.send(true).unwrap();
         assert_eq!(
@@ -1362,7 +1855,7 @@ mod tests {
             let mut update = vec![0, 0];
             update.extend_from_slice(&1_u16.to_be_bytes());
             append_rect_header(&mut update, 0, 0, 1, 1, 0);
-            // Raw needs four BGRA bytes, but this peer stalls halfway through
+            // Raw needs four RGBX bytes, but this peer stalls halfway through
             // the payload. A local cancellation must not wait for its EOF.
             update.extend_from_slice(&[0, 0]);
             stream.write_all(&update).await.unwrap();
@@ -1499,17 +1992,25 @@ mod tests {
         let mut pixel_format = [0_u8; 20];
         stream.read_exact(&mut pixel_format).await.unwrap();
         assert_eq!(pixel_format[0], 0);
+        // 32bpp little-endian true colour with R/G/B shifts 0/8/16 puts wire
+        // pixels in RGBX byte order.
+        assert_eq!(
+            pixel_format[4..],
+            [32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 0, 8, 16, 0, 0, 0]
+        );
         let mut encoding_header = [0_u8; 4];
         stream.read_exact(&mut encoding_header).await.unwrap();
         assert_eq!(encoding_header[..2], [2, 0]);
         let encodings = usize::from(u16::from_be_bytes([encoding_header[2], encoding_header[3]]));
         let mut encoding_values = vec![0_u8; encodings * 4];
         stream.read_exact(&mut encoding_values).await.unwrap();
-        assert!(
-            encoding_values
-                .chunks_exact(4)
-                .any(|encoding| encoding == (-308_i32).to_be_bytes())
-        );
+        for expected in [-308_i32, -239] {
+            assert!(
+                encoding_values
+                    .chunks_exact(4)
+                    .any(|encoding| encoding == expected.to_be_bytes())
+            );
+        }
         let mut request = [0_u8; 10];
         stream.read_exact(&mut request).await.unwrap();
         assert_eq!(request[0], 3);
@@ -1520,7 +2021,8 @@ mod tests {
         let mut update = vec![0, 0];
         update.extend_from_slice(&2_u16.to_be_bytes());
         append_rect_header(&mut update, 0, 0, 1, 1, 0);
-        update.extend_from_slice(&[0, 0, 255, 0]);
+        // RGBX with an undefined padding byte; the client forces alpha.
+        update.extend_from_slice(&[255, 0, 0, 0]);
         append_rect_header(&mut update, 1, 0, 1, 1, 1);
         update.extend_from_slice(&0_u16.to_be_bytes());
         update.extend_from_slice(&0_u16.to_be_bytes());

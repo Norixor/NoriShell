@@ -8,6 +8,12 @@ use tokio::{
 pub const MAX_PIXELS: usize = 16_777_216;
 pub const MAX_DIMENSION: u16 = 8_192;
 pub const MAX_TEXT_BYTES: usize = 65_536;
+/// RDP large pointers are at most 384x384; VNC rich cursors share the same bound.
+pub const MAX_CURSOR_DIMENSION: u16 = 384;
+/// Dirty regions keep a short rectangle list; beyond it the closest pair is merged.
+pub const MAX_DIRTY_RECTS: usize = 16;
+/// Engines publish decoded pixels at most this often; later updates coalesce into the pending region.
+pub const PUBLISH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 pub trait DesktopIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> DesktopIo for T {}
@@ -96,6 +102,154 @@ impl DesktopRect {
             height: (bottom - u32::from(y)) as u16,
         }
     }
+
+    pub fn area(self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+
+    fn contains(self, other: Self) -> bool {
+        self.x <= other.x
+            && self.y <= other.y
+            && u32::from(self.x) + u32::from(self.width)
+                >= u32::from(other.x) + u32::from(other.width)
+            && u32::from(self.y) + u32::from(self.height)
+                >= u32::from(other.y) + u32::from(other.height)
+    }
+
+    fn touches(self, other: Self) -> bool {
+        u32::from(self.x) <= u32::from(other.x) + u32::from(other.width)
+            && u32::from(other.x) <= u32::from(self.x) + u32::from(self.width)
+            && u32::from(self.y) <= u32::from(other.y) + u32::from(other.height)
+            && u32::from(other.y) <= u32::from(self.y) + u32::from(self.height)
+    }
+}
+
+/// A bounded list of changed rectangles. Overlapping or adjacent rectangles merge immediately; when the list
+/// exceeds `MAX_DIRTY_RECTS`, the pair whose union adds the least area merges, so distant small changes do not
+/// collapse into one full-screen bounding box. Rectangles may still over-cover, never under-cover.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DirtyRegion {
+    rects: Vec<DesktopRect>,
+}
+
+impl DirtyRegion {
+    pub fn add(&mut self, rect: DesktopRect) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let mut next = rect;
+        loop {
+            if self.rects.iter().any(|existing| existing.contains(next)) {
+                return;
+            }
+            match self
+                .rects
+                .iter()
+                .position(|existing| existing.touches(next))
+            {
+                Some(index) => next = next.union(self.rects.swap_remove(index)),
+                None => break,
+            }
+        }
+        self.rects.push(next);
+        while self.rects.len() > MAX_DIRTY_RECTS {
+            let mut best = (0, 1, u64::MAX);
+            for i in 0..self.rects.len() {
+                for j in i + 1..self.rects.len() {
+                    let (a, b) = (self.rects[i], self.rects[j]);
+                    let growth = a.union(b).area().saturating_sub(a.area() + b.area());
+                    if growth < best.2 {
+                        best = (i, j, growth);
+                    }
+                }
+            }
+            let second = self.rects.swap_remove(best.1);
+            let first = self.rects.swap_remove(best.0);
+            // Re-adding may cascade merges with rectangles the union now touches.
+            self.add(first.union(second));
+        }
+    }
+
+    pub fn extend(&mut self, other: &DirtyRegion) {
+        for rect in &other.rects {
+            self.add(*rect);
+        }
+    }
+
+    pub fn rects(&self) -> &[DesktopRect] {
+        &self.rects
+    }
+
+    /// Sum of rectangle areas; an upper bound on changed pixels when rectangles do not overlap.
+    pub fn area(&self) -> u64 {
+        self.rects.iter().map(|rect| rect.area()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rects.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.rects.clear();
+    }
+
+    pub fn fits(&self, width: u16, height: u16) -> bool {
+        self.rects.iter().all(|rect| rect.fits(width, height))
+    }
+}
+
+/// Pixel rows for changed rectangles of a frame whose size equals the most recent full `Frame` event.
+#[derive(Clone)]
+pub struct FramePatch {
+    pub width: u16,
+    pub height: u16,
+    /// Each entry holds tightly packed RGBA rows for exactly that rectangle.
+    pub rects: Vec<(DesktopRect, Vec<u8>)>,
+}
+
+/// Remote pointer presentation. Bitmaps carry straight (non-premultiplied) RGBA.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DesktopCursor {
+    /// The platform default arrow.
+    Default,
+    Hidden,
+    Bitmap(Arc<CursorBitmap>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CursorBitmap {
+    pub width: u16,
+    pub height: u16,
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub rgba: Vec<u8>,
+}
+
+impl CursorBitmap {
+    pub fn new(
+        width: u16,
+        height: u16,
+        hotspot_x: u16,
+        hotspot_y: u16,
+        rgba: Vec<u8>,
+    ) -> Result<Self> {
+        if width == 0
+            || height == 0
+            || width > MAX_CURSOR_DIMENSION
+            || height > MAX_CURSOR_DIMENSION
+            || rgba.len() != usize::from(width) * usize::from(height) * 4
+        {
+            return Err(EngineError::Protocol);
+        }
+        // Servers occasionally report a hotspot on the far edge; clamp instead of rejecting the cursor.
+        Ok(Self {
+            width,
+            height,
+            hotspot_x: hotspot_x.min(width - 1),
+            hotspot_y: hotspot_y.min(height - 1),
+            rgba,
+        })
+    }
 }
 
 impl DesktopFrame {
@@ -106,6 +260,35 @@ impl DesktopFrame {
             height,
             rgba: vec![0; len],
         })
+    }
+
+    /// Copies the listed rectangles out of this frame for a `FramePatch` event.
+    pub fn extract_patch(&self, region: &DirtyRegion) -> Result<FramePatch> {
+        let mut rects = Vec::with_capacity(region.rects().len());
+        for rect in region.rects() {
+            self.check_rect(rect.x, rect.y, rect.width, rect.height)?;
+            rects.push((*rect, self.read_rect(*rect)));
+        }
+        Ok(FramePatch {
+            width: self.width,
+            height: self.height,
+            rects,
+        })
+    }
+
+    /// Copies one validated rectangle into tightly packed RGBA rows.
+    pub fn read_rect(&self, rect: DesktopRect) -> Vec<u8> {
+        read_rect(&self.rgba, self.width, rect)
+    }
+
+    pub fn apply_patch(&mut self, patch: &FramePatch) -> Result<()> {
+        if patch.width != self.width || patch.height != self.height {
+            return Err(EngineError::Protocol);
+        }
+        for (rect, rgba) in &patch.rects {
+            self.write_rect(rect.x, rect.y, rect.width, rect.height, rgba)?;
+        }
+        Ok(())
     }
 
     pub fn write_rect(
@@ -171,6 +354,18 @@ impl DesktopFrame {
     }
 }
 
+/// Copies `rect` out of a packed RGBA buffer `stride_width` pixels wide. Callers validate bounds first.
+pub fn read_rect(rgba: &[u8], stride_width: u16, rect: DesktopRect) -> Vec<u8> {
+    let row_bytes = usize::from(rect.width) * 4;
+    let mut out = Vec::with_capacity(row_bytes * usize::from(rect.height));
+    for row in 0..usize::from(rect.height) {
+        let start =
+            ((usize::from(rect.y) + row) * usize::from(stride_width) + usize::from(rect.x)) * 4;
+        out.extend_from_slice(&rgba[start..start + row_bytes]);
+    }
+    out
+}
+
 pub fn frame_len(width: u16, height: u16) -> Result<usize> {
     let pixels = usize::from(width) * usize::from(height);
     if width == 0
@@ -207,6 +402,8 @@ pub enum DesktopInput {
     Resize {
         width: u16,
         height: u16,
+        /// Remote UI scale in percent (100 = standard). RDP forwards it through Display Control; VNC ignores it.
+        scale_percent: u16,
     },
     ReleaseAll,
 }
@@ -223,7 +420,16 @@ impl DesktopInput {
                 scan_code, keysym, ..
             } if *scan_code > 0x1ff || *keysym == 0 => Err(EngineError::InvalidConfiguration),
             Self::Pointer { buttons, .. } if *buttons > 7 => Err(EngineError::InvalidConfiguration),
-            Self::Resize { width, height } => frame_len(*width, *height).map(|_| ()),
+            Self::Resize {
+                width,
+                height,
+                scale_percent,
+            } => {
+                if !(100..=500).contains(scale_percent) {
+                    return Err(EngineError::InvalidConfiguration);
+                }
+                frame_len(*width, *height).map(|_| ())
+            }
             _ => Ok(()),
         }
     }
@@ -273,8 +479,13 @@ pub enum EngineEvent {
     Ready,
     RdpTransport(RdpTransportActual),
     RdpGraphics(RdpGraphicsActual),
+    /// Complete replacement. Sent for the first frame and whenever the size changes; later patches must match its size.
     Frame(Arc<DesktopFrame>),
-    FrameDirty(Arc<DesktopFrame>, DesktopRect),
+    /// Changed rectangles relative to the previously published pixels. Engines coalesce updates and publish at most
+    /// once per `PUBLISH_INTERVAL`; a size mismatch with the last `Frame` is a protocol error.
+    FramePatch(FramePatch),
+    /// Pointer shape changes; the WebView draws the pointer locally instead of compositing it into frames.
+    Cursor(DesktopCursor),
     Clipboard(String),
     AudioState(AudioPlaybackState),
 }
@@ -325,6 +536,66 @@ mod tests {
         assert!(first.union(later).fits(8, 8));
         assert!(!first.union(later).fits(6, 8));
     }
+    fn rect(x: u16, y: u16, width: u16, height: u16) -> DesktopRect {
+        DesktopRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn dirty_region_keeps_distant_rectangles_separate_and_merges_touching_ones() {
+        let mut region = DirtyRegion::default();
+        region.add(rect(0, 0, 2, 2));
+        region.add(rect(100, 100, 2, 2));
+        assert_eq!(region.rects().len(), 2);
+        region.add(rect(2, 0, 2, 2));
+        assert_eq!(region.rects().len(), 2);
+        assert!(region.rects().contains(&rect(0, 0, 4, 2)));
+        region.add(rect(1, 1, 1, 1));
+        assert_eq!(region.rects().len(), 2);
+    }
+
+    #[test]
+    fn dirty_region_bounds_rectangle_count_without_losing_coverage() {
+        let mut region = DirtyRegion::default();
+        let mut added = Vec::new();
+        for i in 0..40u16 {
+            let next = rect((i % 8) * 50, (i / 8) * 50, 3, 3);
+            added.push(next);
+            region.add(next);
+        }
+        assert!(region.rects().len() <= MAX_DIRTY_RECTS);
+        for next in added {
+            assert!(region.rects().iter().any(|covered| covered.contains(next)));
+        }
+    }
+
+    #[test]
+    fn patch_round_trips_changed_rectangles() {
+        let mut source = DesktopFrame::new(4, 4).unwrap();
+        source.write_rect(1, 1, 2, 1, &[9; 8]).unwrap();
+        let mut region = DirtyRegion::default();
+        region.add(rect(1, 1, 2, 1));
+        let patch = source.extract_patch(&region).unwrap();
+        let mut target = DesktopFrame::new(4, 4).unwrap();
+        target.apply_patch(&patch).unwrap();
+        assert!(target.rgba == source.rgba);
+        let mut other = DesktopFrame::new(4, 5).unwrap();
+        assert!(other.apply_patch(&patch).is_err());
+    }
+
+    #[test]
+    fn cursor_bitmap_is_bounded_and_clamps_hotspot() {
+        assert!(CursorBitmap::new(0, 1, 0, 0, vec![]).is_err());
+        assert!(CursorBitmap::new(385, 1, 0, 0, vec![0; 385 * 4]).is_err());
+        assert!(CursorBitmap::new(2, 2, 0, 0, vec![0; 15]).is_err());
+        let cursor = CursorBitmap::new(2, 2, 9, 9, vec![0; 16]).unwrap();
+        assert_eq!((cursor.hotspot_x, cursor.hotspot_y), (1, 1));
+    }
+
     #[test]
     fn rejects_server_dimensions_and_rectangles_before_writing() {
         assert!(DesktopFrame::new(u16::MAX, u16::MAX).is_err());

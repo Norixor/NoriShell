@@ -105,9 +105,20 @@ impl UdpSession {
         if *control.stop.borrow() || *focus.borrow_and_update() != epoch {
             return Err(EngineError::StaleInput);
         }
-        tokio::select! { biased;
-            _ = focus.changed() => Err(EngineError::ConnectionLost),
-            result = self.send(payload) => result,
+        // The transport enqueues each payload whole into a bounded mpsc channel, whose `send` is
+        // cancellation-safe: losing the race to a focus change means nothing was queued.
+        let send = self.send(payload);
+        tokio::pin!(send);
+        loop {
+            tokio::select! { biased;
+                changed = focus.changed() => {
+                    if changed.is_ok() && *focus.borrow_and_update() == epoch {
+                        continue;
+                    }
+                    return Err(EngineError::StaleInput);
+                }
+                result = &mut send => return result,
+            }
         }
     }
 

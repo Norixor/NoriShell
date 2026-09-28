@@ -1,5 +1,5 @@
 // Modified for NoriShell; see vendor/README.md at the repository root for upstream provenance.
-use crate::{MAX_WIRE_BYTES, PixelFormat, Rect, VncError, VncEvent};
+use crate::{MAX_FRAME_BYTES, MAX_WIRE_BYTES, PixelFormat, Rect, VncError, VncEvent};
 use std::future::Future;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -109,6 +109,17 @@ impl Decoder {
                 (bpp, false)
             };
         let mut palette = Vec::with_capacity(128 * bpp);
+        // Tiles are composed into one rectangle so consumers receive a single
+        // image event per ZRLE rectangle instead of one per 64x64 tile.
+        let row_bytes = usize::from(rect.width) * bpp;
+        let image_len = row_bytes
+            .checked_mul(usize::from(rect.height))
+            .ok_or(VncError::ResourceLimit)?;
+        if image_len > MAX_FRAME_BYTES {
+            return Err(VncError::ResourceLimit);
+        }
+        let mut image = uninit_vec(image_len);
+        let mut pixels = Vec::with_capacity(64 * 64 * bpp);
 
         let mut y = 0;
         while y < rect.height {
@@ -141,7 +152,7 @@ impl Decoder {
                     )?
                 }
 
-                let mut pixels = Vec::with_capacity(pixel_count * bpp);
+                pixels.clear();
                 match (is_rle, palette_size) {
                     (false, 0) => {
                         // True Color pixels
@@ -231,22 +242,21 @@ impl Decoder {
                         return Err(VncError::InvalidImageData);
                     }
                 }
-                output_func(VncEvent::RawImage(
-                    Rect {
-                        x: rect.x + x,
-                        y: rect.y + y,
-                        width,
-                        height,
-                    },
-                    pixels,
-                ))
-                .await?;
+                let tile_row_bytes = usize::from(width) * bpp;
+                if pixels.len() != pixel_count * bpp {
+                    return Err(VncError::InvalidImageData);
+                }
+                for (row, source) in pixels.chunks_exact(tile_row_bytes).enumerate() {
+                    let start = (usize::from(y) + row) * row_bytes + usize::from(x) * bpp;
+                    image[start..start + tile_row_bytes].copy_from_slice(source);
+                }
                 x += width;
             }
             y += height;
         }
 
         self.decompressor = Some(reader.into_inner()?);
+        output_func(VncEvent::RawImage(*rect, image)).await?;
 
         Ok(())
     }

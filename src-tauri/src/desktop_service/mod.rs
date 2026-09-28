@@ -14,8 +14,8 @@ use norishell_core_api::{
     DesktopPromptKind, DesktopSessionState, DesktopSessionSummary, WireSequence,
 };
 use norishell_desktop_protocol::{
-    AudioMuteState, AudioPlaybackState, DesktopFrame, DesktopRect, EngineCommand, EngineControl,
-    EngineError, EngineEvent, EventSink, Result,
+    AudioMuteState, AudioPlaybackState, DesktopCursor, DesktopFrame, DirtyRegion, EngineCommand,
+    EngineControl, EngineError, EngineEvent, EventSink, Result,
 };
 use std::{
     collections::BTreeMap,
@@ -53,38 +53,38 @@ struct Session {
     focus_epoch: watch::Sender<u64>,
     audio_muted: watch::Sender<AudioMuteState>,
     done: watch::Sender<bool>,
+    /// Bumped whenever frame or cursor state changes and when the session stops, so frame long-polls wake
+    /// without lost notifications (a receiver subscribed before checking observes every later bump).
+    changes: watch::Sender<u64>,
     transports: Mutex<Vec<norishell_ssh_transport::TransportCloseHandle>>,
 }
 struct Projection {
     summary: DesktopSessionSummary,
-    frame: Option<Arc<DesktopFrame>>,
+    /// Core-owned copy of the remote screen. Engines publish full `Frame` replacements and `FramePatch`
+    /// deltas; `None` before the first frame and after the session stops (the buffer is released then).
+    frame: Option<DesktopFrame>,
+    /// Frame sequence last delivered to the WebView; a patch is only valid relative to it.
     frame_base_sequence: u64,
-    frame_dirty: Option<DesktopRect>,
+    /// Rectangles changed since `frame_base_sequence` was delivered.
+    frame_dirty: DirtyRegion,
+    /// Set by every full replacement; the next delivery must then carry the whole frame.
     frame_requires_full: bool,
+    /// 0 means the cursor was never set (the view keeps its default arrow).
+    cursor_sequence: u64,
+    cursor: DesktopCursor,
     clipboard: Option<String>,
     cleanup_failed: bool,
 }
 
-fn accumulate_dirty(
-    previous_size: Option<(u16, u16)>,
-    frame: &DesktopFrame,
-    pending: Option<DesktopRect>,
-    requires_full: bool,
-    dirty: Option<DesktopRect>,
-) -> (Option<DesktopRect>, bool) {
-    let Some(rect) = dirty.filter(|rect| rect.fits(frame.width, frame.height)) else {
-        return (None, true);
-    };
-    if previous_size != Some((frame.width, frame.height)) {
-        return (None, true);
+impl Projection {
+    /// Drops display memory; a stopped session never renders again, so its last frame must not linger
+    /// while the Tab still holds the closed session record.
+    fn release_display(&mut self) {
+        self.frame = None;
+        self.frame_dirty = DirtyRegion::default();
+        self.frame_requires_full = true;
+        self.cursor = DesktopCursor::Default;
     }
-    if requires_full {
-        return (None, true);
-    }
-    (
-        Some(pending.map_or(rect, |previous| previous.union(rect))),
-        false,
-    )
 }
 
 impl Session {
@@ -121,6 +121,16 @@ impl Session {
         self.focus_epoch
             .send_modify(|epoch| *epoch = epoch.saturating_add(1));
         self.stop.send_replace(true);
+        // `event` ignores updates once `stop` is set, so the released buffer is not re-created.
+        self.projection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_display();
+        self.notify_change();
+    }
+    fn notify_change(&self) {
+        self.changes
+            .send_modify(|value| *value = value.wrapping_add(1));
     }
     fn event(&self, event: EngineEvent) {
         if *self.stop.borrow() {
@@ -130,10 +140,6 @@ impl Session {
             .projection
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dirty = match &event {
-            EngineEvent::FrameDirty(_, rect) => Some(*rect),
-            _ => None,
-        };
         match event {
             EngineEvent::RdpTransport(actual) => {
                 projection.summary.rdp_transport_actual = Some(match actual {
@@ -184,7 +190,7 @@ impl Session {
                 projection.summary.revision =
                     WireSequence::new(projection.summary.revision.get() + 1);
             }
-            EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
+            EngineEvent::Frame(frame) => {
                 if norishell_desktop_protocol::frame_len(frame.width, frame.height).ok()
                     != Some(frame.rgba.len())
                 {
@@ -192,22 +198,49 @@ impl Session {
                     self.fail_and_stop("resourceLimit");
                     return;
                 }
-                let previous_size = projection
-                    .frame
-                    .as_ref()
-                    .map(|previous| (previous.width, previous.height));
-                (projection.frame_dirty, projection.frame_requires_full) = accumulate_dirty(
-                    previous_size,
-                    &frame,
-                    projection.frame_dirty,
-                    projection.frame_requires_full,
-                    dirty,
-                );
+                // Engines normally hand over their only reference, so this moves rather than copies.
+                let frame = Arc::unwrap_or_clone(frame);
+                // A full replacement may differ anywhere (first frame, size change, reactivation), so the
+                // next delivery is always a full frame.
+                projection.frame_dirty.clear();
+                projection.frame_requires_full = true;
                 projection.summary.width = frame.width;
                 projection.summary.height = frame.height;
                 projection.summary.frame_sequence =
                     WireSequence::new(projection.summary.frame_sequence.get() + 1);
                 projection.frame = Some(frame);
+                drop(projection);
+                self.notify_change();
+            }
+            EngineEvent::FramePatch(patch) => {
+                if patch.rects.is_empty() {
+                    return;
+                }
+                let applied = projection
+                    .frame
+                    .as_mut()
+                    .ok_or(EngineError::Protocol)
+                    .and_then(|frame| frame.apply_patch(&patch));
+                if applied.is_err() {
+                    drop(projection);
+                    self.fail_and_stop("protocolError");
+                    return;
+                }
+                if !projection.frame_requires_full {
+                    for (rect, _) in &patch.rects {
+                        projection.frame_dirty.add(*rect);
+                    }
+                }
+                projection.summary.frame_sequence =
+                    WireSequence::new(projection.summary.frame_sequence.get() + 1);
+                drop(projection);
+                self.notify_change();
+            }
+            EngineEvent::Cursor(cursor) => {
+                projection.cursor = cursor;
+                projection.cursor_sequence = projection.cursor_sequence.wrapping_add(1).max(1);
+                drop(projection);
+                self.notify_change();
             }
             EngineEvent::Clipboard(text) => {
                 if projection.summary.profile.clipboard_enabled
@@ -291,6 +324,7 @@ impl DesktopService {
         let (focus_epoch, focus_receiver) = watch::channel(0);
         let (done, _) = watch::channel(false);
         let (audio_muted, _) = watch::channel(AudioMuteState::default());
+        let (changes, _) = watch::channel(0);
         let summary = DesktopSessionSummary {
             id: request.operation_id.clone(),
             width: request.profile.width,
@@ -316,8 +350,10 @@ impl DesktopService {
                 summary: summary.clone(),
                 frame: None,
                 frame_base_sequence: 0,
-                frame_dirty: None,
+                frame_dirty: DirtyRegion::default(),
                 frame_requires_full: true,
+                cursor_sequence: 0,
+                cursor: DesktopCursor::Default,
                 clipboard: None,
                 cleanup_failed: false,
             }),
@@ -326,6 +362,7 @@ impl DesktopService {
             focus_epoch,
             audio_muted,
             done,
+            changes,
             transports: Mutex::new(Vec::new()),
         });
         sessions.insert(request.operation_id, session.clone());
@@ -381,10 +418,13 @@ impl DesktopService {
             }
             projection.summary.revision = WireSequence::new(projection.summary.revision.get() + 1);
             projection.clipboard = None;
+            projection.release_display();
             if projection.summary.profile.audio_playback_enabled {
                 projection.summary.audio_state = DesktopAudioState::Closed;
             }
+            drop(projection);
             session.done.send_replace(true);
+            session.notify_change();
         });
         Ok(summary)
     }
@@ -734,47 +774,121 @@ impl DesktopService {
 }
 
 #[cfg(test)]
-mod frame_tests {
+mod projection_tests {
     use super::*;
+    use norishell_desktop_protocol::{DesktopRect, FramePatch};
+
+    fn session() -> Session {
+        let profile: DesktopProfile = serde_json::from_value(serde_json::json!({
+            "id": "p", "label": "p", "protocol": "rdp", "address": "a", "port": 3389,
+            "username": "", "domain": "", "hostId": null, "gatewayHostId": null,
+            "credentialRefId": null, "width": 8, "height": 8, "clipboardEnabled": false,
+            "revision": "0",
+        }))
+        .unwrap();
+        let summary = DesktopSessionSummary {
+            id: "s".into(),
+            width: 8,
+            height: 8,
+            audio_state: DesktopAudioState::Disabled,
+            audio_muted: false,
+            rdp_transport_actual: None,
+            rdp_graphics_actual: None,
+            profile,
+            generation: WireSequence::new(1),
+            revision: WireSequence::new(1),
+            state: DesktopSessionState::Running,
+            phase: "running".into(),
+            failure: None,
+            frame_sequence: WireSequence::new(0),
+        };
+        Session {
+            projection: Mutex::new(Projection {
+                summary,
+                frame: None,
+                frame_base_sequence: 0,
+                frame_dirty: DirtyRegion::default(),
+                frame_requires_full: true,
+                cursor_sequence: 0,
+                cursor: DesktopCursor::Default,
+                clipboard: None,
+                cleanup_failed: false,
+            }),
+            commands: mpsc::channel(1).0,
+            stop: watch::channel(false).0,
+            focus_epoch: watch::channel(0).0,
+            audio_muted: watch::channel(AudioMuteState::default()).0,
+            done: watch::channel(false).0,
+            changes: watch::channel(0).0,
+            transports: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn patch(width: u16, height: u16, rect: DesktopRect) -> FramePatch {
+        FramePatch {
+            width,
+            height,
+            rects: vec![(rect, vec![7; rect.area() as usize * 4])],
+        }
+    }
+
+    const RECT: DesktopRect = DesktopRect {
+        x: 1,
+        y: 1,
+        width: 2,
+        height: 2,
+    };
 
     #[test]
-    fn skipped_updates_accumulate_but_reactivation_forces_full_even_at_same_size() {
-        let frame = DesktopFrame::new(8, 8).unwrap();
-        let first = DesktopRect {
-            x: 1,
-            y: 1,
-            width: 1,
-            height: 1,
-        };
-        let second = DesktopRect {
-            x: 5,
-            y: 5,
-            width: 1,
-            height: 1,
-        };
-        assert_eq!(
-            accumulate_dirty(None, &frame, None, false, Some(first)),
-            (None, true)
-        );
-        let (pending, full) = accumulate_dirty(Some((8, 8)), &frame, None, false, Some(first));
-        let (pending, full) = accumulate_dirty(Some((8, 8)), &frame, pending, full, Some(second));
-        assert_eq!(
-            (pending, full),
-            (
-                Some(DesktopRect {
-                    x: 1,
-                    y: 1,
-                    width: 5,
-                    height: 5
-                }),
-                false
-            )
-        );
-        let (pending, full) = accumulate_dirty(Some((8, 8)), &frame, pending, full, None);
-        assert_eq!((pending, full), (None, true));
-        assert_eq!(
-            accumulate_dirty(Some((8, 8)), &frame, pending, full, Some(second)),
-            (None, true)
-        );
+    fn frames_patches_and_cursor_update_projection_and_wake_waiters() {
+        let session = session();
+        let changes = session.changes.subscribe();
+        session.event(EngineEvent::Frame(Arc::new(
+            DesktopFrame::new(8, 8).unwrap(),
+        )));
+        {
+            let mut projection = session.projection.lock().unwrap();
+            assert_eq!(projection.summary.frame_sequence.get(), 1);
+            assert!(projection.frame_requires_full);
+            // Simulate a delivery, after which patches accumulate.
+            projection.frame_base_sequence = 1;
+            projection.frame_requires_full = false;
+        }
+        session.event(EngineEvent::FramePatch(patch(8, 8, RECT)));
+        {
+            let projection = session.projection.lock().unwrap();
+            assert_eq!(projection.summary.frame_sequence.get(), 2);
+            assert_eq!(projection.frame_dirty.rects(), &[RECT]);
+            assert_eq!(
+                projection.frame.as_ref().unwrap().read_rect(RECT),
+                vec![7; 16]
+            );
+        }
+        session.event(EngineEvent::Cursor(DesktopCursor::Hidden));
+        {
+            let projection = session.projection.lock().unwrap();
+            assert_eq!(projection.cursor_sequence, 1);
+            assert_eq!(projection.cursor, DesktopCursor::Hidden);
+        }
+        assert!(changes.has_changed().unwrap());
+        assert_eq!(*session.changes.borrow(), 3);
+    }
+
+    #[test]
+    fn patch_without_matching_base_fails_and_releases_the_frame() {
+        let session = session();
+        session.event(EngineEvent::FramePatch(patch(8, 8, RECT)));
+        assert_eq!(session.summary().failure.as_deref(), Some("protocolError"));
+        assert!(*session.stop.borrow());
+
+        let session = super::projection_tests::session();
+        session.event(EngineEvent::Frame(Arc::new(
+            DesktopFrame::new(8, 8).unwrap(),
+        )));
+        session.event(EngineEvent::FramePatch(patch(4, 4, RECT)));
+        let projection = session.projection.lock().unwrap();
+        assert_eq!(projection.summary.failure.as_deref(), Some("protocolError"));
+        assert!(projection.frame.is_none());
+        assert!(*session.stop.borrow());
     }
 }

@@ -2,7 +2,8 @@
 use super::DesktopService;
 use norishell_core_api::*;
 use norishell_desktop_protocol::{
-    DesktopFrame, DesktopInput, DesktopRect, EngineCommand, EngineError,
+    DesktopCursor, DesktopFrame, DesktopInput, DesktopRect, DirtyRegion, EngineCommand,
+    EngineError, MAX_DIRTY_RECTS,
 };
 use tauri::{AppHandle, State, Webview, WebviewWindow, ipc::Response};
 use tokio::sync::oneshot;
@@ -39,34 +40,94 @@ pub(crate) fn desktop_availability() -> Vec<DesktopAvailability> {
 mod tests {
     use super::*;
 
+    fn rect(x: u16, y: u16, width: u16, height: u16) -> DesktopRect {
+        DesktopRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    }
+
     #[test]
     fn patch_requires_matching_base_and_small_bounded_dirty_region() {
-        let frame = DesktopFrame::new(8, 8).unwrap();
-        let dirty = DesktopRect {
-            x: 1,
-            y: 1,
-            width: 2,
-            height: 2,
-        };
-        assert_eq!(frame_region(&frame, 5, 5, Some(dirty), false), (5, dirty));
-        assert_eq!(frame_region(&frame, 4, 5, Some(dirty), false).0, 0);
-        assert_eq!(frame_region(&frame, 5, 5, Some(dirty), true).0, 0);
+        let mut dirty = DirtyRegion::default();
+        dirty.add(rect(1, 1, 2, 2));
+        dirty.add(rect(6, 6, 1, 1));
+        let full = vec![rect(0, 0, 8, 8)];
         assert_eq!(
-            frame_region(
-                &frame,
-                5,
-                5,
-                Some(DesktopRect {
-                    x: 0,
-                    y: 0,
-                    width: 8,
-                    height: 8
-                }),
-                false
-            )
-            .0,
-            0
+            frame_plan(8, 8, 5, 5, &dirty, false),
+            (5, vec![rect(1, 1, 2, 2), rect(6, 6, 1, 1)])
         );
+        assert_eq!(frame_plan(8, 8, 4, 5, &dirty, false), (0, full.clone()));
+        assert_eq!(frame_plan(8, 8, 5, 5, &dirty, true), (0, full.clone()));
+        assert_eq!(frame_plan(8, 8, 0, 0, &dirty, false), (0, full.clone()));
+        assert_eq!(
+            frame_plan(8, 8, 5, 5, &DirtyRegion::default(), false),
+            (0, full.clone())
+        );
+        let mut large = DirtyRegion::default();
+        large.add(rect(0, 0, 8, 4));
+        assert_eq!(frame_plan(8, 8, 5, 5, &large, false), (0, full.clone()));
+        let mut outside = DirtyRegion::default();
+        outside.add(rect(7, 7, 2, 1));
+        assert_eq!(frame_plan(8, 8, 5, 5, &outside, false), (0, full));
+    }
+
+    #[test]
+    fn v2_encoder_writes_header_rects_cursor_and_payload_in_order() {
+        let mut frame = DesktopFrame::new(4, 3).unwrap();
+        for (index, byte) in frame.rgba.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        let rects = [rect(1, 0, 2, 1), rect(0, 2, 1, 1)];
+        let bitmap = std::sync::Arc::new(
+            norishell_desktop_protocol::CursorBitmap::new(1, 2, 0, 5, vec![9; 8]).unwrap(),
+        );
+        let cursor = DesktopCursor::Bitmap(bitmap);
+        let bytes = encode_frame_response(7, 3, Some((&frame, 6, &rects)), Some(&cursor));
+
+        assert_eq!(u32_at(&bytes, 0), 2);
+        assert_eq!(u32_at(&bytes, 4), 3);
+        assert_eq!(u64_at(&bytes, 8), 7);
+        assert_eq!(u64_at(&bytes, 16), 3);
+        assert_eq!(u64_at(&bytes, 24), 6);
+        assert_eq!((u32_at(&bytes, 32), u32_at(&bytes, 36)), (4, 3));
+        assert_eq!(u32_at(&bytes, 40), 2);
+        let rect_words: Vec<u32> = (0..8).map(|i| u32_at(&bytes, 44 + i * 4)).collect();
+        assert_eq!(rect_words, [1, 0, 2, 1, 0, 2, 1, 1]);
+        // Cursor header: bitmap kind, size, hotspot clamped to the bitmap.
+        let cursor_words: Vec<u32> = (0..5).map(|i| u32_at(&bytes, 76 + i * 4)).collect();
+        assert_eq!(cursor_words, [2, 1, 2, 0, 1]);
+        let payload = &bytes[96..];
+        let first: Vec<u8> = (4..12).collect();
+        let second: Vec<u8> = (32..36).collect();
+        assert_eq!(&payload[..8], first.as_slice());
+        assert_eq!(&payload[8..12], second.as_slice());
+        assert_eq!(&payload[12..], &[9; 8]);
+    }
+
+    #[test]
+    fn v2_encoder_omits_absent_blocks() {
+        let cursor_only = encode_frame_response(4, 2, None, Some(&DesktopCursor::Hidden));
+        assert_eq!(cursor_only.len(), 44);
+        assert_eq!(u32_at(&cursor_only, 4), 2);
+        assert_eq!(u64_at(&cursor_only, 8), 4);
+        assert_eq!(u32_at(&cursor_only, 24), 1);
+
+        let frame = DesktopFrame::new(2, 1).unwrap();
+        let full = [rect(0, 0, 2, 1)];
+        let frame_only = encode_frame_response(1, 0, Some((&frame, 0, &full)), None);
+        assert_eq!(u32_at(&frame_only, 4), 1);
+        assert_eq!(frame_only.len(), 24 + 20 + 16 + 8);
     }
 
     #[test]
@@ -99,35 +160,112 @@ mod tests {
         assert_eq!(conflict.message_key, "desktop.profileErrors.conflict");
     }
 }
-fn frame_region(
-    frame: &DesktopFrame,
+/// Chooses what one frame delivery carries: `(base, rects)` where base 0 means a full frame (one rect covering
+/// everything) and a non-zero base is the client's `after` sequence that the patch rectangles apply to.
+fn frame_plan(
+    width: u16,
+    height: u16,
     after: u64,
     base: u64,
-    dirty: Option<DesktopRect>,
+    dirty: &DirtyRegion,
     requires_full: bool,
-) -> (u64, DesktopRect) {
-    let patch = if !requires_full && after == base && after != 0 {
-        dirty.filter(|rect| {
-            rect.fits(frame.width, frame.height)
-                && u64::from(rect.width) * u64::from(rect.height) * 2
-                    < u64::from(frame.width) * u64::from(frame.height)
-        })
+) -> (u64, Vec<DesktopRect>) {
+    let patch = !requires_full
+        && after == base
+        && after != 0
+        && !dirty.is_empty()
+        && dirty.rects().len() <= MAX_DIRTY_RECTS
+        && dirty.fits(width, height)
+        && dirty.area() * 2 < u64::from(width) * u64::from(height);
+    if patch {
+        (after, dirty.rects().to_vec())
     } else {
-        None
-    };
-    match patch {
-        Some(rect) => (after, rect),
-        None => (
+        (
             0,
-            DesktopRect {
+            vec![DesktopRect {
                 x: 0,
                 y: 0,
-                width: frame.width,
-                height: frame.height,
-            },
-        ),
+                width,
+                height,
+            }],
+        )
     }
 }
+
+const FRAME_WIRE_VERSION: u32 = 2;
+const FRAME_FLAG_FRAME: u32 = 1;
+const FRAME_FLAG_CURSOR: u32 = 2;
+
+/// Encodes a v2 frame response (little-endian; see the remote desktop frame wire contract). Rectangles must
+/// already fit `frame`; pixels are copied straight from the Core buffer, so callers hold the projection lock.
+fn encode_frame_response(
+    frame_sequence: u64,
+    cursor_sequence: u64,
+    frame: Option<(&DesktopFrame, u64, &[DesktopRect])>,
+    cursor: Option<&DesktopCursor>,
+) -> Vec<u8> {
+    let pixel_bytes = frame.map_or(0, |(_, _, rects)| {
+        rects
+            .iter()
+            .map(|rect| rect.area() as usize * 4)
+            .sum::<usize>()
+    });
+    let cursor_bytes = match cursor {
+        Some(DesktopCursor::Bitmap(bitmap)) => bitmap.rgba.len(),
+        _ => 0,
+    };
+    let header =
+        24 + frame.map_or(0, |(_, _, rects)| 20 + rects.len() * 16) + cursor.map_or(0, |_| 20);
+    let mut bytes = Vec::with_capacity(header + pixel_bytes + cursor_bytes);
+    let flags = frame.map_or(0, |_| FRAME_FLAG_FRAME) | cursor.map_or(0, |_| FRAME_FLAG_CURSOR);
+    bytes.extend_from_slice(&FRAME_WIRE_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&flags.to_le_bytes());
+    bytes.extend_from_slice(&frame_sequence.to_le_bytes());
+    bytes.extend_from_slice(&cursor_sequence.to_le_bytes());
+    if let Some((frame, base, rects)) = frame {
+        bytes.extend_from_slice(&base.to_le_bytes());
+        bytes.extend_from_slice(&u32::from(frame.width).to_le_bytes());
+        bytes.extend_from_slice(&u32::from(frame.height).to_le_bytes());
+        bytes.extend_from_slice(&(rects.len() as u32).to_le_bytes());
+        for rect in rects {
+            for value in [rect.x, rect.y, rect.width, rect.height] {
+                bytes.extend_from_slice(&u32::from(value).to_le_bytes());
+            }
+        }
+    }
+    if let Some(cursor) = cursor {
+        let (kind, width, height, hotspot_x, hotspot_y) = match cursor {
+            DesktopCursor::Default => (0u32, 0, 0, 0, 0),
+            DesktopCursor::Hidden => (1, 0, 0, 0, 0),
+            DesktopCursor::Bitmap(bitmap) => (
+                2,
+                bitmap.width,
+                bitmap.height,
+                bitmap.hotspot_x,
+                bitmap.hotspot_y,
+            ),
+        };
+        bytes.extend_from_slice(&kind.to_le_bytes());
+        for value in [width, height, hotspot_x, hotspot_y] {
+            bytes.extend_from_slice(&u32::from(value).to_le_bytes());
+        }
+    }
+    if let Some((frame, _, rects)) = frame {
+        let stride = usize::from(frame.width);
+        for rect in rects {
+            let row_bytes = usize::from(rect.width) * 4;
+            for row in 0..usize::from(rect.height) {
+                let start = ((usize::from(rect.y) + row) * stride + usize::from(rect.x)) * 4;
+                bytes.extend_from_slice(&frame.rgba[start..start + row_bytes]);
+            }
+        }
+    }
+    if let Some(DesktopCursor::Bitmap(bitmap)) = cursor {
+        bytes.extend_from_slice(&bitmap.rgba);
+    }
+    bytes
+}
+
 fn map_error(meta: &RequestMeta, error: EngineError) -> Box<CoreApiError> {
     let (category, retry_strategy) = match error {
         EngineError::InvalidConfiguration
@@ -350,7 +488,14 @@ pub(crate) async fn desktop_session_disconnect(
     workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
     views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
 ) -> CoreResult<()> {
-    require_owned_session(&request, &webview, &workspaces, &views)?;
+    require_owned_session(
+        &request.meta,
+        &request.session_id,
+        request.generation.get(),
+        &webview,
+        &workspaces,
+        &views,
+    )?;
     service
         .disconnect(&request.session_id, request.generation.get())
         .await
@@ -358,23 +503,22 @@ pub(crate) async fn desktop_session_disconnect(
 }
 /// Only the Tab WebView whose Core record holds this session handle may end it.
 fn require_owned_session(
-    request: &DesktopSessionRequest,
+    meta: &RequestMeta,
+    session_id: &str,
+    generation: u64,
     webview: &Webview,
     workspaces: &crate::workspace_windows::WorkspaceWindows,
     views: &crate::workspace_tab_views::WorkspaceTabViews,
 ) -> CoreResult<()> {
     let (id, kind, owner) = views
         .projection_identity(webview)
-        .map_err(|error| map_tab_error(&request.meta, error))?;
+        .map_err(|error| map_tab_error(meta, error))?;
     if kind != "desktop"
         || !workspaces
-            .owns_desktop_session(&owner, &id, &request.session_id, request.generation.get())
-            .map_err(|error| map_tab_error(&request.meta, error))?
+            .owns_desktop_session(&owner, &id, session_id, generation)
+            .map_err(|error| map_tab_error(meta, error))?
     {
-        return Err(map_tab_error(
-            &request.meta,
-            "workspace_tab.wrong_owner".into(),
-        ));
+        return Err(map_tab_error(meta, "workspace_tab.wrong_owner".into()));
     }
     Ok(())
 }
@@ -387,7 +531,14 @@ pub(crate) async fn desktop_session_close_owned(
     workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
     views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
 ) -> CoreResult<()> {
-    require_owned_session(&request, &webview, &workspaces, &views)?;
+    require_owned_session(
+        &request.meta,
+        &request.session_id,
+        request.generation.get(),
+        &webview,
+        &workspaces,
+        &views,
+    )?;
     service
         .disconnect(&request.session_id, request.generation.get())
         .await
@@ -400,53 +551,103 @@ pub(crate) async fn desktop_session_close_owned(
     Ok(())
 }
 
+/// Longest time one frame request waits for new frame or cursor state before returning an empty body.
+const FRAME_LONG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+/// Longest wait for a Clipboard or Resize input acknowledgement; expiry reports a timeout only.
+const INPUT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Engine queue slots that droppable pointer and wheel events may not consume.
+const INPUT_RESERVED_SLOTS: usize = 16;
+
 #[tauri::command]
-pub(crate) fn desktop_frame_get(
+pub(crate) async fn desktop_frame_get(
     request: DesktopFrameRequest,
+    webview: Webview,
     service: State<'_, DesktopService>,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
 ) -> CoreResult<Response> {
+    require_owned_session(
+        &request.meta,
+        &request.session_id,
+        request.generation.get(),
+        &webview,
+        &workspaces,
+        &views,
+    )?;
     let session = service
         .session(&request.session_id, request.generation.get())
         .map_err(|error| map_error(&request.meta, error))?;
+    // Subscribe before the first check: any change after this point wakes `changed()`, so no update is lost.
+    let mut changes = session.changes.subscribe();
+    let deadline = tokio::time::Instant::now() + FRAME_LONG_POLL;
+    loop {
+        if *session.stop.borrow() || *session.done.borrow() {
+            return Ok(Response::new(Vec::<u8>::new()));
+        }
+        if let Some(bytes) = take_frame_update(&session, &request)
+            .map_err(|error| map_error(&request.meta, error))?
+        {
+            return Ok(Response::new(bytes));
+        }
+        match tokio::time::timeout_at(deadline, changes.changed()).await {
+            // The Tab may have moved to another WebView while this request waited.
+            Ok(Ok(())) => require_owned_session(
+                &request.meta,
+                &request.session_id,
+                request.generation.get(),
+                &webview,
+                &workspaces,
+                &views,
+            )?,
+            _ => return Ok(Response::new(Vec::<u8>::new())),
+        }
+    }
+}
+
+/// Builds the response for anything newer than the client's sequences and marks it delivered.
+fn take_frame_update(
+    session: &super::Session,
+    request: &DesktopFrameRequest,
+) -> Result<Option<Vec<u8>>, EngineError> {
     let mut projection = session
         .projection
         .lock()
-        .map_err(|_| map_error(&request.meta, EngineError::Protocol))?;
-    let sequence = projection.summary.frame_sequence.get();
-    if request.after_sequence.get() >= sequence {
-        return Ok(Response::new(Vec::<u8>::new()));
+        .map_err(|_| EngineError::Protocol)?;
+    let frame_sequence = projection.summary.frame_sequence.get();
+    let cursor_sequence = projection.cursor_sequence;
+    let after = request.after_sequence.get();
+    let send_frame = after < frame_sequence && projection.frame.is_some();
+    let send_cursor = request.after_cursor_sequence.get() < cursor_sequence;
+    if !send_frame && !send_cursor {
+        return Ok(None);
     }
-    let Some(frame) = projection.frame.clone() else {
-        return Ok(Response::new(Vec::<u8>::new()));
+    let plan = match (&projection.frame, send_frame) {
+        (Some(frame), true) => Some(frame_plan(
+            frame.width,
+            frame.height,
+            after,
+            projection.frame_base_sequence,
+            &projection.frame_dirty,
+            projection.frame_requires_full,
+        )),
+        _ => None,
     };
-    let (base, rect) = frame_region(
-        &frame,
-        request.after_sequence.get(),
-        projection.frame_base_sequence,
-        projection.frame_dirty,
-        projection.frame_requires_full,
+    let bytes = encode_frame_response(
+        frame_sequence,
+        cursor_sequence,
+        projection
+            .frame
+            .as_ref()
+            .zip(plan.as_ref())
+            .map(|(frame, (base, rects))| (frame, *base, rects.as_slice())),
+        send_cursor.then_some(&projection.cursor),
     );
-    projection.frame_base_sequence = sequence;
-    projection.frame_dirty = None;
-    projection.frame_requires_full = false;
-    drop(projection);
-
-    let row_bytes = usize::from(rect.width) * 4;
-    let mut bytes = Vec::with_capacity(40 + row_bytes * usize::from(rect.height));
-    bytes.extend_from_slice(&sequence.to_le_bytes());
-    bytes.extend_from_slice(&base.to_le_bytes());
-    bytes.extend_from_slice(&u32::from(frame.width).to_le_bytes());
-    bytes.extend_from_slice(&u32::from(frame.height).to_le_bytes());
-    bytes.extend_from_slice(&u32::from(rect.x).to_le_bytes());
-    bytes.extend_from_slice(&u32::from(rect.y).to_le_bytes());
-    bytes.extend_from_slice(&u32::from(rect.width).to_le_bytes());
-    bytes.extend_from_slice(&u32::from(rect.height).to_le_bytes());
-    for row in 0..usize::from(rect.height) {
-        let start =
-            ((usize::from(rect.y) + row) * usize::from(frame.width) + usize::from(rect.x)) * 4;
-        bytes.extend_from_slice(&frame.rgba[start..start + row_bytes]);
+    if plan.is_some() {
+        projection.frame_base_sequence = frame_sequence;
+        projection.frame_dirty.clear();
+        projection.frame_requires_full = false;
     }
-    Ok(Response::new(bytes))
+    Ok(Some(bytes))
 }
 
 #[tauri::command]
@@ -535,7 +736,7 @@ pub(crate) async fn desktop_input(
         return Err(map_error(&request.meta, EngineError::StaleInput));
     }
     let broker = ssh.focus_broker();
-    broker
+    let acknowledgement = broker
         .linearize(async {
             let mut focus = service.focus.lock().await;
             if !ordinary_window(&webview, &workspaces, &views, window.label()) {
@@ -553,6 +754,10 @@ pub(crate) async fn desktop_input(
                 || focus.session.as_deref() != Some(&request.session_id)
                 || focus.window_label.as_deref() != Some(window.label())
                 || focus.epoch != request.focus_epoch.get()
+                // Core revokes input (prompts, window blur, terminal focus) by bumping the session epoch
+                // without touching the lease; without this check fire-and-forget input would be silently
+                // dropped by the engine while the view still believes it holds control.
+                || *session.focus_epoch.borrow() != focus.epoch
                 || request.sequence.get() <= focus.sequence
                 || session.summary().state != DesktopSessionState::Running
             {
@@ -616,13 +821,34 @@ pub(crate) async fn desktop_input(
                     {
                         return Err(map_error(&request.meta, EngineError::InvalidConfiguration));
                     }
-                    DesktopInput::Resize { width, height }
+                    // Input-driven resizes keep the standard remote scale; only the resolution command sets it.
+                    DesktopInput::Resize {
+                        width,
+                        height,
+                        scale_percent: 100,
+                    }
                 }
                 DesktopInputEvent::ReleaseAll => DesktopInput::ReleaseAll,
             };
             input
                 .validate()
                 .map_err(|error| map_error(&request.meta, error))?;
+            // Key, pointer, wheel, text and release are fire-and-forget: the engine still rejects them if the
+            // focus epoch moves before the write, and the view never replays them. Clipboard and resize report
+            // their outcome, but the caller waits outside the focus lock so slow writes cannot block focus changes.
+            let acknowledged = matches!(
+                input,
+                DesktopInput::Clipboard(_) | DesktopInput::Resize { .. }
+            );
+            // Pointer and wheel events may be dropped by the view, so they leave headroom in the queue for keys,
+            // releases and clipboard writes that must not be refused during a congested link.
+            if matches!(
+                input,
+                DesktopInput::Pointer { .. } | DesktopInput::Wheel { .. }
+            ) && session.commands.capacity() <= INPUT_RESERVED_SLOTS
+            {
+                return Err(map_error(&request.meta, EngineError::ResourceLimit));
+            }
             let (completion, response) = oneshot::channel();
             session
                 .commands
@@ -632,19 +858,21 @@ pub(crate) async fn desktop_input(
                     completion,
                 })
                 .map_err(|_| map_error(&request.meta, EngineError::ResourceLimit))?;
-            match tokio::time::timeout(std::time::Duration::from_secs(5), response).await {
-                Ok(Ok(Ok(()))) => {
-                    focus.sequence = request.sequence.get();
-                    Ok(())
-                }
-                Ok(Ok(Err(error))) => Err(map_error(&request.meta, error)),
-                _ => {
-                    session.fail_and_stop("inputUncertain");
-                    Err(map_error(&request.meta, EngineError::Timeout))
-                }
-            }
+            focus.sequence = request.sequence.get();
+            Ok(acknowledged.then_some(response))
         })
-        .await
+        .await?;
+    let Some(response) = acknowledgement else {
+        return Ok(());
+    };
+    // An expired wait leaves the outcome unknown but the stream intact; engines fail the session themselves
+    // when a partial write breaks it, so the timeout never stops the session here.
+    match tokio::time::timeout(INPUT_ACK_TIMEOUT, response).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(map_error(&request.meta, error)),
+        Ok(Err(_)) => Err(map_error(&request.meta, EngineError::ConnectionLost)),
+        Err(_) => Err(map_error(&request.meta, EngineError::Timeout)),
+    }
 }
 
 #[tauri::command]
@@ -685,9 +913,13 @@ pub(crate) async fn desktop_resolution_set(
         }
         _ => {}
     }
+    if !(100..=500).contains(&request.scale_percent) {
+        return Err(map_error(&request.meta, EngineError::InvalidConfiguration));
+    }
     let input = DesktopInput::Resize {
         width: request.width,
         height: request.height,
+        scale_percent: request.scale_percent,
     };
     input
         .validate()
@@ -780,8 +1012,19 @@ impl DesktopService {
 #[tauri::command]
 pub(crate) fn desktop_audio_mute(
     request: DesktopAudioMuteRequest,
+    webview: Webview,
     service: State<'_, DesktopService>,
+    workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
 ) -> CoreResult<()> {
+    require_owned_session(
+        &request.meta,
+        &request.session_id,
+        request.generation.get(),
+        &webview,
+        &workspaces,
+        &views,
+    )?;
     let session = service
         .session(&request.session_id, request.generation.get())
         .map_err(|error| map_error(&request.meta, error))?;
