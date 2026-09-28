@@ -67,6 +67,30 @@
 - 许可证：`MIT OR Apache-2.0`，正文保留在本目录对应子目录。
 - 相对发布包发生修改的文件（忽略 CRLF/LF 差异）：`Cargo.toml`、`Cargo.toml.orig`。
 
+### tauri 2.11.5（`vendor/tauri-reparent/`）
+
+- 上游：https://github.com/tauri-apps/tauri
+- crates.io 基线：`tauri 2.11.5`；根 Cargo `[patch.crates-io]` 指向本目录。用途：Workspace Tab 子 WebView 在窗口间 reparent（`src-tauri/src/workspace_tab_views.rs`）所需的最小补丁。
+- 许可证：`Apache-2.0 OR MIT`，正文保留在本目录 `LICENSE_APACHE-2.0`、`LICENSE_MIT`。
+- 相对发布包发生修改的文件（未计入被忽略的 `mobile/android/build` 生成目录）：
+  - `src/manager/mod.rs`：`emit` / `emit_filter` 先克隆 WebView 列表并释放 webviews 注册表锁，再向 JS 派发；上游在派发期间持锁，与等待事件循环的原生 reparent 互相等待时会死锁。
+  - `src/webview/mod.rs`：`Webview::reparent` 在 runtime 成功后才更新 Rust 侧父窗口；上游先写入，失败时留下错误父窗口。
+  - `src/window/mod.rs`：`is_webview_window` 由 `all` 改为 `any`，同名主 WebView 存在即视为 WebviewWindow。上游在添加子 WebView 后会把 `main` 等窗口判定为非 WebviewWindow，导致 `get_webview_window("main")` 与 `WebviewWindow` 命令参数失效。
+  - `src/webview/webview_window.rs`、`src/lib.rs`：`WebviewWindow` 命令参数、`get_webview_window` 与 `webview_windows` 额外要求 WebView label 等于窗口 label，子 WebView 不会被配成其父窗口的 WebviewWindow（保持上游对子 WebView 返回 `None` / 拒绝的语义）。
+  - `src/menu/plugin.rs`：`popup` 命令只持有克隆出的菜单 `Arc`，不在原生弹出（macOS 为嵌套模态循环）期间持有 resources table 锁，避免期间需要该表的 IPC 死锁。
+- 语义边界：`is_webview_window` 其余内部调用点为 `manager/window.rs` 的窗口级拖放事件路由（主 WebView 存在时按单 WebView 窗口的 `Labeled` 目标派发，子 WebView 仍可收到针对该窗口 label 的监听）和 `Webview::reparent` 的非 `unstable` 拒绝分支（本应用启用 `unstable`，不走此分支）；不含任何 WebView 的窗口改为不视为 WebviewWindow，不影响本应用。无上游测试覆盖，该 crate 不在 workspace 内，未补 Rust 单测。
+- 未修补的上游行为：JS `Menu.new` 的内联 action channel 按 MenuId 存于全局表且菜单关闭后不移除。应用层由 `src/components/terminal/NvxTerminalTabBar.vue` 为原生 Tab 菜单及每项使用固定 id，新弹出覆盖并 drop 旧 channel，保留量为常数；新增 JS 原生菜单须沿用同一做法。
+
+### tauri-runtime-wry 2.11.4（`vendor/tauri-runtime-wry-reparent/`）
+
+- 上游：https://github.com/tauri-apps/tauri
+- crates.io 基线：`tauri-runtime-wry 2.11.4`；根 Cargo `[patch.crates-io]` 指向本目录。
+- 许可证：`Apache-2.0 OR MIT`，正文保留在本目录 `LICENSE_APACHE-2.0`、`LICENSE_MIT`。
+- 相对发布包发生修改的文件：`src/lib.rs`。
+  - `WebviewMessage::Reparent` 处理：原生 reparent 成功后才把注册项从源窗口移到目标窗口，并在原生调用前释放 `RefCell` 借用；上游先移除源注册，失败或目标窗口缺失时丢失仍存活的 WebView。目标窗口缺失时回复错误，上游不回复导致调用方 panic。
+  - `WryWebviewDispatcher::reparent`：回复通道断开时返回 `FailedToSendMessage` 而非 `unwrap` panic。
+  - 同窗口 reparent 不做短路，由调用方 `WorkspaceWindows::move_native_view`（`src-tauri/src/workspace_windows.rs`）在 source == target 时直接返回。
+
 ### vnc-rs 0.5.3
 
 - 上游：https://github.com/HsuJv/vnc-rs
