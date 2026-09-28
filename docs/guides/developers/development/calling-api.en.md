@@ -118,7 +118,7 @@ fn describe_text(request: &PluginHostRequest) -> Result<String, PluginError> {
 | `protocolEvent` | A protocol provider lifecycle event | Use `protocol_event` / `protocol_response` for bytes and state |
 | `terminalObservation` | Approved terminal observation | Process only the observation data within the granted scope |
 | `invoke` | A host-dispatched plugin invocation | Follow that feature's payload contract; it does not imply unrestricted user permission |
-| `sshSyncResult` | An SSH synchronization result | Needed only by plugins implementing that integration |
+| `sshSyncResult` | An SSH synchronization result | Needed only by plugins implementing that integration; normally returns one replacement document. From Core API 1.90, an error-free `status` result may instead return only one `api.request` to continue a broker chain in the same action, keeping that action's foreground or background authority |
 
 The host serializes `handle` calls for a Wasm instance. Plugins do not need their own network thread or event loop. Store state needed across messages in the plugin struct, and account for disable, restart and resource closure.
 

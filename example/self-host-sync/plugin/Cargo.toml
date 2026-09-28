@@ -1,6 +1,6 @@
 [package]
 name = "norishell-self-host-sync"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 license = "GPL-3.0-only"
 publish = false

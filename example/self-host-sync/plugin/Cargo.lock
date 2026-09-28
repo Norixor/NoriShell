@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-self-host-sync"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "norishell-plugin-sdk",
  "serde_json",

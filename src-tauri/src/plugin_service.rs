@@ -428,6 +428,20 @@ fn ui_action_output_is_admissible(
         }
 }
 
+/// Only an error-free account status may hand its action to an API chain. Any
+/// other ssh-sync callback must still return exactly one replacement document.
+fn ssh_sync_status_continues_with_api(
+    callback: &ParsedPluginUiOutputs,
+    account_status_request: bool,
+    status_succeeded: bool,
+    action_kind: PluginUiActionKind,
+) -> bool {
+    callback.api_call.is_some()
+        && account_status_request
+        && status_succeeded
+        && action_kind == PluginUiActionKind::Standard
+}
+
 fn auto_refresh_initial_output_is_admissible(parsed: &ParsedPluginUiOutputs) -> bool {
     parsed.panels.is_empty()
         && parsed.navigation.is_empty()
@@ -5815,6 +5829,10 @@ impl PluginService {
                 ));
             }
             let ssh_sync_profile_id = ssh_sync_request_profile_id(&sync_request).to_owned();
+            let account_status_request = matches!(
+                sync_request,
+                norishell_core_api::PluginSshSyncRequest::Status { .. }
+            );
             let capability = self.has_capability(
                 request.meta.request_id.clone(),
                 &request.plugin_id,
@@ -5942,34 +5960,88 @@ impl PluginService {
                         Some(PluginHostProcessError::Rejected),
                     )
                 })?;
-            if !callback.panels.is_empty()
-                || callback.templates.len() != 1
-                || !callback.navigation.is_empty()
-                || !callback.pages.is_empty()
-                || callback.clipboard_text.is_some()
-                || callback.host_mutation.is_some()
-                || callback.host_session.is_some()
-                || callback.host_dom_operations.is_some()
-                || callback.terminal_input_suggestion.is_some()
-                || callback.isolated_surface.is_some()
-                || callback.ssh_sync_request.is_some()
-                || callback.remote_operation.is_some()
-                || callback.resource_operation.is_some()
-                || callback.api_call.is_some()
-                || callback.ui_state.is_some()
-                || (callback.storage_write.is_some() && storage_snapshot.is_none())
-            {
-                self.clear_ui_action_in_flight(&request);
-                self.record_runtime_failure(&request.plugin_id, request.instance_generation);
-                return Err(plugin_runtime_error(
-                    request.meta.request_id,
-                    Some(PluginHostProcessError::Rejected),
-                ));
+            // A read-only account status may be followed by one API chain in the same
+            // action, so a page can register its account session and then refresh data
+            // without a second click. The chain keeps this action's authority: a page
+            // lifecycle hook stays background and cannot open Vault or key prompts.
+            if ssh_sync_status_continues_with_api(
+                &callback,
+                account_status_request,
+                status.stable_error_code.is_none(),
+                action_kind,
+            ) {
+                if !operations::broker_chain_intermediate_is_pure(&callback) {
+                    self.clear_ui_action_in_flight(&request);
+                    self.record_runtime_failure(&request.plugin_id, request.instance_generation);
+                    return Err(plugin_runtime_error(
+                        request.meta.request_id,
+                        Some(PluginHostProcessError::Rejected),
+                    ));
+                }
+                // Continue from the state the initial output published, as the
+                // plain broker path does.
+                let chain_state = parsed
+                    .ui_state
+                    .as_ref()
+                    .map_or_else(|| state_snapshot.clone(), |state| state.value_json.clone());
+                match self
+                    .invoke_operation_broker(
+                        &request,
+                        &installed,
+                        &callback,
+                        &plugin_visible_fields,
+                        &storage_snapshot,
+                        &chain_state,
+                        &settings_projection,
+                        explicit_user_action,
+                        None,
+                    )
+                    .await
+                {
+                    Ok((final_callback, final_callback_id)) => {
+                        parsed.templates = final_callback.templates;
+                        parsed.storage_write = final_callback.storage_write;
+                        parsed.ui_state = final_callback.ui_state;
+                        storage_write_token = final_callback_id;
+                    }
+                    Err(error) => {
+                        self.clear_ui_action_in_flight(&request);
+                        return Err(error);
+                    }
+                }
+                // The status was an intermediate step; the page document reports the
+                // chain's outcome, so the frontend must not toast the status result.
+                None
+            } else {
+                if !callback.panels.is_empty()
+                    || callback.templates.len() != 1
+                    || !callback.navigation.is_empty()
+                    || !callback.pages.is_empty()
+                    || callback.clipboard_text.is_some()
+                    || callback.host_mutation.is_some()
+                    || callback.host_session.is_some()
+                    || callback.host_dom_operations.is_some()
+                    || callback.terminal_input_suggestion.is_some()
+                    || callback.isolated_surface.is_some()
+                    || callback.ssh_sync_request.is_some()
+                    || callback.remote_operation.is_some()
+                    || callback.resource_operation.is_some()
+                    || callback.api_call.is_some()
+                    || callback.ui_state.is_some()
+                    || (callback.storage_write.is_some() && storage_snapshot.is_none())
+                {
+                    self.clear_ui_action_in_flight(&request);
+                    self.record_runtime_failure(&request.plugin_id, request.instance_generation);
+                    return Err(plugin_runtime_error(
+                        request.meta.request_id,
+                        Some(PluginHostProcessError::Rejected),
+                    ));
+                }
+                parsed.templates = callback.templates;
+                parsed.storage_write = callback.storage_write;
+                storage_write_token = callback_request_id;
+                Some(status)
             }
-            parsed.templates = callback.templates;
-            parsed.storage_write = callback.storage_write;
-            storage_write_token = callback_request_id;
-            Some(status)
         } else {
             None
         };
@@ -9174,6 +9246,47 @@ mod tests {
         };
         assert!(parse_plugin_ui_outputs("request-1", vec![output("safe.call_id-1")]).is_ok());
         assert!(parse_plugin_ui_outputs("request-1", vec![output("invalid:call")]).is_err());
+    }
+
+    #[test]
+    fn only_error_free_account_status_may_continue_with_an_api_chain() {
+        let api = parse_plugin_ui_outputs(
+            "request-1",
+            vec![norishell_core_api::PluginRuntimeOutput {
+                request_id: "request-1".to_owned(),
+                kind: "api.request".to_owned(),
+                payload_json: serde_json::json!({
+                    "callId": "self-host.1",
+                    "operation": {"kind": "describe"}
+                })
+                .to_string(),
+            }],
+        )
+        .expect("api continuation");
+        assert!(super::operations::broker_chain_intermediate_is_pure(&api));
+        let standard = PluginUiActionKind::Standard;
+        assert!(ssh_sync_status_continues_with_api(
+            &api, true, true, standard
+        ));
+        assert!(!ssh_sync_status_continues_with_api(
+            &api, false, true, standard
+        ));
+        assert!(!ssh_sync_status_continues_with_api(
+            &api, true, false, standard
+        ));
+        assert!(!ssh_sync_status_continues_with_api(
+            &api,
+            true,
+            true,
+            PluginUiActionKind::Copy
+        ));
+        let document_only = parse_plugin_ui_outputs("request-1", vec![]).expect("empty callback");
+        assert!(!ssh_sync_status_continues_with_api(
+            &document_only,
+            true,
+            true,
+            standard
+        ));
     }
 
     #[test]

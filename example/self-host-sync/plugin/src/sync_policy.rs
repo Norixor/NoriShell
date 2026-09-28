@@ -87,7 +87,15 @@ pub fn select(
     let mut selection = Selection::default();
     for id in ids {
         let selected = match (local.get(id).copied(), remote.get(id).copied()) {
-            (Some(left), Some(right)) if equal(left, right) => Some((left, Source::Local)),
+            // Identical content with a newer remote clock takes the remote copy, so a
+            // clock-only drift converges by applying the download instead of uploading.
+            (Some(left), Some(right)) if equal(left, right) => {
+                if right.updated_at > left.updated_at {
+                    Some((right, Source::Remote))
+                } else {
+                    Some((left, Source::Local))
+                }
+            }
             (Some(left), Some(right)) => {
                 let base = baseline.get(id).copied();
                 if base.is_some_and(|base| equal(left, base)) {
@@ -210,6 +218,24 @@ mod tests {
             assert_eq!(result.conflicts, ["host:one"]);
             assert!(result.objects.is_empty());
         }
+    }
+
+    #[test]
+    fn identical_content_prefers_the_newer_clock() {
+        let local = item("local", "same", Some(10), false);
+        let remote = item("remote", "same", Some(20), false);
+        let result = select(
+            std::slice::from_ref(&local),
+            std::slice::from_ref(&remote),
+            &[],
+            Policy::Prompt,
+            Policy::Prompt,
+        )
+        .unwrap();
+        assert_eq!(result.objects[0].source, Source::Remote);
+        let result = select(&[remote], &[local], &[], Policy::Prompt, Policy::Prompt).unwrap();
+        assert_eq!(result.objects[0].source, Source::Local);
+        assert!(result.conflicts.is_empty());
     }
 
     #[test]

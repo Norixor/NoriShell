@@ -694,7 +694,7 @@ fn broker_chain_outcome_unknown(request_id: RequestId) -> Box<CoreApiError> {
     )
 }
 
-fn broker_chain_intermediate_is_pure(value: &ParsedPluginUiOutputs) -> bool {
+pub(super) fn broker_chain_intermediate_is_pure(value: &ParsedPluginUiOutputs) -> bool {
     value.panels.is_empty()
         && value.templates.is_empty()
         && value.clipboard_text.is_none()

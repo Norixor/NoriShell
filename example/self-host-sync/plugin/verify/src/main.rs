@@ -494,6 +494,26 @@ fn verify_page_open_status(wasm: &[u8], settings: &Value) {
     assert_eq!(opened[0].kind, "ssh.sync.request");
     let request: Value = serde_json::from_str(&opened[0].payload_json).expect("status request");
     assert_eq!(request["action"], "status");
+    // Signed out: opening the page stays a quiet status document.
+    let status = execute(
+        &mut runtime,
+        PluginHostMessageKind::SshSyncResult,
+        json!({"locale":"en","actionId":"sync.pageOpened","result":{
+            "accountState":"disconnected","operationState":"idle","stableErrorCode":null
+        }}),
+    );
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].kind, "ui.document");
+    assert!(status[0].payload_json.contains("Disconnected"));
+    assert!(!status[0].payload_json.contains("errorNotice"));
+
+    // Signed in: the same action continues into a background data refresh.
+    let opened = execute(
+        &mut runtime,
+        PluginHostMessageKind::UiAction,
+        json!({"locale":"en","actionId":"sync.pageOpened","settings":settings}),
+    );
+    assert_eq!(opened[0].kind, "ssh.sync.request");
     let status = execute(
         &mut runtime,
         PluginHostMessageKind::SshSyncResult,
@@ -501,10 +521,7 @@ fn verify_page_open_status(wasm: &[u8], settings: &Value) {
             "accountState":"connected","operationState":"idle","stableErrorCode":null
         }}),
     );
-    assert_eq!(status.len(), 1);
-    assert_eq!(status[0].kind, "ui.document");
-    let document: Value = serde_json::from_str(&status[0].payload_json).expect("document");
-    assert!(document.to_string().contains("Connected"));
+    api_call(&status, "dataSnapshot");
 }
 
 fn reply(
@@ -534,6 +551,17 @@ fn verify_provider_flow(runtime: &mut WasmRuntime, settings: &Value) {
         runtime,
         PluginHostMessageKind::UiAction,
         json!({"locale":"en","actionId":"sync.run","settings":settings}),
+    );
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0].kind, "ssh.sync.request");
+    let status: Value = serde_json::from_str(&output[0].payload_json).expect("status request");
+    assert_eq!(status["action"], "status");
+    let output = execute(
+        runtime,
+        PluginHostMessageKind::SshSyncResult,
+        json!({"locale":"en","actionId":"sync.run","result":{
+            "accountState":"connected","operationState":"idle","stableErrorCode":null
+        }}),
     );
     let snapshot = api_call(&output, "dataSnapshot");
     assert_eq!(
