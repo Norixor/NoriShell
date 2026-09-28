@@ -78,11 +78,11 @@ For sync across devices, follow the [self-hosted sync guide](docs/guides/users/s
 
 ## Preview
 
-![NoriShell tabbed and split terminals](.github/assets/screenshots/terminal.png)
+![NoriShell workspace: tabs, split terminal panes, and a tab dragged out into its own window while its session stays connected](.github/assets/illustrations/workspace.en.svg)
 
 ## Core and security
 
-![NoriShell Core and security boundaries](.github/assets/diagrams/core-security.en.svg)
+![NoriShell Core and security boundaries: the interface and secure windows talk to the Rust Core, which owns SSH host-key checks, sessions and the Argon2id / XChaCha20-Poly1305 Vault; plugins run as WebAssembly in a separate process with no Vault access; local storage keeps the encrypted Vault file apart from the non-secret SQLite database](.github/assets/diagrams/core-security.en.svg)
 
 The Rust Core owns connections and checks server identity before SSH authentication; a changed trusted fingerprint blocks the connection. Saved secrets live in the encrypted Vault, while the local database holds non-secret settings. Plugins run in a separate process and request approved capabilities through the Core; they cannot read the Vault. Sync does not upload the local Vault file.
 
