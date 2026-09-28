@@ -1,73 +1,106 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="824" viewBox="0 0 1160 824" role="img" aria-labelledby="title desc" lang="en">
-<title id="title">How NoriShell works</title><desc id="desc">The user interacts through the desktop interface or separate protected windows. Rust Core owns connections and sessions, checks identity and authentication, and manages input and resource lifecycle. Isolated WebAssembly plugins request approved capabilities through the Core permission broker and cannot directly access the Vault. Core connects remote sessions and the local shell. Local SQLite stores non-secret settings; the encrypted Vault stores saved secrets and is not uploaded by sync.</desc>
-<defs><linearGradient id="core" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#174fae"/><stop offset="1" stop-color="#12386f"/></linearGradient><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="m1 1 5 3-5 3" fill="none" stroke="#8193af" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="850" viewBox="0 0 1160 850" role="img" aria-labelledby="title desc" lang="en">
+<title id="title">NoriShell Core and security boundaries</title><desc id="desc">Architecture overview of NoriShell. Inside one desktop app process, the interface layer (a Vue main window, one native view per tab that can move between windows, and separate secure windows for Vault, credential and approval prompts) talks to the Rust Core through typed commands and receives projections back. The Rust Core owns SSH: the host key must be confirmed on first use and a changed key blocks the connection; routes may use Direct, HTTP CONNECT or SOCKS5 plus jump hosts. It owns sessions: one input owner per pane, and Terminal, SFTP and Forward each use their own transport. It owns the Vault: Argon2id derives the key, XChaCha20-Poly1305 encrypts, and secrets stay in Core memory. Plugins run as WebAssembly in a separate process with capabilities denied by default and can only call the Core broker; they have no access to the Vault, database or sockets. The Core reaches external targets (SSH, SFTP and port forwarding; RDP and VNC; the local shell) and local storage (an encrypted Vault file and a non-secret SQLite database).</desc>
+<defs><marker id="aCtrl" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2l6 3-6 3z" fill="#1f5fd2"/></marker><marker id="aData" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2l6 3-6 3z" fill="#0f766e"/></marker><marker id="aDeny" markerWidth="12" markerHeight="12" refX="6" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="#dc2626" stroke-width="2" stroke-linecap="round"/></marker></defs>
 <g font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
-<rect x="1" y="1" width="1158" height="822" rx="24" fill="#f7f9fc" stroke="#e0e6ee"/>
-<rect x="40" y="40" width="5" height="36" rx="2.5" fill="#1f5fd2"/>
-<text x="60" y="68" font-size="30" fill="#192b45" font-weight="650" >How NoriShell works</text>
-<text x="40" y="108" font-size="19" fill="#586478" font-weight="400" >One workspace. Connections and sensitive operations stay under Core control.</text>
-<text x="40" y="151" font-size="13" fill="#68778e" font-weight="650" letter-spacing="1.4">YOU &amp; THE INTERFACE</text>
-<text x="408" y="151" font-size="13" fill="#68778e" font-weight="650" letter-spacing="1.4">ON YOUR DEVICE</text>
-<text x="832" y="151" font-size="13" fill="#68778e" font-weight="650" letter-spacing="1.4">SESSION TARGETS</text>
-<path d="M330 242H396" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
-<path d="M330 414H396" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
-<path d="M752 242H820" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
-<path d="M792 242V490H820" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
-<circle cx="792" cy="242" r="4" fill="#8193af"/>
-<path d="M330 683H366V485H396" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
-<path d="M580 536V589" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M580 589V630" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
-<path d="M580 589H952V630" fill="none" stroke="#8193af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
-<circle cx="580" cy="589" r="4" fill="#8193af"/>
-<rect x="40" y="174" width="290" height="138" rx="18" fill="#fff" stroke="#dce3ec"/>
-<g transform="translate(62 196) scale(1)" fill="none" stroke="#1f5fd2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="3"/><path d="M8 21h8M12 17v4"/></g>
-<text x="101" y="216" font-size="22" fill="#192b45" font-weight="620" >Desktop interface</text>
-<text x="62" y="256" font-size="19" fill="#586478" font-weight="400" >Tabs · files · hosts</text>
-<text x="62" y="286" font-size="17" fill="#586478" font-weight="400" >Requests in · state out</text>
-<rect x="40" y="356" width="290" height="160" rx="18" fill="#eef6f4" stroke="#bbd8d0"/>
-<g transform="translate(62 378) scale(1)" fill="none" stroke="#267a62" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 21 6v6c0 5-9 10-9 10S3 17 3 12V6Z"/><path d="m8 12 3 3 5-6"/></g>
-<text x="101" y="398" font-size="21" fill="#205a4d" font-weight="620" >Protected windows</text>
-<text x="62" y="441" font-size="19" fill="#315e53" font-weight="400" >Credentials &amp; approvals</text>
-<text x="62" y="477" font-size="17" fill="#52736a" font-weight="400" >Separate from plugin UI</text>
-<rect x="40" y="586" width="290" height="192" rx="18" fill="#f4f2fa" stroke="#d6d0e7"/>
-<g transform="translate(62 608) scale(1)" fill="none" stroke="#72599a" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 17.5h7M17.5 14v7"/></g>
-<text x="101" y="628" font-size="22" fill="#574078" font-weight="620" >Isolated plugins</text>
-<text x="62" y="671" font-size="16.5" fill="#655b78" font-weight="400" >WebAssembly · separate process</text>
-<text x="62" y="704" font-size="17" fill="#655b78" font-weight="400" >Request approved capabilities</text>
-<path d="M62 725H308" stroke="#ded9ea"/>
-<text x="62" y="753" font-size="17" fill="#574078" font-weight="550" >No direct Vault access</text>
-<rect x="408" y="174" width="344" height="362" rx="20" fill="url(#core)" stroke="#154c9f"/>
-<g transform="translate(434 198) scale(1.15)" fill="none" stroke="#c3d8ff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="3"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/><path d="m9 10 3 3 3-3"/></g>
-<text x="477" y="225" font-size="30" fill="#ffffff" font-weight="650" >Rust Core</text>
-<text x="434" y="275" font-size="20" fill="#e2ebfd" font-weight="500" >Owns connections &amp; sessions</text>
-<path d="M434 300H726" stroke="#ffffff" stroke-opacity=".19"/>
-<path d="m435 332 4 4 8-9" fill="none" stroke="#a9c6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-<text x="458" y="339" font-size="18" fill="#e3ecff" font-weight="400" >Identity &amp; authentication</text>
-<path d="m435 372 4 4 8-9" fill="none" stroke="#a9c6ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-<text x="458" y="379" font-size="18" fill="#e3ecff" font-weight="400" >Input &amp; resource lifecycle</text>
-<rect x="430" y="440" width="300" height="74" rx="12" fill="#e8f0ff" stroke="#e8f0ff"/>
-<text x="448" y="469" font-size="20" fill="#163c76" font-weight="650" >Permission broker</text>
-<text x="448" y="495" font-size="16" fill="#4a6388" font-weight="400" >Checks every plugin request</text>
-<rect x="832" y="174" width="288" height="228" rx="18" fill="#fff" stroke="#dce3ec"/>
-<g transform="translate(854 196) scale(1)" fill="none" stroke="#1f5fd2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01M15 6.5h3M15 17.5h3"/></g>
-<text x="893" y="216" font-size="22" fill="#192b45" font-weight="620" >Remote sessions</text>
-<text x="854" y="257" font-size="20" fill="#44556f" font-weight="400" >SSH · SFTP · tunnels</text>
-<text x="854" y="288" font-size="19" fill="#44556f" font-weight="400" >RDP / VNC · metrics</text>
-<path d="M854 310H1098" stroke="#e3e8f0"/>
-<text x="854" y="341" font-size="17" fill="#586478" font-weight="400" >SSH host key checked</text>
-<text x="854" y="368" font-size="17" fill="#586478" font-weight="400" >before authentication</text>
-<rect x="832" y="444" width="288" height="112" rx="18" fill="#eef3fa" stroke="#d4dfed"/>
-<g transform="translate(854 464) scale(1)" fill="none" stroke="#1f5fd2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="18" rx="3"/><path d="m6 8 4 4-4 4M13 16h5"/></g>
-<text x="893" y="486" font-size="22" fill="#192b45" font-weight="620" >Local shell</text>
-<text x="854" y="526" font-size="18" fill="#586478" font-weight="400" >Local PTY · default shell</text>
-<rect x="408" y="638" width="344" height="140" rx="18" fill="#fff" stroke="#dce3ec"/>
-<g transform="translate(430 660) scale(1)" fill="none" stroke="#62748c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 4 18 4 18 0V5M3 12c0 4 18 4 18 0"/></g>
-<text x="469" y="680" font-size="22" fill="#192b45" font-weight="620" >Local database</text>
-<text x="430" y="717" font-size="19" fill="#44556f" font-weight="500" >Non-secret settings</text>
-<text x="430" y="751" font-size="16" fill="#586478" font-weight="400" >Hosts · preferences · trust records</text>
-<rect x="784" y="638" width="336" height="140" rx="18" fill="#edf4ff" stroke="#c9dafa"/>
-<g transform="translate(806 658) scale(1)" fill="none" stroke="#1f5fd2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="12" rx="3"/><path d="M8 10V6a4 4 0 0 1 8 0v4M12 15v3"/></g>
-<text x="845" y="680" font-size="22" fill="#204b8d" font-weight="620" >Encrypted Vault</text>
-<text x="806" y="717" font-size="18" fill="#445f88" font-weight="500" >Saved passwords &amp; private keys</text>
-<text x="806" y="751" font-size="16" fill="#586f92" font-weight="400" >Sync does not upload this file</text>
+<rect x="1" y="1" width="1158" height="848" rx="24" fill="#f7f9fc" stroke="#e0e6ee"/>
+<rect x="40" y="36" width="5" height="34" rx="2.5" fill="#1f5fd2"/>
+<text x="60" y="62" font-size="27" font-weight="650" fill="#192b45">Core and security boundaries</text>
+<text x="40" y="96" font-size="15.5" fill="#586478">The Rust Core owns every connection and secret; the interface and plugins only see projections and handles.</text>
+<rect x="24" y="124" width="800" height="456" rx="14" fill="#ffffff" stroke="#b9c8e2" stroke-width="1.5"/><text x="42" y="151" font-size="14" font-weight="700" fill="#192b45" letter-spacing=".5">DESKTOP APP PROCESS  ·  Tauri 2</text>
+<rect x="38" y="166" width="772" height="150" rx="10" fill="#eef3fb"/>
+<text x="54" y="190" font-size="14" font-weight="700" fill="#1f5fd2" letter-spacing=".5">INTERFACE</text>
+<rect x="44.0" y="202" width="244" height="100" rx="10" fill="#ffffff" stroke="#d9e1ec"/>
+<rect x="44.0" y="214" width="3" height="76" rx="1.5" fill="#1f5fd2"/>
+<text x="62.0" y="230" font-size="16" font-weight="650" fill="#192b45">Main window</text>
+<text x="62.0" y="252" font-size="14" fill="#586478">Navigation, layout, projections</text>
+<text x="62.0" y="277" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" font-size="14" fill="#192b45">Vue 3 · xterm</text>
+<rect x="302.0" y="202" width="244" height="100" rx="10" fill="#ffffff" stroke="#d9e1ec"/>
+<rect x="302.0" y="214" width="3" height="76" rx="1.5" fill="#1f5fd2"/>
+<text x="320.0" y="230" font-size="16" font-weight="650" fill="#192b45">Tab views</text>
+<text x="320.0" y="252" font-size="14" fill="#586478">One native view per tab</text>
+<text x="320.0" y="277" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" font-size="14" fill="#192b45">moves between windows</text>
+<rect x="560.0" y="202" width="244" height="100" rx="10" fill="#ffffff" stroke="#d9e1ec"/>
+<rect x="560.0" y="214" width="3" height="76" rx="1.5" fill="#1f5fd2"/>
+<text x="578.0" y="230" font-size="16" font-weight="650" fill="#192b45">Secure windows</text>
+<text x="578.0" y="252" font-size="14" fill="#586478">Credential and approval prompts</text>
+<text x="578.0" y="277" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" font-size="14" fill="#192b45">Vault · approvals</text>
+<path d="M84.0 316L84.0 359" stroke="#1f5fd2" stroke-width="2" fill="none" marker-end="url(#aCtrl)"/>
+<path d="M764.0 360L764.0 317" stroke="#0f766e" stroke-width="2" stroke-dasharray="7 4" fill="none" marker-end="url(#aData)"/>
+<text x="424.0" y="343" font-size="13.5" font-weight="400" fill="#586478" text-anchor="middle">typed commands ↓   projections ↑</text>
+<rect x="38" y="360" width="772" height="206" rx="10" fill="#ffffff" stroke="#1f5fd2" stroke-width="1.5"/>
+<rect x="38" y="360" width="772" height="46" rx="10" fill="#1f5fd2"/>
+<rect x="38" y="394" width="772" height="12" fill="#1f5fd2"/>
+<text x="54" y="389" font-size="16" font-weight="700" fill="#ffffff">RUST CORE</text>
+<text x="794" y="389" font-size="13.5" fill="#dbe6ff" text-anchor="end">owns connections, sessions and secrets</text>
+<text x="54.0" y="436" font-size="15" font-weight="650" fill="#192b45">SSH</text>
+<text x="54.0" y="462" font-size="14" fill="#334155">Host key: confirm on first use,</text>
+<text x="54.0" y="486" font-size="14" fill="#334155">a changed key blocks</text>
+<text x="54.0" y="510" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">Direct · HTTP CONNECT</text>
+<text x="54.0" y="534" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">SOCKS5 · + jump hosts</text>
+<path d="M290.66666666666663 422V550" stroke="#d9e1ec"/>
+<text x="300.66666666666663" y="436" font-size="15" font-weight="650" fill="#192b45">Sessions</text>
+<text x="300.66666666666663" y="462" font-size="14" fill="#334155">One input owner per pane</text>
+<text x="300.66666666666663" y="486" font-size="14" fill="#334155">Terminal, SFTP and Forward</text>
+<text x="300.66666666666663" y="510" font-size="14" fill="#334155">each use their own transport</text>
+<text x="300.66666666666663" y="534" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">raw VT/ANSI bytes</text>
+<path d="M537.3333333333333 422V550" stroke="#d9e1ec"/>
+<text x="547.3333333333333" y="436" font-size="15" font-weight="650" fill="#192b45">Vault</text>
+<text x="547.3333333333333" y="462" font-size="14" fill="#334155">Secrets stay in Core memory</text>
+<text x="547.3333333333333" y="486" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">Argon2id</text>
+<text x="547.3333333333333" y="510" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">XChaCha20-Poly1305</text>
+<text x="547.3333333333333" y="534" font-size="14" fill="#334155">never written to SQLite or logs</text>
+<rect x="856" y="124" width="280" height="456" rx="14" fill="#fff8ec" stroke="#d97706" stroke-width="1.5" stroke-dasharray="8 5"/><text x="874" y="151" font-size="14" font-weight="700" fill="#d97706" letter-spacing=".5">PLUGINS</text>
+<text x="874" y="174" font-size="14" fill="#586478">Sandboxed outside the app process</text>
+<rect x="874" y="196" width="244" height="66" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="888" y="222" font-size="15" font-weight="650" fill="#192b45">Runtime</text>
+<text x="888" y="245" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">WebAssembly · no WASI</text>
+<rect x="874" y="274" width="244" height="66" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="888" y="300" font-size="15" font-weight="650" fill="#192b45">Isolation</text>
+<text x="888" y="323" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">separate process</text>
+<rect x="874" y="352" width="244" height="66" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="888" y="378" font-size="15" font-weight="650" fill="#192b45">Permissions</text>
+<text x="888" y="401" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">denied by default</text>
+<rect x="874" y="430" width="244" height="66" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="888" y="456" font-size="15" font-weight="650" fill="#192b45">Access</text>
+<text x="888" y="479" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">Core broker only</text>
+<text x="874" y="520" font-size="13.5" fill="#586478">No Vault, database or socket access.</text>
+<path d="M824 450L855 450" stroke="#1f5fd2" stroke-width="2" fill="none" marker-end="url(#aCtrl)"/>
+<path d="M856 466L825 466" stroke="#1f5fd2" stroke-width="2" fill="none" marker-end="url(#aCtrl)"/>
+<rect x="24" y="624" width="604" height="158" rx="14" fill="#f4f6f9" stroke="#7b8798" stroke-width="1.5" stroke-dasharray="8 5"/><text x="42" y="651" font-size="14" font-weight="700" fill="#7b8798" letter-spacing=".5">EXTERNAL TARGETS</text>
+<rect x="656" y="624" width="480" height="158" rx="14" fill="#eefaf3" stroke="#15803d" stroke-width="1.5"/><text x="674" y="651" font-size="14" font-weight="700" fill="#15803d" letter-spacing=".5">LOCAL STORAGE</text>
+<rect x="42.0" y="664" width="181.33333333333334" height="102" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="56.0" y="690" font-size="15" font-weight="650" fill="#192b45">SSH</text>
+<text x="56.0" y="712" font-size="14" fill="#586478">Terminal · SFTP · Forward</text>
+<text x="56.0" y="736" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">own transport</text>
+<rect x="235.33333333333334" y="664" width="181.33333333333334" height="102" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="249.33333333333334" y="690" font-size="15" font-weight="650" fill="#192b45">Desktop</text>
+<text x="249.33333333333334" y="712" font-size="14" fill="#586478">RDP · VNC</text>
+<text x="249.33333333333334" y="736" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">IronRDP · vnc-rs</text>
+<rect x="428.6666666666667" y="664" width="181.33333333333334" height="102" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="442.6666666666667" y="690" font-size="15" font-weight="650" fill="#192b45">Local shell</text>
+<text x="442.6666666666667" y="712" font-size="14" fill="#586478">User default shell</text>
+<text x="442.6666666666667" y="736" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">PTY · $HOME</text>
+<rect x="674.0" y="664" width="216.0" height="102" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="688.0" y="690" font-size="15" font-weight="650" fill="#192b45">Vault file</text>
+<text x="688.0" y="712" font-size="14" fill="#586478">Encrypted, atomic writes</text>
+<text x="688.0" y="736" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">XChaCha20-Poly1305</text>
+<rect x="902.0" y="664" width="216.0" height="102" rx="8" fill="#ffffff" stroke="#d9e1ec"/>
+<text x="916.0" y="690" font-size="15" font-weight="650" fill="#192b45">SQLite</text>
+<text x="916.0" y="712" font-size="14" fill="#586478">Non-secret settings only</text>
+<text x="916.0" y="736" font-size="14" font-family="SF Mono, Menlo, Consolas, Liberation Mono, monospace" fill="#192b45">hosts · routes · layout</text>
+<path d="M132.66666666666669 580L132.66666666666669 623" stroke="#1f5fd2" stroke-width="2" fill="none" marker-end="url(#aCtrl)"/>
+<path d="M326.0 580L326.0 623" stroke="#1f5fd2" stroke-width="2" fill="none" marker-end="url(#aCtrl)"/>
+<path d="M519.3333333333334 580L519.3333333333334 623" stroke="#1f5fd2" stroke-width="2" fill="none" marker-end="url(#aCtrl)"/>
+<path d="M722.0 580L722.0 623" stroke="#0f766e" stroke-width="2" stroke-dasharray="7 4" fill="none" marker-end="url(#aData)"/>
+<path d="M842.0 580L842.0 623" stroke="#0f766e" stroke-width="2" stroke-dasharray="7 4" fill="none" marker-end="url(#aData)"/>
+<path d="M1050.0 580L1050.0 618" stroke="#dc2626" stroke-width="2" stroke-dasharray="3 4" fill="none" marker-end="url(#aDeny)"/>
+<text x="1038.0" y="607" font-size="13.5" font-weight="600" fill="#dc2626" text-anchor="end">no access</text>
+<text x="229.33333333333334" y="607" font-size="13.5" font-weight="400" fill="#586478" text-anchor="middle">verified connections</text>
+<path d="M40 817L84 817" stroke="#1f5fd2" stroke-width="2" fill="none" marker-end="url(#aCtrl)"/>
+<text x="94" y="822" font-size="14" fill="#334155">request / control</text>
+<path d="M244 817L288 817" stroke="#0f766e" stroke-width="2" stroke-dasharray="7 4" fill="none" marker-end="url(#aData)"/>
+<text x="298" y="822" font-size="14" fill="#334155">data</text>
+<path d="M448 817L492 817" stroke="#dc2626" stroke-width="2" stroke-dasharray="3 4" fill="none" marker-end="url(#aDeny)"/>
+<text x="502" y="822" font-size="14" fill="#334155">forbidden</text>
+<text x="1120" y="822" font-size="13.5" fill="#586478" text-anchor="end">Plugins and sync never receive the Vault file.</text>
 </g></svg>

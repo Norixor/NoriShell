@@ -78,11 +78,11 @@
 
 ## 界面预览
 
-![NoriShell 多标签与分屏终端](.github/assets/screenshots/terminal.png)
+![NoriShell 工作区：多标签、分屏终端，以及拖出为独立窗口且连接不中断的标签页](.github/assets/illustrations/workspace.zh-CN.svg)
 
 ## Core 与安全
 
-![NoriShell Core 与安全边界](.github/assets/diagrams/core-security.zh-CN.svg)
+![NoriShell Core 与安全边界：界面与安全窗口通过 Rust Core 工作，Core 持有 SSH host key 核验、会话与 Argon2id / XChaCha20-Poly1305 加密的 Vault；插件以 WebAssembly 在独立进程运行且不能访问 Vault；本地存储将加密 Vault 文件与非秘密 SQLite 数据库分开](.github/assets/diagrams/core-security.zh-CN.svg)
 
 Rust Core 管理连接，在 SSH 认证前核验服务器身份；已信任的指纹发生变化时会阻断连接。已保存的秘密存放在加密 Vault 中，本地数据库保存非秘密设置。插件在独立进程中运行，只能通过 Core 请求已授权的能力，不能读取 Vault。同步不会上传本机 Vault 文件。
 
