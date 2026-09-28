@@ -95,7 +95,9 @@ use norishell_plugin_platform::{
 
 use semver::Version;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, State, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use tauri_plugin_dialog::DialogExt as _;
 use uuid::Uuid;
 
@@ -227,6 +229,8 @@ struct ActivePluginTargetContext {
     context: PluginExtensionTargetContext,
     identity_key: String,
     instance_key: String,
+    /// Open count per WebView label; u64 cannot overflow from IPC calls.
+    leases: BTreeMap<String, u64>,
 }
 
 #[derive(Clone)]
@@ -3332,6 +3336,7 @@ impl PluginService {
     fn open_target_context(
         &self,
         request: PluginTargetContextOpenRequest,
+        webview_label: &str,
     ) -> CoreResult<PluginExtensionTargetContext> {
         self.require_ready(request.meta.request_id.clone())?;
         let Some(definition) = plugin_extension_registry::find(&request.target_id) else {
@@ -3371,9 +3376,10 @@ impl PluginService {
             .runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(handle) = runtime.target_context_identity.get(&identity_key)
-            && let Some(active) = runtime.target_contexts.get(handle)
+        if let Some(handle) = runtime.target_context_identity.get(&identity_key).cloned()
+            && let Some(active) = runtime.target_contexts.get_mut(&handle)
         {
+            *active.leases.entry(webview_label.into()).or_default() += 1;
             return Ok(active.context.clone());
         }
         if runtime.target_contexts.len() >= PLUGIN_TARGET_CONTEXT_LIMIT {
@@ -3404,17 +3410,25 @@ impl PluginService {
                 context: context.clone(),
                 identity_key,
                 instance_key: request.target_instance_key,
+                leases: BTreeMap::from([(webview_label.into(), 1)]),
             },
         );
         Ok(context)
     }
 
-    fn close_target_context(&self, request: PluginTargetContextCloseRequest) -> CoreResult<()> {
+    fn close_target_context(
+        &self,
+        request: PluginTargetContextCloseRequest,
+        webview_label: &str,
+    ) -> CoreResult<()> {
         let mut runtime = self
             .runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(active) = runtime.target_contexts.get(request.context_handle.as_str()) else {
+        let Some(active) = runtime
+            .target_contexts
+            .get_mut(request.context_handle.as_str())
+        else {
             return Ok(());
         };
         if active.context.target_revision != request.expected_target_revision {
@@ -3423,27 +3437,66 @@ impl PluginService {
                 Some(active.context.target_revision),
             ));
         }
-        let identity_key = active.identity_key.clone();
-        runtime
-            .target_contexts
-            .remove(request.context_handle.as_str());
-        runtime
-            .host_handles
-            .retain(|_, handle| handle.context_handle != request.context_handle);
-        for instance in runtime.active_instances.values_mut() {
-            instance
-                .scoped_templates
-                .remove(request.context_handle.as_str());
-            instance
-                .scoped_states
-                .remove(request.context_handle.as_str());
+        let Some(count) = active.leases.get_mut(webview_label) else {
+            return Err(plugin_error(
+                request.meta.request_id,
+                "plugin.target_context_not_owned",
+                ErrorCategory::Permission,
+                RetryStrategy::Never,
+                "errors.plugin.capabilityDenied",
+                None,
+            ));
+        };
+        *count -= 1;
+        if *count == 0 {
+            active.leases.remove(webview_label);
         }
-        if runtime.target_context_identity.get(&identity_key)
-            == Some(&request.context_handle.as_str().to_owned())
-        {
-            runtime.target_context_identity.remove(&identity_key);
+        if active.leases.is_empty() {
+            Self::remove_target_context(&mut runtime, request.context_handle.as_str());
         }
         Ok(())
+    }
+
+    fn remove_target_context(runtime: &mut PluginRuntimeState, handle: &str) {
+        let Some(active) = runtime.target_contexts.remove(handle) else {
+            return;
+        };
+        runtime
+            .host_handles
+            .retain(|_, host| host.context_handle.as_str() != handle);
+        for instance in runtime.active_instances.values_mut() {
+            instance.scoped_templates.remove(handle);
+            instance.scoped_states.remove(handle);
+        }
+        if runtime
+            .target_context_identity
+            .get(&active.identity_key)
+            .map(String::as_str)
+            == Some(handle)
+        {
+            runtime.target_context_identity.remove(&active.identity_key);
+        }
+    }
+
+    pub(crate) fn close_target_contexts_for_webview(&self, webview_label: &str) {
+        let mut runtime = self
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handles = runtime
+            .target_contexts
+            .iter()
+            .filter(|(_, active)| active.leases.contains_key(webview_label))
+            .map(|(handle, _)| handle.clone())
+            .collect::<Vec<_>>();
+        for handle in handles {
+            if let Some(active) = runtime.target_contexts.get_mut(&handle) {
+                active.leases.remove(webview_label);
+                if active.leases.is_empty() {
+                    Self::remove_target_context(&mut runtime, &handle);
+                }
+            }
+        }
     }
 
     fn canonical_target_context(
@@ -6329,11 +6382,23 @@ impl PluginService {
     }
 }
 
-fn require_main_plugin_management_window<R: tauri::Runtime>(
-    window: &WebviewWindow<R>,
+/// Admits the main WebView and any child Tab view that its current window
+/// owns, whatever the Tab kind. The kind is deliberately not checked: protocol
+/// terminal Tabs run in child WebViews and need the same plugin commands as
+/// Page Tabs. Top-level WebViews of secondary workspace windows are refused.
+fn require_main_or_owned_tab_view<R: tauri::Runtime>(
+    webview: &Webview<R>,
     request_id: RequestId,
 ) -> CoreResult<()> {
-    if window.label() == "main" {
+    let window = webview.window();
+    let child_allowed = crate::workspace_tab_views::tab_id_from_view_label(webview.label())
+        .is_some_and(|id| {
+            webview
+                .app_handle()
+                .try_state::<crate::workspace_windows::WorkspaceWindows>()
+                .is_some_and(|tabs| tabs.owns_tab(window.label(), &id).is_ok())
+        });
+    if webview.label() == "main" || child_allowed {
         Ok(())
     } else {
         Err(plugin_permission_error(request_id))
@@ -6351,10 +6416,10 @@ pub(crate) fn plugin_installed_list(
 #[tauri::command]
 pub(crate) fn plugin_theme_list<R: tauri::Runtime>(
     request: PluginThemeListRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginThemeListResponse> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     service.list_themes(request.meta.request_id)
 }
 
@@ -6448,17 +6513,38 @@ pub(crate) fn plugin_extension_target_list(
 #[tauri::command]
 pub(crate) fn plugin_target_context_open(
     request: PluginTargetContextOpenRequest,
+    webview: Webview,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginExtensionTargetContext> {
-    service.open_target_context(request)
+    let meta = request.meta.clone();
+    crate::workspace_tab_views::ordinary_owner(webview.app_handle(), &webview)
+        .map_err(|_| plugin_permission_error(meta.request_id.clone()))?;
+    let context = service.open_target_context(request, webview.label())?;
+    // A WebView can disappear while the Core context is being opened. The
+    // second check releases precisely this open, leaving other leases intact.
+    if crate::workspace_tab_views::ordinary_owner(webview.app_handle(), &webview).is_err() {
+        let _ = service.close_target_context(
+            PluginTargetContextCloseRequest {
+                meta: meta.clone(),
+                context_handle: context.context_handle.clone(),
+                expected_target_revision: context.target_revision,
+            },
+            webview.label(),
+        );
+        return Err(plugin_permission_error(meta.request_id));
+    }
+    Ok(context)
 }
 
 #[tauri::command]
 pub(crate) fn plugin_target_context_close(
     request: PluginTargetContextCloseRequest,
+    webview: Webview,
     service: State<'_, PluginService>,
 ) -> CoreResult<()> {
-    service.close_target_context(request)
+    // Release remains available while a Tab moves or its plugin grant changes.
+    // The lease itself authenticates this exact calling WebView label.
+    service.close_target_context(request, webview.label())
 }
 
 #[tauri::command]
@@ -7515,30 +7601,30 @@ pub(crate) fn plugin_operation_cancel(
 #[tauri::command]
 pub(crate) fn plugin_operation_permissions_list<R: tauri::Runtime>(
     request: PluginOperationPermissionListRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginOperationPermissionList> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     service.list_operation_permissions(request)
 }
 
 #[tauri::command]
 pub(crate) fn plugin_operation_permission_revoke<R: tauri::Runtime>(
     request: PluginOperationPermissionRevokeRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<()> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     service.revoke_operation_permission(request)
 }
 
 #[tauri::command]
 pub(crate) fn plugin_operation_permissions_clear<R: tauri::Runtime>(
     request: PluginOperationPermissionsClearRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<()> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     service.clear_operation_permissions(request)
 }
 
@@ -10940,6 +11026,174 @@ mod tests {
     }
 
     #[test]
+    fn destroyed_plugin_page_tab_releases_its_core_target_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let hosts = HostService::start(directory.path()).unwrap();
+        let sessions = SshSessionService::start(
+            hosts.clone(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+        );
+        let service = PluginService::start(directory.path(), hosts, sessions).unwrap();
+        let opened = service
+            .open_target_context(
+                PluginTargetContextOpenRequest {
+                    meta: request_meta(),
+                    target_id: norishell_core_api::PluginExtensionTargetId::parse("app.page")
+                        .unwrap(),
+                    target_instance_key: "test.plugin|dashboard".into(),
+                    display_label: None,
+                },
+                "workspace-tab-page:plugin:test.plugin:dashboard",
+            )
+            .unwrap();
+        service
+            .close_target_contexts_for_webview("workspace-tab-page:plugin:test.plugin:dashboard");
+        assert!(
+            !service
+                .runtime
+                .lock()
+                .unwrap()
+                .target_contexts
+                .contains_key(opened.context_handle.as_str())
+        );
+        let reopened = service
+            .open_target_context(
+                PluginTargetContextOpenRequest {
+                    meta: request_meta(),
+                    target_id: norishell_core_api::PluginExtensionTargetId::parse("app.page")
+                        .unwrap(),
+                    target_instance_key: "test.plugin|dashboard".into(),
+                    display_label: None,
+                },
+                "workspace-tab-page:plugin:test.plugin:dashboard",
+            )
+            .unwrap();
+        assert_ne!(opened.context_handle, reopened.context_handle);
+    }
+
+    #[test]
+    fn shared_sftp_target_context_closes_only_after_each_webview_releases_its_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let hosts = HostService::start(directory.path()).unwrap();
+        let sessions = SshSessionService::start(
+            hosts.clone(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+        );
+        let service = PluginService::start(directory.path(), hosts, sessions).unwrap();
+        let request = || PluginTargetContextOpenRequest {
+            meta: request_meta(),
+            target_id: norishell_core_api::PluginExtensionTargetId::parse("sftp.toolbar").unwrap(),
+            target_instance_key: "sftp-session-1".into(),
+            display_label: None,
+        };
+        let first = service
+            .open_target_context(request(), "workspace-tab-file-a")
+            .unwrap();
+        let duplicate = service
+            .open_target_context(request(), "workspace-tab-file-a")
+            .unwrap();
+        let second = service
+            .open_target_context(request(), "workspace-tab-file-b")
+            .unwrap();
+        assert_eq!(first.context_handle, duplicate.context_handle);
+        assert_eq!(first.context_handle, second.context_handle);
+        let close = || PluginTargetContextCloseRequest {
+            meta: request_meta(),
+            context_handle: first.context_handle.clone(),
+            expected_target_revision: first.target_revision,
+        };
+        service
+            .close_target_context(close(), "workspace-tab-file-a")
+            .unwrap();
+        assert!(
+            service
+                .runtime
+                .lock()
+                .unwrap()
+                .target_contexts
+                .contains_key(first.context_handle.as_str())
+        );
+        service
+            .close_target_context(close(), "workspace-tab-file-a")
+            .unwrap();
+        assert!(
+            service
+                .runtime
+                .lock()
+                .unwrap()
+                .target_contexts
+                .contains_key(first.context_handle.as_str())
+        );
+        assert_eq!(
+            service
+                .close_target_context(close(), "workspace-tab-file-a")
+                .unwrap_err()
+                .code,
+            "plugin.target_context_not_owned"
+        );
+        service
+            .close_target_context(close(), "workspace-tab-file-b")
+            .unwrap();
+        assert!(
+            !service
+                .runtime
+                .lock()
+                .unwrap()
+                .target_contexts
+                .contains_key(first.context_handle.as_str())
+        );
+        let reopened = service
+            .open_target_context(request(), "workspace-tab-file-a")
+            .unwrap();
+        assert_ne!(first.context_handle, reopened.context_handle);
+    }
+
+    #[test]
+    fn destroyed_child_releases_only_its_shared_sftp_context_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let hosts = HostService::start(directory.path()).unwrap();
+        let sessions = SshSessionService::start(
+            hosts.clone(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+        );
+        let service = PluginService::start(directory.path(), hosts, sessions).unwrap();
+        let request = || PluginTargetContextOpenRequest {
+            meta: request_meta(),
+            target_id: norishell_core_api::PluginExtensionTargetId::parse("sftp.toolbar").unwrap(),
+            target_instance_key: "sftp-session-1".into(),
+            display_label: None,
+        };
+        let first = service
+            .open_target_context(request(), "workspace-tab-file-a")
+            .unwrap();
+        service
+            .open_target_context(request(), "workspace-tab-file-b")
+            .unwrap();
+        service.close_target_contexts_for_webview("workspace-tab-file-a");
+        service.close_target_contexts_for_webview("workspace-tab-file-a");
+        assert!(
+            service
+                .runtime
+                .lock()
+                .unwrap()
+                .target_contexts
+                .contains_key(first.context_handle.as_str())
+        );
+        service.close_target_contexts_for_webview("workspace-tab-file-b");
+        assert!(
+            !service
+                .runtime
+                .lock()
+                .unwrap()
+                .target_contexts
+                .contains_key(first.context_handle.as_str())
+        );
+    }
+
+    #[test]
     fn contextual_documents_and_state_do_not_leak_into_another_terminal_pane() {
         let directory = tempfile::tempdir().expect("plugin service directory");
         let hosts = HostService::start(directory.path()).unwrap();
@@ -10994,12 +11248,15 @@ mod tests {
             norishell_core_api::PluginExtensionTargetId::parse("terminal.tools").unwrap();
         let open = |pane: &str| {
             service
-                .open_target_context(PluginTargetContextOpenRequest {
-                    meta: request_meta(),
-                    target_id: target_id.clone(),
-                    target_instance_key: pane.to_owned(),
-                    display_label: None,
-                })
+                .open_target_context(
+                    PluginTargetContextOpenRequest {
+                        meta: request_meta(),
+                        target_id: target_id.clone(),
+                        target_instance_key: pane.to_owned(),
+                        display_label: None,
+                    },
+                    "main",
+                )
                 .unwrap()
         };
         let first = open("pane-a");
@@ -11098,11 +11355,14 @@ mod tests {
             .contribution_action_in_flight = true;
         assert!(service.ssh_sync_action_fence_current(&action));
         service
-            .close_target_context(PluginTargetContextCloseRequest {
-                meta: request_meta(),
-                context_handle: first.context_handle.clone(),
-                expected_target_revision: first.target_revision,
-            })
+            .close_target_context(
+                PluginTargetContextCloseRequest {
+                    meta: request_meta(),
+                    context_handle: first.context_handle.clone(),
+                    expected_target_revision: first.target_revision,
+                },
+                "main",
+            )
             .unwrap();
         assert!(
             !service.ssh_sync_action_fence_current(&action),
@@ -11148,12 +11408,15 @@ mod tests {
         let target_id =
             norishell_core_api::PluginExtensionTargetId::parse("terminal.tools").expect("target");
         let target = service
-            .open_target_context(PluginTargetContextOpenRequest {
-                meta: request_meta(),
-                target_id: target_id.clone(),
-                target_instance_key: "pane-a".to_owned(),
-                display_label: None,
-            })
+            .open_target_context(
+                PluginTargetContextOpenRequest {
+                    meta: request_meta(),
+                    target_id: target_id.clone(),
+                    target_instance_key: "pane-a".to_owned(),
+                    display_label: None,
+                },
+                "main",
+            )
             .expect("target context");
         let install = |record: &PluginInstalledRecord| {
             let binding = current_plugin_permission_binding(&record.package_sha256);
@@ -11498,13 +11761,16 @@ mod tests {
             })
             .expect("persist revoked grant");
         let target = service
-            .open_target_context(PluginTargetContextOpenRequest {
-                meta: request_meta(),
-                target_id: norishell_core_api::PluginExtensionTargetId::parse("terminal.tools")
-                    .expect("target id"),
-                target_instance_key: "pane-a".to_owned(),
-                display_label: None,
-            })
+            .open_target_context(
+                PluginTargetContextOpenRequest {
+                    meta: request_meta(),
+                    target_id: norishell_core_api::PluginExtensionTargetId::parse("terminal.tools")
+                        .expect("target id"),
+                    target_instance_key: "pane-a".to_owned(),
+                    display_label: None,
+                },
+                "main",
+            )
             .expect("target context");
         let template = serde_json::from_value::<PluginUiTemplate>(serde_json::json!({
             "targetId": "terminal.tools",

@@ -21,7 +21,7 @@ use file_utilities::{
 
 use local_capability::{
     LocalBoundary, LocalDirectoryCapability, LocalDirectoryCursor, LocalDirectoryEntryReference,
-    LocalObjectIdentity, LocalObjectKind, rememberable_local_child_path,
+    LocalDirectoryOwner, LocalObjectIdentity, LocalObjectKind, rememberable_local_child_path,
     rememberable_local_directory_path, safe_local_name_display,
 };
 
@@ -65,9 +65,9 @@ use russh_sftp::{
     protocol::{FileAttributes as RemoteFileAttributes, OpenFlags},
 };
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, Webview};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Semaphore, watch};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -99,6 +99,8 @@ const MAX_LABEL_BYTES: usize = 4096;
 const MAX_RESUME_PREFIX_BYTES: usize = 8 * 1024 * 1024;
 const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
 const SFTP_PROTOCOL_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
+const LOCAL_DIRECTORY_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_IN_FLIGHT_LOCAL_DIRECTORY_IO: usize = 4;
 const SFTP_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const SFTP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const MUTATION_LEDGER_CAPACITY: usize = 1_024;
@@ -133,6 +135,7 @@ pub(crate) enum SftpRuntimeError {
     InvalidInput,
     StaleGeneration,
     InvalidState,
+    LocalDirectoryTimeout,
     #[allow(
         dead_code,
         reason = "plugin-facing error mapping keeps the state-machine failure contract stable"
@@ -4280,6 +4283,7 @@ pub(crate) struct SftpSessionService {
     records: Arc<Mutex<BTreeMap<String, SftpServiceRecord>>>,
     local_boundaries: Arc<Mutex<BTreeMap<String, LocalBoundary>>>,
     local_directories: Arc<Mutex<BTreeMap<String, LocalDirectoryCapability>>>,
+    local_directory_io_limit: Arc<Semaphore>,
     local_directory_entries: Arc<Mutex<BTreeMap<String, LocalDirectoryEntryReference>>>,
     local_directory_cursors: Arc<Mutex<BTreeMap<String, LocalDirectoryCursor>>>,
     remote_directory_refs: Arc<Mutex<BTreeMap<String, RemoteDirectoryReference>>>,
@@ -4324,6 +4328,7 @@ impl SftpSessionService {
             records: Arc::new(Mutex::new(BTreeMap::new())),
             local_boundaries: Arc::new(Mutex::new(BTreeMap::new())),
             local_directories: Arc::new(Mutex::new(BTreeMap::new())),
+            local_directory_io_limit: Arc::new(Semaphore::new(MAX_IN_FLIGHT_LOCAL_DIRECTORY_IO)),
             local_directory_entries: Arc::new(Mutex::new(BTreeMap::new())),
             local_directory_cursors: Arc::new(Mutex::new(BTreeMap::new())),
             remote_directory_refs: Arc::new(Mutex::new(BTreeMap::new())),
@@ -4663,6 +4668,7 @@ impl SftpSessionService {
     async fn register_local_directory(
         &self,
         request: wire::SftpLocalDirectoryRegisterRequest,
+        owner: &LocalDirectoryOwner,
     ) -> Result<wire::SftpLocalDirectoryCapability, SftpProductionError> {
         if request.selected_path.trim().is_empty() {
             return Err(SftpRuntimeError::InvalidInput.into());
@@ -4675,42 +4681,28 @@ impl SftpSessionService {
         #[cfg(any(unix, windows))]
         {
             let selected = PathBuf::from(&request.selected_path);
-            let capability = NativeLocalDirectoryCapability::register(&selected)
-                .map_err(|_| SftpRuntimeError::InvalidInput)?;
-            let capability_id = uuid::Uuid::now_v7().to_string();
-            let revision = 1;
-            let display_name = local_display_name(&selected);
+            let selected_for_open = selected.clone();
+            let capability = self
+                .run_local_directory_io(SftpRuntimeError::InvalidInput, move || {
+                    NativeLocalDirectoryCapability::register(&selected_for_open)
+                })
+                .await?;
             let rememberable_path = rememberable_local_directory_path(&selected);
             let mut capabilities = self.local_directories.lock().await;
-            capabilities.retain(|_, capability| {
-                !capability.revoked.load(Ordering::Acquire)
-                    && capability.expires_at > std::time::Instant::now()
-            });
-            if capabilities.len() >= MAX_LOCAL_DIRECTORY_CAPABILITIES {
-                return Err(SftpRuntimeError::InvalidState.into());
-            }
-            capabilities.insert(
-                capability_id.clone(),
-                LocalDirectoryCapability {
-                    revision,
-                    capability: Arc::new(LocalDirectoryCapabilityHandle::Native(capability)),
-                    rememberable_path: rememberable_path.clone(),
-                    revoked: Arc::new(AtomicBool::new(false)),
-                    expires_at: std::time::Instant::now() + LOCAL_DIRECTORY_CAPABILITY_TTL,
-                },
-            );
-            Ok(wire::SftpLocalDirectoryCapability {
-                directory_ref: capability_id,
-                revision: WireSequence::new(revision),
-                display_name,
+            Ok(publish_local_directory(
+                &mut capabilities,
+                owner,
+                capability,
+                local_display_name(&selected),
                 rememberable_path,
-            })
+            )?)
         }
     }
 
     async fn list_local_directory(
         &self,
         request: wire::SftpLocalDirectoryListRequest,
+        owner: &LocalDirectoryOwner,
     ) -> Result<wire::SftpLocalDirectoryListing, SftpProductionError> {
         if request.idempotency_key.trim().is_empty()
             || request.directory_ref.trim().is_empty()
@@ -4741,9 +4733,10 @@ impl SftpSessionService {
                 {
                     return Err(SftpRuntimeError::Conflict.into());
                 }
-                self.require_local_directory(
+                self.require_owned_local_directory(
                     &replay.result.directory_ref,
                     replay.result.revision.get(),
+                    owner,
                 )
                 .await?;
                 return Ok(replay.result);
@@ -4756,6 +4749,7 @@ impl SftpSessionService {
                 .cloned()
                 .ok_or(SftpRuntimeError::InvalidInput)?;
             if directory_capability.revision != request.expected_revision.get()
+                || !directory_capability.owner.admits(owner)
                 || directory_capability.revoked.load(Ordering::Acquire)
                 || directory_capability.expires_at <= std::time::Instant::now()
             {
@@ -4781,15 +4775,32 @@ impl SftpSessionService {
             } else {
                 None
             };
-            let (entries, next_stream) = match directory_capability.capability.as_ref() {
-                LocalDirectoryCapabilityHandle::Native(capability) => capability
-                    .list_page(
+            let directory_handle = directory_capability.capability.clone();
+            let revoked = directory_capability.revoked.clone();
+            let page_size = usize::from(request.page_size);
+            let (entries, next_stream) = self
+                .run_local_directory_io(SftpRuntimeError::Conflict, move || match directory_handle
+                    .as_ref()
+                {
+                    LocalDirectoryCapabilityHandle::Native(capability) => capability.list_page(
                         cursor_state.map(|cursor| cursor.stream),
-                        usize::from(request.page_size),
-                        &directory_capability.revoked,
-                    )
-                    .map_err(|_| SftpRuntimeError::Conflict)?,
-            };
+                        page_size,
+                        &revoked,
+                    ),
+                })
+                .await?;
+            let capabilities = self.local_directories.lock().await;
+            if capabilities
+                .get(&request.directory_ref)
+                .is_none_or(|current| {
+                    current.revision != request.expected_revision.get()
+                        || !Arc::ptr_eq(&current.revoked, &directory_capability.revoked)
+                        || current.revoked.load(Ordering::Acquire)
+                        || current.expires_at <= std::time::Instant::now()
+                })
+            {
+                return Err(SftpRuntimeError::Conflict.into());
+            }
             let mut entry_refs = self.local_directory_entries.lock().await;
             entry_refs.retain(|_, entry| entry.expires_at > std::time::Instant::now());
             if entry_refs.len().saturating_add(entries.len()) > MAX_DIRECTORY_ENTRY_REFS {
@@ -4839,6 +4850,7 @@ impl SftpSessionService {
             } else {
                 None
             };
+            drop(capabilities);
             let result = wire::SftpLocalDirectoryListing {
                 directory_ref: request.directory_ref,
                 revision: request.expected_revision,
@@ -4866,6 +4878,7 @@ impl SftpSessionService {
     async fn open_local_child_directory(
         &self,
         request: wire::SftpLocalDirectoryOpenChildRequest,
+        owner: &LocalDirectoryOwner,
     ) -> Result<wire::SftpLocalDirectoryCapability, SftpProductionError> {
         if request.idempotency_key.trim().is_empty()
             || request.parent_directory_ref.trim().is_empty()
@@ -4894,9 +4907,10 @@ impl SftpSessionService {
                 {
                     return Err(SftpRuntimeError::Conflict.into());
                 }
-                self.require_local_directory(
+                self.require_owned_local_directory(
                     &replay.result.directory_ref,
                     replay.result.revision.get(),
+                    owner,
                 )
                 .await?;
                 return Ok(replay.result);
@@ -4909,6 +4923,7 @@ impl SftpSessionService {
                 .cloned()
                 .ok_or(SftpRuntimeError::InvalidInput)?;
             if parent.revision != request.expected_parent_revision.get()
+                || !parent.owner.admits(owner)
                 || parent.revoked.load(Ordering::Acquire)
                 || parent.expires_at <= std::time::Instant::now()
             {
@@ -4928,40 +4943,30 @@ impl SftpSessionService {
             {
                 return Err(SftpRuntimeError::Conflict.into());
             }
-            let child = match parent.capability.as_ref() {
-                LocalDirectoryCapabilityHandle::Native(parent) => parent
-                    .open_child(&entry.name, &entry.identity)
-                    .map_err(|_| SftpRuntimeError::Conflict)?,
-            };
-            let capability_id = uuid::Uuid::now_v7().to_string();
-            let revision = 1;
-            let display_name = safe_local_name_display(&entry.name);
+            let parent_handle = parent.capability.clone();
+            let entry_name = entry.name.clone();
+            let entry_identity = entry.identity.clone();
+            let child = self
+                .run_local_directory_io(SftpRuntimeError::Conflict, move || {
+                    match parent_handle.as_ref() {
+                        LocalDirectoryCapabilityHandle::Native(parent) => {
+                            parent.open_child(&entry_name, &entry_identity)
+                        }
+                    }
+                })
+                .await?;
             let rememberable_path =
                 rememberable_local_child_path(parent.rememberable_path.as_deref(), &entry.name);
             let mut capabilities = self.local_directories.lock().await;
-            capabilities.retain(|_, capability| {
-                !capability.revoked.load(Ordering::Acquire)
-                    && capability.expires_at > std::time::Instant::now()
-            });
-            if capabilities.len() >= MAX_LOCAL_DIRECTORY_CAPABILITIES {
-                return Err(SftpRuntimeError::InvalidState.into());
-            }
-            capabilities.insert(
-                capability_id.clone(),
-                LocalDirectoryCapability {
-                    revision,
-                    capability: Arc::new(LocalDirectoryCapabilityHandle::Native(child)),
-                    rememberable_path: rememberable_path.clone(),
-                    revoked: Arc::new(AtomicBool::new(false)),
-                    expires_at: std::time::Instant::now() + LOCAL_DIRECTORY_CAPABILITY_TTL,
-                },
-            );
-            let result = wire::SftpLocalDirectoryCapability {
-                directory_ref: capability_id,
-                revision: WireSequence::new(revision),
-                display_name,
+            require_live_parent(&capabilities, &request.parent_directory_ref, &parent, owner)?;
+            let result = publish_local_directory(
+                &mut capabilities,
+                owner,
+                child,
+                safe_local_name_display(&entry.name),
                 rememberable_path,
-            };
+            )?;
+            drop(capabilities);
             let mut ledger = self.local_directory_open_ledger.lock().await;
             if ledger.len() >= MUTATION_LEDGER_CAPACITY
                 && let Some(oldest) = ledger.keys().next().cloned()
@@ -4983,6 +4988,7 @@ impl SftpSessionService {
     async fn create_local_child_directory(
         &self,
         request: wire::SftpLocalDirectoryCreateChildRequest,
+        owner: &LocalDirectoryOwner,
     ) -> Result<wire::SftpLocalDirectoryCapability, SftpProductionError> {
         if request.idempotency_key.trim().is_empty()
             || request.parent_directory_ref.trim().is_empty()
@@ -4997,6 +5003,7 @@ impl SftpSessionService {
         #[cfg(not(unix))]
         {
             let _ = request;
+            let _ = owner;
             return Err(SftpRuntimeError::InvalidState.into());
         }
         #[cfg(unix)]
@@ -5015,9 +5022,10 @@ impl SftpSessionService {
                 {
                     return Err(SftpRuntimeError::Conflict.into());
                 }
-                self.require_local_directory(
+                self.require_owned_local_directory(
                     &replay.result.directory_ref,
                     replay.result.revision.get(),
+                    owner,
                 )
                 .await?;
                 return Ok(replay.result);
@@ -5028,42 +5036,37 @@ impl SftpSessionService {
                     request.expected_parent_revision.get(),
                 )
                 .await?;
-            let child = match parent.capability.as_ref() {
-                LocalDirectoryCapabilityHandle::Native(parent) => parent
-                    .create_child(request.name.as_bytes())
-                    .map_err(|_| SftpRuntimeError::Conflict)?,
-            };
-            let capability_id = uuid::Uuid::now_v7().to_string();
-            let revision = 1;
-            let display_name = request.name;
+            if !parent.owner.admits(owner) {
+                return Err(SftpRuntimeError::Conflict.into());
+            }
+            let parent_handle = parent.capability.clone();
+            let name = request.name.clone();
+            // mkdirat may still complete after a timeout; the created directory
+            // then stays on disk without a capability and a retry reports a
+            // conflict instead of silently reusing it.
+            let child = self
+                .run_local_directory_io(SftpRuntimeError::Conflict, move || {
+                    match parent_handle.as_ref() {
+                        LocalDirectoryCapabilityHandle::Native(parent) => {
+                            parent.create_child(name.as_bytes())
+                        }
+                    }
+                })
+                .await?;
             let rememberable_path = rememberable_local_child_path(
                 parent.rememberable_path.as_deref(),
-                display_name.as_bytes(),
+                request.name.as_bytes(),
             );
             let mut capabilities = self.local_directories.lock().await;
-            capabilities.retain(|_, capability| {
-                !capability.revoked.load(Ordering::Acquire)
-                    && capability.expires_at > std::time::Instant::now()
-            });
-            if capabilities.len() >= MAX_LOCAL_DIRECTORY_CAPABILITIES {
-                return Err(SftpRuntimeError::InvalidState.into());
-            }
-            capabilities.insert(
-                capability_id.clone(),
-                LocalDirectoryCapability {
-                    revision,
-                    capability: Arc::new(LocalDirectoryCapabilityHandle::Native(child)),
-                    rememberable_path: rememberable_path.clone(),
-                    revoked: Arc::new(AtomicBool::new(false)),
-                    expires_at: std::time::Instant::now() + LOCAL_DIRECTORY_CAPABILITY_TTL,
-                },
-            );
-            let result = wire::SftpLocalDirectoryCapability {
-                directory_ref: capability_id,
-                revision: WireSequence::new(revision),
-                display_name,
+            require_live_parent(&capabilities, &request.parent_directory_ref, &parent, owner)?;
+            let result = publish_local_directory(
+                &mut capabilities,
+                owner,
+                child,
+                request.name,
                 rememberable_path,
-            };
+            )?;
+            drop(capabilities);
             let mut ledger = self.local_directory_open_ledger.lock().await;
             if ledger.len() >= MUTATION_LEDGER_CAPACITY
                 && let Some(oldest) = ledger.keys().next().cloned()
@@ -5085,12 +5088,14 @@ impl SftpSessionService {
     async fn release_local_directory(
         &self,
         request: wire::SftpLocalDirectoryReleaseRequest,
+        owner: &LocalDirectoryOwner,
     ) -> Result<(), SftpProductionError> {
         let mut capabilities = self.local_directories.lock().await;
         let capability = capabilities
             .get(&request.directory_ref)
             .ok_or(SftpRuntimeError::InvalidInput)?;
-        if capability.revision != request.expected_revision.get() {
+        if capability.revision != request.expected_revision.get() || !capability.owner.admits(owner)
+        {
             return Err(SftpRuntimeError::Conflict.into());
         }
         capability.revoked.store(true, Ordering::Release);
@@ -5105,6 +5110,94 @@ impl SftpSessionService {
             .await
             .retain(|_, cursor| cursor.directory_ref != request.directory_ref);
         Ok(())
+    }
+
+    /// Releases capabilities of a destroyed WebView instance. A child Tab
+    /// label may already belong to a recreated view, so only capabilities
+    /// whose liveness flag is false are removed; window-level owners have no
+    /// flag and their unique label identifies the destroyed instance.
+    async fn release_local_directories_of_destroyed_webview(&self, owner_webview: &str) -> usize {
+        let mut capabilities = self.local_directories.lock().await;
+        let removed = capabilities
+            .iter()
+            .filter(|(_, capability)| {
+                capability.owner.label == owner_webview
+                    && capability
+                        .owner
+                        .liveness
+                        .as_ref()
+                        .is_none_or(|live| !live.load(Ordering::Acquire))
+            })
+            .map(|(reference, _)| reference.clone())
+            .collect::<BTreeSet<_>>();
+        for reference in &removed {
+            if let Some(capability) = capabilities.remove(reference) {
+                capability.revoked.store(true, Ordering::Release);
+            }
+        }
+        drop(capabilities);
+        if !removed.is_empty() {
+            self.local_directory_entries
+                .lock()
+                .await
+                .retain(|_, entry| !removed.contains(&entry.directory_ref));
+            self.local_directory_cursors
+                .lock()
+                .await
+                .retain(|_, cursor| !removed.contains(&cursor.directory_ref));
+        }
+        removed.len()
+    }
+
+    /// Callers must clear the view's liveness flag before invoking this, so a
+    /// capability published concurrently is either swept here or refused by
+    /// `publish_local_directory`.
+    pub(crate) fn on_webview_destroyed(&self, owner_webview: &str) {
+        let service = self.clone();
+        let owner_webview = owner_webview.to_owned();
+        tauri::async_runtime::spawn(async move {
+            service
+                .release_local_directories_of_destroyed_webview(&owner_webview)
+                .await;
+        });
+    }
+
+    /// Runs one blocking local filesystem call under the shared I/O limit.
+    ///
+    /// Protected or stalled filesystems can block while macOS waits for a
+    /// user decision, so the call leaves the async worker and the Pane gets
+    /// `LocalDirectoryTimeout` instead of hanging. `spawn_blocking` cannot be
+    /// cancelled, so the semaphore bounds how many abandoned calls can pile
+    /// up; the permit moves into the blocking task and is released only when
+    /// the syscall returns. I/O errors map to `failure`.
+    #[cfg(any(unix, windows))]
+    async fn run_local_directory_io<T, E>(
+        &self,
+        failure: SftpRuntimeError,
+        io: impl FnOnce() -> Result<T, E> + Send + 'static,
+    ) -> Result<T, SftpRuntimeError>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        tokio::time::timeout(LOCAL_DIRECTORY_OPEN_TIMEOUT, async {
+            let permit = self
+                .local_directory_io_limit
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| SftpRuntimeError::InvalidState)?;
+            tokio::task::spawn_blocking(move || {
+                let result = io();
+                drop(permit);
+                result
+            })
+            .await
+            .map_err(|_| SftpRuntimeError::InvalidState)?
+            .map_err(|_| failure)
+        })
+        .await
+        .map_err(|_| SftpRuntimeError::LocalDirectoryTimeout)?
     }
 
     pub(crate) async fn wire_summaries(
@@ -7043,6 +7136,21 @@ impl SftpSessionService {
             || capability.revoked.load(Ordering::Acquire)
             || capability.expires_at <= std::time::Instant::now()
         {
+            return Err(SftpRuntimeError::Conflict.into());
+        }
+        Ok(capability)
+    }
+
+    async fn require_owned_local_directory(
+        &self,
+        directory_ref: &str,
+        revision: u64,
+        owner: &LocalDirectoryOwner,
+    ) -> Result<LocalDirectoryCapability, SftpProductionError> {
+        let capability = self
+            .require_local_directory(directory_ref, revision)
+            .await?;
+        if !capability.owner.admits(owner) {
             return Err(SftpRuntimeError::Conflict.into());
         }
         Ok(capability)
@@ -9498,16 +9606,17 @@ pub(crate) async fn sftp_session_open(
     mut request: wire::SftpSessionOpenRequest,
     service: State<'_, SftpSessionService>,
     workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
+    views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     lifecycle: State<'_, LifecycleState>,
     app: AppHandle,
-    window: WebviewWindow,
+    webview: Webview,
 ) -> CoreResult<wire::SftpSessionSummary> {
-    if window.label() != "main" && !workspaces.contains(window.label()) {
-        return Err(map_sftp_core_error(
-            request.meta.request_id,
+    let owner = views.ordinary_owner(&webview, &workspaces).map_err(|_| {
+        map_sftp_core_error(
+            request.meta.request_id.clone(),
             SftpRuntimeError::InvalidInput.into(),
-        ));
-    }
+        )
+    })?;
     let _creation_permit = lifecycle.acquire_resource_creation(request.meta.request_id.clone())?;
     let request_id = request.meta.request_id.clone();
     let capture = Arc::new(StdMutex::new(None));
@@ -9528,7 +9637,7 @@ pub(crate) async fn sftp_session_open(
         };
         if !crate::secure_ssh_challenge::prompt_sftp_host_key(
             &app,
-            window.label(),
+            &owner,
             request.operation_id.as_str(),
             &endpoint,
             &observed,
@@ -9538,8 +9647,8 @@ pub(crate) async fn sftp_session_open(
             return Ok(summary);
         }
         // A decision can outlive the ordinary window that started this open operation.
-        if app.get_webview_window(window.label()).is_none()
-            || window.label() != "main" && !workspaces.contains(window.label())
+        if app.get_webview_window(&owner).is_none()
+            || views.ordinary_owner(&webview, &workspaces).as_deref() != Ok(owner.as_str())
         {
             return Err(map_sftp_core_error(
                 request_id,
@@ -9600,68 +9709,185 @@ pub(crate) async fn sftp_local_boundary_register(
         })
 }
 
+/// Publishes a freshly opened directory handle for `owner`.
+///
+/// The owner liveness check runs under the registry lock that the destroy
+/// sweep also takes: the sweep either runs first (the flag is already false
+/// and publication is refused) or after the insert (and removes the entry).
+#[cfg(any(unix, windows))]
+fn publish_local_directory(
+    capabilities: &mut BTreeMap<String, LocalDirectoryCapability>,
+    owner: &LocalDirectoryOwner,
+    handle: NativeLocalDirectoryCapability,
+    display_name: String,
+    rememberable_path: Option<String>,
+) -> Result<wire::SftpLocalDirectoryCapability, SftpRuntimeError> {
+    let now = std::time::Instant::now();
+    capabilities.retain(|_, capability| {
+        let keep = !capability.revoked.load(Ordering::Acquire)
+            && capability.expires_at > now
+            && capability.owner.is_live();
+        if !keep {
+            capability.revoked.store(true, Ordering::Release);
+        }
+        keep
+    });
+    if !owner.is_live() {
+        return Err(SftpRuntimeError::Conflict);
+    }
+    if capabilities.len() >= MAX_LOCAL_DIRECTORY_CAPABILITIES {
+        return Err(SftpRuntimeError::InvalidState);
+    }
+    let directory_ref = uuid::Uuid::now_v7().to_string();
+    let revision = 1;
+    capabilities.insert(
+        directory_ref.clone(),
+        LocalDirectoryCapability {
+            owner: owner.clone(),
+            revision,
+            capability: Arc::new(LocalDirectoryCapabilityHandle::Native(handle)),
+            rememberable_path: rememberable_path.clone(),
+            revoked: Arc::new(AtomicBool::new(false)),
+            expires_at: now + LOCAL_DIRECTORY_CAPABILITY_TTL,
+        },
+    );
+    Ok(wire::SftpLocalDirectoryCapability {
+        directory_ref,
+        revision: WireSequence::new(revision),
+        display_name,
+        rememberable_path,
+    })
+}
+
+/// Rejects a child publication when its parent was released, replaced, or
+/// expired while the blocking open ran.
+#[cfg(any(unix, windows))]
+fn require_live_parent(
+    capabilities: &BTreeMap<String, LocalDirectoryCapability>,
+    parent_ref: &str,
+    parent: &LocalDirectoryCapability,
+    owner: &LocalDirectoryOwner,
+) -> Result<(), SftpRuntimeError> {
+    let current = capabilities
+        .get(parent_ref)
+        .ok_or(SftpRuntimeError::Conflict)?;
+    if current.revision != parent.revision
+        || !Arc::ptr_eq(&current.revoked, &parent.revoked)
+        || !current.owner.admits(owner)
+        || current.revoked.load(Ordering::Acquire)
+        || current.expires_at <= std::time::Instant::now()
+    {
+        return Err(SftpRuntimeError::Conflict);
+    }
+    Ok(())
+}
+
+/// Resolves the calling WebView instance. Child Tab views must still be
+/// registered so their capabilities can bind to the view's liveness flag.
+/// Operations on existing capabilities only need this identity; creating one
+/// additionally requires `new_local_directory_owner`.
+fn local_directory_owner(
+    webview: &Webview,
+    request_id: &wire::RequestId,
+) -> CoreResult<LocalDirectoryOwner> {
+    let conflict = || map_sftp_core_error(request_id.clone(), SftpRuntimeError::Conflict.into());
+    let liveness = if webview.label() == webview.window().label() {
+        None
+    } else {
+        Some(
+            crate::workspace_tab_views::child_liveness(webview.app_handle(), webview)
+                .ok_or_else(conflict)?,
+        )
+    };
+    Ok(LocalDirectoryOwner {
+        label: webview.label().to_owned(),
+        liveness,
+    })
+}
+
+/// Resolves the owner for a new capability; only ordinary workspace surfaces
+/// that own their Tab may acquire local filesystem access.
+fn new_local_directory_owner(
+    webview: &Webview,
+    request_id: &wire::RequestId,
+) -> CoreResult<LocalDirectoryOwner> {
+    crate::workspace_tab_views::ordinary_owner(webview.app_handle(), webview)
+        .map_err(|_| map_sftp_core_error(request_id.clone(), SftpRuntimeError::Conflict.into()))?;
+    local_directory_owner(webview, request_id)
+}
+
 #[tauri::command]
 pub(crate) async fn sftp_local_directory_register(
+    webview: Webview,
     request: wire::SftpLocalDirectoryRegisterRequest,
     service: State<'_, SftpSessionService>,
     lifecycle: State<'_, LifecycleState>,
 ) -> CoreResult<wire::SftpLocalDirectoryCapability> {
     let request_id = request.meta.request_id.clone();
     let _creation_permit = lifecycle.acquire_resource_creation(request_id.clone())?;
+    let owner = new_local_directory_owner(&webview, &request_id)?;
     service
-        .register_local_directory(request)
+        .register_local_directory(request, &owner)
         .await
         .map_err(|error| map_sftp_core_error(request_id, error))
 }
 
 #[tauri::command]
 pub(crate) async fn sftp_local_directory_list(
+    webview: Webview,
     request: wire::SftpLocalDirectoryListRequest,
     service: State<'_, SftpSessionService>,
 ) -> CoreResult<wire::SftpLocalDirectoryListing> {
     let request_id = request.meta.request_id.clone();
+    let owner = local_directory_owner(&webview, &request_id)?;
     service
-        .list_local_directory(request)
+        .list_local_directory(request, &owner)
         .await
         .map_err(|error| map_sftp_core_error(request_id, error))
 }
 
 #[tauri::command]
 pub(crate) async fn sftp_local_directory_open_child(
+    webview: Webview,
     request: wire::SftpLocalDirectoryOpenChildRequest,
     service: State<'_, SftpSessionService>,
     lifecycle: State<'_, LifecycleState>,
 ) -> CoreResult<wire::SftpLocalDirectoryCapability> {
     let request_id = request.meta.request_id.clone();
     let _creation_permit = lifecycle.acquire_resource_creation(request_id.clone())?;
+    let owner = new_local_directory_owner(&webview, &request_id)?;
     service
-        .open_local_child_directory(request)
+        .open_local_child_directory(request, &owner)
         .await
         .map_err(|error| map_sftp_core_error(request_id, error))
 }
 
 #[tauri::command]
 pub(crate) async fn sftp_local_directory_create_child(
+    webview: Webview,
     request: wire::SftpLocalDirectoryCreateChildRequest,
     service: State<'_, SftpSessionService>,
     lifecycle: State<'_, LifecycleState>,
 ) -> CoreResult<wire::SftpLocalDirectoryCapability> {
     let request_id = request.meta.request_id.clone();
     let _creation_permit = lifecycle.acquire_resource_creation(request_id.clone())?;
+    let owner = new_local_directory_owner(&webview, &request_id)?;
     service
-        .create_local_child_directory(request)
+        .create_local_child_directory(request, &owner)
         .await
         .map_err(|error| map_sftp_core_error(request_id, error))
 }
 
 #[tauri::command]
 pub(crate) async fn sftp_local_directory_release(
+    webview: Webview,
     request: wire::SftpLocalDirectoryReleaseRequest,
     service: State<'_, SftpSessionService>,
 ) -> CoreResult<()> {
     let request_id = request.meta.request_id.clone();
+    let owner = local_directory_owner(&webview, &request_id)?;
     service
-        .release_local_directory(request)
+        .release_local_directory(request, &owner)
         .await
         .map_err(|error| map_sftp_core_error(request_id, error))
 }
@@ -10627,6 +10853,9 @@ fn map_sftp_core_error(
     let code = match &error {
         SftpProductionError::Runtime(SftpRuntimeError::Conflict) => "sftp.conflict",
         SftpProductionError::Runtime(SftpRuntimeError::InvalidInput) => "sftp.invalid_input",
+        SftpProductionError::Runtime(SftpRuntimeError::LocalDirectoryTimeout) => {
+            "sftp.local_directory_timeout"
+        }
         SftpProductionError::Runtime(SftpRuntimeError::UnsafeReplaceUnsupported) => {
             "sftp.unsafe_no_replace_unsupported"
         }
@@ -10645,6 +10874,10 @@ fn map_sftp_core_error(
         | SftpProductionError::Runtime(SftpRuntimeError::Conflict) => (
             wire::ErrorCategory::Conflict,
             wire::RetryStrategy::RefreshSnapshot,
+        ),
+        SftpProductionError::Runtime(SftpRuntimeError::LocalDirectoryTimeout) => (
+            wire::ErrorCategory::Unavailable,
+            wire::RetryStrategy::WaitForUser,
         ),
         SftpProductionError::VaultUnavailable
         | SftpProductionError::Profile(ConnectionProfileError::CredentialUnavailable) => (
@@ -10756,6 +10989,7 @@ fn map_transfer_runtime_failure(error: SftpRuntimeError) -> TransferFailureCode 
         SftpRuntimeError::InvalidInput
         | SftpRuntimeError::StaleGeneration
         | SftpRuntimeError::InvalidState
+        | SftpRuntimeError::LocalDirectoryTimeout
         | SftpRuntimeError::ChallengeMismatch
         | SftpRuntimeError::ResumeEvidenceMismatch => TransferFailureCode::Protocol,
     }
@@ -12742,6 +12976,375 @@ mod tests {
         assert_eq!(service.snapshot().await.unwrap().transfers.len(), 1);
     }
 
+    fn window_owner(label: &str) -> LocalDirectoryOwner {
+        LocalDirectoryOwner {
+            label: label.to_owned(),
+            liveness: None,
+        }
+    }
+
+    fn tab_view_owner(label: &str) -> (LocalDirectoryOwner, Arc<AtomicBool>) {
+        let live = Arc::new(AtomicBool::new(true));
+        (
+            LocalDirectoryOwner {
+                label: label.to_owned(),
+                liveness: Some(live.clone()),
+            },
+            live,
+        )
+    }
+
+    fn local_list_request(
+        capability: &wire::SftpLocalDirectoryCapability,
+        key: &str,
+    ) -> wire::SftpLocalDirectoryListRequest {
+        wire::SftpLocalDirectoryListRequest {
+            meta: wire::RequestMeta {
+                request_id: wire::RequestId::new(),
+            },
+            operation_id: wire::OperationId::new(),
+            idempotency_key: key.into(),
+            directory_ref: capability.directory_ref.clone(),
+            expected_revision: capability.revision,
+            cursor: None,
+            page_size: 8,
+        }
+    }
+
+    fn local_release_request(
+        capability: &wire::SftpLocalDirectoryCapability,
+    ) -> wire::SftpLocalDirectoryReleaseRequest {
+        wire::SftpLocalDirectoryReleaseRequest {
+            meta: wire::RequestMeta {
+                request_id: wire::RequestId::new(),
+            },
+            directory_ref: capability.directory_ref.clone(),
+            expected_revision: capability.revision,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn destroyed_webview_releases_only_its_local_directory_capabilities() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = SftpSessionService::production(
+            HostService::start(directory.path()).unwrap(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+            SshAgentService::default(),
+        );
+        let register = || wire::SftpLocalDirectoryRegisterRequest {
+            meta: wire::RequestMeta {
+                request_id: wire::RequestId::new(),
+            },
+            selected_path: directory.path().to_string_lossy().into_owned(),
+        };
+        let (owner_a, live_a) = tab_view_owner("workspace-tab-file-a");
+        let (owner_b, _live_b) = tab_view_owner("workspace-tab-file-b");
+        let first = service
+            .register_local_directory(register(), &owner_a)
+            .await
+            .unwrap();
+        let second = service
+            .register_local_directory(register(), &owner_b)
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .release_local_directory(local_release_request(&first), &owner_b)
+                .await,
+            Err(SftpProductionError::Runtime(SftpRuntimeError::Conflict))
+        ));
+
+        // Destroying view A clears its flag before the sweep runs.
+        live_a.store(false, Ordering::Release);
+        assert_eq!(
+            service
+                .release_local_directories_of_destroyed_webview("workspace-tab-file-a")
+                .await,
+            1
+        );
+        assert!(
+            service
+                .require_local_directory(&first.directory_ref, first.revision.get())
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .require_local_directory(&second.directory_ref, second.revision.get())
+                .await
+                .is_ok()
+        );
+
+        // A recreated view reuses the label but owns a new liveness flag, so
+        // a late sweep for the old instance must not touch it.
+        let (recreated_a, _live_recreated) = tab_view_owner("workspace-tab-file-a");
+        let recovered = service
+            .register_local_directory(register(), &recreated_a)
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .release_local_directories_of_destroyed_webview("workspace-tab-file-a")
+                .await,
+            0
+        );
+        assert!(
+            service
+                .require_local_directory(&recovered.directory_ref, recovered.revision.get())
+                .await
+                .is_ok()
+        );
+
+        // An IPC call from the destroyed instance that completes after the
+        // sweep must not publish a capability.
+        let before = service.local_directories.lock().await.len();
+        assert!(matches!(
+            service.register_local_directory(register(), &owner_a).await,
+            Err(SftpProductionError::Runtime(SftpRuntimeError::Conflict))
+        ));
+        assert_eq!(service.local_directories.lock().await.len(), before);
+        assert!(matches!(
+            service
+                .release_local_directory(local_release_request(&recovered), &owner_a)
+                .await,
+            Err(SftpProductionError::Runtime(SftpRuntimeError::Conflict))
+        ));
+
+        // A window-level owner has no flag; its unique label identifies it.
+        let main = window_owner("main");
+        let main_capability = service
+            .register_local_directory(register(), &main)
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .release_local_directories_of_destroyed_webview("main")
+                .await,
+            1
+        );
+        assert!(
+            service
+                .require_local_directory(
+                    &main_capability.directory_ref,
+                    main_capability.revision.get()
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_directory_listing_is_restricted_to_the_owner_instance() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = SftpSessionService::production(
+            HostService::start(directory.path()).unwrap(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+            SshAgentService::default(),
+        );
+        let (owner, live) = tab_view_owner("workspace-tab-file-a");
+        let (foreign, _foreign_live) = tab_view_owner("workspace-tab-file-b");
+        let capability = service
+            .register_local_directory(
+                wire::SftpLocalDirectoryRegisterRequest {
+                    meta: wire::RequestMeta {
+                        request_id: wire::RequestId::new(),
+                    },
+                    selected_path: directory.path().to_string_lossy().into_owned(),
+                },
+                &owner,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .list_local_directory(local_list_request(&capability, "foreign"), &foreign)
+                .await,
+            Err(SftpProductionError::Runtime(SftpRuntimeError::Conflict))
+        ));
+        let request = local_list_request(&capability, "owned");
+        service
+            .list_local_directory(request.clone(), &owner)
+            .await
+            .unwrap();
+        // Ledger replays apply the same owner fence.
+        assert!(matches!(
+            service
+                .list_local_directory(request.clone(), &foreign)
+                .await,
+            Err(SftpProductionError::Runtime(SftpRuntimeError::Conflict))
+        ));
+        // A recreated view with the same label is a different instance.
+        live.store(false, Ordering::Release);
+        let (recreated, _recreated_live) = tab_view_owner("workspace-tab-file-a");
+        assert!(matches!(
+            service
+                .list_local_directory(local_list_request(&capability, "recreated"), &recreated)
+                .await,
+            Err(SftpProductionError::Runtime(SftpRuntimeError::Conflict))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_local_child_directory_runs_under_the_bounded_io_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = SftpSessionService::production(
+            HostService::start(directory.path()).unwrap(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+            SshAgentService::default(),
+        );
+        let owner = window_owner("main");
+        let parent = service
+            .register_local_directory(
+                wire::SftpLocalDirectoryRegisterRequest {
+                    meta: wire::RequestMeta {
+                        request_id: wire::RequestId::new(),
+                    },
+                    selected_path: directory.path().to_string_lossy().into_owned(),
+                },
+                &owner,
+            )
+            .await
+            .unwrap();
+        let held_permits = service
+            .local_directory_io_limit
+            .clone()
+            .acquire_many_owned(MAX_IN_FLIGHT_LOCAL_DIRECTORY_IO as u32)
+            .await
+            .unwrap();
+        let create_service = service.clone();
+        let create_parent = parent.clone();
+        let create_task = tokio::spawn(async move {
+            create_service
+                .create_local_child_directory(
+                    wire::SftpLocalDirectoryCreateChildRequest {
+                        meta: wire::RequestMeta {
+                            request_id: wire::RequestId::new(),
+                        },
+                        operation_id: wire::OperationId::new(),
+                        idempotency_key: "create-child".into(),
+                        parent_directory_ref: create_parent.directory_ref,
+                        expected_parent_revision: create_parent.revision,
+                        name: "created".into(),
+                    },
+                    &window_owner("main"),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!create_task.is_finished());
+        assert!(!directory.path().join("created").exists());
+        drop(held_permits);
+        let child = create_task.await.unwrap().unwrap();
+        assert!(directory.path().join("created").is_dir());
+        assert_eq!(child.display_name, "created");
+        assert!(
+            service
+                .require_owned_local_directory(&child.directory_ref, child.revision.get(), &owner)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn revoked_parent_cannot_publish_a_child_after_open_waits() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("child")).unwrap();
+        let service = SftpSessionService::production(
+            HostService::start(directory.path()).unwrap(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+            SshAgentService::default(),
+        );
+        let parent = service
+            .register_local_directory(
+                wire::SftpLocalDirectoryRegisterRequest {
+                    meta: wire::RequestMeta {
+                        request_id: wire::RequestId::new(),
+                    },
+                    selected_path: directory.path().to_string_lossy().into_owned(),
+                },
+                &window_owner("main"),
+            )
+            .await
+            .unwrap();
+        let listing = service
+            .list_local_directory(
+                wire::SftpLocalDirectoryListRequest {
+                    meta: wire::RequestMeta {
+                        request_id: wire::RequestId::new(),
+                    },
+                    operation_id: wire::OperationId::new(),
+                    idempotency_key: "list-child".into(),
+                    directory_ref: parent.directory_ref.clone(),
+                    expected_revision: parent.revision,
+                    cursor: None,
+                    page_size: 8,
+                },
+                &window_owner("main"),
+            )
+            .await
+            .unwrap();
+        let entry_ref = listing
+            .entries
+            .into_iter()
+            .find(|entry| entry.display_name == "child")
+            .unwrap()
+            .entry_ref;
+        let held_permits = service
+            .local_directory_io_limit
+            .clone()
+            .acquire_many_owned(MAX_IN_FLIGHT_LOCAL_DIRECTORY_IO as u32)
+            .await
+            .unwrap();
+        let child_service = service.clone();
+        let parent_ref = parent.directory_ref.clone();
+        let child_task = tokio::spawn(async move {
+            child_service
+                .open_local_child_directory(
+                    wire::SftpLocalDirectoryOpenChildRequest {
+                        meta: wire::RequestMeta {
+                            request_id: wire::RequestId::new(),
+                        },
+                        operation_id: wire::OperationId::new(),
+                        idempotency_key: "open-child".into(),
+                        parent_directory_ref: parent_ref,
+                        expected_parent_revision: parent.revision,
+                        entry_ref,
+                    },
+                    &window_owner("main"),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!child_task.is_finished());
+        service
+            .release_local_directory(
+                wire::SftpLocalDirectoryReleaseRequest {
+                    meta: wire::RequestMeta {
+                        request_id: wire::RequestId::new(),
+                    },
+                    directory_ref: parent.directory_ref,
+                    expected_revision: parent.revision,
+                },
+                &window_owner("main"),
+            )
+            .await
+            .unwrap();
+        drop(held_permits);
+        assert!(matches!(
+            child_task.await.unwrap(),
+            Err(SftpProductionError::Runtime(SftpRuntimeError::Conflict))
+        ));
+        assert!(service.local_directories.lock().await.is_empty());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_prepare_replays_one_intent_token() {
@@ -12758,35 +13361,44 @@ mod tests {
             SshAgentService::default(),
         );
         let source = service
-            .register_local_directory(wire::SftpLocalDirectoryRegisterRequest {
-                meta: wire::RequestMeta {
-                    request_id: wire::RequestId::new(),
+            .register_local_directory(
+                wire::SftpLocalDirectoryRegisterRequest {
+                    meta: wire::RequestMeta {
+                        request_id: wire::RequestId::new(),
+                    },
+                    selected_path: source_directory.to_string_lossy().into_owned(),
                 },
-                selected_path: source_directory.to_string_lossy().into_owned(),
-            })
+                &window_owner("workspace-window-a"),
+            )
             .await
             .unwrap();
         let target = service
-            .register_local_directory(wire::SftpLocalDirectoryRegisterRequest {
-                meta: wire::RequestMeta {
-                    request_id: wire::RequestId::new(),
+            .register_local_directory(
+                wire::SftpLocalDirectoryRegisterRequest {
+                    meta: wire::RequestMeta {
+                        request_id: wire::RequestId::new(),
+                    },
+                    selected_path: target_directory.to_string_lossy().into_owned(),
                 },
-                selected_path: target_directory.to_string_lossy().into_owned(),
-            })
+                &window_owner("workspace-window-b"),
+            )
             .await
             .unwrap();
         let source_listing = service
-            .list_local_directory(wire::SftpLocalDirectoryListRequest {
-                meta: wire::RequestMeta {
-                    request_id: wire::RequestId::new(),
+            .list_local_directory(
+                wire::SftpLocalDirectoryListRequest {
+                    meta: wire::RequestMeta {
+                        request_id: wire::RequestId::new(),
+                    },
+                    operation_id: wire::OperationId::new(),
+                    idempotency_key: "list-source".to_owned(),
+                    directory_ref: source.directory_ref.clone(),
+                    expected_revision: source.revision,
+                    cursor: None,
+                    page_size: 8,
                 },
-                operation_id: wire::OperationId::new(),
-                idempotency_key: "list-source".to_owned(),
-                directory_ref: source.directory_ref.clone(),
-                expected_revision: source.revision,
-                cursor: None,
-                page_size: 8,
-            })
+                &window_owner("workspace-window-a"),
+            )
             .await
             .unwrap();
         let source_entry = source_listing

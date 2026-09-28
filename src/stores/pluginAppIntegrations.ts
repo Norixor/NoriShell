@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { defineStore } from "pinia";
-import { nextTick, ref } from "vue";
+import { nextTick, ref, watch } from "vue";
 import type { PluginAppIntegrationSnapshot, PluginAppCommand } from "../core-api/generated/core-api";
 import { useTipsStore } from "./tips";
 import { usePluginExtensionsStore } from "./pluginExtensions";
@@ -82,12 +82,91 @@ function closeOwnPluginDialogs(owner: PluginDialogOwner) {
   }
 }
 
+function startPluginAppShortcutListener(store: ReturnType<typeof usePluginAppIntegrationsStore>): () => void {
+  let active = true;
+  const onKey = (event: KeyboardEvent) => {
+    if (!active || event.defaultPrevented || !store.enabledBindings || store.busy) return;
+    const matches = store.snapshots.flatMap((snapshot) => snapshot.registration.commands
+      .filter((command) => appShortcutMatches(event, command.shortcut))
+      .map((command) => ({ snapshot, command })));
+    const selected = matches.length === 1 ? matches[0] : undefined;
+    if (!selected) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void store.run(selected.snapshot, selected.command).catch(() => {
+      if (active) useTipsStore().show({ tone: "error", title: i18n.global.t("pluginAppIntegrations.error") });
+    });
+  };
+  let refreshing = false;
+  const refreshBindings = async () => {
+    if (!active || refreshing || !store.enabledBindings) return;
+    refreshing = true;
+    try { await store.refresh(); } catch { /* The next focused poll retries the projection. */ }
+    finally { refreshing = false; }
+  };
+  // Core emits no change event for registrations, so only the focused WebView polls: shortcuts can only reach the
+  // document that holds keyboard focus, and regaining focus refreshes immediately.
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stopPolling = () => {
+    if (timer !== undefined) clearInterval(timer);
+    timer = undefined;
+  };
+  const startPolling = () => {
+    if (!active) return;
+    timer ??= setInterval(() => { void refreshBindings(); }, 3000);
+    void refreshBindings();
+  };
+  document.addEventListener("keydown", onKey);
+  window.addEventListener("focus", startPolling);
+  window.addEventListener("blur", stopPolling);
+  if (document.hasFocus()) startPolling();
+  return () => {
+    active = false;
+    stopPolling();
+    document.removeEventListener("keydown", onKey);
+    window.removeEventListener("focus", startPolling);
+    window.removeEventListener("blur", stopPolling);
+  };
+}
+
+/**
+ * A child WebView has its own Pinia store. The opt-in is session state of the main window only, so the child asks for
+ * it once and then follows the main window's change events before using shortcuts.
+ */
+export async function startPluginAppShortcuts(): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { emit, listen } = await import("@tauri-apps/api/event");
+  const store = usePluginAppIntegrationsStore();
+  const stopShortcuts = startPluginAppShortcutListener(store);
+  let active = true;
+  try {
+    const unlisten = await listen<{ enabled: boolean }>("norishell://plugin-app-bindings-changed", ({ payload }) => {
+      if (!active || typeof payload?.enabled !== "boolean") return;
+      store.enabledBindings = payload.enabled;
+      if (payload.enabled) void store.refresh().catch(() => undefined);
+    });
+    await emit("norishell://plugin-app-bindings-request").catch(() => undefined);
+    return () => { active = false; unlisten(); stopShortcuts(); };
+  } catch (error) {
+    active = false;
+    stopShortcuts();
+    throw error;
+  }
+}
+
 /** Main-window integration; the Core event carries an exact current plugin fence. */
 export async function startPluginAppNavigation(router: import("vue-router").Router): Promise<() => void> {
   if (!isTauri()) return () => {};
-  const { listen } = await import("@tauri-apps/api/event");
+  const { emit, listen } = await import("@tauri-apps/api/event");
   const store = usePluginAppIntegrationsStore();
   let active = true;
+  const stopShortcuts = startPluginAppShortcutListener(store);
+  const stopBindingWatch = watch(() => store.enabledBindings, (enabled) => {
+    if (active) void emit("norishell://plugin-app-bindings-changed", { enabled }).catch(() => undefined);
+  }, { immediate: true });
+  const stopBindingRequests = await listen("norishell://plugin-app-bindings-request", () => {
+    if (active) void emit("norishell://plugin-app-bindings-changed", { enabled: store.enabledBindings }).catch(() => undefined);
+  });
   const unlisten = await listen<PluginAppNavigationPayload>("norishell://plugin-app-navigation", async ({ payload }) => {
     // Unknown or foreign dialog owners block immediately and never replay; only the host renderer can recognize
     // the owner of this plugin's declarative modal.
@@ -115,32 +194,11 @@ export async function startPluginAppNavigation(router: import("vue-router").Rout
       useTipsStore().show({ scope: `plugin-app:${payload.pluginId}`, tone: "info", title: current.pluginName, message: notification.text });
     } catch { /* Revocation discards queued notifications. */ }
   });
-  const onKey = (event: KeyboardEvent) => {
-    if (!active || !store.enabledBindings || store.busy) return;
-    const matches = store.snapshots.flatMap((snapshot) => snapshot.registration.commands
-      .filter((command) => appShortcutMatches(event, command.shortcut))
-      .map((command) => ({ snapshot, command })));
-    const selected = matches.length === 1 ? matches[0] : undefined;
-    if (!selected) return;
-    event.preventDefault();
-    event.stopPropagation();
-    void store.run(selected.snapshot, selected.command).catch(() => {
-      if (active) useTipsStore().show({ tone: "error", title: i18n.global.t("pluginAppIntegrations.error") });
-    });
-  };
-  let refreshing = false;
-  const refreshBindings = async () => {
-    if (!active || refreshing || !store.enabledBindings) return;
-    refreshing = true;
-    try { await store.refresh(); } catch { /* The next bounded poll retries the projection. */ }
-    finally { refreshing = false; }
-  };
-  const timer = setInterval(() => { void refreshBindings(); }, 3000);
-  document.addEventListener("keydown", onKey);
   return () => {
     active = false;
-    clearInterval(timer);
-    document.removeEventListener("keydown", onKey);
+    stopBindingWatch();
+    stopBindingRequests();
+    stopShortcuts();
     unlisten();
     stopNotifications();
   };

@@ -42,8 +42,39 @@ pub(super) struct LocalBoundary {
     pub(super) capability: Arc<LocalBoundaryCapability>,
 }
 
+/// The WebView instance that owns a local directory capability.
+#[derive(Debug, Clone)]
+pub(super) struct LocalDirectoryOwner {
+    pub(super) label: String,
+    /// Child Tab views derive their label from the Tab id and reuse it after a
+    /// view is recreated, so their capabilities are bound to the view
+    /// instance's liveness flag instead of the label. Window-level WebViews
+    /// have no flag: their labels are unique for the window's lifetime.
+    pub(super) liveness: Option<Arc<AtomicBool>>,
+}
+
+impl LocalDirectoryOwner {
+    pub(super) fn is_live(&self) -> bool {
+        self.liveness
+            .as_ref()
+            .is_none_or(|live| live.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// True when `caller` is the same live WebView instance as this owner.
+    pub(super) fn admits(&self, caller: &Self) -> bool {
+        self.label == caller.label
+            && self.is_live()
+            && match (&self.liveness, &caller.liveness) {
+                (Some(owner), Some(caller)) => Arc::ptr_eq(owner, caller),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct LocalDirectoryCapability {
+    pub(super) owner: LocalDirectoryOwner,
     pub(super) revision: u64,
     pub(super) capability: Arc<LocalDirectoryCapabilityHandle>,
     pub(super) rememberable_path: Option<String>,

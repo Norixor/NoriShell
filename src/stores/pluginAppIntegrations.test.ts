@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import type { Router } from "vue-router";
 import type { PluginAppIntegrationSnapshot } from "../core-api/generated/core-api";
 import { listPluginDialogs, registerPluginDialog } from "../plugins/pluginDialogRegistry";
-import { appShortcutMatches, startPluginAppNavigation, usePluginAppIntegrationsStore } from "./pluginAppIntegrations";
+import { appShortcutMatches, startPluginAppNavigation, startPluginAppShortcuts, usePluginAppIntegrationsStore } from "./pluginAppIntegrations";
 
 const eventHarness = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => unknown>(),
+  emitted: [] as Array<{ eventName: string; payload: unknown }>,
 }));
 
 const owner = {
@@ -79,6 +81,10 @@ describe("plugin app shortcuts", () => {
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn().mockResolvedValue([]) }));
 vi.mock("@tauri-apps/api/event", () => ({
+  emit: vi.fn(async (eventName: string, payload: unknown) => {
+    eventHarness.emitted.push({ eventName, payload });
+    await eventHarness.listeners.get(eventName)?.({ payload });
+  }),
   listen: vi.fn(async (eventName: string, listener: (event: { payload: unknown }) => unknown) => {
     eventHarness.listeners.set(eventName, listener);
     return () => {
@@ -94,6 +100,7 @@ describe("application lifetime plugin bindings", () => {
     document.body.replaceChildren();
     listPluginDialogs();
     eventHarness.listeners.clear();
+    eventHarness.emitted.length = 0;
     vi.clearAllMocks();
   });
 
@@ -104,6 +111,7 @@ describe("application lifetime plugin bindings", () => {
     const current = snapshot();
     store.snapshots = [current];
     store.enabledBindings = true;
+    vi.spyOn(store, "refresh").mockResolvedValue();
     const run = vi.spyOn(store, "run").mockResolvedValue();
     const stop = await startPluginAppNavigation({ push: vi.fn() } as unknown as Router);
     const key = () => new KeyboardEvent("keydown", { code: "KeyP", altKey: true, shiftKey: true, cancelable: true });
@@ -122,6 +130,70 @@ describe("application lifetime plugin bindings", () => {
     document.dispatchEvent(key());
     expect(run).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("enables a child WebView only after the main opt-in and removes its independent listener", async () => {
+    vi.useFakeTimers();
+    setActivePinia(createPinia());
+    const store = usePluginAppIntegrationsStore();
+    store.snapshots = [snapshot()];
+    vi.spyOn(store, "refresh").mockResolvedValue();
+    const run = vi.spyOn(store, "run").mockResolvedValue();
+    const stop = await startPluginAppShortcuts();
+    const key = () => new KeyboardEvent("keydown", { code: "KeyP", altKey: true, shiftKey: true, cancelable: true });
+
+    document.dispatchEvent(key());
+    expect(run).not.toHaveBeenCalled();
+    await eventHarness.listeners.get("norishell://plugin-app-bindings-changed")?.({ payload: { enabled: true } });
+    const enabled = key();
+    document.dispatchEvent(enabled);
+    expect(enabled.defaultPrevented).toBe(true);
+    expect(run).toHaveBeenCalledOnce();
+
+    await eventHarness.listeners.get("norishell://plugin-app-bindings-changed")?.({ payload: { enabled: false } });
+    document.dispatchEvent(key());
+    expect(run).toHaveBeenCalledOnce();
+    stop();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(eventHarness.listeners.has("norishell://plugin-app-bindings-changed")).toBe(false);
+  });
+
+  it("polls plugin shortcut bindings only while the WebView has focus", async () => {
+    vi.useFakeTimers();
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    setActivePinia(createPinia());
+    const store = usePluginAppIntegrationsStore();
+    const refresh = vi.spyOn(store, "refresh").mockResolvedValue();
+    const stop = await startPluginAppShortcuts();
+    await eventHarness.listeners.get("norishell://plugin-app-bindings-changed")?.({ payload: { enabled: true } });
+    expect(refresh).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(refresh).toHaveBeenCalledOnce();
+
+    window.dispatchEvent(new Event("focus"));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(refresh).toHaveBeenCalledTimes(3);
+
+    window.dispatchEvent(new Event("blur"));
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(refresh).toHaveBeenCalledTimes(3);
+    stop();
+    window.dispatchEvent(new Event("focus"));
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+    hasFocus.mockRestore();
+  });
+
+  it("replies to a late child with the main window's current opt-in", async () => {
+    setActivePinia(createPinia());
+    const store = usePluginAppIntegrationsStore();
+    const stop = await startPluginAppNavigation({ push: vi.fn() } as unknown as Router);
+    store.enabledBindings = true;
+    await nextTick();
+    await eventHarness.listeners.get("norishell://plugin-app-bindings-request")?.({ payload: undefined });
+    expect(eventHarness.emitted.at(-1)).toEqual({ eventName: "norishell://plugin-app-bindings-changed", payload: { enabled: true } });
+    stop();
   });
 
   it("navigates for the current owner when no dialog is open", async () => {
