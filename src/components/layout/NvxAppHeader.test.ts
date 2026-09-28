@@ -46,6 +46,11 @@ describe("NvxAppHeader platform frame", () => {
   });
   afterEach(() => { vi.unstubAllGlobals(); });
 
+  it("drops the brand divider only in standalone windows", () => {
+    expect(mountHeader("macos", true).classes()).toContain("nvx-app-header--standalone");
+    expect(mountHeader("macos").classes()).not.toContain("nvx-app-header--standalone");
+  });
+
   it("reserves a passive native-control inset on macOS without rendering caption buttons", () => {
     const wrapper = mountHeader("macos");
 

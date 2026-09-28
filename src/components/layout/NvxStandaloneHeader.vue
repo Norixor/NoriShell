@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { detectDesktopPlatform } from "../../platform";
 import NvxAppHeader from "./NvxAppHeader.vue";
 import NvxWindowFrame from "./NvxWindowFrame.vue";
+import { secondaryWindowZoom } from "../../secure-window";
 
 const platform = detectDesktopPlatform();
 let doubleClickStart: { x: number; y: number } | undefined;
@@ -37,7 +38,10 @@ function onMouseUp(event: MouseEvent) {
 </script>
 
 <template>
-  <NvxWindowFrame class="nvx-standalone-header">
+  <NvxWindowFrame
+    class="nvx-standalone-header"
+    :zoom="secondaryWindowZoom"
+  >
     <NvxAppHeader
       :platform="platform"
       standalone

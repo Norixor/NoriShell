@@ -1,11 +1,12 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
-import { initializeSecureWindowAppearance } from "./secure-window";
+import { initializeSecureWindowAppearance, initializeSecondaryWindowZoom } from "./secure-window";
 import { i18n } from "./locales";
 import ToolWindow from "./views/ToolWindow.vue";
 import { revealWindowAfterMount } from "./window-first-show";
 import "./styles/tokens.css";
 import "./styles/base.css";
 initializeSecureWindowAppearance();
+initializeSecondaryWindowZoom();
 createApp(ToolWindow).use(createPinia()).use(i18n).mount("#tool-app");
 void revealWindowAfterMount();
