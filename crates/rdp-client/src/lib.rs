@@ -1131,7 +1131,10 @@ async fn process_udp_payload(
     let (batch, outputs) = decode_in_place(|| {
         active.process_dvc_tunnel(image, SoftSyncTunnelType::RELIABLE_UDP, payload)
     })
-    .map_err(|_| EngineError::Protocol)?;
+    .map_err(|error| {
+        record_protocol_failure("udp.process_dvc_tunnel", error.report());
+        EngineError::Protocol
+    })?;
     check_graphics_mode(
         &outputs,
         graphics_unavailable,

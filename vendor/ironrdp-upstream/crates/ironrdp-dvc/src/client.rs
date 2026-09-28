@@ -376,19 +376,52 @@ impl DrdynvcClient {
         payload: &[u8],
     ) -> PduResult<DvcMessageBatch> {
         let pdu = decode_dvc_message(payload).map_err(|e| decode_err!(e))?;
-        let DrdynvcServerPdu::Data(data) = pdu else {
-            return Err(pdu_other_err!(
-                "only DVC data is permitted on a multitransport tunnel"
-            ));
+        let data = match pdu {
+            DrdynvcServerPdu::Data(data) => data,
+            // NoriShell: after Soft-Sync, Windows servers also send channel Create and Close requests
+            // through the tunnel. They are handled exactly as on TCP; a channel created here is bound
+            // to this tunnel so its data and replies stay on it. A refused Create is answered on the
+            // channel's default (TCP) route because the channel never exists on the tunnel.
+            DrdynvcServerPdu::Create(request) => {
+                let channel_id = request.channel_id();
+                let messages = SvcProcessor::process(self, payload)?;
+                if self
+                    .dynamic_channels
+                    .get_by_channel_id(channel_id)
+                    .is_some()
+                {
+                    self.tunnel_channels.insert(channel_id, tunnel_type);
+                }
+                return Ok(DvcMessageBatch::new(channel_id, messages));
+            }
+            DrdynvcServerPdu::Close(close) => {
+                let channel_id = close.channel_id();
+                let messages = SvcProcessor::process(self, payload)?;
+                self.tunnel_channels.remove(&channel_id);
+                return Ok(DvcMessageBatch::new(channel_id, messages));
+            }
+            _ => {
+                return Err(pdu_other_err!(
+                    "only DVC data, create and close are permitted on a multitransport tunnel"
+                ));
+            }
         };
         let channel_id = data.channel_id();
-        let selected_tunnel = self
-            .tunnel_channels
-            .get(&channel_id)
-            .copied()
-            .ok_or_else(|| {
-                pdu_other_err!("received tunneled data for a channel not selected by Soft-Sync")
-            })?;
+        let Some(selected_tunnel) = self.tunnel_channels.get(&channel_id).copied() else {
+            // NoriShell: Soft-Sync skips ids this client never opened, but the server still routes their
+            // data here. There is no processor to receive it, so it is dropped; data for an open channel
+            // that was not selected remains a protocol error.
+            if self
+                .dynamic_channels
+                .get_by_channel_id(channel_id)
+                .is_none()
+            {
+                return Ok(DvcMessageBatch::new(channel_id, Vec::new()));
+            }
+            return Err(pdu_other_err!(
+                "received tunneled data for a channel not selected by Soft-Sync"
+            ));
+        };
         if tunnel_type != selected_tunnel {
             return Err(pdu_other_err!(
                 "received tunneled data on a tunnel not selected for the dynamic channel"
@@ -429,18 +462,20 @@ impl DrdynvcClient {
                 ));
             }
 
-            let mut selected_channels = Vec::new();
-            for channel_id in list.channel_ids() {
-                if self
-                    .dynamic_channels
-                    .get_by_channel_id(*channel_id)
-                    .is_none()
-                {
-                    selected_channels.clear();
-                    break;
-                }
-                selected_channels.push(*channel_id);
-            }
+            // NoriShell: the server may list channels this client declined or never opened. Dropping the
+            // whole list for one unknown id left every known channel (EGFX included) on TCP while the server
+            // had already moved their data to the tunnel, so graphics stalled. Unknown ids are skipped;
+            // `process_tunnel` drops any data the server still routes to them.
+            let selected_channels: Vec<_> = list
+                .channel_ids()
+                .iter()
+                .copied()
+                .filter(|channel_id| {
+                    self.dynamic_channels
+                        .get_by_channel_id(*channel_id)
+                        .is_some()
+                })
+                .collect();
             if selected_channels.is_empty() && !list.channel_ids().is_empty() {
                 continue;
             }
@@ -785,6 +820,68 @@ mod tests {
         client.close_channel(1).unwrap();
         assert_eq!(client.tunnel_for_channel(1), None);
         assert!(!client.has_channels_on_tunnel(SoftSyncTunnelType::RELIABLE_UDP));
+    }
+
+    #[test]
+    fn soft_sync_routes_known_channels_when_the_list_names_an_unknown_one() {
+        let mut client = DrdynvcClient::new();
+        add_active_channel(&mut client, 1);
+        client.enable_soft_sync_tunnel(SoftSyncTunnelType::RELIABLE_UDP);
+        let request =
+            crate::pdu::SoftSyncRequestPdu::new(alloc::vec![crate::pdu::SoftSyncChannelList::new(
+                SoftSyncTunnelType::RELIABLE_UDP,
+                alloc::vec![1, 99],
+            )]);
+        client.process_soft_sync_request(request).unwrap();
+        assert_eq!(
+            client.tunnel_for_channel(1),
+            Some(SoftSyncTunnelType::RELIABLE_UDP)
+        );
+        assert_eq!(client.tunnel_for_channel(99), None);
+        assert!(client.has_channels_on_tunnel(SoftSyncTunnelType::RELIABLE_UDP));
+
+        // Data the server still routes for the unknown id is dropped instead of failing the session.
+        let unknown = ironrdp_core::encode_vec(&DrdynvcServerPdu::Data(DrdynvcDataPdu::Data(
+            crate::pdu::DataPdu::new(99, alloc::vec![1, 2, 3]),
+        )))
+        .unwrap();
+        let batch = client
+            .process_tunnel(SoftSyncTunnelType::RELIABLE_UDP, &unknown)
+            .unwrap();
+        assert!(batch.messages().is_empty());
+    }
+
+    #[test]
+    fn tunnel_accepts_create_requests_and_refuses_unknown_channels_without_failing() {
+        let mut client = DrdynvcClient::new();
+        add_active_channel(&mut client, 1);
+        client.enable_soft_sync_tunnel(SoftSyncTunnelType::RELIABLE_UDP);
+        client
+            .process_soft_sync_request(crate::pdu::SoftSyncRequestPdu::new(alloc::vec![
+                crate::pdu::SoftSyncChannelList::new(
+                    SoftSyncTunnelType::RELIABLE_UDP,
+                    alloc::vec![1]
+                ),
+            ]))
+            .unwrap();
+        // Captured from a Windows server: Create Request for an unsupported video control channel.
+        let create = [
+            0x18, 0x0a, b'M', b'i', b'c', b'r', b'o', b's', b'o', b'f', b't', b':', b':', b'W',
+            b'i', b'n', b'd', b'o', b'w', b's', b':', b':', b'R', b'D', b'S', b':', b':', b'V',
+            b'i', b'd', b'e', b'o', b':', b':', b'C', b'o', b'n', b't', b'r', b'o', b'l', b':',
+            b':', b'v', b'0', b'8', b'.', b'0', b'1', 0,
+        ];
+        let batch = client
+            .process_tunnel(SoftSyncTunnelType::RELIABLE_UDP, &create)
+            .unwrap();
+        assert_eq!(batch.channel_id(), 0x0a);
+        assert!(!batch.messages().is_empty());
+        // Refused channels are not bound to the tunnel, so the reply uses the default route.
+        assert_eq!(client.tunnel_for_channel(0x0a), None);
+        assert_eq!(
+            client.tunnel_for_channel(1),
+            Some(SoftSyncTunnelType::RELIABLE_UDP)
+        );
     }
 
     #[test]
