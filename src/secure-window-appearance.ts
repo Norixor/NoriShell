@@ -7,6 +7,7 @@ export function publishSecureWindowAppearance(value: ApplicationPreferences) {
     localStorage.setItem(SECURE_WINDOW_APPEARANCE_KEY, JSON.stringify({
       locale: value.locale,
       themePreference: value.themePreference,
+      uiZoom: value.uiZoom,
     }));
   } catch { /* A secondary window can still use the system appearance. */ }
 }

@@ -9,7 +9,7 @@ withDefaults(defineProps<{ platform: DesktopPlatform; standalone?: boolean; work
 <template>
   <header
     class="nvx-app-header"
-    :class="`nvx-app-header--${platform}`"
+    :class="[`nvx-app-header--${platform}`, { 'nvx-app-header--standalone': standalone }]"
     data-tauri-drag-region="deep"
   >
     <div
@@ -105,6 +105,11 @@ withDefaults(defineProps<{ platform: DesktopPlatform; standalone?: boolean; work
 
 .nvx-app-header__brand strong {
   pointer-events: none;
+}
+
+/* A standalone window has no Tab strip to separate from, so the brand needs no divider. */
+.nvx-app-header--standalone .nvx-app-header__brand {
+  border-right: 0;
 }
 
 .nvx-app-header--macos .nvx-app-header__brand {
