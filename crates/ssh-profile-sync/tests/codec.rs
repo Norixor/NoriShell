@@ -867,6 +867,20 @@ fn sample_preferences() -> PortablePreferencesV1 {
     }
 }
 
+#[test]
+fn application_preferences_reject_removed_motion_setting() {
+    let mut preferences = sample_preferences();
+    assert!(preferences.validate().is_ok());
+    preferences
+        .groups
+        .get_mut("application")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("reduceMotion".into(), json!(true));
+    assert!(preferences.validate().is_err());
+}
+
 fn empty_v4_preferences_bundle() -> PortableBundleV1 {
     PortableBundleV1 {
         schema: BundleSchema::V4,

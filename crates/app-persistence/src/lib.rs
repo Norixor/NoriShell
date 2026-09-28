@@ -59,10 +59,10 @@ use migrations::{
     migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6, migrate_v6_to_v7,
 };
 
-const SCHEMA_VERSION: i64 = 48;
+const SCHEMA_VERSION: i64 = 50;
 const ROOT_DISK_RESOURCE_ID: &str = "root";
 const AGGREGATE_NON_LOOPBACK_NETWORK_RESOURCE_ID: &str = "aggregateNonLoopback";
-const MAX_TERMINAL_WORKSPACE_LAYOUT_BYTES: usize = 256 * 1024;
+const MAX_TERMINAL_WORKSPACE_LAYOUT_BYTES: usize = 4 * 1024 * 1024;
 
 const DEFAULT_ALGORITHM_POLICY_ID: &str = "secure-default";
 const MAX_AUTHENTICATION_CREDENTIALS: usize = 16;
@@ -19399,6 +19399,176 @@ mod tests {
             repository.replace_terminal_workspace_layout(initial.revision, &layout),
             Err(AppPersistenceError::Conflict)
         ));
+    }
+
+    #[test]
+    fn v50_strips_retired_application_preference_keys_from_v49_candidates() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("migration.sqlite");
+        let repository = AppRepository::open(&path).expect("open current database");
+        let stored = serde_json::json!({
+            "themePreference": "system", "locale": "en", "uiZoom": 100,
+            "terminalStartupBehavior": "welcome", "newTerminalBehavior": "welcome",
+            "singlePaneTabCloseBehavior": "confirm", "reduceMotion": false
+        });
+        repository
+            .connection
+            .execute(
+                "INSERT INTO application_preferences (group_id, revision, value_json, updated_at_ms)
+                 VALUES ('application', 4, ?1, 1)",
+                params![stored.to_string()],
+            )
+            .expect("legacy row");
+        repository
+            .connection
+            .pragma_update(None, "user_version", 49)
+            .expect("claim v49");
+        drop(repository);
+
+        let repository = AppRepository::open(&path).expect("migrate to v50");
+        let version: i64 = repository
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, super::SCHEMA_VERSION);
+        let snapshot = repository
+            .get_application_preferences(
+                norishell_core_api::ApplicationPreferenceGroupId::Application,
+            )
+            .expect("strict read succeeds");
+        assert_eq!(snapshot.revision, Some(WireSequence::new(4)));
+        assert!(snapshot.value.expect("value").get("reduceMotion").is_none());
+    }
+
+    #[test]
+    fn v49_starts_with_empty_layout_without_removing_saved_hosts() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("migration.sqlite");
+        let mut repository = AppRepository::open(&path).expect("open current database");
+        let host = repository
+            .create_host("Existing", "existing.example", 22, None, None, false)
+            .expect("saved host");
+        let old = repository
+            .get_terminal_workspace_layout()
+            .expect("old layout");
+        let layout = TerminalWorkspaceLayout {
+            schema_version: 1,
+            active_tab_id: Some("old-tab".to_owned()),
+            tabs: vec![TerminalWorkspaceTab {
+                tab_id: "old-tab".to_owned(),
+                layout: TerminalWorkspaceLayoutNode::Pane {
+                    pane_id: "old-pane".to_owned(),
+                    terminal_id: "old-pane".to_owned(),
+                },
+                active_pane_id: "old-pane".to_owned(),
+                panes: vec![TerminalWorkspacePane::Local {
+                    pane_id: "old-pane".to_owned(),
+                    label: "zsh".to_owned(),
+                }],
+            }],
+        };
+        repository
+            .replace_terminal_workspace_layout(old.revision, &layout)
+            .expect("write old layout");
+        let old_layout: (i64, String) = repository
+            .connection
+            .query_row(
+                "SELECT revision, layout_json FROM terminal_workspace_layout WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read old layout row");
+        repository
+            .connection
+            .execute_batch(
+                "DROP TABLE terminal_workspace_layout;
+                 CREATE TABLE terminal_workspace_layout (
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                   schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                   revision INTEGER NOT NULL CHECK(revision >= 1),
+                   layout_json TEXT NOT NULL
+                     CHECK(length(CAST(layout_json AS BLOB)) BETWEEN 1 AND 262144),
+                   updated_at_ms INTEGER NOT NULL
+                 ) STRICT;",
+            )
+            .expect("restore published v0.1.5 layout schema");
+        repository
+            .connection
+            .execute(
+                "INSERT INTO terminal_workspace_layout
+                   (singleton, schema_version, revision, layout_json, updated_at_ms)
+                 VALUES (1, 1, ?1, ?2, 0)",
+                params![old_layout.0, old_layout.1],
+            )
+            .expect("restore published v0.1.5 layout row");
+        repository
+            .connection
+            .pragma_update(None, "user_version", 48)
+            .expect("old database version");
+        drop(repository);
+
+        let mut upgraded = AppRepository::open(&path).expect("upgrade database");
+        let fresh = upgraded
+            .get_terminal_workspace_layout()
+            .expect("fresh layout");
+        assert!(fresh.layout.tabs.is_empty());
+        assert_eq!(fresh.layout.active_tab_id, None);
+        assert_eq!(
+            upgraded.list_hosts().expect("saved hosts")[0].host_id,
+            host.host_id
+        );
+        upgraded
+            .replace_terminal_workspace_layout(fresh.revision, &layout)
+            .expect("new layout remains writable");
+        drop(upgraded);
+
+        let reopened = AppRepository::open(&path).expect("reopen current database");
+        assert_eq!(
+            reopened
+                .get_terminal_workspace_layout()
+                .expect("current layout")
+                .layout,
+            layout
+        );
+        assert_eq!(
+            reopened
+                .connection
+                .execute(
+                    "UPDATE terminal_workspace_layout SET layout_json = ?1 WHERE singleton = 1",
+                    ["x".repeat(300 * 1024)],
+                )
+                .expect("current layout size fits the SQLite constraint"),
+            1
+        );
+    }
+
+    #[test]
+    fn v49_initializes_layout_when_old_json_cannot_be_loaded() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("migration.sqlite");
+        let repository = AppRepository::open(&path).expect("open current database");
+        repository
+            .connection
+            .execute(
+                "UPDATE terminal_workspace_layout SET layout_json = ?1 WHERE singleton = 1",
+                ["invalid old layout"],
+            )
+            .expect("unreadable old layout");
+        repository
+            .connection
+            .pragma_update(None, "user_version", 48)
+            .expect("old database version");
+        drop(repository);
+
+        let upgraded = AppRepository::open(&path).expect("upgrade unreadable layout");
+        assert!(
+            upgraded
+                .get_terminal_workspace_layout()
+                .expect("initialized layout")
+                .layout
+                .tabs
+                .is_empty()
+        );
     }
 
     #[test]

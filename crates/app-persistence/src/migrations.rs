@@ -1,6 +1,6 @@
 //! Forward-only SQLite schema migrations.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{AppPersistenceError, Result, SCHEMA_VERSION};
 
@@ -816,8 +816,174 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
     }
     if current == 47 {
         migrate_v47_to_v48(connection)?;
+        current = 48;
+    }
+    if current == 48 {
+        // v0.1.5 Tab geometry is disposable; start the native-view layout empty.
+        // Keep connection, credential, plugin, and other SQLite data untouched.
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             DROP TABLE terminal_workspace_layout;
+             CREATE TABLE terminal_workspace_layout (
+               singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+               schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+               revision INTEGER NOT NULL CHECK(revision >= 1),
+               layout_json TEXT NOT NULL
+                 CHECK(length(CAST(layout_json AS BLOB)) BETWEEN 1 AND 4194304),
+               updated_at_ms INTEGER NOT NULL
+             ) STRICT;
+             INSERT INTO terminal_workspace_layout
+               (singleton, schema_version, revision, layout_json, updated_at_ms)
+             VALUES (1, 1, 1, '{\"schemaVersion\":1,\"activeTabId\":null,\"tabs\":[]}', 0);
+             PRAGMA user_version = 49;
+             COMMIT;",
+        )?;
+        current = 49;
+    }
+    if current == 49 {
+        // Local v49 candidates stored two preference keys that never shipped.
+        // Strip them so strict validation can read the row again.
+        let transaction = connection.unchecked_transaction()?;
+        strip_retired_application_preference_keys(&transaction)?;
+        transaction.pragma_update(None, "user_version", 50)?;
+        transaction.commit()?;
     }
     Ok(())
+}
+
+// One-time v50 cleanup for unreleased v49 candidates: strips two keys ("reduceMotion",
+// "headerDensity") that only ever existed in local pre-release preference rows and were
+// never part of a shipped schema. Only these two keys are touched; every other stored
+// preference field and every other table is left untouched.
+fn strip_retired_application_preference_keys(connection: &Connection) -> Result<()> {
+    let row: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT revision, value_json FROM application_preferences WHERE group_id = 'application'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((revision, json)) = row else {
+        return Ok(());
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&json) else {
+        // Malformed stored data is reported by the normal read path; nothing to clean up here.
+        return Ok(());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    let removed_reduce_motion = object.remove("reduceMotion").is_some();
+    let removed_header_density = object.remove("headerDensity").is_some();
+    if !removed_reduce_motion && !removed_header_density {
+        return Ok(());
+    }
+    let updated_json = serde_json::to_string(&value)
+        .map_err(|_| AppPersistenceError::InvalidInput("application_preferences.invalid_input"))?;
+    connection.execute(
+        "UPDATE application_preferences SET value_json = ?1
+         WHERE group_id = 'application' AND revision = ?2",
+        params![updated_json, revision],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod retired_application_preference_keys_migration_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn application_preferences_connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE application_preferences (
+                   group_id TEXT PRIMARY KEY CHECK(group_id IN (
+                     'application', 'appearance', 'interaction', 'highlights', 'shortcuts', 'files'
+                   )),
+                   revision INTEGER NOT NULL CHECK(revision >= 1),
+                   value_json TEXT NOT NULL CHECK(length(CAST(value_json AS BLOB)) <= 65536),
+                   updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0)
+                 ) STRICT;",
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn strips_retired_keys_without_changing_revision_or_other_fields() {
+        let connection = application_preferences_connection();
+        let legacy = json!({
+            "themePreference": "system", "locale": "en", "uiZoom": 100,
+            "terminalStartupBehavior": "welcome", "newTerminalBehavior": "welcome",
+            "singlePaneTabCloseBehavior": "confirm",
+            "reduceMotion": true, "headerDensity": "comfortable"
+        });
+        connection
+            .execute(
+                "INSERT INTO application_preferences (group_id, revision, value_json, updated_at_ms)
+                 VALUES ('application', 7, ?1, 1000)",
+                params![legacy.to_string()],
+            )
+            .unwrap();
+
+        strip_retired_application_preference_keys(&connection).unwrap();
+
+        let (revision, json_text): (i64, String) = connection
+            .query_row(
+                "SELECT revision, value_json FROM application_preferences WHERE group_id = 'application'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revision, 7);
+        let value: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+        assert!(value.get("reduceMotion").is_none());
+        assert!(value.get("headerDensity").is_none());
+        assert_eq!(value.get("themePreference"), Some(&json!("system")));
+        assert_eq!(value.get("uiZoom"), Some(&json!(100)));
+    }
+
+    #[test]
+    fn no_op_when_row_is_missing_or_already_clean() {
+        let connection = application_preferences_connection();
+        // Missing row: nothing to touch.
+        strip_retired_application_preference_keys(&connection).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM application_preferences", [], |row| {
+                    row.get::<_, i64>(0)
+                },)
+                .unwrap(),
+            0
+        );
+
+        let clean = json!({
+            "themePreference": "light", "locale": "zh-CN", "uiZoom": 100,
+            "terminalStartupBehavior": "restoreHistory", "newTerminalBehavior": "welcome",
+            "singlePaneTabCloseBehavior": "confirm"
+        });
+        connection
+            .execute(
+                "INSERT INTO application_preferences (group_id, revision, value_json, updated_at_ms)
+                 VALUES ('application', 3, ?1, 1000)",
+                params![clean.to_string()],
+            )
+            .unwrap();
+        strip_retired_application_preference_keys(&connection).unwrap();
+        let (revision, json_text): (i64, String) = connection
+            .query_row(
+                "SELECT revision, value_json FROM application_preferences WHERE group_id = 'application'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revision, 3);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json_text).unwrap(),
+            clean
+        );
+    }
 }
 
 fn migrate_v47_to_v48(connection: &Connection) -> Result<()> {
