@@ -547,6 +547,20 @@ describe("desktop display settings", () => {
 });
 
 describe("desktop session state and local controls", () => {
+  it("resumes the display and state polling when a deactivated Tab WebView is activated again", async () => {
+    const wrapper = await fixture();
+    const display = () => wrapper.findComponent(canvas);
+    expect(display().props("active")).toBe(true);
+    controller.deactivate();
+    await flushPromises();
+    expect(display().props("active")).toBe(false);
+    // The Tab WebView never leaves /desktop, so only explicit activation can resume it.
+    mocks.snapshot.mockClear();
+    controller.activate("desktop:one");
+    await flushPromises();
+    expect(display().props("active")).toBe(true);
+    expect(mocks.snapshot).toHaveBeenCalled();
+  });
   it.each([
     ["connecting", desktopEn.phases.gatewayConnecting],
     ["needsInteraction", desktopEn.states.needsInteraction],

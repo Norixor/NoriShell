@@ -127,17 +127,27 @@ describe("protected desktop display", () => {
     expect(mocks.frame).toHaveBeenCalledTimes(3);
     wrapper.unmount();
   });
-  it("retries a pending Tab ownership error quietly instead of reporting it", async () => {
+  it("retries a pending Tab ownership error quietly and reports frame failures", async () => {
     mocks.frame.mockRejectedValueOnce({ code: "workspace_tab.wrong_owner", messageKey: "workspace_tab.wrong_owner" }).mockRejectedValueOnce(new Error("boom"));
     const wrapper = fixture(); await flushPromises();
-    expect(wrapper.emitted("error")).toBeUndefined();
+    expect(wrapper.emitted("frameError")).toBeUndefined();
     await vi.advanceTimersByTimeAsync(249);
     expect(mocks.frame).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1); await flushPromises();
     expect(mocks.frame).toHaveBeenCalledTimes(2);
-    expect(wrapper.emitted("error")).toHaveLength(1);
+    expect(wrapper.emitted("frameError")).toHaveLength(1);
+    expect(wrapper.emitted("error")).toBeUndefined();
     await vi.advanceTimersByTimeAsync(250); await flushPromises();
     expect(mocks.frame).toHaveBeenCalledTimes(3);
+    wrapper.unmount();
+  });
+  it("reports a Tab ownership failure that persists instead of staying black", async () => {
+    mocks.frame.mockRejectedValue({ code: "workspace_tab.wrong_owner", messageKey: "workspace_tab.wrong_owner" });
+    const wrapper = fixture(); await flushPromises();
+    await vi.advanceTimersByTimeAsync(250 * 6); await flushPromises();
+    expect(wrapper.emitted("frameError")).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(250 * 2); await flushPromises();
+    expect(wrapper.emitted("frameError")).toHaveLength(1);
     wrapper.unmount();
   });
   it("shows the remote cursor bitmap scaled to the display and resets it per session", async () => {

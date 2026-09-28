@@ -17,7 +17,7 @@ const props = withDefaults(defineProps<{
   /** Device preference: request device-pixel resolution and show actual size at one device pixel per remote pixel. */
   hiDpi?: boolean;
 }>(), { commandAsControl: false, hiDpi: false });
-const emit = defineEmits<{ error: []; resolutionError: [error: unknown] }>();
+const emit = defineEmits<{ error: []; frameError: [error: unknown]; resolutionError: [error: unknown] }>();
 const { t } = useI18n();
 
 const inputSink = ref<HTMLTextAreaElement | null>(null);
@@ -111,6 +111,7 @@ const canvasStyle = computed(() => {
 });
 
 let reportedFrameError = false;
+let ownershipRetries = 0;
 let mounted = false;
 let frameBusy = false;
 let after = 0n;
@@ -476,6 +477,7 @@ async function pull() {
     if (!mounted || !canRun.value || document.hidden || key !== identity.value) return;
     const decoded = decodeDesktopFrame(data, after);
     reportedFrameError = false;
+    ownershipRetries = 0;
     if (!decoded) {
       // Core already waited for new data; a reply that returned at once did not, so avoid a hot loop.
       next = performance.now() - started < 20 ? 50 : 0;
@@ -489,11 +491,11 @@ async function pull() {
   } catch (error) {
     if (key !== identity.value || !canRun.value) return;
     next = 250;
-    // Tab ownership is still being projected; the next snapshot or retry resolves it without user action.
-    if (parseCoreApiError(error)?.code.startsWith("workspace_tab.")) return;
+    // Tab ownership may briefly be mid-projection; only a failure that persists is reported, never hidden forever.
+    if (parseCoreApiError(error)?.code.startsWith("workspace_tab.") && ++ownershipRetries < 8) return;
     if (!reportedFrameError) {
       reportedFrameError = true;
-      emit("error");
+      emit("frameError", error);
     }
   } finally {
     frameBusy = false;
