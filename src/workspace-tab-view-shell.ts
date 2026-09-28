@@ -64,6 +64,8 @@ const recoveringTabIds = new Set<string>();
 const pendingCloseRequests = new Map<string, Promise<boolean>>();
 // Tabs already swapped out of the Header while their native view closes.
 const replacedTabIds = new Set<string>();
+// Tabs whose view handed off its screen before tearing its content down for a close.
+const closingTabIds = new Set<string>();
 let shellRouter: Router | null = null;
 let creatingNewPage: Promise<boolean> | null = null;
 let contentBounds: WorkspaceTabViewBounds | null = null;
@@ -368,6 +370,38 @@ export function showWorkspaceShellRoute(navigate?: () => unknown): Promise<void>
       }
     }
   });
+}
+
+/**
+ * A closing Tab view is about to remove its content (a Terminal's welcome state, an
+ * empty page) and later its native WebView. Show the next Tab first (or the shell
+ * page when none is left) and hide the closing view, so the teardown is never seen.
+ * The closing view's input is released before any other view is granted focus.
+ */
+function handOffClosingView(id: string): Promise<void> {
+  return queueActivation(async () => {
+    if (!workspaceTabViewSummary(id)) return;
+    closingTabIds.add(id);
+    markTabBoot(id, "shell", "close_handoff_start");
+    if (activeWorkspaceTabViewId.value === id) {
+      const remaining = new Set(workspaceTabViewSummaries.value.map((summary) => summary.id)
+        .filter((item) => item !== id && !closingTabIds.has(item)));
+      const fallback = workspaceTabViewFallbackAfterRemoval(id, remaining);
+      if (fallback) await activateWorkspaceTabViewNow(fallback);
+      else {
+        await releaseActiveWorkspaceTabView();
+        setActiveWorkspaceTabView(null);
+      }
+    }
+    await applyVisibility();
+    markTabBoot(id, "shell", "close_handoff_done");
+  });
+}
+
+/** A handed-off close did not complete; its view shows its restored content again. */
+function restoreClosingView(id: string): Promise<void> {
+  if (!closingTabIds.delete(id) || !workspaceTabViewSummary(id)) return Promise.resolve();
+  return activateWorkspaceTabView(id);
 }
 
 export function deactivateWorkspaceTabView(): Promise<void> {
@@ -843,6 +877,19 @@ export async function startWorkspaceTabViewShell(router: Router): Promise<() => 
     if (viewLabels.get(payload.id) !== payload.viewLabel) return;
     showWorkspaceTabFailure(payload.code, `workspace-tab-projection:${payload.id}`, "workspace_tab.projection_failed");
   }));
+  unlisteners.push(await listen<ViewReply & { replyTo?: string }>("workspace-tab-view-closing", ({ payload }) => {
+    if (!payload?.id || viewLabels.get(payload.id) !== payload.viewLabel || !payload.operationId) return;
+    void handOffClosingView(payload.id).catch(() => undefined).then(() => emitTo(payload.viewLabel,
+      "workspace-tab-view-closing-ready", { id: payload.id, viewLabel: payload.viewLabel, operationId: payload.operationId }))
+      .catch(() => undefined);
+  }));
+  for (const event of ["workspace-tab-view-close-restored", "workspace-tab-view-close-failed", "workspace-tab-view-close-cancelled"]) {
+    unlisteners.push(await listen<ViewSignal>(event, ({ payload }) => {
+      if (!payload?.id || viewLabels.get(payload.id) !== payload.viewLabel) return;
+      void restoreClosingView(payload.id).catch((error: unknown) =>
+        showWorkspaceTabFailure(error, `workspace-tab-close-restore:${payload.id}`, "workspace_tab.activation_failed"));
+    }));
+  }
   unlisteners.push(await listen<ViewSignal & { pluginId: string }>("workspace-tab-view-plugin-invalidated", ({ payload }) => {
     if (viewLabels.get(payload.id) !== payload.viewLabel || !payload.id.startsWith(`page:plugin:${payload.pluginId}:`)) return;
     invalidatedPluginTabs.add(payload.id);
@@ -932,6 +979,7 @@ export async function startWorkspaceTabViewShell(router: Router): Promise<() => 
       }
     }
     for (const id of [...viewLabels.keys()]) if (!ids.has(id)) viewLabels.delete(id);
+    for (const id of [...closingTabIds]) if (!ids.has(id)) closingTabIds.delete(id);
     const invalidatedRemoved = [...previous].some((id) => !ids.has(id) && invalidatedPluginTabs.delete(id));
     if (invalidatedRemoved) await router.push("/plugins");
     for (const { record, view } of ownedRecords) {

@@ -39,8 +39,10 @@ import { markTabBoot } from "../workspace-tab-boot-trace";
 import { afterNextPaint } from "../workspace-tab-paint";
 import { startNativeBackgroundSync } from "../native-window-background";
 import { acceptSftpPluginNavigation } from "./sftpPluginNavigation";
+import { registerWorkspaceTabCloseHandoff } from "../workspace-tab-close-handoff";
+import { requestReply } from "../workspace-tab-reply";
 import {
-  closeOwnWorkspaceTabView,
+  closeOwnWorkspaceTabView as closeOwnNativeTabView,
   getWorkspaceTabContext,
   takeWorkspaceTabBootstrap,
   setWorkspaceTabOwnerWindow,
@@ -125,6 +127,41 @@ let stopPluginAppShortcuts: (() => void) | null = null;
 let latestProjection: unknown | null = null;
 let projectionBusy = false;
 let projectionAwaitingContext = false;
+
+// The shell normally answers within a few frames; a lost reply must not stall the close.
+const CLOSE_HANDOFF_TIMEOUT_MS = 2_000;
+
+/**
+ * Before this view removes its content for a close, the owner shell shows the next
+ * Tab (or its own page) and hides this view. Failure only means the teardown may be
+ * seen; the close continues either way.
+ */
+async function handOffBeforeClose(): Promise<void> {
+  const operationId = crypto.randomUUID();
+  markTabBoot(tabId, "tab", "close_handoff_sent");
+  try {
+    await syncOwner();
+    await requestReply<{ id: string; viewLabel: string; operationId: string; code?: string }>({
+      replyEvent: "workspace-tab-view-closing-ready",
+      matches: (payload) => payload.id === tabId && payload.viewLabel === viewLabel && payload.operationId === operationId,
+      send: () => emitTo(ownerWindow.value, "workspace-tab-view-closing", { id: tabId, viewLabel, operationId }),
+      timeoutMs: CLOSE_HANDOFF_TIMEOUT_MS,
+      timeoutCode: "workspace_tab.close_handoff_timeout",
+    });
+    markTabBoot(tabId, "tab", "close_handoff_ready");
+  } catch { /* The close proceeds visibly rather than not at all. */ }
+}
+
+async function restoreAfterCloseHandoff(): Promise<void> {
+  await syncOwner().catch(() => undefined);
+  await emitTo(ownerWindow.value, "workspace-tab-view-close-restored", { id: tabId, viewLabel });
+}
+
+/** Every close path hides this view before its native WebView is destroyed. */
+async function closeOwnWorkspaceTabView(): Promise<void> {
+  await handOffBeforeClose();
+  await closeOwnNativeTabView();
+}
 
 async function syncOwner(): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -849,6 +886,8 @@ async function close(event: TabEvent): Promise<void> {
     } else {
       // Leaving the page releases its plugin target; destroying this WebView closes
       // any context that release could not reach.
+      // An idle route renders nothing; the next content is shown before that blank page.
+      await handOffBeforeClose();
       await router.replace("/workspace-tab-idle");
       await nextTick();
       if (!tabs.closePageTab(tabId)) throw new Error("workspace_tab.not_found");
@@ -942,12 +981,17 @@ function handleShortcut(event: KeyboardEvent): void {
 }
 
 let stopNativeBackground: (() => void) | null = null;
+let stopCloseHandoff: (() => void) | null = null;
 onMounted(async () => {
   if (!tabId || viewLabel !== workspaceTabViewLabel(tabId)) {
     errorCode.value = "workspace_tab.invalid_view";
     return;
   }
   stopNativeBackground = startNativeBackgroundSync("webview");
+  stopCloseHandoff = registerWorkspaceTabCloseHandoff({
+    closing: (ids) => ids.includes(tabId) ? handOffBeforeClose() : Promise.resolve(),
+    restored: (ids) => ids.includes(tabId) ? restoreAfterCloseHandoff() : Promise.resolve(),
+  });
   window.addEventListener("keydown", handleShortcut, true);
   window.addEventListener("norishell:terminal-tab-close-committed", terminalTabCloseCommitted);
   window.addEventListener("norishell:terminal-tab-close-cancelled", terminalTabCloseCancelled);
@@ -1030,6 +1074,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopNativeBackground?.();
+  stopCloseHandoff?.();
   removeRouteGuard();
   window.removeEventListener("keydown", handleShortcut, true);
   window.removeEventListener("norishell:terminal-tab-close-committed", terminalTabCloseCommitted);

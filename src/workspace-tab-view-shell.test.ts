@@ -568,3 +568,82 @@ describe("managed Tab creation", () => {
     expect(workspaceTabViewSummaries.value.some((item) => item.id === "page:newPage:source")).toBe(false);
   });
 });
+
+describe("closing Tab handoff", () => {
+  const router = { currentRoute: ref({ path: "/terminal", fullPath: "/terminal" }), push: vi.fn() } as unknown as Router;
+  let stopShell: () => void;
+
+  async function startWith(ids: string[]) {
+    retainWorkspaceTabViewSummaries(new Set());
+    for (const id of ids) setWorkspaceTabViewSummary({ id, viewLabel: id, kind: "terminal", label: id, stateLabel: "" });
+    vi.mocked(snapshotWorkspaceTabs).mockResolvedValue({ owned: ids.map((id) => ({ id, kind: "terminal", payload: {} })), others: [] } as
+      unknown as Awaited<ReturnType<typeof snapshotWorkspaceTabs>>);
+    stopShell = await startWorkspaceTabViewShell(router);
+    setActiveWorkspaceTabView(ids[0]!);
+  }
+
+  beforeEach(() => {
+    native.getView.mockReset().mockImplementation(async (id: string) => ({ id, label: id, ownerWindow: "main" }));
+    native.visible.mockReset().mockImplementation(async () => undefined);
+    native.focus.mockReset().mockImplementation(async () => undefined);
+    native.handlers.clear();
+    native.emitted.length = 0;
+    native.autoAcknowledge = true;
+    native.autoDeactivate = true;
+    setActiveWorkspaceTabView(null);
+  });
+  afterEach(() => {
+    stopShell();
+    vi.mocked(snapshotWorkspaceTabs).mockReset().mockResolvedValue({ owned: [], others: [] } as
+      unknown as Awaited<ReturnType<typeof snapshotWorkspaceTabs>>);
+  });
+
+  const closing = (id: string, operationId = `close-${id}`) =>
+    native.handlers.get("workspace-tab-view-closing")?.({ payload: { id, viewLabel: id, operationId } });
+  const ready = (id: string) => native.emitted.find((item) => item.event === "workspace-tab-view-closing-ready"
+    && item.payload.id === id);
+
+  it("shows the neighbouring Tab and hides the closing view before the view tears down", async () => {
+    await startWith(["A", "B"]);
+    const order: string[] = [];
+    native.visible.mockImplementation(async (id: string, visible: boolean) => { order.push(`${id}:${visible}`); });
+    closing("A");
+    await vi.waitFor(() => expect(ready("A")).toBeTruthy());
+    expect(ready("A")!.payload.operationId).toBe("close-A");
+    expect(activeWorkspaceTabViewId.value).toBe("B");
+    // Input of the closing view is released before the next view is activated.
+    const events = native.emitted.map((item) => `${item.event}:${String(item.payload.id)}`);
+    expect(events.indexOf("workspace-tab-view-deactivate:A")).toBeLessThan(events.indexOf("workspace-tab-view-activate:B"));
+    // New content first, then the closing view is hidden.
+    expect(order.indexOf("B:true")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("B:true")).toBeLessThan(order.indexOf("A:false"));
+    expect(native.focus).toHaveBeenLastCalledWith("B");
+  });
+
+  it("releases and hides the last Tab so the shell page shows", async () => {
+    await startWith(["A"]);
+    closing("A");
+    await vi.waitFor(() => expect(ready("A")).toBeTruthy());
+    expect(activeWorkspaceTabViewId.value).toBeNull();
+    expect(native.emitted.some((item) => item.event === "workspace-tab-view-deactivate" && item.payload.id === "A")).toBe(true);
+    expect(native.visible).toHaveBeenCalledWith("A", false);
+  });
+
+  it("shows a Tab again when its handed-off close is rolled back", async () => {
+    await startWith(["A", "B"]);
+    closing("A");
+    await vi.waitFor(() => expect(ready("A")).toBeTruthy());
+    expect(activeWorkspaceTabViewId.value).toBe("B");
+    native.handlers.get("workspace-tab-view-close-restored")?.({ payload: { id: "A", viewLabel: "A" } });
+    await vi.waitFor(() => expect(activeWorkspaceTabViewId.value).toBe("A"));
+    expect(native.focus).toHaveBeenLastCalledWith("A");
+  });
+
+  it("does not reactivate a Tab whose close was cancelled before any handoff", async () => {
+    await startWith(["A", "B"]);
+    setActiveWorkspaceTabView("B");
+    native.handlers.get("workspace-tab-view-close-cancelled")?.({ payload: { id: "A", viewLabel: "A" } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(activeWorkspaceTabViewId.value).toBe("B");
+  });
+});
