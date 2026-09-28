@@ -162,6 +162,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.plugin-page { display: grid; align-content: start; gap: var(--nvx-space-4); min-width: 0; padding: var(--nvx-space-6); }
+/* A Page Tab WebView clips its root; the page owns vertical scrolling. */
+.plugin-page { display: grid; align-content: start; gap: var(--nvx-space-4); min-width: 0; min-height: 0; overflow-y: auto; padding: var(--nvx-space-6); }
 .plugin-page__surface { display: grid; min-width: 0; gap: var(--nvx-space-4); }
 </style>
