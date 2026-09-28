@@ -748,37 +748,37 @@ fn input_fence(
 #[tauri::command]
 pub(crate) fn plugin_protocol_launch_list<R: tauri::Runtime>(
     request: wire::PluginReadinessGetRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<Vec<wire::PluginProtocolLaunchSummary>> {
-    require_main_plugin_management_window(&window, request.meta.request_id)?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id)?;
     Ok(service.pending_protocol_launches())
 }
 #[tauri::command]
 pub(crate) async fn plugin_protocol_launch_claim<R: tauri::Runtime>(
     request: wire::PluginProtocolLaunchRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalOpenResponse> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     service.claim_protocol_launch(request).await
 }
 #[tauri::command]
 pub(crate) async fn plugin_terminal_open<R: tauri::Runtime>(
     request: wire::PluginTerminalOpenRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalOpenResponse> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     service.open_protocol_profile(request).await
 }
 #[tauri::command]
 pub(crate) async fn plugin_terminal_snapshot<R: tauri::Runtime>(
     request: wire::PluginReadinessGetRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalSnapshot> {
-    require_main_plugin_management_window(&window, request.meta.request_id)?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id)?;
     let _gate = service.protocol_launch_gate.lock().await;
     let raw = service.protocol_actor()?.snapshot().await;
     let ids: BTreeSet<_> = raw.iter().map(|session| session.session_id).collect();
@@ -802,10 +802,10 @@ pub(crate) async fn plugin_terminal_snapshot<R: tauri::Runtime>(
 pub(crate) async fn plugin_terminal_attach<R: tauri::Runtime>(
     request: wire::PluginTerminalAttachRequest,
     on_event: Channel<wire::PluginTerminalEvent>,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalAttachResponse> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     let request_id = request.meta.request_id.clone();
     let actor = service.protocol_actor()?;
     let session_id = uuid(&request.session_id, &request_id)?;
@@ -902,10 +902,10 @@ pub(crate) async fn plugin_terminal_attach<R: tauri::Runtime>(
 #[tauri::command]
 pub(crate) async fn plugin_terminal_attachment_heartbeat<R: tauri::Runtime>(
     request: wire::PluginTerminalAttachmentHeartbeatRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalAttachment> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     let actor = service.protocol_actor()?;
     let id = uuid(&request.session_id, &request.meta.request_id)?;
     let session = actor
@@ -928,10 +928,10 @@ pub(crate) async fn plugin_terminal_attachment_heartbeat<R: tauri::Runtime>(
 #[tauri::command]
 pub(crate) async fn plugin_terminal_detach<R: tauri::Runtime>(
     request: wire::PluginTerminalDetachRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalDetachResponse> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     let actor = service.protocol_actor()?;
     let id = uuid(&request.session_id, &request.meta.request_id)?;
     let previous = actor
@@ -972,10 +972,10 @@ pub(crate) async fn plugin_terminal_detach<R: tauri::Runtime>(
 #[tauri::command]
 pub(crate) async fn plugin_terminal_input_lease_renew<R: tauri::Runtime>(
     request: wire::PluginTerminalLeaseRenewRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalInputLease> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     let fence = input_fence(
         &request.meta.request_id,
         &request.session_id,
@@ -1009,10 +1009,10 @@ pub(crate) async fn plugin_terminal_input_lease_renew<R: tauri::Runtime>(
 #[tauri::command]
 pub(crate) async fn plugin_terminal_input<R: tauri::Runtime>(
     request: wire::PluginTerminalInputRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<()> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     let fence = input_fence(
         &request.meta.request_id,
         &request.session_id,
@@ -1045,10 +1045,10 @@ pub(crate) async fn plugin_terminal_input<R: tauri::Runtime>(
 #[tauri::command]
 pub(crate) async fn plugin_terminal_resize<R: tauri::Runtime>(
     request: wire::PluginTerminalResizeRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<()> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     let fence = input_fence(
         &request.meta.request_id,
         &request.session_id,
@@ -1082,10 +1082,10 @@ pub(crate) async fn plugin_terminal_resize<R: tauri::Runtime>(
 #[tauri::command]
 pub(crate) async fn plugin_terminal_disconnect<R: tauri::Runtime>(
     request: wire::PluginTerminalDisconnectRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalSummary> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     let actor = service.protocol_actor()?;
     let id = uuid(&request.session_id, &request.meta.request_id)?;
     let previous = actor
@@ -1126,10 +1126,10 @@ pub(crate) async fn plugin_terminal_disconnect<R: tauri::Runtime>(
 #[tauri::command]
 pub(crate) async fn plugin_terminal_reconnect<R: tauri::Runtime>(
     request: wire::PluginTerminalReconnectRequest,
-    window: WebviewWindow<R>,
+    webview: Webview<R>,
     service: State<'_, PluginService>,
 ) -> CoreResult<wire::PluginTerminalSummary> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     let _gate = service.protocol_launch_gate.lock().await;
     let _permit = service
         .api_creation_permit(request.meta.request_id.clone())

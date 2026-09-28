@@ -208,10 +208,10 @@ impl PluginService {
 #[tauri::command]
 pub(crate) fn plugin_app_integration_list<R: tauri::Runtime>(
     request: PluginAppIntegrationListRequest,
-    window: tauri::WebviewWindow<R>,
+    webview: tauri::Webview<R>,
     service: tauri::State<'_, PluginService>,
 ) -> CoreResult<Vec<PluginAppIntegrationSnapshot>> {
-    require_main_plugin_management_window(&window, request.meta.request_id.clone())?;
+    require_main_or_owned_tab_view(&webview, request.meta.request_id.clone())?;
     service.require_ready(request.meta.request_id)?;
     let mut state = service
         .app_integrations

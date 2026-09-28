@@ -1411,6 +1411,7 @@ fn map_sftp_error(error: SftpProductionError) -> PluginApiErrorCode {
         | SftpProductionError::NonUtf8RemotePath => PluginApiErrorCode::InvalidRequest,
         SftpProductionError::Runtime(
             SftpRuntimeError::InvalidState
+            | SftpRuntimeError::LocalDirectoryTimeout
             | SftpRuntimeError::UnsafeReplaceUnsupported
             | SftpRuntimeError::ProgressRegression
             | SftpRuntimeError::LengthMismatch
