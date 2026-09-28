@@ -222,6 +222,8 @@ pub struct DesktopResolutionRequest {
     pub generation: WireSequence,
     pub width: u16,
     pub height: u16,
+    /// Remote UI scale in percent, 100..=500. RDP applies it through Display Control; VNC ignores it.
+    pub scale_percent: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -286,6 +288,8 @@ pub struct DesktopFrameRequest {
     pub session_id: String,
     pub generation: WireSequence,
     pub after_sequence: WireSequence,
+    /// Last cursor revision the view applied; a newer revision adds the cursor block to the response.
+    pub after_cursor_sequence: WireSequence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

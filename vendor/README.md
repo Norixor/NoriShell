@@ -97,3 +97,4 @@
 - crates.io 基线：`vnc-rs 0.5.3`；上游 revision：`ab684d009d767c968af2f7559576334038623124`。
 - 许可证：`MIT OR Apache-2.0`，正文保留在本目录对应子目录。
 - 相对发布包发生修改的文件（忽略 CRLF/LF 差异）：`Cargo.toml`、`src/client/messages.rs`、`src/client/mod.rs`、`src/codec/mod.rs`、`src/codec/raw.rs`、`src/codec/tight.rs`、`src/codec/zrle.rs`、`src/config.rs`、`src/error.rs`、`src/event.rs`、`src/lib.rs`。
+- 本项目新增文件：`src/client/hardened.rs`（有界握手与消息循环，协商 RGBA 像素格式、Cursor 伪编码与缓冲读取）。

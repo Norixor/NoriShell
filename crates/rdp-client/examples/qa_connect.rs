@@ -2,11 +2,18 @@
 //! Approval of a temporary self-signed certificate is restricted to the exact caller-supplied SHA-256 fingerprint.
 
 use norishell_desktop_protocol::{
-    AudioMuteState, AudioPlaybackState, DesktopInput, EngineCommand, EngineControl, EngineError,
-    EngineEvent, EventSink,
+    AudioMuteState, AudioPlaybackState, DesktopFrame, DesktopInput, EngineCommand, EngineControl,
+    EngineError, EngineEvent, EventSink,
 };
 use norishell_rdp_client::{CertificateApproval, GraphicsMode, RdpOptions, TransportMode, run};
-use std::{env, error::Error, fs, path::Path, sync::Arc, time::Duration};
+use std::{
+    env,
+    error::Error,
+    fs,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot, watch},
@@ -21,6 +28,37 @@ enum Observation {
     Ready,
     Frame(Arc<norishell_desktop_protocol::DesktopFrame>),
     Audio(AudioPlaybackState),
+}
+
+/// Rebuilds the composed desktop from full frames and patches, as Core's projection does.
+fn observer(observed_tx: mpsc::UnboundedSender<Observation>) -> EventSink {
+    let composed = Mutex::new(None::<DesktopFrame>);
+    Arc::new(move |event| match event {
+        EngineEvent::Ready => {
+            let _ = observed_tx.send(Observation::Ready);
+        }
+        EngineEvent::Frame(frame) => {
+            *composed.lock().unwrap() = Some((*frame).clone());
+            let _ = observed_tx.send(Observation::Frame(frame));
+        }
+        EngineEvent::FramePatch(patch) => {
+            let mut composed = composed.lock().unwrap();
+            let Some(frame) = composed.as_mut() else {
+                panic!("RDP sent a frame patch before a full frame");
+            };
+            frame
+                .apply_patch(&patch)
+                .expect("RDP frame patch must match the last full frame");
+            let _ = observed_tx.send(Observation::Frame(Arc::new(frame.clone())));
+        }
+        EngineEvent::Cursor(_)
+        | EngineEvent::Clipboard(_)
+        | EngineEvent::RdpTransport(_)
+        | EngineEvent::RdpGraphics(_) => {}
+        EngineEvent::AudioState(state) => {
+            let _ = observed_tx.send(Observation::Audio(state));
+        }
+    })
 }
 
 fn required(name: &str) -> String {
@@ -80,18 +118,7 @@ async fn observe_failed_authentication(
     let (stop_tx, stop) = watch::channel(false);
     let (_epoch_tx, focus_epoch) = watch::channel(0_u64);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let sink: EventSink = Arc::new(move |event| match event {
-        EngineEvent::Ready => {
-            let _ = observed_tx.send(Observation::Ready);
-        }
-        EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
-            let _ = observed_tx.send(Observation::Frame(frame));
-        }
-        EngineEvent::Clipboard(_) | EngineEvent::RdpTransport(_) | EngineEvent::RdpGraphics(_) => {}
-        EngineEvent::AudioState(state) => {
-            let _ = observed_tx.send(Observation::Audio(state));
-        }
-    });
+    let sink = observer(observed_tx);
     let mut task = tokio::spawn(run(
         Box::new(stream),
         options(password, expected_fingerprint),
@@ -214,18 +241,7 @@ async fn successful_session(
     let (stop_tx, stop) = watch::channel(false);
     let (_epoch_tx, focus_epoch) = watch::channel(0_u64);
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let sink: EventSink = Arc::new(move |event| match event {
-        EngineEvent::Ready => {
-            let _ = observed_tx.send(Observation::Ready);
-        }
-        EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
-            let _ = observed_tx.send(Observation::Frame(frame));
-        }
-        EngineEvent::Clipboard(_) | EngineEvent::RdpTransport(_) | EngineEvent::RdpGraphics(_) => {}
-        EngineEvent::AudioState(state) => {
-            let _ = observed_tx.send(Observation::Audio(state));
-        }
-    });
+    let sink = observer(observed_tx);
     let task = tokio::spawn(run(
         Box::new(stream),
         options(password, expected_fingerprint),
@@ -319,18 +335,7 @@ async fn audio_playback_session(
     let (_epoch_tx, focus_epoch) = watch::channel(0_u64);
     let (mute_tx, audio_muted) = watch::channel(AudioMuteState::default());
     let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let sink: EventSink = Arc::new(move |event| match event {
-        EngineEvent::Ready => {
-            let _ = observed_tx.send(Observation::Ready);
-        }
-        EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
-            let _ = observed_tx.send(Observation::Frame(frame));
-        }
-        EngineEvent::Clipboard(_) | EngineEvent::RdpTransport(_) | EngineEvent::RdpGraphics(_) => {}
-        EngineEvent::AudioState(state) => {
-            let _ = observed_tx.send(Observation::Audio(state));
-        }
-    });
+    let sink = observer(observed_tx);
     let mut task = tokio::spawn(run(
         Box::new(stream),
         audio_options(password, expected_fingerprint, audio_muted),

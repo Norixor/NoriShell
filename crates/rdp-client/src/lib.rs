@@ -11,13 +11,15 @@ use ironrdp::{
     connector::{self, ClientConnector, ClientConnectorState, Credentials},
     core::WriteBuf,
     graphics::image_processing::PixelFormat,
+    graphics::pointer::DecodedPointer,
     input::{Database, MouseButton, MousePosition, Operation, Scancode, WheelRotations},
     session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput, image::DecodedImage},
 };
 use norishell_desktop_protocol::{
-    AudioMuteState, BoxedDesktopIo, DesktopFrame, DesktopInput, DesktopRect, EngineCommand,
-    EngineControl, EngineError, EngineEvent, EventSink, RdpGraphicsActual, RdpTransportActual,
-    Result, frame_len,
+    AudioMuteState, BoxedDesktopIo, CursorBitmap, DesktopCursor, DesktopFrame, DesktopInput,
+    DesktopRect, DirtyRegion, EngineCommand, EngineControl, EngineError, EngineEvent, EventSink,
+    FramePatch, PUBLISH_INTERVAL, RdpGraphicsActual, RdpTransportActual, Result, frame_len,
+    read_rect,
 };
 use std::{
     net::SocketAddr,
@@ -46,6 +48,21 @@ fn record_protocol_failure(stage: &'static str, detail: impl std::fmt::Display) 
 
 #[cfg(not(debug_assertions))]
 fn record_protocol_failure(_: &'static str, _: impl std::fmt::Display) {}
+
+/// The WebView draws the remote pointer locally (CSS cursor), so IronRDP must emit pointer bitmaps
+/// instead of compositing them into decoded frame pixels.
+const POINTER_SOFTWARE_RENDERING: bool = false;
+
+/// Runs CPU-heavy protocol decoding without stalling other tasks on the same async worker.
+/// `block_in_place` is only valid on the multi-threaded runtime; tests use `current_thread`.
+fn decode_in_place<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
 
 pub struct RdpOptions {
     pub server_name: String,
@@ -181,7 +198,7 @@ async fn inner(
         share_id: result.share_id,
         compression_type: result.compression_type,
         enable_server_pointer: result.enable_server_pointer,
-        pointer_software_rendering: result.pointer_software_rendering,
+        pointer_software_rendering: POINTER_SOFTWARE_RENDERING,
     }
     .build();
     if udp.established() {
@@ -194,8 +211,15 @@ async fn inner(
     let mut pending_resize: Option<(EngineCommand, tokio::time::Instant)> = None;
     let mut pending_apply: Option<(EngineCommand, u16, u16, tokio::time::Instant)> = None;
     let mut last_transport = None;
+    let mut presentation = Presentation::default();
     (events)(EngineEvent::Ready);
     loop {
+        if presentation
+            .due()
+            .is_some_and(|due| due <= tokio::time::Instant::now())
+        {
+            presentation.flush(&image, &events)?;
+        }
         let transport = graphics_transport(&active, &udp);
         if last_transport != Some(transport) {
             (events)(EngineEvent::RdpTransport(transport));
@@ -235,6 +259,7 @@ async fn inner(
                 &mut active,
                 &activation,
                 &events,
+                &mut presentation,
                 soft_sync,
                 &graphics_unavailable,
                 &graphics_seen,
@@ -255,6 +280,7 @@ async fn inner(
                 &udp,
                 &clip,
                 &events,
+                &mut presentation,
                 clipboard_enabled,
             )
             .await;
@@ -288,6 +314,7 @@ async fn inner(
             .into_iter()
             .chain(pending_apply.as_ref().map(|(_, _, _, deadline)| *deadline))
             .min();
+        let publish_due = presentation.due();
         tokio::select! { biased;
             _=async move {
                 if let Some(deadline) = resize_deadline {
@@ -306,12 +333,19 @@ async fn inner(
                     let _ = command.completion.send(Err(EngineError::RdpResolutionNotApplied));
                 }
             }
+            // The loop head flushes pending pixels once their coalescing interval has elapsed.
+            _=async move {
+                match publish_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }=>{}
             changed=control.focus_epoch.changed()=> {
                 if changed.is_err() { return Err(EngineError::Cancelled); }
                 let released=input.release_all();
                 for chunk in released.chunks(15) {
                     let outputs=active.process_fastpath_input(&mut image,chunk).map_err(|_|EngineError::Protocol)?;
-                    process_outputs(outputs,&mut wire,&mut image,&mut active,&activation,&events,&mut udp,soft_sync).await?;
+                    process_outputs(outputs,&mut wire,&mut image,&mut active,&activation,&events,&mut presentation,&mut udp,soft_sync).await?;
                 }
             }
             command=commands.recv()=> {
@@ -326,7 +360,7 @@ async fn inner(
                     && let Some((previous, _, _, _)) = pending_apply.take() {
                     let _ = previous.completion.send(Err(EngineError::StaleInput));
                 }
-                let result=send_input(&command,control,&mut input,&mut active,&mut image,&mut wire,&udp,&clip,&events,clipboard_enabled).await;
+                let result=send_input(&command,control,&mut input,&mut active,&mut image,&mut wire,&udp,&clip,&events,&mut presentation,clipboard_enabled).await;
                 if command.focus_epoch.is_none() && matches!(result, Err(EngineError::RdpResolutionUnavailable)) {
                     pending_resize = Some((command, tokio::time::Instant::now() + Duration::from_secs(4)));
                     continue;
@@ -344,9 +378,9 @@ async fn inner(
                 let (action,bytes)=packet.inspect_err(|error| { record_protocol_failure("wire.pdu", error); })?;
                 limits.check(action,&bytes).inspect_err(|error| { record_protocol_failure("limits.check", error); })?;
                 graphics_seen.store(false, Ordering::Relaxed);
-                let outputs=active.process(&mut image,action,&bytes).map_err(|error| { record_protocol_failure("active.process", error.report()); EngineError::Protocol })?;
+                let outputs=decode_in_place(|| active.process(&mut image,action,&bytes)).map_err(|error| { record_protocol_failure("active.process", error.report()); EngineError::Protocol })?;
                 check_graphics_mode(&outputs, &graphics_unavailable, &graphics_seen, &graphics_actual, required_avc, &events)?;
-                if process_outputs(outputs,&mut wire,&mut image,&mut active,&activation,&events,&mut udp,soft_sync).await.inspect_err(|error| { record_protocol_failure("process_outputs", error); })? { return Ok(()); }
+                if process_outputs(outputs,&mut wire,&mut image,&mut active,&activation,&events,&mut presentation,&mut udp,soft_sync).await.inspect_err(|error| { record_protocol_failure("process_outputs", error); })? { return Ok(()); }
                 flush_clipboard(&mut active,&mut wire,&clip).await.inspect_err(|error| { record_protocol_failure("flush_clipboard", error); })?;
             }
             payload=udp.recv(), if udp.available() && pending_udp_payload.is_none()=> {
@@ -354,7 +388,7 @@ async fn inner(
                     Some(payload) if payload.is_empty() => {},
                     Some(payload) if payload.len() > u16::MAX as usize => return Err(EngineError::ResourceLimit),
                     Some(payload) if active.reliable_udp_dvc_tunnel_in_use() => {
-                        process_udp_payload(&payload,&mut udp,&mut wire,&mut image,&mut active,&activation,&events,soft_sync,&graphics_unavailable,&graphics_seen,&graphics_actual,required_avc).await.inspect_err(|error| { record_protocol_failure("udp_payload", error); })?;
+                        process_udp_payload(&payload,&mut udp,&mut wire,&mut image,&mut active,&activation,&events,&mut presentation,soft_sync,&graphics_unavailable,&graphics_seen,&graphics_actual,required_avc).await.inspect_err(|error| { record_protocol_failure("udp_payload", error); })?;
                     }
                     Some(payload) => pending_udp_payload=Some(payload),
                     None if active.reliable_udp_dvc_tunnel_in_use() => return Err(EngineError::ConnectionLost),
@@ -367,7 +401,7 @@ async fn inner(
 
 fn resize_target(input: &DesktopInput) -> Option<(u16, u16)> {
     match input {
-        DesktopInput::Resize { width, height } => Some((*width, *height)),
+        DesktopInput::Resize { width, height, .. } => Some((*width, *height)),
         _ => None,
     }
 }
@@ -745,7 +779,7 @@ fn config(options: &RdpOptions) -> connector::Config {
         enable_audio_playback: options.audio_playback_enabled,
         enable_audio_capture: false,
         compression_type: None,
-        pointer_software_rendering: true,
+        pointer_software_rendering: POINTER_SOFTWARE_RENDERING,
         multitransport_flags: options
             .udp_peer
             .filter(|_| options.transport_mode != TransportMode::TcpOnly)
@@ -786,44 +820,240 @@ fn dirty_rect(
     rect.fits(width, height).then_some(rect)
 }
 
-fn publish(image: &DecodedImage, dirty: Option<DesktopRect>, events: &EventSink) -> Result<()> {
-    #[cfg(debug_assertions)]
-    let copy_started = std::time::Instant::now();
-    let expected = frame_len(image.width(), image.height())?;
-    if image.data().len() != expected {
-        return Err(EngineError::Protocol);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishKind {
+    Nothing,
+    Full,
+    Patch,
+}
+
+/// Chooses between a full frame and a patch. A full frame is required after activation, a size change, an
+/// out-of-bounds region, or when the dirty area reaches 60% of the frame (a patch would save little).
+fn publish_kind(force_full: bool, region: &DirtyRegion, width: u16, height: u16) -> PublishKind {
+    if force_full || !region.fits(width, height) {
+        return PublishKind::Full;
     }
-    let frame = Arc::new(DesktopFrame {
-        width: image.width(),
-        height: image.height(),
-        rgba: image.data().to_vec(),
-    });
+    if region.is_empty() {
+        return PublishKind::Nothing;
+    }
+    let frame_area = u64::from(width) * u64::from(height);
+    if region.area() * 10 >= frame_area * 6 {
+        PublishKind::Full
+    } else {
+        PublishKind::Patch
+    }
+}
+
+/// Converts an IronRDP accelerated-target pointer (straight RGBA; inverted pixels already expanded to a
+/// checker pattern) into a WebView cursor. A zero-sized pointer means hidden; an invalid one falls back to
+/// the default arrow instead of failing the session.
+fn cursor_from_pointer(pointer: &DecodedPointer) -> DesktopCursor {
+    if pointer.width == 0 || pointer.height == 0 {
+        return DesktopCursor::Hidden;
+    }
+    match CursorBitmap::new(
+        pointer.width,
+        pointer.height,
+        pointer.hotspot_x,
+        pointer.hotspot_y,
+        pointer.bitmap_data.clone(),
+    ) {
+        Ok(bitmap) => DesktopCursor::Bitmap(Arc::new(bitmap)),
+        Err(_) => DesktopCursor::Default,
+    }
+}
+
+/// Engine-side presentation state: decoded pixels changed since the last publish and the last cursor sent.
+/// Protocol updates only record damage; the engine loop publishes at most once per `PUBLISH_INTERVAL`.
+#[derive(Default)]
+struct Presentation {
+    region: DirtyRegion,
+    needs_full: bool,
+    pending: bool,
+    /// `None` publishes immediately (first frame, reactivation).
+    last_publish: Option<tokio::time::Instant>,
+    published_size: Option<(u16, u16)>,
+    cursor: Option<DesktopCursor>,
+    /// Identity of the last converted pointer so cached pointer re-selection skips reconversion.
+    cursor_source: Option<Arc<DecodedPointer>>,
     #[cfg(debug_assertions)]
-    {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNT: AtomicU64 = AtomicU64::new(0);
-        static BYTES: AtomicU64 = AtomicU64::new(0);
-        static COPY_US: AtomicU64 = AtomicU64::new(0);
-        let count = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        let bytes = BYTES.fetch_add(expected as u64, Ordering::Relaxed) + expected as u64;
-        let last_copy_us = copy_started.elapsed().as_micros() as u64;
-        let copy_us = COPY_US.fetch_add(last_copy_us, Ordering::Relaxed) + last_copy_us;
-        if count.is_multiple_of(60) {
-            record_protocol_failure(
-                "publish.60",
-                format_args!(
-                    "frames={count} copied_bytes={bytes} copy_us={copy_us} size={}x{} last_dirty={dirty:?}",
-                    image.width(),
-                    image.height()
-                ),
-            );
+    stats: PublishStats,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct PublishStats {
+    frames: u64,
+    patches: u64,
+    bytes: u64,
+    copy_us: u64,
+}
+
+impl Presentation {
+    fn mark(&mut self, rect: Option<DesktopRect>) {
+        self.pending = true;
+        match rect {
+            Some(rect) => self.region.add(rect),
+            None => self.needs_full = true,
         }
     }
-    events(match dirty {
-        Some(rect) => EngineEvent::FrameDirty(frame, rect),
-        None => EngineEvent::Frame(frame),
-    });
-    Ok(())
+
+    /// After (re)activation the decode buffer was replaced; publish it in full without waiting.
+    fn reset_after_activation(&mut self) {
+        self.needs_full = true;
+        self.pending = true;
+        self.region.clear();
+        self.last_publish = None;
+        // The rebuilt fast-path processor drops its pointer cache; identity no longer proves equality.
+        self.cursor_source = None;
+    }
+
+    fn due(&self) -> Option<tokio::time::Instant> {
+        if !self.pending {
+            return None;
+        }
+        Some(match self.last_publish {
+            Some(last) => last + PUBLISH_INTERVAL,
+            None => tokio::time::Instant::now(),
+        })
+    }
+
+    /// Records damage and pointer changes from one processing batch. Must run before any later
+    /// `ActiveStage` processing call, which clears the stage's damage list.
+    fn observe(
+        &mut self,
+        outputs: &[ActiveStageOutput],
+        active: &mut ActiveStage,
+        image: &DecodedImage,
+        events: &EventSink,
+    ) {
+        let mut updates = Vec::new();
+        let mut cursor = None;
+        for output in outputs {
+            match output {
+                ActiveStageOutput::GraphicsUpdate(rect) => updates.push(rect.clone()),
+                ActiveStageOutput::PointerDefault
+                | ActiveStageOutput::PointerHidden
+                | ActiveStageOutput::PointerBitmap(_) => cursor = Some(output),
+                // Server-side pointer warps are ignored; the local pointer stays under user control.
+                _ => {}
+            }
+        }
+        if !updates.is_empty() {
+            // Exact per-rectangle damage (EGFX composites report one bounding box per batch).
+            let damage = active.take_damage_regions();
+            let rects = if damage.is_empty() { updates } else { damage };
+            for rect in rects {
+                self.mark(dirty_rect(
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    image.width(),
+                    image.height(),
+                ));
+            }
+        }
+        // Only the final pointer state of a batch matters (cached selection emits Hidden then Bitmap).
+        if let Some(output) = cursor {
+            self.set_cursor(output, events);
+        }
+    }
+
+    fn set_cursor(&mut self, output: &ActiveStageOutput, events: &EventSink) {
+        let next = match output {
+            ActiveStageOutput::PointerDefault => DesktopCursor::Default,
+            ActiveStageOutput::PointerHidden => DesktopCursor::Hidden,
+            ActiveStageOutput::PointerBitmap(pointer) => {
+                if matches!(self.cursor, Some(DesktopCursor::Bitmap(_)))
+                    && self
+                        .cursor_source
+                        .as_ref()
+                        .is_some_and(|source| Arc::ptr_eq(source, pointer))
+                {
+                    return;
+                }
+                self.cursor_source = Some(pointer.clone());
+                cursor_from_pointer(pointer)
+            }
+            _ => return,
+        };
+        if !matches!(next, DesktopCursor::Bitmap(_)) {
+            self.cursor_source = None;
+        }
+        if self.cursor.as_ref() == Some(&next) {
+            return;
+        }
+        self.cursor = Some(next.clone());
+        events(EngineEvent::Cursor(next));
+    }
+
+    fn flush(&mut self, image: &DecodedImage, events: &EventSink) -> Result<()> {
+        #[cfg(debug_assertions)]
+        let copy_started = std::time::Instant::now();
+        let (width, height) = (image.width(), image.height());
+        let expected = frame_len(width, height)?;
+        if image.data().len() != expected {
+            return Err(EngineError::Protocol);
+        }
+        let force_full = self.needs_full || self.published_size != Some((width, height));
+        let kind = publish_kind(force_full, &self.region, width, height);
+        let mut copied = 0usize;
+        match kind {
+            PublishKind::Nothing => {}
+            PublishKind::Full => {
+                copied = expected;
+                events(EngineEvent::Frame(Arc::new(DesktopFrame {
+                    width,
+                    height,
+                    rgba: image.data().to_vec(),
+                })));
+                self.published_size = Some((width, height));
+            }
+            PublishKind::Patch => {
+                let rects: Vec<_> = self
+                    .region
+                    .rects()
+                    .iter()
+                    .map(|rect| (*rect, read_rect(image.data(), width, *rect)))
+                    .collect();
+                copied = rects.iter().map(|(_, rgba)| rgba.len()).sum();
+                events(EngineEvent::FramePatch(FramePatch {
+                    width,
+                    height,
+                    rects,
+                }));
+            }
+        }
+        self.region.clear();
+        self.needs_full = false;
+        self.pending = false;
+        self.last_publish = Some(tokio::time::Instant::now());
+        #[cfg(debug_assertions)]
+        {
+            let stats = &mut self.stats;
+            match kind {
+                PublishKind::Full => stats.frames += 1,
+                PublishKind::Patch => stats.patches += 1,
+                PublishKind::Nothing => {}
+            }
+            stats.bytes += copied as u64;
+            stats.copy_us += copy_started.elapsed().as_micros() as u64;
+            let published = stats.frames + stats.patches;
+            if kind != PublishKind::Nothing && published.is_multiple_of(60) {
+                record_protocol_failure(
+                    "publish.60",
+                    format_args!(
+                        "frames={} patches={} copied_bytes={} copy_us={} size={width}x{height}",
+                        stats.frames, stats.patches, stats.bytes, stats.copy_us
+                    ),
+                );
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = copied;
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -834,36 +1064,14 @@ async fn process_outputs(
     active: &mut ActiveStage,
     activation: &connector::connection_activation::ConnectionActivationFactory,
     events: &EventSink,
+    presentation: &mut Presentation,
     udp: &mut udp::UdpSession,
     soft_sync: bool,
 ) -> Result<bool> {
-    let mut changed = false;
-    let mut dirty: Option<DesktopRect> = None;
-    let mut full = false;
+    presentation.observe(&outputs, active, image, events);
     for output in outputs {
         match output {
             ActiveStageOutput::ResponseFrame(frame) => wire.write(&frame).await?,
-            ActiveStageOutput::GraphicsUpdate(rect) => {
-                changed = true;
-                if !full {
-                    match dirty_rect(
-                        rect.left,
-                        rect.top,
-                        rect.right,
-                        rect.bottom,
-                        image.width(),
-                        image.height(),
-                    ) {
-                        Some(next) => {
-                            dirty = Some(dirty.map_or(next, |previous| previous.union(next)))
-                        }
-                        None => {
-                            full = true;
-                            dirty = None;
-                        }
-                    }
-                }
-            }
             ActiveStageOutput::Terminate(_) => return Ok(true),
             ActiveStageOutput::MultitransportRequest(request) => {
                 let success = udp.bootstrap(request.clone(), soft_sync).await;
@@ -883,23 +1091,20 @@ async fn process_outputs(
                 let mut sequence = activation.create();
                 loop {
                     wire.step(&mut sequence).await?;
-                    if let connector::connection_activation::ConnectionActivationState::Finalized { desktop_size,share_id,enable_server_pointer,pointer_software_rendering, .. }=sequence.connection_activation_state() {
+                    if let connector::connection_activation::ConnectionActivationState::Finalized { desktop_size,share_id,enable_server_pointer, .. }=sequence.connection_activation_state() {
                         frame_len(desktop_size.width,desktop_size.height)?;
                         *image=DecodedImage::new(PixelFormat::RgbA32,desktop_size.width,desktop_size.height);
-                        full = true;
-                        dirty = None;
+                        presentation.reset_after_activation();
                         active.set_share_id(share_id);
                         active.set_enable_server_pointer(enable_server_pointer);
-                        active.set_fastpath_processor(ironrdp::session::fast_path::ProcessorBuilder { io_channel_id:activation.io_channel_id(),user_channel_id:activation.user_channel_id(),share_id,enable_server_pointer,pointer_software_rendering }.build());
-                        changed=true; break;
+                        active.set_fastpath_processor(ironrdp::session::fast_path::ProcessorBuilder { io_channel_id:activation.io_channel_id(),user_channel_id:activation.user_channel_id(),share_id,enable_server_pointer,pointer_software_rendering:POINTER_SOFTWARE_RENDERING }.build());
+                        break;
                     }
                 }
             }
+            // Graphics and pointer outputs were consumed by `observe` above.
             _ => {}
         }
-    }
-    if changed {
-        publish(image, dirty, events)?;
     }
     Ok(false)
 }
@@ -913,6 +1118,7 @@ async fn process_udp_payload(
     active: &mut ActiveStage,
     activation: &connector::connection_activation::ConnectionActivationFactory,
     events: &EventSink,
+    presentation: &mut Presentation,
     soft_sync: bool,
     graphics_unavailable: &AtomicBool,
     graphics_seen: &AtomicBool,
@@ -922,9 +1128,10 @@ async fn process_udp_payload(
     use ironrdp::dvc::pdu::SoftSyncTunnelType;
     limits::Limits::check_udp_dvc(payload)?;
     graphics_seen.store(false, Ordering::Relaxed);
-    let (batch, outputs) = active
-        .process_dvc_tunnel(image, SoftSyncTunnelType::RELIABLE_UDP, payload)
-        .map_err(|_| EngineError::Protocol)?;
+    let (batch, outputs) = decode_in_place(|| {
+        active.process_dvc_tunnel(image, SoftSyncTunnelType::RELIABLE_UDP, payload)
+    })
+    .map_err(|_| EngineError::Protocol)?;
     check_graphics_mode(
         &outputs,
         graphics_unavailable,
@@ -951,7 +1158,15 @@ async fn process_udp_payload(
         }
     }
     if process_outputs(
-        outputs, wire, image, active, activation, events, udp, soft_sync,
+        outputs,
+        wire,
+        image,
+        active,
+        activation,
+        events,
+        presentation,
+        udp,
+        soft_sync,
     )
     .await?
     {
@@ -971,18 +1186,27 @@ async fn send_input(
     udp: &udp::UdpSession,
     clip: &Arc<Mutex<clipboard::State>>,
     events: &EventSink,
+    presentation: &mut Presentation,
     clipboard_enabled: bool,
 ) -> Result<()> {
     if !control.accepts(command) {
         return Err(EngineError::StaleInput);
     }
     match &command.input {
-        DesktopInput::Resize { width, height } => {
+        DesktopInput::Resize {
+            width,
+            height,
+            scale_percent,
+        } => {
             if *width < 200 || *height < 200 || width % 2 != 0 {
                 return Err(EngineError::InvalidConfiguration);
             }
+            // Every request carries an explicit scale so returning to 100% after a HiDPI layout takes effect;
+            // an absent field would let the server keep the previous factor. Physical size is optional in
+            // MS-RDPEDISP and unknown to the engine, so it is not sent.
+            let scale_factor = Some(u32::from(*scale_percent));
             let batch = active
-                .prepare_resize(u32::from(*width), u32::from(*height), None, None)
+                .prepare_resize(u32::from(*width), u32::from(*height), scale_factor, None)
                 .ok_or(EngineError::RdpResolutionUnavailable)?
                 .map_err(|_| EngineError::Protocol)?;
             if !control.accepts(command) {
@@ -1052,32 +1276,18 @@ async fn send_input(
                 let outputs = active
                     .process_fastpath_input(image, chunk)
                     .map_err(|_| EngineError::Protocol)?;
+                presentation.observe(&outputs, active, image, events);
                 for output in outputs {
-                    match output {
-                        ActiveStageOutput::ResponseFrame(bytes) => {
-                            if !control.accepts(command) {
-                                return Err(EngineError::StaleInput);
-                            }
-                            wire.write_fenced(
-                                &bytes,
-                                control,
-                                command.focus_epoch.ok_or(EngineError::StaleInput)?,
-                            )
-                            .await?;
+                    if let ActiveStageOutput::ResponseFrame(bytes) = output {
+                        if !control.accepts(command) {
+                            return Err(EngineError::StaleInput);
                         }
-                        ActiveStageOutput::GraphicsUpdate(rect) => publish(
-                            image,
-                            dirty_rect(
-                                rect.left,
-                                rect.top,
-                                rect.right,
-                                rect.bottom,
-                                image.width(),
-                                image.height(),
-                            ),
-                            events,
-                        )?,
-                        _ => {}
+                        wire.write_fenced(
+                            &bytes,
+                            control,
+                            command.focus_epoch.ok_or(EngineError::StaleInput)?,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1234,6 +1444,208 @@ mod tests {
         assert!(dirty_rect(0, 0, u16::MAX, 1, 8, 8).is_none());
         assert!(dirty_rect(4, 0, 3, 1, 8, 8).is_none());
     }
+    fn rect(x: u16, y: u16, width: u16, height: u16) -> DesktopRect {
+        DesktopRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn recording_sink() -> (EventSink, Arc<Mutex<Vec<EngineEvent>>>) {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let sink: EventSink = {
+            let recorded = recorded.clone();
+            Arc::new(move |event| recorded.lock().unwrap().push(event))
+        };
+        (sink, recorded)
+    }
+
+    #[test]
+    fn publish_decision_prefers_patches_for_small_regions() {
+        let mut region = DirtyRegion::default();
+        assert_eq!(publish_kind(false, &region, 100, 100), PublishKind::Nothing);
+        assert_eq!(publish_kind(true, &region, 100, 100), PublishKind::Full);
+        region.add(rect(0, 0, 10, 10));
+        assert_eq!(publish_kind(false, &region, 100, 100), PublishKind::Patch);
+        region.add(rect(0, 0, 100, 59));
+        assert_eq!(publish_kind(false, &region, 100, 100), PublishKind::Patch);
+        region.add(rect(0, 0, 100, 60));
+        assert_eq!(publish_kind(false, &region, 100, 100), PublishKind::Full);
+        let mut outside = DirtyRegion::default();
+        outside.add(rect(90, 90, 20, 20));
+        assert_eq!(publish_kind(false, &outside, 100, 100), PublishKind::Full);
+    }
+
+    #[test]
+    fn presentation_coalesces_updates_into_frame_then_patches() {
+        let (sink, recorded) = recording_sink();
+        let image = DecodedImage::new(PixelFormat::RgbA32, 64, 32);
+        let mut presentation = Presentation::default();
+        assert!(presentation.due().is_none());
+        presentation.mark(Some(rect(1, 1, 2, 2)));
+        // The first frame is due immediately and must be complete.
+        assert!(presentation.due().unwrap() <= tokio::time::Instant::now());
+        presentation.flush(&image, &sink).unwrap();
+        assert!(presentation.due().is_none());
+        presentation.mark(Some(rect(1, 1, 2, 2)));
+        presentation.mark(Some(rect(40, 20, 3, 1)));
+        let due = presentation.due().unwrap();
+        assert!(due > tokio::time::Instant::now());
+        presentation.flush(&image, &sink).unwrap();
+        presentation.mark(None);
+        presentation.flush(&image, &sink).unwrap();
+        presentation.reset_after_activation();
+        assert!(presentation.due().unwrap() <= tokio::time::Instant::now());
+        let events = recorded.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], EngineEvent::Frame(frame) if frame.rgba.len() == 64 * 32 * 4));
+        let EngineEvent::FramePatch(patch) = &events[1] else {
+            panic!("expected a patch");
+        };
+        assert_eq!((patch.width, patch.height), (64, 32));
+        assert_eq!(patch.rects.len(), 2);
+        for (rect, rgba) in &patch.rects {
+            assert_eq!(rgba.len(), rect.area() as usize * 4);
+        }
+        assert!(matches!(&events[2], EngineEvent::Frame(_)));
+    }
+
+    #[test]
+    fn size_change_forces_full_frame() {
+        let (sink, recorded) = recording_sink();
+        let mut presentation = Presentation::default();
+        presentation.mark(Some(rect(0, 0, 1, 1)));
+        presentation
+            .flush(&DecodedImage::new(PixelFormat::RgbA32, 8, 8), &sink)
+            .unwrap();
+        presentation.mark(Some(rect(0, 0, 1, 1)));
+        presentation
+            .flush(&DecodedImage::new(PixelFormat::RgbA32, 16, 8), &sink)
+            .unwrap();
+        let events = recorded.lock().unwrap();
+        assert!(matches!(&events[1], EngineEvent::Frame(frame) if frame.width == 16));
+    }
+
+    #[test]
+    fn pointer_conversion_keeps_straight_rgba_and_falls_back_safely() {
+        let pointer = DecodedPointer {
+            width: 2,
+            height: 1,
+            hotspot_x: 5,
+            hotspot_y: 0,
+            bitmap_data: vec![10, 20, 30, 128, 0, 0, 0, 0],
+        };
+        let DesktopCursor::Bitmap(bitmap) = cursor_from_pointer(&pointer) else {
+            panic!("expected a bitmap cursor");
+        };
+        assert_eq!(bitmap.rgba, pointer.bitmap_data);
+        assert_eq!((bitmap.hotspot_x, bitmap.hotspot_y), (1, 0));
+        assert_eq!(
+            cursor_from_pointer(&DecodedPointer::new_invisible()),
+            DesktopCursor::Hidden
+        );
+        let oversized = DecodedPointer {
+            width: 400,
+            height: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            bitmap_data: vec![0; 1600],
+        };
+        assert_eq!(cursor_from_pointer(&oversized), DesktopCursor::Default);
+        let truncated = DecodedPointer {
+            width: 2,
+            height: 2,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            bitmap_data: vec![0; 3],
+        };
+        assert_eq!(cursor_from_pointer(&truncated), DesktopCursor::Default);
+    }
+
+    #[test]
+    fn identical_cursors_are_sent_once() {
+        let (sink, recorded) = recording_sink();
+        let mut presentation = Presentation::default();
+        let pointer = Arc::new(DecodedPointer {
+            width: 1,
+            height: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            bitmap_data: vec![1, 2, 3, 255],
+        });
+        let same_pixels = Arc::new(DecodedPointer {
+            width: 1,
+            height: 1,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            bitmap_data: vec![1, 2, 3, 255],
+        });
+        for output in [
+            ActiveStageOutput::PointerBitmap(pointer.clone()),
+            ActiveStageOutput::PointerBitmap(pointer.clone()),
+            ActiveStageOutput::PointerBitmap(same_pixels),
+            ActiveStageOutput::PointerPosition { x: 3, y: 4 },
+            ActiveStageOutput::PointerHidden,
+            ActiveStageOutput::PointerHidden,
+            ActiveStageOutput::PointerBitmap(pointer),
+            ActiveStageOutput::PointerDefault,
+        ] {
+            presentation.set_cursor(&output, &sink);
+        }
+        let kinds: Vec<_> = recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| match event {
+                EngineEvent::Cursor(DesktopCursor::Bitmap(_)) => "bitmap",
+                EngineEvent::Cursor(DesktopCursor::Hidden) => "hidden",
+                EngineEvent::Cursor(DesktopCursor::Default) => "default",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["bitmap", "hidden", "bitmap", "default"]);
+    }
+
+    #[test]
+    fn rdp_uses_local_pointer_rendering() {
+        let (_audio_muted_tx, audio_muted) = tokio::sync::watch::channel(AudioMuteState::default());
+        let options = RdpOptions {
+            server_name: "rdp.test".into(),
+            udp_peer: None,
+            transport_mode: TransportMode::Auto,
+            graphics_mode: GraphicsMode::Auto,
+            username: "user".into(),
+            domain: None,
+            password: Zeroizing::new(String::new()),
+            width: 800,
+            height: 600,
+            clipboard_enabled: false,
+            audio_playback_enabled: false,
+            audio_muted,
+            certificate_approval: None,
+        };
+        let config = config(&options);
+        assert!(!config.pointer_software_rendering);
+        assert!(config.enable_server_pointer);
+    }
+
+    #[test]
+    fn decoding_runs_inline_without_multi_thread_runtime() {
+        assert_eq!(decode_in_place(|| 7), 7);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(async { tokio::spawn(async { decode_in_place(|| 9) }).await })
+                .unwrap(),
+            9
+        );
+    }
+
     #[test]
     fn forced_avc_rejects_legacy_bitmap_before_reporting_a_frame() {
         let outputs = [ActiveStageOutput::GraphicsUpdate(

@@ -6,13 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NvxDesktopDisplaySettings from "../components/desktop/NvxDesktopDisplaySettings.vue";
 import DesktopView from "./DesktopView.vue";
 import { desktopEn } from "../locales/desktop";
+import { DESKTOP_LOCAL_PREFERENCES_KEY, reloadDesktopLocalPreferences } from "../components/desktop/localPreferences";
 import type { DesktopProfile, DesktopSessionSummary } from "../core-api/generated/core-api";
 import type { DesktopHeaderController } from "../stores/workspaceTabs";
 
 const mocks = vi.hoisted(() => ({
   save: vi.fn(), snapshot: vi.fn(), profiles: vi.fn(), availability: vi.fn(), focus: vi.fn(),
   openOwned: vi.fn(),
-  closeOwned: vi.fn(), disconnect: vi.fn(), invalidate: vi.fn(), remoteKey: vi.fn(),
+  closeOwned: vi.fn(), disconnect: vi.fn(), invalidate: vi.fn(), remoteKey: vi.fn(), sendKeys: vi.fn(),
   register: vi.fn(), sync: vi.fn(), tips: vi.fn(), windowAction: vi.fn(), ownership: vi.fn(),
   projectionUpdate: vi.fn(),
 }));
@@ -28,10 +29,11 @@ vi.mock("../stores/workspaceTabs", () => ({ useWorkspaceTabsStore: () => ({ regi
 vi.mock("../stores/tips", () => ({ useTipsStore: () => ({ show: mocks.tips }) }));
 vi.mock("../platform-window", () => ({ performWindowAction: mocks.windowAction }));
 vi.mock("../tool-windows", () => ({ openToolWindow: vi.fn(), onToolWindowChanged: vi.fn().mockResolvedValue(() => undefined) }));
+vi.mock("../platform", () => ({ detectDesktopPlatform: () => "macos" }));
 const canvas = defineComponent({
-  props: { session: { type: Object, default: undefined }, active: Boolean, fit: Boolean, panning: Boolean },
+  props: { session: { type: Object, default: undefined }, active: Boolean, fit: Boolean, panning: Boolean, commandAsControl: Boolean, hiDpi: Boolean },
   setup(_, { expose }) {
-    expose({ invalidate: mocks.invalidate });
+    expose({ invalidate: mocks.invalidate, sendKeys: mocks.sendKeys });
     return () => h("canvas", { tabindex: 0, onKeydown: mocks.remoteKey, onKeyup: mocks.remoteKey });
   },
 });
@@ -89,6 +91,9 @@ beforeEach(() => {
   mocks.profiles.mockResolvedValue([session().profile]);
   mocks.availability.mockResolvedValue([{ protocol: "rdp", available: true }]);
   mocks.invalidate.mockResolvedValue(undefined);
+  mocks.sendKeys.mockResolvedValue(true);
+  try { localStorage.removeItem(DESKTOP_LOCAL_PREFERENCES_KEY); } catch { /* storage optional */ }
+  reloadDesktopLocalPreferences();
   mocks.closeOwned.mockResolvedValue(undefined);
   mocks.projectionUpdate.mockResolvedValue(undefined);
   mocks.register.mockImplementation((value: DesktopHeaderController) => { controller = value; return () => undefined; });
@@ -538,5 +543,87 @@ describe("desktop display settings", () => {
     expect(mocks.save).not.toHaveBeenCalled();
     expect(mocks.disconnect).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain(desktopEn.displaySettingsInvalid);
+  });
+});
+
+describe("desktop session state and local controls", () => {
+  it.each([
+    ["connecting", desktopEn.phases.gatewayConnecting],
+    ["needsInteraction", desktopEn.states.needsInteraction],
+    ["disconnecting", desktopEn.states.disconnecting],
+  ] as const)("covers the screen with a %s progress overlay without a reconnect action", async (state, text) => {
+    mocks.snapshot.mockResolvedValue([{ ...session(), state, phase: "gatewayConnecting" }]);
+    const wrapper = await fixture();
+    const overlay = wrapper.get(".desktop-state--progress");
+    expect(overlay.text()).toContain(text);
+    expect(overlay.find("button").exists()).toBe(false);
+    expect(wrapper.get(".desktop-screen").classes()).toContain("desktop-screen--dimmed");
+    expect(wrapper.get('[aria-label="Send special keys"]').attributes("disabled")).toBeDefined();
+  });
+  it("explains a failed session in place of the stale image and reconnects from the overlay", async () => {
+    mocks.snapshot.mockResolvedValue([{ ...session(), state: "failed", failure: "connectionLost" }]);
+    const wrapper = await fixture();
+    const overlay = wrapper.get(".desktop-state--failed");
+    expect(overlay.text()).toContain(desktopEn.errors.connectionLost);
+    expect(wrapper.get(".desktop-screen").classes()).toContain("desktop-screen--ended");
+    expect(wrapper.find(".desktop-session .nvx-inline-notice--error").exists()).toBe(false);
+    await overlay.get("button").trigger("click");
+    await flushPromises();
+    expect(mocks.closeOwned).toHaveBeenCalledWith(expect.objectContaining({ id: "one" }));
+    expect(mocks.openOwned).toHaveBeenCalledOnce();
+  });
+  it("offers reconnect for a closed session and no overlay while running", async () => {
+    mocks.snapshot.mockResolvedValue([{ ...session(), state: "closed" }]);
+    const wrapper = await fixture();
+    expect(wrapper.get(".desktop-state--closed").text()).toContain(desktopEn.reconnect);
+    mocks.snapshot.mockResolvedValue([session()]);
+    await vi.advanceTimersByTimeAsync(750);
+    await flushPromises();
+    expect(wrapper.find(".desktop-state").exists()).toBe(false);
+    expect(wrapper.get(".desktop-screen").classes()).not.toContain("desktop-screen--ended");
+  });
+  it("sends special key chords through the display after choosing them from the toolbar menu", async () => {
+    const wrapper = await fixture();
+    const trigger = wrapper.get('[aria-label="Send special keys"]');
+    expect(trigger.attributes("aria-haspopup")).toBe("menu");
+    await trigger.trigger("click");
+    await flushPromises();
+    const items = wrapper.findAll('[role="menuitem"]');
+    expect(items.map((item) => item.text())).toEqual(Object.values(desktopEn.specialKeyNames));
+    await items[0]!.trigger("click");
+    await flushPromises();
+    expect(mocks.sendKeys).toHaveBeenCalledOnce();
+    const sequence = mocks.sendKeys.mock.calls[0]?.[0] as { scanCode: number; down: boolean }[];
+    expect(sequence.map((event) => [event.scanCode, event.down])).toEqual([[29, true], [56, true], [0x153, true], [0x153, false], [56, false], [29, false]]);
+    expect(wrapper.find('[role="menu"]').exists()).toBe(false);
+    mocks.sendKeys.mockResolvedValue(false);
+    await trigger.trigger("click");
+    await wrapper.findAll('[role="menuitem"]')[1]!.trigger("click");
+    await flushPromises();
+    expect(mocks.tips).toHaveBeenCalledWith(expect.objectContaining({ title: desktopEn.specialKeysFailed }));
+  });
+  it("applies device-local HiDPI and ⌘ preferences immediately and keeps them out of the profile", async () => {
+    const wrapper = await fixture(true);
+    await wrapper.get('[aria-label="Display settings"]').trigger("click");
+    await flushPromises();
+    const display = wrapper.getComponent(canvas);
+    expect(display.props("hiDpi")).toBe(false);
+    await wrapper.get("#desktop-local-hidpi").setValue(true);
+    await wrapper.get("#desktop-local-command-control").setValue(true);
+    expect(display.props("hiDpi")).toBe(true);
+    expect(display.props("commandAsControl")).toBe(true);
+    expect(JSON.parse(localStorage.getItem(DESKTOP_LOCAL_PREFERENCES_KEY) ?? "{}")).toEqual({ version: 1, commandAsControl: true, hiDpi: true });
+    expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.disconnect).not.toHaveBeenCalled();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
+  });
+  it("names the unavailable protocol and the profile being deleted", async () => {
+    mocks.availability.mockResolvedValue([{ protocol: "rdp", available: false, reasonKey: null }]);
+    const wrapper = await fixture(true);
+    expect(wrapper.get("#desktop-profiles .nvx-inline-notice--warning").text()).toContain("RDP is unavailable on this device.");
+    expect(wrapper.find('[aria-label="Send special keys"]').exists()).toBe(true);
+    wrapper.findComponent({ name: "NvxDesktopProfileMenu" }).vm.$emit("delete");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Delete the saved desktop “Desktop one”?");
   });
 });

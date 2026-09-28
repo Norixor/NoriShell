@@ -4,9 +4,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { Monitor, Plus, ChevronDown, RotateCw, Unplug, Scaling, Scan, Maximize2, ClipboardCopy, ClipboardPaste, Volume2, VolumeX, Hand, X, PanelLeftClose, PanelLeftOpen, Minimize2, Settings2 } from "lucide-vue-next";
-import { NvxButton, NvxDialog, NvxIcon, NvxIconButton, NvxInlineNotice, NvxField, NvxSelect } from "../components/ui";
+import { NvxButton, NvxCheckbox, NvxDialog, NvxIcon, NvxIconButton, NvxInlineNotice, NvxField, NvxSelect } from "../components/ui";
 import NvxDesktopProfileMenu from "../components/desktop/NvxDesktopProfileMenu.vue";
 import NvxDesktopDisplaySettings from "../components/desktop/NvxDesktopDisplaySettings.vue";
+import NvxDesktopSpecialKeysMenu from "../components/desktop/NvxDesktopSpecialKeysMenu.vue";
+import NvxDesktopStateOverlay from "../components/desktop/NvxDesktopStateOverlay.vue";
+import { useDesktopLocalPreferences } from "../components/desktop/localPreferences";
+import { desktopSpecialKeySequence, type DesktopSpecialKey } from "../components/desktop/input";
 import { parseCoreApiError } from "../core-api/client";
 import NvxDesktopCanvas from "../components/desktop/NvxDesktopCanvas.vue";
 import { desktopClient } from "../core-api/desktop-client";
@@ -19,10 +23,12 @@ import { onSavedConnectionsChanged } from "../saved-connections";
 import { filterDesktopSessions, type DesktopTabHandoffSnapshot } from "../workspace-desktop-handoff";
 import { snapshotWorkspaceTabs, updateOwnWorkspaceTabProjection } from "../workspace-tab-windows";
 import { runWorkspaceTabShellAction } from "../workspace-tab-shell-action";
+import { handOffClosingWorkspaceTabs, restoreClosedWorkspaceTabs } from "../workspace-tab-close-handoff";
 import { isWorkspaceTabView } from "../workspace-window-context";
 defineOptions({ name: "DesktopView" });
 const { t, te } = useI18n(), router = useRouter(), workspace = useWorkspaceTabsStore(), tips = useTipsStore();
 const revealRoute = useRouteReveal();
+const local = useDesktopLocalPreferences();
 let initialRouteReady = false;
 const availability = ref<DesktopAvailability[]>([]);
 const profiles = ref<DesktopProfile[]>([]), sessions = ref<DesktopSessionSummary[]>([]);
@@ -259,8 +265,10 @@ async function close(tabId: string) {
   const session = visibleSessions.value.find((item) => tabIdForSession(item.id) === tabId); if (!session) return;
   busy.value = true;
   try {
+    await handOffClosingWorkspaceTabs([tabId]);
     if (session.id === activeId.value) await display.value?.invalidate();
-    await desktopClient.closeOwned(session);
+    try { await desktopClient.closeOwned(session); }
+    catch (error) { await restoreClosedWorkspaceTabs([tabId]); throw error; }
     projectionRevision++;
     sessions.value = sessions.value.filter((item) => item.id !== session.id);
     if (activeId.value === session.id) activeId.value = visibleSessions.value[0]?.id ?? "";
@@ -304,6 +312,19 @@ async function clipboard(receive: boolean) {
     }
     if (stillCurrent()) notice("clipboardDone", "success");
   } catch { if (stillCurrent()) notice(); }
+}
+async function sendSpecialKeys(key: DesktopSpecialKey) {
+  const session = current.value;
+  if (!session || session.state !== "running" || panning.value) return;
+  const stillCurrent = () => current.value?.id === session.id && current.value?.generation === session.generation && active.value;
+  try {
+    if (!await display.value?.sendKeys(desktopSpecialKeySequence(key)) && stillCurrent()) notice("specialKeysFailed");
+  } catch { if (stillCurrent()) notice("specialKeysFailed"); }
+}
+function protocolUnavailable(protocol: DesktopProfile["protocol"]) {
+  const entry = availability.value.find((item) => item.protocol === protocol);
+  if (!entry || entry.available) return null;
+  return entry.reasonKey && te(entry.reasonKey) ? t(entry.reasonKey) : t("desktop.protocolUnavailable", { protocol: protocol.toUpperCase() });
 }
 function fullscreenElement() { return document.fullscreenElement ?? fullscreenDocument.webkitFullscreenElement ?? null; }
 function sessionKey() { return current.value ? `${current.value.id}:${current.value.generation}` : ""; }
@@ -576,9 +597,9 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <NvxInlineNotice
-                v-if="availability.some((item) => item.protocol === profile.protocol && !item.available)"
+                v-if="protocolUnavailable(profile.protocol)"
                 tone="warning"
-                :title="t('desktop.error')"
+                :title="protocolUnavailable(profile.protocol) ?? undefined"
               />
             </article>
           </div>
@@ -714,6 +735,11 @@ onBeforeUnmount(() => {
               role="status"
             >{{ t(`desktop.audioStates.${current.audioState}`) }}</span>
           </template>
+          <NvxDesktopSpecialKeysMenu
+            :disabled="busy || current.state !== 'running' || panning"
+            :active="active && !deleteTarget && !settingsDraft"
+            @send="sendSpecialKeys"
+          />
           <template v-if="current.profile.clipboardEnabled">
             <NvxIconButton
               size="sm"
@@ -751,15 +777,10 @@ onBeforeUnmount(() => {
         </div>
       </header>
       <template v-if="current">
-        <NvxInlineNotice
-          v-if="current.state === 'failed'"
-          tone="error"
-          :title="current.failure && te(`desktop.errors.${current.failure}`) ? t(`desktop.errors.${current.failure}`) : t('desktop.failure')"
-        />
         <div
           ref="fullscreenTarget"
           class="desktop-screen"
-          :class="{ 'desktop-screen--fullscreen': fullscreen }"
+          :class="{ 'desktop-screen--fullscreen': fullscreen, 'desktop-screen--dimmed': ['connecting', 'needsInteraction', 'disconnecting'].includes(current.state), 'desktop-screen--ended': ['failed', 'closed'].includes(current.state) }"
         >
           <NvxDesktopCanvas
             ref="display"
@@ -768,8 +789,15 @@ onBeforeUnmount(() => {
             :active="active && !stagedIds.has(tabIdForSession(current.id)) && !deleteTarget && !settingsDraft"
             :fit="fit"
             :panning="panning"
+            :command-as-control="local.commandAsControlAvailable && local.preferences.commandAsControl"
+            :hi-dpi="local.preferences.hiDpi"
             @error="notice('inputFailed')"
             @resolution-error="resolutionFailure"
+          />
+          <NvxDesktopStateOverlay
+            :session="current"
+            :busy="busy"
+            @reconnect="reconnect(current)"
           />
           <NvxIconButton
             v-if="fullscreen"
@@ -840,6 +868,32 @@ onBeforeUnmount(() => {
             id-prefix="desktop-session"
           />
         </div>
+        <section
+          class="desktop-settings-local"
+          :aria-label="t('desktop.localSettings')"
+        >
+          <h3>{{ t('desktop.localSettings') }}</h3>
+          <p>{{ t('desktop.localSettingsHint') }}</p>
+          <NvxCheckbox
+            id="desktop-local-hidpi"
+            :model-value="local.preferences.hiDpi"
+            @update:model-value="local.setHiDpi"
+          >
+            {{ t('desktop.hiDpi') }}<template #hint>
+              {{ t('desktop.hiDpiHint') }}
+            </template>
+          </NvxCheckbox>
+          <NvxCheckbox
+            v-if="local.commandAsControlAvailable"
+            id="desktop-local-command-control"
+            :model-value="local.preferences.commandAsControl"
+            @update:model-value="local.setCommandAsControl"
+          >
+            {{ t('desktop.commandAsControl') }}<template #hint>
+              {{ t('desktop.commandAsControlHint') }}
+            </template>
+          </NvxCheckbox>
+        </section>
       </template>
       <template #actions>
         <NvxButton
@@ -871,7 +925,7 @@ onBeforeUnmount(() => {
       :dismissible="!busy"
       @update:model-value="!$event && (deleteTarget = null)"
     >
-      <p>{{ t('desktop.confirmDelete') }}</p><template #actions>
+      <p>{{ t('desktop.confirmDelete', { label: deleteTarget?.label ?? '' }) }}</p><template #actions>
         <NvxButton
           variant="secondary"
           :disabled="busy"
@@ -891,6 +945,9 @@ onBeforeUnmount(() => {
 </template>
 <style scoped>
 .desktop-settings-vnc { margin-bottom: var(--nvx-space-3); }
+.desktop-settings-local { display: grid; gap: var(--nvx-space-3); margin-top: var(--nvx-space-4); padding-top: var(--nvx-space-4); border-top: 1px solid var(--nvx-color-border); }
+.desktop-settings-local h3 { margin: 0; font-size: var(--nvx-font-size-sm); font-weight: var(--nvx-font-weight-semibold); }
+.desktop-settings-local p { margin: 0; color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-xs); line-height: var(--nvx-line-height-sm); }
 .desktop-settings-current { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--nvx-space-3); margin: 0 0 var(--nvx-space-4); padding-bottom: var(--nvx-space-3); border-bottom: 1px solid var(--nvx-color-border); font-size: var(--nvx-font-size-sm); }
 .desktop-settings-current dt { color: var(--nvx-color-text-secondary); font-size: var(--nvx-font-size-xs); }
 .desktop-settings-current dd { margin: var(--nvx-space-1) 0 0; }
@@ -923,6 +980,9 @@ h1 { font-size: var(--nvx-font-size-sm); margin: 0; white-space: nowrap; }
 .desktop-toolbar__actions :deep(svg) { stroke-width: 1.25; }
 .desktop-toolbar__pan[aria-pressed="true"] { background: var(--nvx-color-bg-hover); color: var(--nvx-color-text-primary); }
 .desktop-screen { position: relative; flex: 1; min-height: 0; overflow: hidden; background: var(--nvx-color-terminal-bg); }
+/* A session that is not running never presents its last image as live. */
+.desktop-screen--dimmed > .desktop-display { opacity: 0.35; filter: grayscale(1); }
+.desktop-screen--ended > .desktop-display { visibility: hidden; }
 .desktop-screen:fullscreen, .desktop-screen:-webkit-full-screen {
   width: 100vw;
   height: 100vh;

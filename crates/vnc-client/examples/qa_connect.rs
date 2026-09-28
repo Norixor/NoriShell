@@ -1,7 +1,8 @@
 //! Smoke test against a real TigerVNC container, used only by qa/remote-desktop/smoke.sh.
 
 use norishell_desktop_protocol::{
-    DesktopInput, EngineCommand, EngineControl, EngineError, EngineEvent, EventSink,
+    DesktopFrame, DesktopInput, EngineCommand, EngineControl, EngineError, EngineEvent, EventSink,
+    FramePatch,
 };
 use norishell_vnc_client::{VncOptions, VncVersion, run};
 use std::{env, error::Error, fs, path::Path, sync::Arc, time::Duration};
@@ -14,10 +15,10 @@ use zeroize::Zeroizing;
 
 const WAIT: Duration = Duration::from_secs(30);
 
-#[derive(Clone)]
 enum Observation {
     Ready,
-    Frame(Arc<norishell_desktop_protocol::DesktopFrame>),
+    Frame(Arc<DesktopFrame>),
+    Patch(FramePatch),
 }
 
 fn required(name: &str) -> String {
@@ -84,10 +85,7 @@ async fn send_key(
     }
 }
 
-fn write_ppm(
-    path: &Path,
-    frame: &norishell_desktop_protocol::DesktopFrame,
-) -> Result<(), Box<dyn Error>> {
+fn write_ppm(path: &Path, frame: &DesktopFrame) -> Result<(), Box<dyn Error>> {
     let mut image = format!("P6\n{} {}\n255\n", frame.width, frame.height).into_bytes();
     for pixel in frame.rgba.chunks_exact(4) {
         image.extend_from_slice(&pixel[..3]);
@@ -106,10 +104,14 @@ async fn successful_session(address: &str, password: String) -> Result<(), Box<d
         EngineEvent::Ready => {
             let _ = observed_tx.send(Observation::Ready);
         }
-        EngineEvent::Frame(frame) | EngineEvent::FrameDirty(frame, _) => {
+        EngineEvent::Frame(frame) => {
             let _ = observed_tx.send(Observation::Frame(frame));
         }
-        EngineEvent::Clipboard(_)
+        EngineEvent::FramePatch(patch) => {
+            let _ = observed_tx.send(Observation::Patch(patch));
+        }
+        EngineEvent::Cursor(_)
+        | EngineEvent::Clipboard(_)
         | EngineEvent::AudioState(_)
         | EngineEvent::RdpTransport(_)
         | EngineEvent::RdpGraphics(_) => {}
@@ -128,6 +130,13 @@ async fn successful_session(address: &str, password: String) -> Result<(), Box<d
             match observed_rx.recv().await {
                 Some(Observation::Ready) => ready = true,
                 Some(Observation::Frame(next)) => frame = Some(next),
+                // A patch always follows the first full frame.
+                Some(Observation::Patch(patch)) => {
+                    let base = frame.as_mut().ok_or("VNC patch before a full frame")?;
+                    Arc::make_mut(base)
+                        .apply_patch(&patch)
+                        .map_err(|_| "VNC patch did not match the frame")?;
+                }
                 None => return Err("VNC event stream closed before ready/frame"),
             }
         }
@@ -146,14 +155,19 @@ async fn successful_session(address: &str, password: String) -> Result<(), Box<d
             .await
             {
                 Ok(Some(Observation::Frame(next))) => newest = next,
+                Ok(Some(Observation::Patch(patch))) => {
+                    if Arc::make_mut(&mut newest).apply_patch(&patch).is_err() {
+                        return Err("VNC patch did not match the frame");
+                    }
+                }
                 Ok(Some(Observation::Ready)) => {}
                 Ok(None) => break,
                 Err(_) => {}
             }
         }
-        newest
+        Ok(newest)
     })
-    .await?;
+    .await??;
     if let Ok(path) = env::var("QA_VNC_FRAME") {
         write_ppm(Path::new(&path), &settled_frame)?;
         println!("VNC frame retained at {path}");
