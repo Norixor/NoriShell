@@ -83,6 +83,10 @@ let shellRouter: Router | null = null;
 let creatingNewPage: Promise<boolean> | null = null;
 let contentBounds: WorkspaceTabViewBounds | null = null;
 let visibilityWrite = Promise.resolve();
+// Native Tab views sit above the shell page, so a dialog rendered by the shell would be hidden
+// underneath the active view. While at least one suspension is held no view is shown natively.
+let tabViewSuspensions = 0;
+const nativelyVisible = (visible: boolean) => visible && tabViewSuspensions === 0;
 let activationWrite = Promise.resolve();
 let refreshRevision = 0;
 let shellRouteSettled: (() => Promise<void>) | null = null;
@@ -219,11 +223,32 @@ function applyVisibility(): Promise<void> {
     await Promise.all(workspaceTabViewSummaries.value.filter((summary) => summary.id !== pending).map(async (summary) => {
       if (contentBounds) await setWorkspaceTabViewBounds(summary.id, contentBounds);
       const visible = summary.id === active;
-      await setWorkspaceTabViewVisible(summary.id, visible);
+      await setWorkspaceTabViewVisible(summary.id, nativelyVisible(visible));
       await emitTo(summary.viewLabel, "workspace-tab-view-visibility", { id: summary.id, visible });
     }));
   });
   return visibilityWrite;
+}
+
+/**
+ * Hides every native Tab view until the returned function is called, so a shell-level dialog (for
+ * example the quit confirmation) is not covered by the active view. Suspensions nest, and releasing
+ * one twice is harmless. Which Tab is active is unchanged: only the native visibility is held back.
+ */
+export function suspendWorkspaceTabViews(): () => void {
+  tabViewSuspensions += 1;
+  void applyVisibility().catch(() => undefined);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    tabViewSuspensions = Math.max(0, tabViewSuspensions - 1);
+    // Hiding a native view drops its focus, so hand it back once the Tab is visible again.
+    void applyVisibility().then(() => {
+      const active = activeWorkspaceTabViewId.value;
+      if (tabViewSuspensions === 0 && active && workspaceTabViewSummary(active)) return focusWorkspaceTabView(active);
+    }).catch(() => undefined);
+  };
 }
 
 export function setWorkspaceTabViewContentBounds(bounds: WorkspaceTabViewBounds | null): void {
@@ -277,14 +302,15 @@ async function requestViewActivation(id: string, onDispatch?: () => void): Promi
  * Core rejects views this window does not own.
  */
 async function showAndActivate(id: string, onDispatch: () => void, focusWindow = false): Promise<void> {
-  await setWorkspaceTabViewVisible(id, true);
+  await setWorkspaceTabViewVisible(id, nativelyVisible(true));
   await emitTo(workspaceTabViewLabel(id), "workspace-tab-view-visibility", { id, visible: true });
   await requestViewActivation(id, onDispatch);
   markTabBoot(id, "shell", "activation_reply");
   setActiveWorkspaceTabView(id);
   await applyVisibility();
   if (focusWindow) await focusWorkspaceWindowTarget(workspaceWindowLabel());
-  await focusWorkspaceTabView(id);
+  // A suspended (hidden) view must not take native focus from the shell dialog; release refocuses.
+  if (tabViewSuspensions === 0) await focusWorkspaceTabView(id);
 }
 
 async function restorePreviousWorkspaceTabView(id: string | null): Promise<void> {

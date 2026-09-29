@@ -20,6 +20,15 @@ const hooks = vi.hoisted(() => ({
   runtimeReady: undefined as undefined | ((event: { payload: InstalledPluginSummary }) => void),
 }));
 
+const tabViews = vi.hoisted(() => {
+  const release = vi.fn();
+  return { release, suspend: vi.fn(() => release) };
+});
+vi.mock("./workspace-tab-view-shell", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./workspace-tab-view-shell")>(),
+  suspendWorkspaceTabViews: tabViews.suspend,
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
 vi.mock("./workspace-tab-window-ui", () => ({
   startWorkspaceTabWindowUi: vi.fn(async () => () => undefined),
@@ -144,6 +153,39 @@ describe("application exit failure", () => {
     expect(wrapper.text()).toContain("lifecycle.cleanupFailedTitle");
     expect(wrapper.text()).toContain("lifecycle.cleanupFailed");
     expect(wrapper.text()).toContain("lifecycle.retryCleanupAndQuit");
+  });
+});
+
+describe("quit confirmation and native Tab views", () => {
+  it("holds the native Tab views back while the confirmation is open and restores them when it closes", async () => {
+    tabViews.suspend.mockClear();
+    tabViews.release.mockClear();
+    hooks.flushAndExit.mockRejectedValueOnce(new Error("cleanup incomplete"));
+    const { wrapper } = await mountApplication();
+    expect(tabViews.suspend).not.toHaveBeenCalled();
+
+    await hooks.applicationExit?.();
+    await flushPromises();
+    expect(tabViews.suspend).toHaveBeenCalledTimes(1);
+    expect(tabViews.release).not.toHaveBeenCalled();
+
+    const keepWorking = wrapper.findAll("button").find((button) => button.text().includes("lifecycle.continueWorking"));
+    await keepWorking!.trigger("click");
+    await flushPromises();
+    expect(tabViews.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the Tab views when the page unmounts while the confirmation is open", async () => {
+    tabViews.suspend.mockClear();
+    tabViews.release.mockClear();
+    hooks.flushAndExit.mockRejectedValueOnce(new Error("cleanup incomplete"));
+    const { wrapper } = await mountApplication();
+    await hooks.applicationExit?.();
+    await flushPromises();
+    expect(tabViews.suspend).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+    expect(tabViews.release).toHaveBeenCalledTimes(1);
   });
 });
 
