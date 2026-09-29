@@ -42,16 +42,25 @@
 
 ## 安装与快速开始
 
-当前版本：**[v0.1.6](https://github.com/Norixor/NoriShell/releases/tag/v0.1.6)**。按设备选择安装包或免安装 ZIP。
+当前版本：**[v0.1.7](https://github.com/Norixor/NoriShell/releases/tag/v0.1.7)**。按设备选择安装包或免安装 ZIP；Linux 预览版安装包见下方。
 
 | 平台 | 架构 | 安装包 | 免安装 ZIP |
 | --- | --- | --- | --- |
-| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_arm64.zip) |
-| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_x64.zip) |
-| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_x64.zip) |
-| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_arm64.zip) |
+| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_arm64.zip) |
+| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_x64.zip) |
+| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_x64.zip) |
+| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_arm64.zip) |
 
 使用 macOS 安装包时，将 NoriShell 拖入“应用程序”；Windows 安装包按向导安装。ZIP 版使用同样的本机配置与数据目录，运行前请完整解压。Windows ZIP 版需要系统已安装 WebView2 Runtime。
+
+**Linux（预览版）**
+
+| 平台 | 架构 | AppImage | deb |
+| --- | --- | --- | --- |
+| Linux（预览版） | x64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_x64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_x64.deb) |
+| Linux（预览版） | ARM64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_arm64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_arm64.deb) |
+
+Linux 版为预览版，目前仅在 Ubuntu 22.04（GNOME、Wayland）上验证。Linux 上尚未实现托盘、原生通知和系统钥匙串自动解锁。只有 AppImage 支持应用内更新，deb 为手动下载。
 
 ### 首次连接
 

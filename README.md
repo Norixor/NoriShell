@@ -42,16 +42,25 @@ Working on a server often means switching between terminal tabs, file transfer w
 
 ## Installation and quick start
 
-Latest release: **[v0.1.6](https://github.com/Norixor/NoriShell/releases/tag/v0.1.6)**. Choose an installer or a standalone ZIP for your device.
+Latest release: **[v0.1.7](https://github.com/Norixor/NoriShell/releases/tag/v0.1.7)**. Choose an installer or a standalone ZIP for your device; Linux packages are listed below as a preview.
 
 | Platform | Architecture | Installer | Standalone ZIP |
 | --- | --- | --- | --- |
-| macOS 13 or later | Apple Silicon (ARM64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_arm64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_arm64.zip) |
-| macOS 13 or later | Intel (x64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_x64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_macos_x64.zip) |
-| Windows | x64 (Intel / AMD) | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_x64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_x64.zip) |
-| Windows | ARM64 | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_arm64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.6/NoriShell_0.1.6_windows_arm64.zip) |
+| macOS 13 or later | Apple Silicon (ARM64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_arm64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_arm64.zip) |
+| macOS 13 or later | Intel (x64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_x64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_x64.zip) |
+| Windows | x64 (Intel / AMD) | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_x64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_x64.zip) |
+| Windows | ARM64 | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_arm64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_arm64.zip) |
 
 For a macOS installer, drag NoriShell into Applications; on Windows, follow the installer. ZIP builds use the same local settings and data directories. Extract the full archive before running. The Windows ZIP requires WebView2 Runtime to be installed.
+
+**Linux (Preview)**
+
+| Platform | Architecture | AppImage | deb |
+| --- | --- | --- | --- |
+| Linux (Preview) | x64 | [Download AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_x64.AppImage) | [Download deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_x64.deb) |
+| Linux (Preview) | ARM64 | [Download AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_arm64.AppImage) | [Download deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_arm64.deb) |
+
+Linux is a preview and has so far only been verified on Ubuntu 22.04 (GNOME, Wayland). The tray, native notifications, and system-keychain auto-unlock are not implemented on Linux yet. Only the AppImage can update in the app; the deb is a manual download.
 
 ### First connection
 
