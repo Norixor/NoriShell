@@ -17,8 +17,18 @@ version="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["versi
 out="$root/output/linux/$version"
 mkdir -p "$out"
 revision="$(git -C "$root" rev-parse HEAD)"
+# A clean tracked tree is built from `git archive HEAD`, so untracked files cannot leak into a release
+# build; local edits build the working tree and are recorded as dirty.
+# The source dir lives under the repo because colima only shares the home directory.
+src="$root"
 dirty=false
-[ -n "$(git -C "$root" status --porcelain)" ] && dirty=true
+if git -C "$root" diff --quiet HEAD; then
+  src="$root/output/linux/.src-$arch"
+  rm -rf "$src"; mkdir -p "$src"
+  git -C "$root" archive HEAD | tar -x -C "$src"
+else
+  dirty=true
+fi
 
 image="norishell-linux-build:$arch"
 docker build --platform "$platform" -t "$image" "$root/tools/linux-release"
@@ -26,7 +36,7 @@ docker build --platform "$platform" -t "$image" "$root/tools/linux-release"
 # The source is copied into a named volume so target/ and node_modules/ survive between builds
 # without touching the Mac working tree.
 docker run --rm --platform "$platform" \
-  -v "$root":/src:ro -v "$out":/out -v "$root/tools/linux-release/inner-build.sh":/inner-build.sh:ro \
+  -v "$src":/src:ro -v "$out":/out -v "$root/tools/linux-release/inner-build.sh":/inner-build.sh:ro \
   -v "norishell-work-$arch":/work -v "norishell-cargo-$arch":/opt/cargo/registry \
   -e SRC=/src -e WORK=/work -e OUT=/out -e ARCH="$arch" -e VERSION="$version" \
   "$image" bash /inner-build.sh
