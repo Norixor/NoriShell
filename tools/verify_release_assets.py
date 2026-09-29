@@ -19,6 +19,8 @@ PLATFORMS = {
     "darwin-x86_64": "macos_x64",
     "windows-x86_64": "windows_x64",
     "windows-aarch64": "windows_arm64",
+    "linux-x86_64": "linux_x64",
+    "linux-aarch64": "linux_arm64",
 }
 
 
@@ -31,8 +33,11 @@ def expected_names(version: str, sync_version: str) -> set[str]:
     names.update(f"NoriShell_{version}_{platform}.zip" for platform in ("windows_x64", "windows_arm64"))
     names.update(f"NoriShell_{version}_{platform}-setup.exe" for platform in ("windows_x64", "windows_arm64"))
     names.update(f"NoriShell_{version}_{platform}.app.tar.gz" for platform in ("macos_arm64", "macos_x64"))
-    names.update(f"NoriShell_{version}_{platform}.app.tar.gz.sig" for platform in ("macos_arm64", "macos_x64"))
-    names.update(f"NoriShell_{version}_{platform}-setup.exe.sig" for platform in ("windows_x64", "windows_arm64"))
+    names.update(
+        f"NoriShell_{version}_{platform}.{extension}"
+        for platform in ("linux_x64", "linux_arm64")
+        for extension in ("AppImage", "deb")
+    )
     names.update((
         f"NoriShell_SelfHostSync_Server_{sync_version}.zip",
         f"NoriShell_SelfHostSync_Plugin_{sync_version}.zip",
@@ -42,13 +47,13 @@ def expected_names(version: str, sync_version: str) -> set[str]:
     return names
 
 
-def verify_signature(asset: Path, signature: Path, public_key: str, version: str) -> None:
+def verify_signature(asset: Path, signature: str, public_key: str, version: str) -> None:
     with tempfile.TemporaryDirectory(prefix="norishell-release-signature-") as directory:
         tmp = Path(directory)
         key_file = tmp / "public.key"
         signature_file = tmp / "signature"
         key_file.write_bytes(base64.b64decode(public_key, validate=True))
-        raw_signature = base64.b64decode(signature.read_text().strip(), validate=True)
+        raw_signature = base64.b64decode(signature.strip(), validate=True)
         signature_file.write_bytes(raw_signature)
         subprocess.run(
             ["minisign", "-V", "-q", "-p", str(key_file), "-m", str(asset), "-x", str(signature_file)],
@@ -100,19 +105,18 @@ def main() -> None:
     public_key = updater["pubkey"]
     base = f"https://github.com/Norixor/NoriShell/releases/download/v{args.version}/"
     for target, platform in PLATFORMS.items():
-        filename = (
-            f"NoriShell_{args.version}_{platform}.app.tar.gz"
-            if target.startswith("darwin")
-            else f"NoriShell_{args.version}_{platform}-setup.exe"
-        )
+        if target.startswith("darwin"):
+            filename = f"NoriShell_{args.version}_{platform}.app.tar.gz"
+        elif target.startswith("linux"):
+            filename = f"NoriShell_{args.version}_{platform}.AppImage"
+        else:
+            filename = f"NoriShell_{args.version}_{platform}-setup.exe"
         entry = manifest["platforms"][target]
         if set(entry) != {"url", "signature"} or entry["url"] != base + filename:
             raise ValueError(f"update URL differs: {target}")
-        signature = assets / f"{filename}.sig"
-        if entry["signature"] != signature.read_text().strip():
-            raise ValueError(f"update manifest signature differs: {target}")
-        verify_signature(assets / filename, signature, public_key, args.version)
-    print(f"Verified 17 Release assets, SHA256SUMS and four updater signatures for v{args.version}")
+        # Signatures exist only inside latest.json; no .sig files are published.
+        verify_signature(assets / filename, entry["signature"], public_key, args.version)
+    print(f"Verified 17 Release assets, SHA256SUMS and six updater signatures for v{args.version}")
 
 
 if __name__ == "__main__":

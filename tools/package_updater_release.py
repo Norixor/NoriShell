@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Stage signed Tauri update assets for the four desktop release targets."""
+"""Stage signed Tauri update assets and the manifest for all Release targets.
+
+Updater platforms: macOS arm64/x64 (.app.tar.gz), Windows x64/arm64 (NSIS setup.exe)
+and Linux x64/arm64 (AppImage, Preview). Linux .deb files are manual downloads and
+are never signed. Signatures live only inside latest.json; no .sig file is ever
+written to (or tolerated in) the upload stage. Linux build metadata JSON files are
+read from --linux-metadata-dir and are not Release assets.
+"""
 
 from __future__ import annotations
 
@@ -25,20 +32,24 @@ PLATFORMS = {
     "darwin-x86_64": ("macos_x64", "x86_64-apple-darwin"),
     "windows-x86_64": ("windows_x64", None),
     "windows-aarch64": ("windows_arm64", None),
+    "linux-x86_64": ("linux_x64", None),
+    "linux-aarch64": ("linux_arm64", None),
 }
+LINUX_ARCHES = {"x64": "linux_x64", "arm64": "linux_arm64"}
+EXPECTED_ASSET_COUNT = 17
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def verify_signature(asset: Path, signature: Path, public_key: Path) -> None:
+def verify_signature(asset: Path, signature: str, public_key: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="norishell-update-verify-") as directory:
         tmp = Path(directory)
         key = tmp / "public.key"
         sig = tmp / "signature"
         key.write_bytes(base64.b64decode(public_key.read_text().strip(), validate=True))
-        sig.write_bytes(base64.b64decode(signature.read_text().strip(), validate=True))
+        sig.write_bytes(base64.b64decode(signature.strip(), validate=True))
         subprocess.run(
             ["minisign", "-V", "-q", "-p", str(key), "-m", str(asset), "-x", str(sig)],
             check=True,
@@ -59,8 +70,6 @@ exit [lindex $result 3]
 
 
 def sign(asset: Path, key: Path, public_key: Path, version: str) -> str:
-    signature = Path(f"{asset}.sig")
-    signature.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="norishell-update-sign-") as directory:
         raw_key = Path(directory) / "secret.key"
         raw_signature = Path(directory) / "signature"
@@ -78,9 +87,9 @@ def sign(asset: Path, key: Path, public_key: Path, version: str) -> str:
         raw = raw_signature.read_bytes()
         if raw.decode().splitlines()[2] != f"trusted comment: {comment}":
             raise ValueError(f"signed version metadata differs: {asset}")
-        signature.write_text(base64.b64encode(raw).decode() + "\n")
+        signature = base64.b64encode(raw).decode()
     verify_signature(asset, signature, public_key)
-    return signature.read_text().strip()
+    return signature
 
 
 def mac_executable_in_tar(archive: Path) -> bytes:
@@ -94,13 +103,41 @@ def mac_executable_in_tar(archive: Path) -> bytes:
         return stream.read()
 
 
+def check_linux_metadata(stage: Path, metadata_dir: Path, version: str) -> None:
+    """Bind the staged Linux packages to the metadata written by the Linux builder."""
+    for arch, name in LINUX_ARCHES.items():
+        meta_file = metadata_dir / f"linux-build-{arch}.json"
+        if not meta_file.is_file():
+            raise ValueError(f"missing Linux build metadata: {meta_file}")
+        meta = json.loads(meta_file.read_text())
+        if meta.get("schema") != 1:
+            raise ValueError(f"unsupported Linux build metadata schema: {meta_file}")
+        if meta.get("version") != version:
+            raise ValueError(f"Linux build metadata version differs from {version}: {meta_file}")
+        if meta.get("arch") != arch:
+            raise ValueError(f"Linux build metadata architecture is not {arch}: {meta_file}")
+        if meta.get("dirty") is not False:
+            raise ValueError(f"Linux build came from a dirty working tree: {meta_file}")
+        for extension, key in (("AppImage", "appImageSha256"), ("deb", "debSha256")):
+            package = stage / f"NoriShell_{version}_{name}.{extension}"
+            if not package.is_file():
+                raise ValueError(f"missing Linux package: {package}")
+            if digest(package.read_bytes()) != meta.get(key):
+                raise ValueError(f"Linux package differs from {meta_file} ({key}): {package}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--private-key", type=Path, required=True)
+    parser.add_argument("--linux-metadata-dir", type=Path, required=True)
     args = parser.parse_args()
     stage = args.stage.resolve(strict=True)
+    stale = sorted(path.name for path in stage.iterdir() if path.name.endswith(".sig"))
+    if stale:
+        raise ValueError(f"signature files must not be staged for upload (remove them): {stale}")
+    check_linux_metadata(stage, args.linux_metadata_dir.resolve(strict=True), args.version)
     key = args.private_key.resolve(strict=True)
     public_key = Path(f"{key}.pub").resolve(strict=True)
     config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
@@ -123,6 +160,9 @@ def main() -> None:
                 packaged_exe = contents.read("NoriShell.app/Contents/MacOS/norishell")
             if digest(mac_executable_in_tar(archive)) != digest(packaged_exe):
                 raise ValueError(f"updater archive differs from application ZIP: {target}")
+        elif name.startswith("linux_"):
+            # The AppImage is the only Linux updater artifact; hashes were checked above.
+            archive = stage / f"NoriShell_{args.version}_{name}.AppImage"
         else:
             archive = stage / f"NoriShell_{args.version}_{name}-setup.exe"
             app_zip = stage / f"NoriShell_{args.version}_{name}.zip"
@@ -141,8 +181,8 @@ def main() -> None:
     manifest = {"version": args.version, "platforms": platforms}
     (stage / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     assets = sorted(path for path in stage.iterdir() if path.name.startswith("NoriShell_") or path.name == "latest.json")
-    if len(assets) != 17:
-        raise ValueError(f"expected 17 application, sync and updater assets; found {len(assets)}")
+    if len(assets) != EXPECTED_ASSET_COUNT:
+        raise ValueError(f"expected {EXPECTED_ASSET_COUNT} application, sync and updater assets; found {len(assets)}")
     (stage / "SHA256SUMS.txt").write_text(
         "".join(f"{digest(path.read_bytes())}  {path.name}\n" for path in assets)
     )
