@@ -37,7 +37,7 @@ fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 getrandom = "0.3.4"
 hmac = "0.12.1"
 image = { version = "0.25.9", default-features = false, features = ["jpeg", "png", "webp"] }
-imagesize = "0.14.0"
+imagesize = "0.15.0"
 ed25519-dalek = "=2.2.0"
 hex = "0.4.3"
 libc = "0.2.183"
