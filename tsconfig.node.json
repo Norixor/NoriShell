@@ -13,6 +13,6 @@
     "strict": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "vitest.config.ts", "eslint.config.js"]
+  "include": ["vite.config.ts", "vite-about-versions.ts", "vitest.config.ts", "eslint.config.js"]
 }
 
