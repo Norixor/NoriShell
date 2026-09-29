@@ -45,6 +45,17 @@ Use RELEASING.md for the public release format; local build and verification ste
 | Windows · x64 | [⬇ Setup](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_windows_x64-setup.exe) | [⬇ ZIP](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_windows_x64.zip) |
 | Windows · ARM64 | [⬇ Setup](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_windows_arm64-setup.exe) | [⬇ ZIP](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_windows_arm64.zip) |
 
+### Linux · Preview / 预览版
+
+| Platform / 平台 | AppImage (in-app updates / 支持应用内更新) | deb (manual download / 手动下载) |
+| --- | --- | --- |
+| Linux · x64 | [⬇ AppImage](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_linux_x64.AppImage) | [⬇ deb](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_linux_x64.deb) |
+| Linux · ARM64 | [⬇ AppImage](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_linux_arm64.AppImage) | [⬇ deb](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_linux_arm64.deb) |
+
+Linux support is a preview, verified so far only on Ubuntu 22.04 (GNOME, Wayland). The tray, native notifications and system-keychain auto-unlock are not implemented yet. Only the AppImage updates in the app.
+
+Linux 版为预览版，目前仅在 Ubuntu 22.04（GNOME、Wayland）上验证。托盘、原生通知和系统钥匙串自动解锁尚未实现；只有 AppImage 支持应用内更新。
+
 **Self-hosted Sync / 自建同步** · [Server ZIP / 服务端](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_SelfHostSync_Server_{{SYNC_VERSION}}.zip) · [Plugin ZIP / 插件包](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_SelfHostSync_Plugin_{{SYNC_VERSION}}.zip) · [Installation guide / 安装指南](https://github.com/Norixor/NoriShell/blob/v{{APP_VERSION}}/docs/guides/users/self-host-sync.en.md)
 
 **Checksums / 校验** · [SHA256SUMS.txt](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/SHA256SUMS.txt)
