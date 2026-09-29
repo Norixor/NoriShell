@@ -9,6 +9,8 @@ rsync -a --delete \
   "$SRC"/ "$WORK"/
 cd "$WORK"
 pnpm install --frozen-lockfile
+# target/ persists between builds; stale bundles of older versions must not match the copy globs below.
+rm -rf target/release/bundle
 # EXTRA_CONFIG (optional JSON) is only for local updater tests: version, pubkey and endpoint overrides.
 extra=(); [ -n "${EXTRA_CONFIG:-}" ] && extra=(--config "$EXTRA_CONFIG")
 pnpm tauri build --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}' "${extra[@]}"
