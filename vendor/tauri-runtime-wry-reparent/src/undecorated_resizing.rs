@@ -540,10 +540,8 @@ mod gtk {
     webview.connect_button_press_event(
       move |webview: &webkit2gtk::WebView, event: &gtk::gdk::EventButton| {
         if event.button() == 1 {
-          // This one should be GtkBox
-          if let Some(window) = webview.parent().and_then(|w| w.parent()) {
-            // Safe to unwrap unless this is not from tao
-            let window: gtk::Window = window.downcast().unwrap();
+          // NoriShell: webviews sit at different depths (Box, Overlay, Fixed), so resolve the toplevel.
+          if let Some(window) = webview.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok()) {
             if !window.is_decorated() && window.is_resizable() && !window.is_maximized() {
               if let Some(window) = window.window() {
                 let (root_x, root_y) = event.root();
@@ -566,7 +564,10 @@ mod gtk {
                 match edge {
                   WindowEdge::__Unknown(_) => (),
                   _ => {
-                    window.begin_resize_drag(edge, 1, root_x as i32, root_y as i32, event.time())
+                    window.begin_resize_drag(edge, 1, root_x as i32, root_y as i32, event.time());
+                    // NoriShell: the window manager takes over the pointer and swallows the release, so
+                    // the page must not see this press or it keeps waiting for a mouse-up.
+                    return Propagation::Stop;
                   }
                 }
               }
@@ -580,10 +581,8 @@ mod gtk {
 
     webview.connect_touch_event(
       move |webview: &webkit2gtk::WebView, event: &gtk::gdk::Event| {
-        // This one should be GtkBox
-        if let Some(window) = webview.parent().and_then(|w| w.parent()) {
-          // Safe to unwrap unless this is not from tao
-          let window: gtk::Window = window.downcast().unwrap();
+        // NoriShell: see the button press handler above.
+        if let Some(window) = webview.toplevel().and_then(|w| w.downcast::<gtk::Window>().ok()) {
           if !window.is_decorated() && window.is_resizable() && !window.is_maximized() {
             if let Some(window) = window.window() {
               if let Some((root_x, root_y)) = event.root_coords() {

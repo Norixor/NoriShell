@@ -14,6 +14,8 @@ import NvxShortcutSettings from "./NvxShortcutSettings.vue";
 describe("NvxShortcutSettings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // jsdom reports a Linux user agent; these expectations cover the macOS profile.
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)");
   });
 
   it("filters command rows and records a binding without overwriting another action", async () => {

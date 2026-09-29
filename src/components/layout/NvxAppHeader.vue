@@ -40,9 +40,10 @@ withDefaults(defineProps<{ platform: DesktopPlatform; standalone?: boolean; work
       <slot name="tabs" />
     </div>
     <NvxWindowControls
-      v-if="platform === 'windows'"
+      v-if="platform === 'windows' || platform === 'linux'"
       :standalone="standalone"
       :workspace="workspace"
+      :snap-layout="platform === 'windows'"
     />
   </header>
 </template>
@@ -64,6 +65,7 @@ withDefaults(defineProps<{ platform: DesktopPlatform; standalone?: boolean; work
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
+.nvx-app-header--linux,
 .nvx-app-header--other {
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
@@ -110,6 +112,17 @@ withDefaults(defineProps<{ platform: DesktopPlatform; standalone?: boolean; work
 /* A standalone window has no Tab strip to separate from, so the brand needs no divider. */
 .nvx-app-header--standalone .nvx-app-header__brand {
   border-right: 0;
+}
+
+/* Linux keeps the brand as a rail-width cell so its divider meets the Navigation Rail edge. */
+.nvx-app-header--linux .nvx-app-header__brand {
+  justify-content: center;
+  width: var(--nvx-layout-navigation-rail-width);
+  padding-inline: 0;
+}
+
+.nvx-app-header--linux .nvx-app-header__brand strong {
+  display: none;
 }
 
 .nvx-app-header--macos .nvx-app-header__brand {

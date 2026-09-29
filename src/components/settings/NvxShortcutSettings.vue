@@ -11,7 +11,7 @@ import {
   type ShortcutCommandId,
   type ShortcutPlatform,
 } from "../../shortcuts";
-import { detectDesktopPlatform } from "../../platform";
+import { detectDesktopPlatform, shortcutProfilePlatform } from "../../platform";
 import { exportJsonFile } from "../../platform-file-export";
 import { useShortcutsStore, type ShortcutSaveResult } from "../../stores/shortcuts";
 import { applicationPreferenceFailure } from "../../core-api/application-preferences";
@@ -21,7 +21,7 @@ import { NvxButton, NvxDialog, NvxField, NvxIcon, NvxInlineNotice, NvxInput, Nvx
 const { t } = useI18n();
 const shortcuts = useShortcutsStore();
 const tips = useTipsStore();
-const initialPlatform = detectDesktopPlatform() === "windows" ? "windows" : "macos";
+const initialPlatform = shortcutProfilePlatform(detectDesktopPlatform());
 
 const platform = ref<ShortcutPlatform>(initialPlatform);
 const query = ref("");

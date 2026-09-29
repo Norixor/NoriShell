@@ -30,7 +30,7 @@ const terminalMocks = vi.hoisted(() => ({
   } | null,
 }));
 const opener = vi.hoisted(() => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
-const platform = vi.hoisted(() => ({ value: "other" as "macos" | "windows" | "other" }));
+const platform = vi.hoisted(() => ({ value: "other" as "macos" | "windows" | "linux" | "other" }));
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {

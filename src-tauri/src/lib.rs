@@ -11,6 +11,8 @@ mod forward_session_service;
 mod host_service;
 mod json_export;
 mod lifecycle;
+#[cfg(target_os = "linux")]
+mod linux_window_shape;
 mod local_terminal_platform;
 mod metrics_session_service;
 mod native_notification_service;
@@ -79,8 +81,8 @@ pub fn run_plugin_host_if_requested() -> Option<i32> {
 }
 
 use lifecycle::{
-    LifecycleState, UpdateExitState, application_menu, application_request_exit,
-    handle_application_menu_event, hide_window_on_close, install_tray, window_request_close,
+    LifecycleState, UpdateExitState, application_request_exit, handle_application_menu_event,
+    hide_window_on_close, install_tray, window_request_close,
 };
 
 macro_rules! production_invoke_handler {
@@ -437,8 +439,11 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .menu(application_menu)
+        .plugin(tauri_plugin_updater::Builder::new().build());
+    // The custom Header replaces native window chrome; on Linux an explicit menu would add a GTK menu bar above it.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.menu(lifecycle::application_menu);
+    let builder = builder
         .on_menu_event(handle_application_menu_event)
         .manage(LifecycleState::default())
         .manage(UpdateExitState::default())
@@ -460,6 +465,17 @@ pub fn run() {
             if let Some(main_window) = app.get_webview_window("main") {
                 window_frame::install_windows_caption_bridge(&main_window)
                     .map_err(std::io::Error::other)?;
+            }
+            // The configured 1280x800 would fill a small Linux screen; fit it to the monitor and center it.
+            #[cfg(target_os = "linux")]
+            if let Some(main_window) = app.get_webview_window("main") {
+                let (width, height) = secure_window_frame::default_window_size(
+                    app.handle(),
+                    (1280.0, 800.0),
+                    (1024.0, 720.0),
+                );
+                let _ = main_window.set_size(tauri::LogicalSize::new(width, height));
+                let _ = main_window.center();
             }
             let app_data_directory = app.path().app_data_dir()?;
             let host_service = host_service::HostService::start(&app_data_directory)
@@ -688,8 +704,16 @@ pub fn run() {
             {
                 hints.notify();
             }
+            #[cfg(target_os = "linux")]
+            linux_window_shape::on_window_event(window, event);
             hide_window_on_close(window, event);
         });
+    #[cfg(target_os = "linux")]
+    let builder = builder.on_page_load(|webview, payload| {
+        if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+            linux_window_shape::on_page_load(webview);
+        }
+    });
     let context = tauri::generate_context!();
     #[cfg(any(windows, target_os = "macos"))]
     let mut context = context;
@@ -706,6 +730,20 @@ pub fn run() {
         {
             main.background_color = Some(secure_window_frame::WINDOWS_INITIAL_CANVAS);
         }
+    }
+    // Linux has no native rounded frame; a transparent window lets the page clip its own corners.
+    // The block above is not compiled on Linux, and hiding the window there would need a first-show hook.
+    #[cfg(target_os = "linux")]
+    let mut context = context;
+    #[cfg(target_os = "linux")]
+    if let Some(main) = context
+        .config_mut()
+        .app
+        .windows
+        .iter_mut()
+        .find(|window| window.label == "main")
+    {
+        main.transparent = true;
     }
     let app = with_production_invoke_handler(builder)
         .build(context)

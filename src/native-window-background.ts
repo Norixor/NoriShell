@@ -2,6 +2,8 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { installLinuxWindowShape } from "./linux-window-shape";
+import { detectDesktopPlatform } from "./platform";
 import { canvasBackgroundRgb } from "./workspace-tab-paint";
 
 export type NativeBackgroundTarget = "window-and-webview" | "webview";
@@ -16,6 +18,8 @@ export type NativeBackgroundTarget = "window-and-webview" | "webview";
  */
 export function startNativeBackgroundSync(target: NativeBackgroundTarget): () => void {
   if (!isTauri() || typeof MutationObserver !== "function") return () => undefined;
+  // An opaque native background would fill the transparent window behind the rounded corners.
+  if (detectDesktopPlatform() === "linux") return installLinuxWindowShape(target === "webview" ? "tab" : "window");
   let applied = "";
   let writes = Promise.resolve();
   const sync = () => {

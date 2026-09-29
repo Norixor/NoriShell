@@ -46,7 +46,12 @@ fn supports_auto_install() -> bool {
             .and_then(|path| path.parent().map(|parent| parent.join("uninstall.exe")))
             .is_some_and(|path| path.is_file());
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // Only an AppImage can replace itself; a deb is owned by the package manager.
+        return std::env::var_os("APPIMAGE").is_some_and(|path| !path.is_empty());
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         true
     }
@@ -258,7 +263,7 @@ mod tests {
         assert_eq!(result.status, ReleaseCheckStatus::UpdateAvailable);
         assert_eq!(result.latest_version.as_deref(), Some("0.1.1"));
         assert_eq!(result.release_url, GITHUB_RELEASES_PAGE);
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         assert!(result.supports_auto_install);
     }
 

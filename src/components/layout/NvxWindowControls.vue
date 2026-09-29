@@ -13,7 +13,7 @@ import {
 import { NvxIcon, NvxIconButton } from "../ui";
 
 const { t } = useI18n();
-const props = withDefaults(defineProps<{ standalone?: boolean; workspace?: boolean }>(), { standalone: false, workspace: false });
+const props = withDefaults(defineProps<{ standalone?: boolean; workspace?: boolean; snapLayout?: boolean }>(), { standalone: false, workspace: false, snapLayout: true });
 const controlsRoot = ref<HTMLElement | null>(null);
 const canMaximize = ref(!props.standalone);
 let resizeObserver: ResizeObserver | null = null;
@@ -42,6 +42,8 @@ async function perform(action: "close" | "minimize" | "maximize") {
 
 async function publishMaximizeHitRegion() {
   pendingMeasurement = null;
+  // Only Windows has a native non-client maximize hit test to feed.
+  if (!props.snapLayout) return;
   const button = canMaximize.value
     ? controlsRoot.value?.querySelector<HTMLElement>("[data-windows-maximize]:not(:disabled)")
     : null;
@@ -85,7 +87,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", scheduleMaximizeHitRegion);
   resizeObserver?.disconnect();
   if (pendingMeasurement !== null) cancelAnimationFrame(pendingMeasurement);
-  void setWindowsMaximizeHitRegion(null).catch(() => undefined);
+  if (props.snapLayout) void setWindowsMaximizeHitRegion(null).catch(() => undefined);
 });
 </script>
 

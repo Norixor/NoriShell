@@ -13,7 +13,7 @@ import type { LocalSessionSummary, NativeTrayAction, PluginApprovedTerminalChann
 import { registerNativeTransferNavigation, type NativeTransferNavigationTarget } from "../native-transfer-navigation";
 import { startPluginAppShortcuts } from "../stores/pluginAppIntegrations";
 import { i18n } from "../locales";
-import { detectDesktopPlatform } from "../platform";
+import { detectDesktopPlatform, shortcutProfilePlatform } from "../platform";
 import { invalidatePluginHostDom } from "../plugins/hostDomBroker";
 import {
   isEditableShortcutTarget,
@@ -985,7 +985,8 @@ function pluginSpecialPermissionChanged(payload: PluginSpecialPermissionOutcome)
 
 function shortcutPlatform(): ShortcutPlatform {
   if (navigator.platform.startsWith("Win")) return "windows";
-  return detectDesktopPlatform() === "windows" ? "windows" : "macos";
+  if (navigator.platform.startsWith("Mac")) return "macos";
+  return shortcutProfilePlatform(detectDesktopPlatform());
 }
 
 function handleShortcut(event: KeyboardEvent): void {
