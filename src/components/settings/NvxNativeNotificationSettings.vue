@@ -47,7 +47,14 @@ async function perform(operation: "refresh" | "request" | "test") {
     testSuppressed.value = operation === "test" && result.lastDelivery === "suppressed";
   } catch (caught) {
     if (mounted) {
-      error.value = nativeNotificationFailure(caught);
+      const failure = nativeNotificationFailure(caught);
+      if (operation === "refresh" && failure === "unavailable") {
+        // The OS cannot report notification state at all (for example an unregistered app identity):
+        // that is a fact about this environment, not a failed action, so show it as the status.
+        snapshot.value = { permission: "unavailable", lastDelivery: "unavailable" };
+        return;
+      }
+      error.value = failure;
       if (operation === "refresh" || error.value === "permissionDenied" || error.value === "unavailable") snapshot.value = null;
     }
   } finally {
