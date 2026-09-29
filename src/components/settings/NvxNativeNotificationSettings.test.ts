@@ -53,6 +53,14 @@ describe("native notification settings", () => {
     wrapper.unmount();
   });
 
+  it("shows an unreadable system state as unavailable instead of an error banner", async () => {
+    api.getNativeNotificationPermission.mockRejectedValueOnce({ code: "unavailable", requestId: "id" });
+    const wrapper = mountSettings();
+    await flushPromises();
+    expect(wrapper.text()).toContain("System notifications are unavailable");
+    expect(wrapper.text()).not.toContain("cannot be read");
+  });
+
   it("shows denied and unavailable system facts without claiming permission was granted", async () => {
     api.getNativeNotificationPermission.mockResolvedValueOnce({ permission: "denied", lastDelivery: "permissionDenied" });
     const wrapper = mountSettings();
