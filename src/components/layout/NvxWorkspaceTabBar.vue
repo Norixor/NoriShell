@@ -29,7 +29,7 @@ import {
   type ShortcutCommand,
   type ShortcutPlatform,
 } from "../../shortcuts";
-import { detectDesktopPlatform } from "../../platform";
+import { detectDesktopPlatform, shortcutProfilePlatform } from "../../platform";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { useShortcutsStore } from "../../stores/shortcuts";
 import { useWorkspaceTabsStore } from "../../stores/workspaceTabs";
@@ -133,7 +133,8 @@ function pointerMove(event: PointerEvent) {
     if (activeDrag !== current) return;
     activeDrag = null;
     void cancelWorkspaceTabDrag(current.nonce).catch(() => undefined);
-    if (String(error) !== "workspace_tab.drag_button_released") moveFailure(error);
+    // Linux has no cross-window Tab drag; the Tab context menu moves Tabs between windows there.
+    if (!["workspace_tab.drag_button_released", "workspace_tab.drag_unsupported"].includes(String(error))) moveFailure(error);
   });
 }
 
@@ -244,7 +245,8 @@ function reserveWorkspaceShortcut(event: KeyboardEvent) {
 
 function shortcutPlatform(): ShortcutPlatform {
   if (navigator.platform.startsWith("Win")) return "windows";
-  return detectDesktopPlatform() === "windows" ? "windows" : "macos";
+  if (navigator.platform.startsWith("Mac")) return "macos";
+  return shortcutProfilePlatform(detectDesktopPlatform());
 }
 
 function shortcutRecordingActive() {

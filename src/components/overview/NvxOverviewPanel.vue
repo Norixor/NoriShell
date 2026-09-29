@@ -555,6 +555,11 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
   white-space: nowrap;
 }
 
+/* Linux system fonts run wider: the averages get a full-width row instead of wrapping and truncating. */
+html[data-nvx-shape] .nvx-overview-panel__kpi--load {
+  grid-column: 1 / -1;
+}
+
 .nvx-overview-panel__loads {
   display: grid;
   flex: 1 1 auto;

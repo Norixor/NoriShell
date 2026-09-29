@@ -272,10 +272,11 @@ export function themeWithOverride(definition: ThemeDefinition, override: ThemeOv
 }
 
 /** Maps a validated definition to host-owned CSS custom properties only. */
+// Linux system fonts trail the macOS/Windows families so those platforms resolve exactly as before.
 export function themeStyles(definition: ThemeDefinition): Record<string, string> {
   const fontFamily = definition.fontFamily === "mono" ? "var(--nvx-font-mono)"
-    : definition.fontFamily === "sans" ? "Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif"
-      : "ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
+    : definition.fontFamily === "sans" ? "Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Ubuntu, 'Noto Sans', Cantarell, 'Liberation Sans', sans-serif"
+      : "ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Ubuntu, 'Noto Sans', Cantarell, 'Liberation Sans', sans-serif";
   const density = definition.density === "compact" ? 0.875 : definition.density === "comfortable" ? 1.125 : 1;
   const shadow = definition.shadow === "none" ? "none"
     : definition.shadow === "soft" ? "0 2px 8px rgb(16 24 40 / 8%)"

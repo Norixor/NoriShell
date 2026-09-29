@@ -12,20 +12,51 @@ body,
 }
 
 /* Minimums mirror each native window's minimum inner size so content never
-   overflows past the window controls. Tab views fill the bounds the shell
-   gives them and have no minimum of their own. */
+   overflows past the window controls. The width is capped at the viewport: when the
+   platform hands the WebView a few pixels less than the native minimum (for example an
+   invisible resize border), an uncapped minimum would push the right edge, and the
+   window controls with it, out of view. Tab views fill the bounds the shell gives them
+   and have no minimum of their own. */
 html:has(#app),
 html:has(#app) body,
 #app {
-  min-width: calc(1024px / var(--nvx-ui-zoom, 1));
+  min-width: min(calc(1024px / var(--nvx-ui-zoom, 1)), 100%);
   min-height: calc(720px / var(--nvx-ui-zoom, 1));
 }
 
 html:has(#workspace-window-app),
 html:has(#workspace-window-app) body,
 #workspace-window-app {
-  min-width: calc(800px / var(--nvx-ui-zoom, 1));
+  min-width: min(calc(800px / var(--nvx-ui-zoom, 1)), 100%);
   min-height: calc(560px / var(--nvx-ui-zoom, 1));
+}
+
+/* Linux draws its own rounded window corners on a transparent window (see linux-window-shape.ts). */
+html[data-nvx-shape] {
+  --nvx-linux-window-radius: 10px;
+  /* A plain transparent root hands body's background to the canvas, which then fills the whole window and
+     ignores body's radius. A transparent image keeps the root from being "transparent" for that rule. */
+  background: linear-gradient(transparent, transparent);
+  /* Without its own overflow the root would take body's overflow, and body would stop clipping its radius. */
+  overflow: hidden;
+}
+
+/* Linux system fonts are wider, so the rail labels need more room than the 72px default. */
+html[data-nvx-shape="window"] {
+  --nvx-layout-navigation-rail-width: 84px;
+}
+
+html[data-nvx-shape="window"] body {
+  border-radius: var(--nvx-linux-window-radius);
+}
+
+/* A Tab view only touches the window's bottom corners. */
+html[data-nvx-shape="tab"] body {
+  border-radius: 0 0 var(--nvx-linux-window-radius) var(--nvx-linux-window-radius);
+}
+
+html[data-nvx-shape][data-nvx-maximized] body {
+  border-radius: 0;
 }
 
 body {

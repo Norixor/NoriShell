@@ -10,8 +10,10 @@
   --nvx-window-control-windows-icon-size: 16px;
   --nvx-window-control-windows-close-hover: #c42b1c;
   --nvx-window-control-inactive-opacity: 0.55;
+  /* Linux system fonts sit after the macOS/Windows families so those platforms resolve exactly as before. */
   --nvx-font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
-    "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    "Segoe UI", "PingFang SC", "Microsoft YaHei", Ubuntu, "Noto Sans", Cantarell,
+    "Liberation Sans", sans-serif;
   --nvx-font-mono: "SFMono-Regular", "Cascadia Mono", "Segoe UI Mono",
     Consolas, monospace;
   --nvx-font-size-xs: 12px;

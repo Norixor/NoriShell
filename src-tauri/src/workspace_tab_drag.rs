@@ -1,4 +1,11 @@
 //! Native, content-free Workspace Tab drag preview and global mouse release tracking.
+//!
+//! Linux does not support cross-window Tab drags (`workspace_tab_drag_begin` refuses there), so the
+//! rest of this module is inert on that platform while the command surface stays the same.
+#![cfg_attr(
+    target_os = "linux",
+    allow(dead_code, unreachable_code, unused_variables)
+)]
 
 use serde::Serialize;
 use std::{
@@ -326,6 +333,11 @@ pub(crate) async fn workspace_tab_drag_begin(
     nonce: String,
 ) -> Result<(), String> {
     tabs.owns_tab(window.label(), &id)?;
+    // Linux desktops differ too much in global pointer and window placement support (Wayland has neither);
+    // moving a Tab between windows uses the Tab context menu there instead.
+    #[cfg(target_os = "linux")]
+    return Err("workspace_tab.drag_unsupported".into());
+    #[cfg(not(target_os = "linux"))]
     if nonce.is_empty() || nonce.len() > 128 || !nonce.is_ascii() {
         return Err("workspace_tab.drag_invalid_nonce".into());
     }

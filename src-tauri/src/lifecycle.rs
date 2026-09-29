@@ -284,6 +284,7 @@ pub fn request_application_exit<R: Runtime>(app: &AppHandle<R>) {
 /// directly, which bypasses Tauri's preventable `ExitRequested` event. Replace
 /// it with an ordinary menu item so Cmd-Q follows the same readiness gate as
 /// the tray and frontend exit intents.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let menu = Menu::default(app)?;
     #[cfg(target_os = "macos")]

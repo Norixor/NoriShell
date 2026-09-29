@@ -157,6 +157,15 @@ mod monitor;
   target_os = "openbsd"
 ))]
 mod undecorated_resizing;
+
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+mod linux_overlay;
 mod util;
 mod webview;
 mod window;
@@ -2557,6 +2566,34 @@ pub struct WebviewWrapper {
   bounds: Arc<Mutex<Option<WebviewBounds>>>,
 }
 
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+impl WebviewWrapper {
+  // NoriShell: inherent method shadows the wry one reached through Deref so every
+  // bounds update positions child webviews inside their Fixed container.
+  pub fn set_bounds(&self, bounds: wry::Rect) -> wry::Result<()> {
+    if linux_overlay::place(&self.inner, bounds) {
+      Ok(())
+    } else {
+      self.inner.set_bounds(bounds)
+    }
+  }
+
+  // NoriShell: shadows the wry method so a webview shown again picks up the current window size.
+  pub fn set_visible(&self, visible: bool) -> wry::Result<()> {
+    self.inner.set_visible(visible)?;
+    if visible {
+      linux_overlay::refresh(&self.inner);
+    }
+    Ok(())
+  }
+}
+
 impl Deref for WebviewWrapper {
   type Target = WebView;
 
@@ -3594,7 +3631,16 @@ fn handle_user_message<T: UserEvent>(
             let _ = window.set_ignore_cursor_events(ignore);
           }
           WindowMessage::DragWindow => {
-            let _ = window.drag_window();
+            // The request reaches us asynchronously. On Wayland a move started after the button was
+            // already released never ends (the window then follows the pointer and swallows clicks),
+            // so only start it while the primary button is still down.
+            #[cfg(target_os = "linux")]
+            let start = linux_overlay::primary_button_down(window.gtk_window());
+            #[cfg(not(target_os = "linux"))]
+            let start = true;
+            if start {
+              let _ = window.drag_window();
+            }
           }
           WindowMessage::ResizeDragWindow(direction) => {
             let _ = window.drag_resize_window(match direction {
@@ -3718,8 +3764,9 @@ fn handle_user_message<T: UserEvent>(
               target_os = "openbsd"
             ))]
             let reparent_result = {
-              if let Some(container) = new_parent_window.default_vbox() {
-                webview.inner.reparent(container)
+              if let Some(vbox) = new_parent_window.default_vbox() {
+                let fixed = linux_overlay::child_fixed(&vbox);
+                webview.inner.reparent(&fixed)
               } else {
                 Err(wry::Error::MessageSender)
               }
@@ -5246,9 +5293,11 @@ You may have it installed on another user account, but it is not available for t
       target_os = "android"
     )))]
     WebviewKind::WindowChild => {
-      // only way to account for menu bar height, and also works for multiwebviews :)
+      // NoriShell: child webviews need a Fixed to honour their bounds; a Box would
+      // pack them over the whole window. The Fixed sits below the menu bar.
       let vbox = window.default_vbox().unwrap();
-      webview_builder.build_gtk(vbox)
+      let fixed = linux_overlay::child_fixed(&vbox);
+      webview_builder.build_gtk(&fixed)
     }
     #[cfg(any(
       target_os = "windows",
@@ -5272,13 +5321,28 @@ You may have it installed on another user account, but it is not available for t
         target_os = "android"
       )))]
       let builder = {
+        // NoriShell: host the content webview in the overlay that child Fixed containers layer over.
         let vbox = window.default_vbox().unwrap();
-        webview_builder.build_gtk(vbox)
+        let overlay = linux_overlay::content_overlay(&vbox);
+        webview_builder.build_gtk(&overlay)
       };
       builder
     }
   }
   .map_err(|e| Error::CreateWebview(Box::new(e)))?;
+
+  // NoriShell: Tab child webviews cover the window's right and bottom edges, so on
+  // Linux they must start edge resizes as well.
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  if kind == WebviewKind::WindowChild {
+    undecorated_resizing::attach_resize_handler(&webview);
+  }
 
   if kind == WebviewKind::WindowContent {
     #[cfg(any(

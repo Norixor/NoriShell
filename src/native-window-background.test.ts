@@ -18,11 +18,14 @@ describe("native background colour", () => {
   let stop: (() => void) | null = null;
 
   beforeEach(() => {
+    // jsdom reports Linux, which takes the page-drawn shape path; these cases cover macOS and Windows.
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)");
     native.window.mockReset().mockResolvedValue(undefined);
     native.webview.mockReset().mockResolvedValue(undefined);
     root.style.setProperty("--nvx-color-bg-canvas", "#f7f8fa");
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     stop?.();
     stop = null;
     root.style.removeProperty("--nvx-color-bg-canvas");
@@ -60,6 +63,25 @@ describe("native background colour", () => {
     await flush();
     expect(native.webview).toHaveBeenCalledTimes(2);
     delete root.dataset.theme;
+  });
+});
+
+describe("native background colour on Linux", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete document.documentElement.dataset.nvxShape;
+  });
+
+  it("draws the window shape in the page instead of writing an opaque native colour", () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (X11; Linux aarch64)");
+    native.window.mockReset().mockResolvedValue(undefined);
+    native.webview.mockReset().mockResolvedValue(undefined);
+    const stop = startNativeBackgroundSync("webview");
+    expect(document.documentElement.dataset.nvxShape).toBe("tab");
+    expect(native.window).not.toHaveBeenCalled();
+    expect(native.webview).not.toHaveBeenCalled();
+    stop();
+    expect(document.documentElement.dataset.nvxShape).toBeUndefined();
   });
 });
 

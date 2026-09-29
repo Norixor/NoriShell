@@ -338,11 +338,18 @@ pub(crate) async fn create_tab_view(
     // Until its first document frame a new view would paint the platform default
     // (white on WebView2) over the shell's placeholder. With a colour, WKWebView stops
     // drawing its own background, so the placeholder below stays visible until then.
+    #[cfg(not(target_os = "linux"))]
     let builder = match background {
         Some([red, green, blue]) => {
             builder.background_color(tauri::webview::Color(red, green, blue, 255))
         }
         None => builder,
+    };
+    // An opaque colour would square off the rounded window corners the page draws itself.
+    #[cfg(target_os = "linux")]
+    let builder = {
+        let _ = background;
+        builder.transparent(true)
     };
     // The shell supplies the final content rectangle after its first layout.
     // A hidden 1x1 child avoids drawing over the Header in the meantime.

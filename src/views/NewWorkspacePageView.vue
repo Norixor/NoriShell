@@ -452,6 +452,10 @@ onBeforeUnmount(() => {
 .new-workspace__tile-title { font-size:14px; font-weight:700; }
 .new-workspace__tile-description { margin:0; font-size:12px; color:var(--nvx-color-text-secondary); }
 .new-workspace__tile-actions { display:flex; align-items:center; gap:12px; flex:none; }
+/* Linux system fonts run wider than the designed metrics: wrap the actions under the description instead of squeezing it. */
+html[data-nvx-shape] .new-workspace__tile { flex-wrap:wrap; row-gap:12px; }
+html[data-nvx-shape] .new-workspace__tile-info { flex:1 1 240px; }
+html[data-nvx-shape] .new-workspace__tile-actions { flex-wrap:wrap; }
 .new-workspace__tile-link { border:0; background:transparent; color:var(--nvx-color-accent); font-size:12.5px; cursor:pointer; font:inherit; }
 .new-workspace__tile-link:hover { text-decoration:underline; }
 .new-workspace__tile-link:disabled { color:var(--nvx-color-text-tertiary); cursor:default; }

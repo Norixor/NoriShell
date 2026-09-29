@@ -170,8 +170,10 @@ pub(crate) async fn tool_window_open(
                         && url.query().is_none())
             })
             .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+    let default_size =
+        crate::secure_window_frame::default_window_size(&app, (1000.0, 760.0), (640.0, 480.0));
     let child = crate::secure_window_frame::apply_secure_window_frame(&app, &label, builder)
-        .inner_size(1000.0, 760.0)
+        .inner_size(default_size.0, default_size.1)
         .min_inner_size(640.0, 480.0)
         .build();
     let child = match child {
