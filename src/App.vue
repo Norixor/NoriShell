@@ -45,7 +45,7 @@ import { routeRevealKey } from "./routeReveal";
 import { useRouteMotion } from "./route-motion";
 import { startWorkspaceTabWindowUi } from "./workspace-tab-window-ui";
 import { showWorkspaceTabFailure } from "./workspace-tab-errors";
-import { createManagedApprovedPluginChannel, createManagedFileTab, createManagedPluginProtocolLaunch, createManagedTerminalForHost, registerWorkspaceShellRouteSettled, setWorkspaceTabViewContentBounds } from "./workspace-tab-view-shell";
+import { createManagedApprovedPluginChannel, createManagedFileTab, createManagedPluginProtocolLaunch, createManagedTerminalForHost, registerWorkspaceShellRouteSettled, setWorkspaceTabViewContentBounds, suspendWorkspaceTabViews } from "./workspace-tab-view-shell";
 import { afterNextPaint } from "./workspace-tab-paint";
 import { startNativeBackgroundSync } from "./native-window-background";
 
@@ -220,6 +220,17 @@ let stopPluginAppNavigation: (() => void) | null = null;
 const exitReadiness = ref<ExitReadiness | null>(null);
 const confirmedExitInFlight = ref(false);
 const confirmedExitFailed = ref(false);
+// The quit confirmation is rendered by this shell page, beneath the native Tab views: without
+// this it would be covered while the shell chrome around it is already dimmed.
+let releaseTabViews: (() => void) | null = null;
+watch(() => exitReadiness.value !== null, (open) => {
+  if (open) {
+    releaseTabViews ??= suspendWorkspaceTabViews();
+  } else {
+    releaseTabViews?.();
+    releaseTabViews = null;
+  }
+}, { flush: "sync" });
 
 const exitBlockerLabels = computed(() => {
   const counts = new Map<string, number>();
@@ -366,6 +377,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  releaseTabViews?.();
+  releaseTabViews = null;
   stopShellRouteSettled();
   stopNativeBackground?.();
   workspaceContentObserver?.disconnect();

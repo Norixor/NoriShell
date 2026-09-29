@@ -67,6 +67,7 @@ import {
   requestCloseWorkspaceTabView,
   showWorkspaceShellRoute,
   startWorkspaceTabViewShell,
+  suspendWorkspaceTabViews,
 } from "./workspace-tab-view-shell";
 import { pendingWorkspaceTabViewId, workspaceTabViewSummaries } from "./workspace-tab-view-state";
 import { snapshotWorkspaceTabs } from "./workspace-tab-windows";
@@ -252,6 +253,46 @@ describe("native Workspace Tab selection", () => {
     await failed;
     expect(activeWorkspaceTabViewId.value).toBe("A");
     expect(native.focus).not.toHaveBeenCalledWith("B");
+  });
+
+  it("hides the active view while a shell dialog holds it back, then shows it again", async () => {
+    setActiveWorkspaceTabView("A");
+    const release = suspendWorkspaceTabViews();
+    await vi.waitFor(() => expect(native.visible).toHaveBeenCalledWith("A", false));
+    expect(native.visible).not.toHaveBeenCalledWith("A", true);
+    expect(activeWorkspaceTabViewId.value).toBe("A");
+
+    native.visible.mockClear();
+    release();
+    await vi.waitFor(() => expect(native.visible).toHaveBeenCalledWith("A", true));
+    expect(native.visible).toHaveBeenCalledWith("B", false);
+  });
+
+  it("keeps views hidden until every overlapping suspension is released, and ignores a double release", async () => {
+    setActiveWorkspaceTabView("A");
+    const first = suspendWorkspaceTabViews();
+    const second = suspendWorkspaceTabViews();
+    await vi.waitFor(() => expect(native.visible).toHaveBeenCalledWith("A", false));
+
+    native.visible.mockClear();
+    first();
+    first();
+    await vi.waitFor(() => expect(native.visible).toHaveBeenCalled());
+    expect(native.visible).not.toHaveBeenCalledWith("A", true);
+
+    second();
+    await vi.waitFor(() => expect(native.visible).toHaveBeenCalledWith("A", true));
+  });
+
+  it("does not show a Tab activated during a suspension until it is released", async () => {
+    native.autoAcknowledge = true;
+    const release = suspendWorkspaceTabViews();
+    await activateWorkspaceTabView("B");
+    expect(activeWorkspaceTabViewId.value).toBe("B");
+    expect(native.visible).not.toHaveBeenCalledWith("B", true);
+
+    release();
+    await vi.waitFor(() => expect(native.visible).toHaveBeenCalledWith("B", true));
   });
 
   it("finishes rapid selections on the most recently requested Tab", async () => {
