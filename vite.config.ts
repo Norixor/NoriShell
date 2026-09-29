@@ -3,12 +3,17 @@ import vue from "@vitejs/plugin-vue";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { collectAboutVersions } from "./vite-about-versions";
+
 const host = process.env.TAURI_DEV_HOST;
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
   plugins: [vue()],
   clearScreen: false,
+  define: {
+    __NVX_ABOUT_VERSIONS__: collectAboutVersions(),
+  },
   server: {
     port: 1430,
     strictPort: true,

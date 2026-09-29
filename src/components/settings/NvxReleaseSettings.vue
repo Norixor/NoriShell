@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
+import { aboutVersions } from "../../about-versions";
 import appIconUrl from "../../assets/branding/norishell-app-icon.png";
 import { useAppUpdateStore } from "../../stores/appUpdate";
 import { NvxButton, NvxDialog, NvxInlineNotice, NvxStatusLabel } from "../ui";
@@ -50,6 +51,21 @@ async function openReleases() {
   try {
     // The destination is intentionally fixed instead of accepting release HTML URLs.
     await openUrl(RELEASES_PAGE);
+  } catch {
+    if (mounted) openFailed.value = true;
+  }
+}
+
+function repositoryLabel(url: string) {
+  return url.replace(/^https:\/\//, "");
+}
+
+async function openRepository(url: string) {
+  // Build-time constants only, but never hand a non-HTTPS target to the system opener.
+  if (!url.startsWith("https://")) return;
+  openFailed.value = false;
+  try {
+    await openUrl(url);
   } catch {
     if (mounted) openFailed.value = true;
   }
@@ -216,6 +232,60 @@ onBeforeUnmount(() => {
     >
       {{ t('releases.openLinkFailed') }}
     </NvxInlineNotice>
+
+    <section
+      v-if="aboutVersions.components.length"
+      class="about-settings__group"
+      aria-labelledby="about-components-title"
+    >
+      <h3 id="about-components-title">
+        {{ t('releases.components.title') }}
+      </h3>
+      <p>{{ t('releases.components.description') }}</p>
+      <dl class="about-settings__tiles">
+        <div
+          v-for="item in aboutVersions.components"
+          :key="item.id"
+          class="about-settings__tile"
+        >
+          <dt>{{ t(`releases.components.items.${item.id}`) }}</dt>
+          <dd>{{ item.version }}</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section
+      v-if="aboutVersions.openSource.length"
+      class="about-settings__group"
+      aria-labelledby="about-acknowledgements-title"
+    >
+      <h3 id="about-acknowledgements-title">
+        {{ t('releases.acknowledgements.title') }}
+      </h3>
+      <p>{{ t('releases.acknowledgements.description') }}</p>
+      <ul class="about-settings__credits">
+        <li
+          v-for="item in aboutVersions.openSource"
+          :key="item.label"
+          class="about-settings__credit"
+        >
+          <div class="about-settings__credit-main">
+            <strong>{{ item.label }}</strong>
+            <button
+              type="button"
+              class="about-settings__credit-link"
+              :aria-label="t('releases.acknowledgements.openLink', { name: item.label })"
+              @click="openRepository(item.url)"
+            >
+              {{ repositoryLabel(item.url) }}
+            </button>
+          </div>
+          <span class="about-settings__credit-version">
+            {{ item.version }}<template v-if="item.note"> · {{ item.note }}</template>
+          </span>
+        </li>
+      </ul>
+    </section>
     <NvxDialog
       v-model="confirmOpen"
       :title="t('releases.install.confirmTitle')"
@@ -352,6 +422,125 @@ onBeforeUnmount(() => {
   color: var(--nvx-color-text-primary);
   font-size: var(--nvx-font-size-sm);
   font-weight: var(--nvx-font-weight-semibold);
+}
+
+.about-settings__group {
+  display: grid;
+  gap: var(--nvx-space-2);
+  min-width: 0;
+}
+
+.about-settings h3 {
+  margin: 0;
+  color: var(--nvx-color-text-primary);
+  font-size: var(--nvx-font-size-md);
+  font-weight: var(--nvx-font-weight-semibold);
+}
+
+.about-settings__tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--nvx-space-3);
+  margin: var(--nvx-space-2) 0 0;
+}
+
+.about-settings__tile {
+  display: grid;
+  gap: var(--nvx-space-1);
+  min-width: 0;
+  padding: var(--nvx-space-3) var(--nvx-space-4);
+  border: var(--nvx-border-width) solid var(--nvx-color-border);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-surface);
+}
+
+.about-settings__tile dt,
+.about-settings__tile dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.about-settings__tile dt {
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-xs);
+}
+
+.about-settings__tile dd {
+  color: var(--nvx-color-text-primary);
+  font-size: var(--nvx-font-size-md);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--nvx-font-weight-semibold);
+}
+
+.about-settings__credits {
+  display: grid;
+  margin: var(--nvx-space-2) 0 0;
+  padding: 0;
+  overflow: hidden;
+  border: var(--nvx-border-width) solid var(--nvx-color-border);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-surface);
+  list-style: none;
+}
+
+.about-settings__credit {
+  display: flex;
+  gap: var(--nvx-space-4);
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: var(--nvx-space-2) var(--nvx-space-4);
+}
+
+.about-settings__credit + .about-settings__credit {
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
+}
+
+.about-settings__credit-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.about-settings__credit-main strong {
+  color: var(--nvx-color-text-primary);
+  font-size: var(--nvx-font-size-sm);
+  font-weight: var(--nvx-font-weight-semibold);
+}
+
+.about-settings__credit-link {
+  justify-self: start;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--nvx-radius-sm);
+  background: transparent;
+  color: var(--nvx-color-accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--nvx-font-size-xs);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.about-settings__credit-link:hover {
+  text-decoration: underline;
+}
+
+.about-settings__credit-link:focus-visible {
+  outline: var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.about-settings__credit-version {
+  flex: none;
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .about-settings__actions {
