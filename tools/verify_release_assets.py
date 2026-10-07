@@ -24,6 +24,13 @@ PLATFORMS = {
 }
 
 
+ANDROID_TARGET = "android-aarch64"
+
+
+def android_name(version: str) -> str:
+    return f"NoriShell_{version}_android_arm64.apk"
+
+
 def expected_names(version: str, sync_version: str) -> set[str]:
     names = {
         f"NoriShell_{version}_{platform}.{extension}"
@@ -43,7 +50,9 @@ def expected_names(version: str, sync_version: str) -> set[str]:
         f"NoriShell_SelfHostSync_Plugin_{sync_version}.zip",
         "latest.json",
     ))
-    assert len(names) == 17
+    names.add(android_name(version))
+    # 15 user packages + 2 macOS updater archives + latest.json.
+    assert len(names) == 18
     return names
 
 
@@ -97,15 +106,18 @@ def main() -> None:
     manifest = json.loads((assets / "latest.json").read_text())
     if set(manifest) != {"version", "platforms"} or manifest["version"] != args.version:
         raise ValueError("update manifest version or shape differs")
-    if set(manifest["platforms"]) != set(PLATFORMS):
+    if set(manifest["platforms"]) != set(PLATFORMS) | {ANDROID_TARGET}:
         raise ValueError("update manifest platform matrix differs")
     updater = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())["plugins"]["updater"]
     if updater.get("requireSignedVersion") is not True:
         raise ValueError("the application does not require signed update versions")
     public_key = updater["pubkey"]
     base = f"https://github.com/Norixor/NoriShell/releases/download/v{args.version}/"
-    for target, platform in PLATFORMS.items():
-        if target.startswith("darwin"):
+    targets = {**PLATFORMS, ANDROID_TARGET: "android_arm64"}
+    for target, platform in targets.items():
+        if target.startswith("android"):
+            filename = android_name(args.version)
+        elif target.startswith("darwin"):
             filename = f"NoriShell_{args.version}_{platform}.app.tar.gz"
         elif target.startswith("linux"):
             filename = f"NoriShell_{args.version}_{platform}.AppImage"
@@ -116,7 +128,8 @@ def main() -> None:
             raise ValueError(f"update URL differs: {target}")
         # Signatures exist only inside latest.json; no .sig files are published.
         verify_signature(assets / filename, entry["signature"], public_key, args.version)
-    print(f"Verified 17 Release assets, SHA256SUMS and six updater signatures for v{args.version}")
+    count = len(targets)
+    print(f"Verified {len(expected)} Release assets, SHA256SUMS and {count} updater signatures for v{args.version}")
 
 
 if __name__ == "__main__":

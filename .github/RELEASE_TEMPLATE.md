@@ -56,6 +56,16 @@ Linux support is a preview, verified so far only on Ubuntu 22.04 (GNOME, Wayland
 
 Linux 版为预览版，目前仅在 Ubuntu 22.04（GNOME、Wayland）上验证。托盘、原生通知和系统钥匙串自动解锁尚未实现；只有 AppImage 支持应用内更新。
 
+### Android · Preview / 预览版
+
+| Platform / 平台 | APK (in-app updates / 支持应用内更新) |
+| --- | --- |
+| Android · ARM64 (Android 10+) | [⬇ APK](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_{{APP_VERSION}}_android_arm64.apk) |
+
+Android support is a preview, verified so far only on the Android emulator (arm64, API 36), not on real devices. Install the APK directly (allow installing apps from this source when Android asks); it is not on any app store. Later versions update in the app.
+
+Android 版为预览版，目前仅在 Android 模拟器（arm64、API 36）上验证，尚未经真机验收。请直接安装 APK（系统提示时允许该来源安装应用），不在应用商店上架；后续版本可在应用内更新。
+
 **Self-hosted Sync / 自建同步** · [Server ZIP / 服务端](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_SelfHostSync_Server_{{SYNC_VERSION}}.zip) · [Plugin ZIP / 插件包](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/NoriShell_SelfHostSync_Plugin_{{SYNC_VERSION}}.zip) · [Installation guide / 安装指南](https://github.com/Norixor/NoriShell/blob/v{{APP_VERSION}}/docs/guides/users/self-host-sync.en.md)
 
 **Checksums / 校验** · [SHA256SUMS.txt](https://github.com/Norixor/NoriShell/releases/download/v{{APP_VERSION}}/SHA256SUMS.txt)
