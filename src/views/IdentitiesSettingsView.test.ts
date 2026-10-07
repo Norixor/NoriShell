@@ -15,9 +15,16 @@ const client = vi.hoisted(() => ({
   updateIdentity: vi.fn(),
 }));
 const requestSecureCredential = vi.hoisted(() => vi.fn());
+const toolWindows = vi.hoisted(() => ({ open: vi.fn(), listen: vi.fn(), unlisten: vi.fn(), callback: null as ((kind: string) => void) | null }));
+const host = vi.hoisted(() => ({ mobile: false }));
 
 vi.mock("../core-api/client", () => client);
 vi.mock("../core-api/secure-credential-client", () => ({ requestSecureCredential }));
+vi.mock("../tool-windows", () => ({ openToolWindow: toolWindows.open, onToolWindowChanged: toolWindows.listen }));
+vi.mock("../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
 
 import IdentitiesSettingsView from "./IdentitiesSettingsView.vue";
 
@@ -178,5 +185,44 @@ describe("IdentitiesSettingsView", () => {
     });
     expect(document.body.querySelector('input[type="password"]')).toBeNull();
     wrapper.unmount();
+  });
+
+  it("offers no key-file import entry on desktop, where the Hosts page reaches the host editor", async () => {
+    const { wrapper } = await mountView();
+    expect(wrapper.text()).not.toContain("Import key file");
+    expect(toolWindows.listen).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("points the phone shell to the host editor surface for key files and never collects a passphrase here", async () => {
+    host.mobile = true;
+    toolWindows.open.mockResolvedValue(undefined);
+    toolWindows.listen.mockImplementation(async (callback: (kind: string) => void) => { toolWindows.callback = callback; return toolWindows.unlisten; });
+    try {
+      const { wrapper } = await mountView();
+      expect(wrapper.text()).toContain("Import key file");
+      expect(wrapper.text()).toContain("host editor's Authentication section");
+      // The saved identities still render next to the key-file hint, and Refresh is an icon action.
+      expect(wrapper.text()).toContain("Production deploy");
+      const headingActions = wrapper.findAll(".management-heading__actions button");
+      expect(headingActions).toHaveLength(2);
+      expect(headingActions[0]!.attributes("aria-label")).toBe(i18n.global.t("identitySettings.refresh"));
+      expect(headingActions[0]!.text()).toBe("");
+      expect(document.body.querySelector('input[type="password"]')).toBeNull();
+      await wrapper.findAll("button").find((button) => button.text() === "Open host editor")!.trigger("click");
+      await flushPromises();
+      expect(toolWindows.open).toHaveBeenCalledWith({ kind: "hostEditor", hostId: null, initialSection: "connection", title: "Add Host" });
+      expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+      // A key imported in the editor shows up here once that surface reports a change.
+      expect(client.listIdentities).toHaveBeenCalledTimes(1);
+      toolWindows.callback?.("hostEditor");
+      await flushPromises();
+      expect(client.listIdentities).toHaveBeenCalledTimes(2);
+      wrapper.unmount();
+      expect(toolWindows.unlisten).toHaveBeenCalled();
+    } finally {
+      host.mobile = false;
+      toolWindows.callback = null;
+    }
   });
 });

@@ -5,16 +5,19 @@ import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 
 import { themeStyles, themeWithOverride, validateAppThemeProfile, validateThemeDefinition, type AppThemeProfile, type ThemeDefinition } from "../../app-theme";
-import { exportJsonFile } from "../../platform-file-export";
+import { exportJsonFile, isJsonExportWriteIncomplete } from "../../platform-file-export";
 import { useAppThemeStore } from "../../stores/appTheme";
 import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { useUiStore, type ThemePreference } from "../../stores/ui";
-import { NvxButton, NvxField, NvxIcon, NvxInlineNotice, NvxInput, NvxSelect, NvxStatusLabel } from "../ui";
+import { isMobileLayout } from "../../platform-host";
+import { NvxButton, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxSelect, NvxStatusLabel } from "../ui";
 
 const { t, locale } = useI18n();
 const router = useRouter();
 const store = useAppThemeStore();
 const ui = useUiStore();
+// The phone heading keeps one row: Refresh becomes an icon button beside the title.
+const mobileLayout = isMobileLayout();
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const draft = ref<AppThemeProfile>(clone(store.profile));
 const baseline = ref<AppThemeProfile>(clone(store.profile));
@@ -130,7 +133,7 @@ async function exportFile() {
   busy.value = true; error.value = ""; message.value = "";
   try {
     if (await exportJsonFile("theme", store.exportProfile()) && alive) message.value = "exported";
-  } catch { if (alive) error.value = "exportFailed"; }
+  } catch (caught) { if (alive) error.value = isJsonExportWriteIncomplete(caught) ? "exportIncomplete" : "exportFailed"; }
   finally { if (alive) busy.value = false; }
 }
 watch(() => store.profile, (profile) => {
@@ -151,7 +154,19 @@ onBeforeUnmount(() => { alive = false; });
           {{ t('appTheme.title') }}
         </h2><p>{{ t('appTheme.description') }}</p>
       </div>
+      <NvxIconButton
+        v-if="mobileLayout"
+        :label="t('appTheme.refresh')"
+        :disabled="store.loading"
+        @click="store.refreshThemes()"
+      >
+        <NvxIcon
+          :icon="RefreshCw"
+          :size="20"
+        />
+      </NvxIconButton>
       <NvxButton
+        v-else
         variant="ghost"
         size="sm"
         :disabled="store.loading"

@@ -9,7 +9,6 @@ import { i18n } from "../locales";
 const client = vi.hoisted(() => ({
   secureVault: vi.fn(),
   secureChallenge: vi.fn(),
-  decideMetricsHostKey: vi.fn(),
   fetchServerOverview: vi.fn(),
   fetchSshSessionSnapshot: vi.fn(),
   prepareMetricsKeyboardInteractiveAnswer: vi.fn(),
@@ -29,7 +28,6 @@ vi.mock("../core-api/client", async (importOriginal) => {
   return {
     ...actual,
     canUseDesktopCore: () => true,
-    decideMetricsHostKey: client.decideMetricsHostKey,
     fetchServerOverview: client.fetchServerOverview,
     fetchSshSessionSnapshot: client.fetchSshSessionSnapshot,
     prepareMetricsKeyboardInteractiveAnswer: client.prepareMetricsKeyboardInteractiveAnswer,
@@ -47,9 +45,8 @@ import OverviewView from "./OverviewView.vue";
 
 const hostId = "019d0000-0000-7000-8000-000000000001";
 const metricsSessionId = "019d0000-0000-7000-8000-000000000002";
-const challengeId = "019d0000-0000-7000-8000-000000000003";
 
-function snapshot(withChallenge = false): ServerOverviewSnapshot {
+function snapshot(monitored = false): ServerOverviewSnapshot {
   return {
     snapshotRevision: "1",
     cards: [{
@@ -74,7 +71,7 @@ function snapshot(withChallenge = false): ServerOverviewSnapshot {
         hostId,
         revision: "1",
         policy: {
-          enabled: withChallenge,
+          enabled: monitored,
           sampleIntervalMillis: 1500,
           sampleTimeoutMillis: 5000,
           diskMountIds: ["root"],
@@ -85,28 +82,18 @@ function snapshot(withChallenge = false): ServerOverviewSnapshot {
       terminalCounts: { connecting: 0, running: 0, lost: 0, failed: 0 },
       sftpCounts: { connecting: 0, running: 0, lost: 0, failed: 0 },
       forwardCounts: { connecting: 0, running: 0, lost: 0, failed: 0 },
-      metricsCounts: { connecting: withChallenge ? 1 : 0, running: 0, lost: 0, failed: 0 },
+      metricsCounts: { connecting: 0, running: 0, lost: 0, failed: 0 },
       terminalSessionIds: [],
-      metricsSession: withChallenge ? {
+      metricsSession: monitored ? {
         metricsSessionId,
         hostId,
         generation: "2",
         stateRevision: "3",
-        state: "needsHostKeyReview",
+        state: "needsHostTrust",
         authenticationReason: null,
         failureCode: null,
         nextRetryAtUnixMs: null,
         latestSnapshot: null,
-        hostKeyChallenge: {
-          challengeId,
-          metricsSessionId,
-          hostId,
-          generation: "2",
-          routeStage: { kind: "target" },
-          algorithm: "ssh-ed25519",
-          fingerprintSha256: "SHA256:test-fingerprint",
-          trustedFingerprintSha256: null,
-        },
         keyboardInteractiveChallenge: null,
       } : null,
     }],
@@ -193,28 +180,19 @@ describe("OverviewView Core operation boundaries", () => {
     } finally { wrapper.unmount(); }
   });
 
-  it("requires an explicit decision for an unknown Metrics host key", async () => {
-    client.decideMetricsHostKey.mockResolvedValue({});
+  it("offers no background trust action while the server identity is untrusted", async () => {
     const { wrapper } = await mountView(snapshot(true));
 
-    const review = wrapper.findAll("button")
-      .find((candidate) => candidate.attributes("aria-label") === "Review server fingerprint");
-    await review?.trigger("click");
-    await flushPromises();
-    expect(document.body.textContent).not.toContain("SHA256:test-fingerprint");
-    expect(client.secureChallenge).toHaveBeenCalledWith({ kind: "metricsHostKey", request: {
-      metricsSessionId,
-      hostId,
-      expectedGeneration: "2",
-      challengeId,
-    } });
-    expect(client.decideMetricsHostKey).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("Connect once to confirm the server identity");
+    const actions = wrapper.findAll(".nvx-server-card footer button")
+      .map((candidate) => candidate.attributes("aria-label"));
+    expect(actions).not.toContain("Review server fingerprint");
+    expect(client.secureChallenge).not.toHaveBeenCalled();
     wrapper.unmount();
   });
   it.each(["approve", "cancel", "host", "generation", "unmount"])("handles an explicit Vault recovery with %s outcome", async (outcome) => {
     const initial = snapshot(true);
     const metrics = initial.cards[0]!.metricsSession!;
-    metrics.hostKeyChallenge = null;
     metrics.state = "needsAuthentication";
     metrics.authenticationReason = "vaultLocked";
     let approve!: (value: boolean) => void;

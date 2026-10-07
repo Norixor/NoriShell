@@ -1,4 +1,7 @@
+import { invoke } from "@tauri-apps/api/core";
+
 import { BUILTIN_APP_THEMES, themeStyles, validateThemeDefinition, type ThemeAppearance, type ThemeDefinition } from "./app-theme";
+import { hasTauriIpc, isMobileLayout } from "./platform-host";
 import { parseThemePreference, resolveThemePreference, UI_PREFERENCES_KEY } from "./ui-preferences";
 
 const PROJECTION_KEY = "norishell.app-theme.projection.v1";
@@ -7,10 +10,36 @@ type ThemeProjection = Record<ThemeAppearance, ThemeDefinition>;
 /** Regular auxiliary windows consume only resolved appearance data; they never load plugins or their runtime. */
 export function publishAppThemeProjection(projection: ThemeProjection) {
   if (!validateThemeDefinition(projection.light) || !validateThemeDefinition(projection.dark)) return;
+  syncAndroidSystemBars(projection);
   try {
     const text = JSON.stringify(projection);
     if (localStorage.getItem(PROJECTION_KEY) !== text) localStorage.setItem(PROJECTION_KEY, text);
   } catch { /* A saved main-window theme never rolls back because auxiliary-window caching fails. */ }
+}
+
+let lastSystemBars = "";
+
+/**
+ * Android only: status/navigation bar icons and the color behind the bars follow
+ * the app theme chosen in Settings, not just the system night mode. The main
+ * document sets `data-theme` before it applies and publishes the theme.
+ */
+function syncAndroidSystemBars(projection: ThemeProjection) {
+  if (!isMobileLayout() || !hasTauriIpc()) return;
+  const appearance: ThemeAppearance = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  const request = { dark: appearance === "dark", background: projection[appearance].colors.bgSurface.toLowerCase() };
+  const key = JSON.stringify(request);
+  if (key === lastSystemBars) return;
+  lastSystemBars = key;
+  // Bars keep their previous appearance on failure; theme projection and layout are unaffected,
+  // and neither a synchronous throw nor a rejection may escape into the theme store.
+  const failed = () => { if (lastSystemBars === key) lastSystemBars = ""; };
+  try {
+    Promise.resolve(invoke("android_set_system_bars", { request: { meta: { requestId: crypto.randomUUID() }, ...request } }))
+      .catch(failed);
+  } catch {
+    failed();
+  }
 }
 
 export function readAppThemeProjection(appearance: ThemeAppearance): ThemeDefinition {

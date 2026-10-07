@@ -7,6 +7,7 @@ import { canUseDesktopCore, listHosts } from "../core-api/client";
 import type { HostSummary } from "../core-api/generated/core-api";
 import { useRouteReveal } from "../routeReveal";
 import { onSavedConnectionsChanged } from "../saved-connections";
+import { workspaceHostMode } from "../platform-host";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { isWorkspaceTabView } from "../workspace-window-context";
 import { showWorkspaceTabFailure } from "../workspace-tab-errors";
@@ -18,6 +19,8 @@ import SftpView from "./SftpView.vue";
 
 const route = useRoute();
 const revealRoute = useRouteReveal();
+// Focus and plugin navigations that create Tabs need the native Tab manager; a single document only activates existing Tabs.
+const nativeTabsHost = workspaceHostMode() === "nativeTabs";
 const workspaceTabs = useWorkspaceTabsStore();
 const { fileTabs, activeFileTabId } = storeToRefs(workspaceTabs);
 const hosts = ref<HostSummary[]>([]);
@@ -61,10 +64,10 @@ function acceptExternalNavigation() {
       const owner = workspaceTabs.fileSessionOwner(sessionId);
       if (owner) workspaceTabs.activateFileTab(owner);
       else if (isWorkspaceTabView() && currentTab.value) workspaceTabs.claimFileSession(sessionId, currentTab.value.groupId);
-      else if (!isWorkspaceTabView()) void createManagedFileForFocus(Object.fromEntries(
+      else if (nativeTabsHost && !isWorkspaceTabView()) void createManagedFileForFocus(Object.fromEntries(
         Object.entries(route.query).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
       )).catch(showFileCreateFailure);
-    } else if (!currentTab.value && !isWorkspaceTabView()) {
+    } else if (!currentTab.value && nativeTabsHost && !isWorkspaceTabView()) {
       void createManagedFileForFocus({ focusOperation }).catch(showFileCreateFailure);
     }
     return;
@@ -74,7 +77,7 @@ function acceptExternalNavigation() {
     const owner = workspaceTabs.fileSessionOwner(pendingPluginSession);
     if (owner) workspaceTabs.activateFileTab(owner);
     else if (isWorkspaceTabView() && currentTab.value) workspaceTabs.claimFileSession(pendingPluginSession, currentTab.value.groupId);
-    else if (!isWorkspaceTabView()) {
+    else if (nativeTabsHost && !isWorkspaceTabView()) {
       const intent = takeSftpPluginNavigation();
       if (intent) void createManagedFileTab("remote", null, "", intent).catch(showFileCreateFailure);
     }

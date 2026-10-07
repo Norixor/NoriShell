@@ -4,6 +4,8 @@ import { computed, nextTick, onBeforeUnmount, provide, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import type { PluginUiContribution } from "../../core-api/generated/core-api";
+import { pushMobileOverlay, type MobileOverlayHandle } from "../../mobile-overlays";
+import { isMobileLayout } from "../../platform-host";
 import { NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput } from "../ui";
 import NvxPluginExtensionTarget from "./NvxPluginExtensionTarget.vue";
 import { pluginIconMap } from "./pluginIcons";
@@ -28,6 +30,7 @@ const emit = defineEmits<{
 }>();
 const { t, locale } = useI18n();
 const panel = ref<HTMLElement | null>(null);
+const scrim = ref<HTMLElement | null>(null);
 const picker = ref<HTMLElement | null>(null);
 const pickerOpen = ref(false);
 const query = ref("");
@@ -46,6 +49,9 @@ try {
 } catch { /* UI preferences are optional. */ }
 let restoreFocus: HTMLElement | null = null;
 let resizing: { pointerId: number; startX: number; startWidth: number; target: HTMLElement } | null = null;
+// On the phone the panel is a bottom sheet (mobile.css) and the Android back key closes it.
+const mobile = isMobileLayout();
+let mobileOverlay: MobileOverlayHandle | null = null;
 
 function setCatalog(items: Choice[]) {
   choices.value = [...items].sort((a, b) => a.pluginName.localeCompare(b.pluginName, locale.value));
@@ -107,10 +113,20 @@ watch(() => props.modelValue, (open) => {
   if (open) {
     activePluginPanel.value = panelId;
     restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (mobile && !mobileOverlay) {
+      mobileOverlay = pushMobileOverlay(() => {
+        if (pickerOpen.value) pickerOpen.value = false;
+        else close();
+        return true;
+      }, () => [scrim.value, panel.value]);
+      void nextTick(() => mobileOverlay?.refresh());
+    }
     void nextTick(() => panel.value?.querySelector<HTMLElement>("[data-plugin-picker-trigger]")?.focus());
   } else {
     if (activePluginPanel.value === panelId) activePluginPanel.value = null;
     pickerOpen.value = false;
+    mobileOverlay?.release();
+    mobileOverlay = null;
     if (restoreFocus?.isConnected) restoreFocus.focus();
   }
 }, { immediate: true });
@@ -118,148 +134,161 @@ watch(activePluginPanel, (owner) => { if (props.modelValue && owner !== panelId)
 watch(pickerOpen, (open) => {
   if (open) void nextTick(() => picker.value?.querySelector<HTMLInputElement>("input")?.focus());
 });
-onBeforeUnmount(() => { resizing = null; if (activePluginPanel.value === panelId) activePluginPanel.value = null; });
+onBeforeUnmount(() => {
+  resizing = null;
+  mobileOverlay?.release();
+  mobileOverlay = null;
+  if (activePluginPanel.value === panelId) activePluginPanel.value = null;
+});
 </script>
 
 <template>
-  <div
-    v-if="modelValue"
-    class="plugin-tool-panel__scrim"
-    :class="{ 'is-floating': floating }"
-    @click="close"
-  />
-  <aside
-    v-show="modelValue"
-    ref="panel"
-    class="plugin-tool-panel"
-    :class="{ 'is-floating': floating }"
-    :style="{ '--plugin-panel-width': `${width}px` }"
-    :aria-label="t('plugins.tools.title')"
-    @keydown="keydown"
+  <!-- On the phone the panel is a fixed bottom sheet; hosting it under body keeps it out of any
+       ancestor containment or transform that would trap it beneath the scrim. Desktop stays in place. -->
+  <Teleport
+    to="body"
+    :disabled="!mobile"
   >
     <div
-      v-if="modelValue && !floating"
-      class="plugin-tool-panel__resize"
-      role="separator"
-      aria-orientation="vertical"
-      :aria-label="t('plugins.tools.resize')"
-      :aria-valuenow="width"
-      :aria-valuemin="360"
-      :aria-valuemax="720"
-      tabindex="0"
-      @pointerdown="beginResize"
-      @pointermove="moveResize"
-      @pointerup="endResize"
-      @pointercancel="endResize"
-      @keydown="resizeByKey"
+      v-if="modelValue"
+      ref="scrim"
+      class="plugin-tool-panel__scrim"
+      :class="{ 'is-floating': floating }"
+      @click="close"
+    />
+    <aside
+      v-show="modelValue"
+      ref="panel"
+      class="plugin-tool-panel"
+      :class="{ 'is-floating': floating }"
+      :style="{ '--plugin-panel-width': `${width}px` }"
+      :aria-label="t('plugins.tools.title')"
+      @keydown="keydown"
     >
-      <NvxIcon
-        :icon="GripVertical"
-        :size="16"
-      />
-    </div>
-    <header
-      class="plugin-tool-panel__header"
-      data-plugin-protected
-    >
-      <div><strong>{{ t('plugins.tools.title') }}</strong><span :title="contextLabel">{{ contextLabel }}</span></div>
-      <NvxIconButton
-        :label="t('plugins.tools.close')"
-        size="sm"
-        @click="close"
-      >
-        <NvxIcon
-          :icon="X"
-          :size="16"
-        />
-      </NvxIconButton>
-    </header>
-    <div
-      class="plugin-tool-panel__picker"
-      data-plugin-protected
-    >
-      <button
-        data-plugin-picker-trigger
-        type="button"
-        :aria-expanded="pickerOpen"
-        aria-haspopup="listbox"
-        @click="pickerOpen = !pickerOpen"
-      >
-        <NvxIcon
-          :icon="pluginIconMap[selected?.icon ?? ''] ?? Plug"
-          :size="16"
-        />
-        <span>{{ selected?.pluginName ?? t('plugins.tools.choose') }}</span>
-        <small>{{ choices.length }}</small><NvxIcon
-          :icon="ChevronDown"
-          :size="16"
-        />
-      </button>
       <div
-        v-if="pickerOpen"
-        ref="picker"
-        class="plugin-tool-panel__choices"
+        v-if="modelValue && !floating"
+        class="plugin-tool-panel__resize"
+        role="separator"
+        aria-orientation="vertical"
+        :aria-label="t('plugins.tools.resize')"
+        :aria-valuenow="width"
+        :aria-valuemin="360"
+        :aria-valuemax="720"
+        tabindex="0"
+        @pointerdown="beginResize"
+        @pointermove="moveResize"
+        @pointerup="endResize"
+        @pointercancel="endResize"
+        @keydown="resizeByKey"
       >
-        <div class="plugin-tool-panel__search">
-          <NvxIcon
-            :icon="Search"
-            :size="16"
-          /><NvxInput
-            v-model="query"
-            :aria-label="t('plugins.tools.search')"
-            :placeholder="t('plugins.tools.search')"
-          />
-        </div>
-        <div
-          role="listbox"
-          :aria-label="t('plugins.tools.choose')"
+        <NvxIcon
+          :icon="GripVertical"
+          :size="16"
+        />
+      </div>
+      <header
+        class="plugin-tool-panel__header"
+        data-plugin-protected
+      >
+        <div><strong>{{ t('plugins.tools.title') }}</strong><span :title="contextLabel">{{ contextLabel }}</span></div>
+        <NvxIconButton
+          :label="t('plugins.tools.close')"
+          size="sm"
+          @click="close"
         >
-          <button
-            v-for="item in filtered"
-            :key="item.pluginId"
-            type="button"
-            role="option"
-            :aria-selected="item.pluginId === selectedId"
-            @click="select(item)"
-          >
+          <NvxIcon
+            :icon="X"
+            :size="16"
+          />
+        </NvxIconButton>
+      </header>
+      <div
+        class="plugin-tool-panel__picker"
+        data-plugin-protected
+      >
+        <button
+          data-plugin-picker-trigger
+          type="button"
+          :aria-expanded="pickerOpen"
+          aria-haspopup="listbox"
+          @click="pickerOpen = !pickerOpen"
+        >
+          <NvxIcon
+            :icon="pluginIconMap[selected?.icon ?? ''] ?? Plug"
+            :size="16"
+          />
+          <span>{{ selected?.pluginName ?? t('plugins.tools.choose') }}</span>
+          <small>{{ choices.length }}</small><NvxIcon
+            :icon="ChevronDown"
+            :size="16"
+          />
+        </button>
+        <div
+          v-if="pickerOpen"
+          ref="picker"
+          class="plugin-tool-panel__choices"
+        >
+          <div class="plugin-tool-panel__search">
             <NvxIcon
-              :icon="pluginIconMap[item.icon ?? ''] ?? Plug"
+              :icon="Search"
               :size="16"
-            /><span>{{ item.pluginName }}</span>
-          </button>
-          <p v-if="!filtered.length">
-            {{ t(query ? 'plugins.tools.noMatches' : 'plugins.tools.empty') }}
-          </p>
+            /><NvxInput
+              v-model="query"
+              :aria-label="t('plugins.tools.search')"
+              :placeholder="t('plugins.tools.search')"
+            />
+          </div>
+          <div
+            role="listbox"
+            :aria-label="t('plugins.tools.choose')"
+          >
+            <button
+              v-for="item in filtered"
+              :key="item.pluginId"
+              type="button"
+              role="option"
+              :aria-selected="item.pluginId === selectedId"
+              @click="select(item)"
+            >
+              <NvxIcon
+                :icon="pluginIconMap[item.icon ?? ''] ?? Plug"
+                :size="16"
+              /><span>{{ item.pluginName }}</span>
+            </button>
+            <p v-if="!filtered.length">
+              {{ t(query ? 'plugins.tools.noMatches' : 'plugins.tools.empty') }}
+            </p>
+          </div>
         </div>
       </div>
-    </div>
-    <div class="plugin-tool-panel__body">
-      <NvxInlineNotice
-        v-if="!available"
-        tone="info"
-        :title="t('plugins.tools.sessionRequired')"
-      >
-        {{ t('plugins.tools.sessionRequiredBody') }}
-      </NvxInlineNotice>
-      <p
-        v-else-if="!choices.length"
-        class="plugin-tool-panel__empty"
-      >
-        {{ t('plugins.tools.empty') }}
-      </p>
-      <NvxPluginExtensionTarget
-        :key="`${targetId}:${instanceKey}`"
-        :target-id="targetId"
-        :instance-key="instanceKey"
-        :display-label="contextLabel"
-        :route-path="routePath"
-        :selected-plugin-id="modelValue && available ? selectedId : null"
-        :disabled="!available || !modelValue"
-        :show-identity="false"
-        @catalog="setCatalog"
-      />
-    </div>
-  </aside>
+      <div class="plugin-tool-panel__body">
+        <NvxInlineNotice
+          v-if="!available"
+          tone="info"
+          :title="t('plugins.tools.sessionRequired')"
+        >
+          {{ t('plugins.tools.sessionRequiredBody') }}
+        </NvxInlineNotice>
+        <p
+          v-else-if="!choices.length"
+          class="plugin-tool-panel__empty"
+        >
+          {{ t('plugins.tools.empty') }}
+        </p>
+        <NvxPluginExtensionTarget
+          :key="`${targetId}:${instanceKey}`"
+          :target-id="targetId"
+          :instance-key="instanceKey"
+          :display-label="contextLabel"
+          :route-path="routePath"
+          :selected-plugin-id="modelValue && available ? selectedId : null"
+          :disabled="!available || !modelValue"
+          :show-identity="false"
+          @catalog="setCatalog"
+        />
+      </div>
+    </aside>
+  </Teleport>
 </template>
 
 <style scoped>

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { isTauri } from "@tauri-apps/api/core";
 import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
 
@@ -10,6 +9,7 @@ import { NvxInlineNotice } from "../components/ui";
 import { listInstalledPlugins } from "../core-api/client";
 import { usePluginExtensionsStore } from "../stores/pluginExtensions";
 import { pluginPageTab, useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { workspaceHostMode } from "../platform-host";
 import { useRouteReveal } from "../routeReveal";
 import { isWorkspaceTabView } from "../workspace-window-context";
 import { snapshotWorkspaceTabs } from "../workspace-tab-windows";
@@ -47,7 +47,7 @@ async function openOwnedPage() {
   const item = navigationItem.value;
   if (!item || !isCurrentPage(key)) return;
   // Only the page's own Tab WebView renders it; the router opens shells' requests as a Page Tab.
-  if (isTauri()) {
+  if (workspaceHostMode() === "nativeTabs") {
     const owned = (await snapshotWorkspaceTabs()).owned.find((record) => record.id === pluginPageTab(item).groupId);
     if (!owned) throw new Error("workspace_tab.not_found");
     if (owned.kind !== "page") throw new Error("workspace_tab.kind_conflict");

@@ -70,7 +70,7 @@ export const terminalEnhancementsEn = {
     never: "Never",
     title: "Confirm terminal paste",
     description: "Target: {target}",
-    lines: "{count} lines",
+    lines: "{count} line | {count} lines",
     trailingNewline: "Contains a trailing newline",
     controls: "Control characters are shown as escapes in this preview. The actual characters will be sent after confirmation.",
     preview: "Text to paste",

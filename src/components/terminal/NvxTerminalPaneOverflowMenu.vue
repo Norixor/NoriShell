@@ -12,6 +12,7 @@ import type { Component } from "vue";
 import { useI18n } from "vue-i18n";
 
 import { NvxPluginExtensionTarget } from "../plugins";
+import { isMobileLayout } from "../../platform-host";
 import { NvxIcon, NvxIconButton } from "../ui";
 import { usePopoverMenu } from "../ui/usePopoverMenu";
 import NvxPluginContributionSlot from "./NvxPluginContributionSlot.vue";
@@ -50,6 +51,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+// Phones never split a Terminal Tab; "Close Pane" stays (it closes an extra restored Pane, or the Tab).
+const mobileLayout = isMobileLayout();
 const { rootRef, triggerRef, viewportPanelRef, viewportPanelStyle, open, closeMenu, toggleMenu, handleMenuKeyDown } = usePopoverMenu();
 
 function run(action: "search" | "copy" | "session" | "close") {
@@ -127,7 +130,7 @@ function runWorkspaceSplit() {
           {{ t("terminalTools.copySelection") }}
         </button>
 
-        <template v-if="showLayoutActions">
+        <template v-if="showLayoutActions && !mobileLayout">
           <div
             class="terminal-pane-overflow-menu__separator"
             role="separator"

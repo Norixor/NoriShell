@@ -48,10 +48,10 @@ export const desktopSyncEn = {
   closeDetails: "Close",
   noMatches: "No matching items.",
   noItems: "No items yet.",
-  resultCount: "{count} items",
+  resultCount: "{count} item | {count} items",
   previous: "Previous",
   next: "Next",
-  omitted: "{count} more items are not loaded in this read-only view. Search covers loaded items only.",
+  omitted: "{count} more item is not loaded in this read-only view. Search covers loaded items only. | {count} more items are not loaded in this read-only view. Search covers loaded items only.",
   kinds: {
     password: "Password",
     privateKey: "Private key",

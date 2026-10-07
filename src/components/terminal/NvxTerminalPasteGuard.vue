@@ -140,7 +140,7 @@ defineExpose({ requestPaste, pasteFromClipboard });
       class="paste-review"
     >
       <div class="paste-review__summary">
-        <span>{{ t('terminalEnhancements.paste.lines', { count: pending.lineCount }) }}</span>
+        <span>{{ t('terminalEnhancements.paste.lines', pending.lineCount) }}</span>
         <span v-if="pending.hasTrailingNewline">{{ t('terminalEnhancements.paste.trailingNewline') }}</span>
       </div>
       <NvxInlineNotice

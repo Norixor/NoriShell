@@ -28,6 +28,30 @@ describe("NvxTerminalSplitTree", () => {
     expect(separator.attributes("style")).toContain("width: calc(0% + 5px)");
   });
 
+  it("shows only the solo Pane at full size, keeps the others mounted and drops the separators", async () => {
+    const node = splitTerminalPane(createTerminalPane("pane-a"), "pane-a", "horizontal", "pane-b", "split-a");
+    const wrapper = mount(NvxTerminalSplitTree, {
+      props: { node, activePaneId: "pane-b", separatorLabel: "Resize", soloPaneId: "pane-b" },
+      slots: { pane: ({ pane }: { pane: { paneId: string } }) => h("span", { class: "slot-pane" }, pane.paneId) },
+    });
+    const panes = wrapper.findAll(".nvx-terminal-split-tree__pane");
+    expect(panes).toHaveLength(2);
+    expect(panes[0]?.attributes("style")).toContain("display: none");
+    expect(panes[0]?.text()).toBe("pane-a");
+    expect(panes[1]?.attributes("style")).toContain("width: 100%");
+    expect(panes[1]?.attributes("style")).toContain("height: 100%");
+    expect(wrapper.find(".nvx-terminal-split-tree__separator").exists()).toBe(false);
+    // Leaving solo mode (desktop or a single-Pane layout) restores the split geometry without remounting the Panes.
+    await wrapper.setProps({ soloPaneId: null });
+    expect(wrapper.findAll(".nvx-terminal-split-tree__pane")[0]?.attributes("style")).toContain("width: 50%");
+    expect(wrapper.find(".nvx-terminal-split-tree__separator--horizontal").exists()).toBe(true);
+    // A single Pane ignores the solo request: it already fills the tree.
+    const single = mount(NvxTerminalSplitTree, {
+      props: { node: createTerminalPane("only"), activePaneId: "only", separatorLabel: "Resize", soloPaneId: "only" },
+    });
+    expect(single.get(".nvx-terminal-split-tree__pane").attributes("style")).toContain("width: 100%");
+  });
+
   it("keeps keyboard resize behavior on the overlaid separator", async () => {
     const node = splitTerminalPane(
       createTerminalPane("pane-a"),

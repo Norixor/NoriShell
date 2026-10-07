@@ -1,10 +1,11 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { defineStore } from "pinia";
 import { nextTick, ref, watch } from "vue";
 import type { PluginAppIntegrationSnapshot, PluginAppCommand } from "../core-api/generated/core-api";
 import { useTipsStore } from "./tips";
 import { usePluginExtensionsStore } from "./pluginExtensions";
 import { i18n } from "../locales";
+import { hasTauriIpc } from "../platform-host";
 import {
   listPluginDialogs,
   pluginDialogOwnerMatches,
@@ -24,7 +25,7 @@ export const usePluginAppIntegrationsStore = defineStore("pluginAppIntegrations"
   const enabledBindings = ref(false);
   const extensions = usePluginExtensionsStore();
   async function refresh() {
-    if (!isTauri()) return;
+    if (!hasTauriIpc()) return;
     snapshots.value = await invoke<PluginAppIntegrationSnapshot[]>("plugin_app_integration_list", { request: { meta: { requestId: crypto.randomUUID() } } });
   }
   async function run(snapshot: PluginAppIntegrationSnapshot, command: PluginAppCommand) {
@@ -134,7 +135,7 @@ function startPluginAppShortcutListener(store: ReturnType<typeof usePluginAppInt
  * it once and then follows the main window's change events before using shortcuts.
  */
 export async function startPluginAppShortcuts(): Promise<() => void> {
-  if (!isTauri()) return () => {};
+  if (!hasTauriIpc()) return () => {};
   const { emit, listen } = await import("@tauri-apps/api/event");
   const store = usePluginAppIntegrationsStore();
   const stopShortcuts = startPluginAppShortcutListener(store);
@@ -156,7 +157,7 @@ export async function startPluginAppShortcuts(): Promise<() => void> {
 
 /** Main-window integration; the Core event carries an exact current plugin fence. */
 export async function startPluginAppNavigation(router: import("vue-router").Router): Promise<() => void> {
-  if (!isTauri()) return () => {};
+  if (!hasTauriIpc()) return () => {};
   const { emit, listen } = await import("@tauri-apps/api/event");
   const store = usePluginAppIntegrationsStore();
   let active = true;

@@ -29,14 +29,16 @@ describe("isolated SSH challenges", () => {
     expect(fields.every((field) => (field.element as HTMLInputElement).value === "")).toBe(true);
     wrapper.unmount();
   });
-  it("never offers approval for a changed Metrics fingerprint", async () => {
-    client.get.mockResolvedValue({ id: "fixture", content: { kind: "metricsHostKey", challenge: { hostId: "fixture-host", algorithm: "ssh-ed25519", fingerprintSha256: "SHA256:new", trustedFingerprintSha256: "SHA256:old" } } });
+  it("keeps the host-key window for another decision after a failed trust write", async () => {
+    client.get.mockResolvedValue({ id: "fixture", content: { kind: "sshHostKey", challenge: { endpoint: { address: "fixture.example", port: 22 }, keyAlgorithm: "ssh-ed25519", fingerprintSha256: "SHA256:fixture" } } });
+    client.submit.mockRejectedValueOnce("secureChallengeTrustFailed");
     const wrapper = render(); await flushPromises();
-    const approve = wrapper.findAll("button").find((button) => button.text() === i18n.global.t("sshSession.hostKey.accept"))!;
-    expect(approve.attributes("disabled")).toBeDefined();
-    await approve.trigger("click"); expect(client.submit).not.toHaveBeenCalled();
-    await wrapper.findAll("button").find((button) => button.text() === i18n.global.t("sshSession.hostKey.reject"))!.trigger("click");
-    expect(client.submit).toHaveBeenCalledWith("", false, []);
+    const accept = () => wrapper.findAll("button").find((button) => button.text() === i18n.global.t("sshSession.hostKey.accept"))!;
+    await accept().trigger("click"); await flushPromises();
+    expect(wrapper.text()).toContain(i18n.global.t("secureWindow.challenge.trustFailed"));
+    expect(accept().attributes("disabled")).toBeUndefined();
+    await accept().trigger("click");
+    expect(client.submit).toHaveBeenCalledTimes(2);
     wrapper.unmount();
   });
 });

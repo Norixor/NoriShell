@@ -18,18 +18,41 @@ const hooks = vi.hoisted(() => ({
   listPluginNavigation: vi.fn().mockResolvedValue([]),
   runtimeInvalidated: undefined as undefined | ((event: { payload: { pluginId: string } }) => void),
   runtimeReady: undefined as undefined | ((event: { payload: InstalledPluginSummary }) => void),
+  events: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 const tabViews = vi.hoisted(() => {
   const release = vi.fn();
   return { release, suspend: vi.fn(() => release) };
 });
+const launches = vi.hoisted(() => ({
+  nativeChannel: vi.fn(async () => undefined), nativeProtocol: vi.fn(async () => undefined),
+  documentChannel: vi.fn(async () => undefined), documentProtocol: vi.fn(async () => undefined),
+  pending: vi.fn(async () => [] as unknown[]),
+  restore: vi.fn(async () => undefined),
+}));
 vi.mock("./workspace-tab-view-shell", async (importOriginal) => ({
   ...await importOriginal<typeof import("./workspace-tab-view-shell")>(),
   suspendWorkspaceTabViews: tabViews.suspend,
+  createManagedApprovedPluginChannel: launches.nativeChannel,
+  createManagedPluginProtocolLaunch: launches.nativeProtocol,
+}));
+vi.mock("./single-document-workspace", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./single-document-workspace")>(),
+  openSingleDocumentApprovedPluginChannel: launches.documentChannel,
+  openSingleDocumentPluginProtocolLaunches: launches.documentProtocol,
+  restoreSingleDocumentResources: launches.restore,
 }));
 
-vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
+// `invoke` serves the Android system-bar sync in app-theme-projection.ts.
+vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn(() => Promise.resolve()) }));
+const hostMode = vi.hoisted(() => ({ mobile: false }));
+vi.mock("./platform-host", () => ({
+  hasTauriIpc: () => true,
+  isMobileLayout: () => hostMode.mobile,
+  workspaceHostMode: () => (hostMode.mobile ? "singleDocument" : "nativeTabs"),
+  hasNativeWindowChrome: () => !hostMode.mobile,
+}));
 vi.mock("./workspace-tab-window-ui", () => ({
   startWorkspaceTabWindowUi: vi.fn(async () => () => undefined),
 }));
@@ -39,6 +62,7 @@ vi.mock("@tauri-apps/api/event", () => ({
     if (event === "application-exit-requested") hooks.applicationExit = callback;
     if (event === "plugin-runtime-invalidated") hooks.runtimeInvalidated = callback;
     if (event === "plugin-runtime-ready") hooks.runtimeReady = callback;
+    hooks.events.set(event, callback);
     return vi.fn();
   }),
 }));
@@ -62,7 +86,7 @@ vi.mock("./core-api/client", () => ({
   parseCoreApiError: () => null,
 }));
 vi.mock("./core-api/plugin-terminal", () => ({
-  listPluginProtocolLaunches: vi.fn().mockResolvedValue([]),
+  listPluginProtocolLaunches: launches.pending,
 }));
 vi.mock("./terminal-workspace-persistence", () => ({
   requestExitAfterTerminalWorkspaceFlush: hooks.flushAndExit,
@@ -109,6 +133,9 @@ async function mountApplication(path = "/terminal", holdReadyOn: string[] = []) 
         NvxWindowFrame: { template: '<div><slot platform="macos" /></div>' },
         NvxAppHeader: true,
         NvxNavigationRail: true,
+        NvxMobileShell: true,
+        NvxMobileBottomNav: true,
+        NvxWorkspaceTabPlaceholder: true,
         NvxTips: true,
         NvxPluginCommandPalette: true,
         NvxPluginExtensionTarget: PluginTargetStub,
@@ -309,5 +336,66 @@ describe("plugin runtime status projection", () => {
     expect(plugins.installed).toEqual([enabledPlugin]);
     expect(plugins.errorCode).toBe("requestFailed");
     expect(plugins.success).toBeNull();
+  });
+});
+
+describe("phone shell", () => {
+  afterEach(() => { hostMode.mobile = false; hooks.events.clear(); vi.clearAllMocks(); });
+
+  it.each([
+    ["Android", true],
+    ["desktop", false],
+  ] as const)("opens plugin protocol launches and approved channels as Terminal Tabs on %s", async (_name, mobile) => {
+    hostMode.mobile = mobile;
+    hooks.events.clear();
+    const launch = { launchId: "l1", revision: "1", tabId: "t1", paneId: "p1", claimed: false, expiresAtUnixMs: Date.now() + 60_000 };
+    launches.pending.mockResolvedValue([launch]);
+    await mountApplication();
+    await flushPromises();
+    hooks.events.get("plugin-protocol-launch")!({ payload: null });
+    const channel = { operationId: "op-1", authorizationToken: "token", label: "pod" };
+    hooks.events.get("plugin-terminal-channel-approved")!({ payload: channel });
+    hooks.events.get("plugin-terminal-channel-approved")!({ payload: channel });
+    await flushPromises();
+    if (mobile) {
+      // Startup reconcile plus the event; the single document claims through its Terminal view.
+      expect(launches.documentProtocol).toHaveBeenCalledTimes(2);
+      expect(launches.documentChannel).toHaveBeenCalledTimes(1);
+      expect(launches.documentChannel).toHaveBeenCalledWith(channel);
+      expect(launches.nativeProtocol).not.toHaveBeenCalled();
+      expect(launches.nativeChannel).not.toHaveBeenCalled();
+      // A reloaded single document binds its live File and Desktop resources again.
+      expect(launches.restore).toHaveBeenCalledTimes(1);
+      // The tray stays desktop-only, but notification taps from the Android service are handled.
+      expect(hooks.events.has("native-resource-notification-click")).toBe(true);
+    } else {
+      expect(launches.nativeProtocol).toHaveBeenCalledWith(launch);
+      expect(launches.nativeChannel).toHaveBeenCalledTimes(1);
+      expect(launches.documentProtocol).not.toHaveBeenCalled();
+      expect(launches.documentChannel).not.toHaveBeenCalled();
+      expect(launches.restore).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps the desktop header, rail and native Tab placeholder on desktop", async () => {
+    const { wrapper } = await mountApplication();
+    expect(wrapper.find("nvx-app-header-stub").exists()).toBe(true);
+    expect(wrapper.find("nvx-navigation-rail-stub").exists()).toBe(true);
+    expect(wrapper.find("nvx-workspace-tab-placeholder-stub").exists()).toBe(true);
+    expect(wrapper.find("nvx-mobile-shell-stub").exists()).toBe(false);
+    expect(wrapper.find("nvx-mobile-bottom-nav-stub").exists()).toBe(false);
+    expect(wrapper.find(".app-shell--mobile").exists()).toBe(false);
+  });
+
+  it("swaps the desktop frame for the phone shell on Android without native Tab views", async () => {
+    hostMode.mobile = true;
+    const { wrapper } = await mountApplication();
+    expect(wrapper.find(".app-shell--mobile").exists()).toBe(true);
+    expect(wrapper.find("nvx-mobile-shell-stub").exists()).toBe(true);
+    expect(wrapper.find("nvx-mobile-bottom-nav-stub").exists()).toBe(true);
+    expect(wrapper.find("nvx-app-header-stub").exists()).toBe(false);
+    expect(wrapper.find("nvx-navigation-rail-stub").exists()).toBe(false);
+    expect(wrapper.find("nvx-workspace-tab-placeholder-stub").exists()).toBe(false);
+    expect(wrapper.find(".fixture-route").exists()).toBe(true);
   });
 });

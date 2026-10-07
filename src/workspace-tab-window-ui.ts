@@ -1,7 +1,7 @@
-import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Router } from "vue-router";
 
+import { workspaceHostMode } from "./platform-host";
 import { useUiStore } from "./stores/ui";
 import { showWorkspaceTabFailure } from "./workspace-tab-errors";
 import { moveWorkspaceTab } from "./workspace-tab-transfer";
@@ -13,7 +13,7 @@ import { workspaceTabViewSummaries } from "./workspace-tab-view-state";
 
 /** Starts the window shell's native Tab manager; main also restores the Terminal workspace once. */
 export async function startWorkspaceTabWindowUi(router: Router): Promise<() => void> {
-  if (!isTauri()) return () => undefined;
+  if (workspaceHostMode() !== "nativeTabs") return () => undefined;
   const stopTabViews = await startWorkspaceTabViewShell(router);
   if (!isWorkspaceChildWindow()) {
     void restoreTerminalWorkspace(useUiStore().terminalStartupBehavior === "restoreHistory");

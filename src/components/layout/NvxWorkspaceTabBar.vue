@@ -9,7 +9,6 @@ import {
 } from "lucide-vue-next";
 import { storeToRefs } from "pinia";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { isTauri } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
@@ -30,6 +29,7 @@ import {
   type ShortcutPlatform,
 } from "../../shortcuts";
 import { detectDesktopPlatform, shortcutProfilePlatform } from "../../platform";
+import { workspaceHostMode } from "../../platform-host";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { useShortcutsStore } from "../../stores/shortcuts";
 import { useWorkspaceTabsStore } from "../../stores/workspaceTabs";
@@ -332,7 +332,7 @@ onMounted(() => {
   window.addEventListener("pointermove", pointerMove, { capture: true });
   window.addEventListener("pointerup", pointerUp, { capture: true });
   window.addEventListener("pointercancel", pointerUp, { capture: true });
-  if (!isTauri()) return;
+  if (workspaceHostMode() !== "nativeTabs") return;
   void listen<DragHover>("workspace-tab-drag-hover", ({ payload }) => {
     if (payload.active) incomingDrag.value = payload;
     else if (incomingDrag.value?.nonce === payload.nonce) incomingDrag.value = null;
@@ -386,10 +386,10 @@ onBeforeUnmount(() => {
     :close-left-label="t('workspaceTabs.closeLeft')"
     :close-right-label="t('workspaceTabs.closeRight')"
     :move-to-new-window-label="t('workspaceTabs.moveToNewWindow')"
-    :move-to-main-window-label="isTauri() && workspaceWindowLabel() !== 'main' ? t('workspaceTabs.moveToMainWindow') : ''"
+    :move-to-main-window-label="workspaceHostMode() === 'nativeTabs' && workspaceWindowLabel() !== 'main' ? t('workspaceTabs.moveToMainWindow') : ''"
     :scroll-backward-label="t('sshTerminal.scrollTabsBackward')"
     :scroll-forward-label="t('sshTerminal.scrollTabsForward')"
-    :drag-enabled="isTauri()"
+    :drag-enabled="workspaceHostMode() === 'nativeTabs'"
     :incoming-drag="Boolean(incomingDrag && !items.some((item) => item.groupId === incomingDrag?.id))"
     @update:model-value="activateGroup"
     @create="createTerminal"

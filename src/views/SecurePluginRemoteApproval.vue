@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { closeSecureWindow } from "../secure-transport";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -135,7 +135,7 @@ async function decide(decision: PluginApprovalDecision) {
       policy: decision === "approve" ? policy.value : "once",
       expiry: decision === "approve" ? expiry.value : "unlimited",
     });
-    void getCurrentWindow().close().catch(() => undefined);
+    void closeSecureWindow().catch(() => undefined);
   } catch {
     failed.value = true;
   } finally {
@@ -321,7 +321,7 @@ onMounted(async () => {
       <NvxButton
         variant="secondary"
         :disabled="pending"
-        @click="prompt && !failed ? decide('reject') : getCurrentWindow().close()"
+        @click="prompt && !failed ? decide('reject') : closeSecureWindow()"
       >
         {{ t("plugins.remoteApproval.reject") }}
       </NvxButton>

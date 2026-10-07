@@ -8,7 +8,7 @@ export const highlightingEn = {
   saved: "Highlight settings saved", saveFailed: "Could not save highlight settings. Previous settings are unchanged; your draft is kept.",
   invalid: "Provide a name (1–48 characters), valid text or regular expression (1–256 characters), and two #RRGGBB colors. Control characters are not allowed.",
   contrast: "Text contrast is {ratio}:1. Aim for at least 4.5:1 for readable text.", preview: "Test preview", previewHint: "Uses fixed sample text only. Preview stops after 500 ms; terminal output is never sent here.",
-  previewIdle: "Test the rule against the sample below.", previewRunning: "Testing…", previewDone: "{count} matches in sample text", previewUnavailable: "Preview is unavailable. Valid rules can still be saved.", previewTimeout: "Preview timed out and was stopped. Simplify the expression before using it.", previewFailed: "Preview could not evaluate this rule. Check the expression.",
+  previewIdle: "Test the rule against the sample below.", previewRunning: "Testing…", previewDone: "{count} match in sample text | {count} matches in sample text", previewUnavailable: "Preview is unavailable. Valid rules can still be saved.", previewTimeout: "Preview timed out and was stopped. Simplify the expression before using it.", previewFailed: "Preview could not evaluate this rule. Check the expression.",
   unsaved: "Save or cancel these changes before choosing another scope.", inheritHint: "This host uses the current global rules. Choose Custom rules to change them here.", disabledHint: "Highlighting is disabled for this host, regardless of global settings.", orderHint: "Rules are evaluated in list order; the first matching rule takes priority where matches overlap.",
 };
 export const highlightingZhCN = {

@@ -7,17 +7,21 @@ import NvxHostMarker from "../components/hosts/NvxHostMarker.vue";
 import { useHostMarkersStore } from "../stores/hostMarkers";
 import { NvxPageHeader } from "../components/layout";
 import { NvxPluginExtensionTarget } from "../components/plugins";
-import { NvxButton, NvxCheckbox, NvxDialog, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxSelect, NvxStatusLabel, NvxTextarea } from "../components/ui";
+import { NvxActionMenu, NvxButton, NvxCheckbox, NvxDialog, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxSelect, NvxStatusLabel, NvxTextarea } from "../components/ui";
+import type { NvxActionMenuItem } from "../components/ui";
 import { canUseDesktopCore, createHostGroup, createIdentity, createKeyboardInteractiveCredential, createSshAgentCredential, commitOpenSshConfig, deleteHostGroup, deleteHostTag, deleteHost, listHostCatalog, listHostGroups, listHostTags, listIdentities, listSshAgentKeys, previewOpenSshConfig, updateHostFavorite, updateHostGroup, updateHostTag } from "../core-api/client";
 import type { HostCatalogEntry, HostGroupSummary, HostSummary, HostTagSummary, IdentitySummary, OpenSshConfigPreviewResponse, OpenSshImportRoutePreview, SshAgentKeySummary } from "../core-api/generated/core-api";
 import { useTipsStore } from "../stores/tips";
 import { openToolWindow, onToolWindowChanged } from "../tool-windows";
 import { useRouteReveal } from "../routeReveal";
+import { isMobileLayout } from "../platform-host";
 import { onSavedConnectionsChanged } from "../saved-connections";
 import { openWorkspaceTerminalHost } from "../workspace-tab-shell-action";
 import { showWorkspaceTabFailure } from "../workspace-tab-errors";
 
 const { t } = useI18n();
+// Android has no system SSH Agent socket, so the agent manager stays desktop-only.
+const mobileLayout = isMobileLayout();
 
 const tips = useTipsStore();
 
@@ -484,7 +488,7 @@ async function importSelectedOpenSshHosts() {
     tips.show({
       scope: "hosts-openssh-import",
       tone: "success",
-      title: t("sshHosts.opensshImport.imported", { count: response.hosts.length }),
+      title: t("sshHosts.opensshImport.imported", response.hosts.length),
     });
   } catch {
     tips.show({
@@ -636,6 +640,43 @@ async function confirmClassificationDelete() {
   }
 }
 
+const pageMenuItems = computed<NvxActionMenuItem[]>(() => [
+  { id: "importSshConfig", label: t("sshHosts.opensshImport.manage"), icon: FileInput },
+  { id: "keyboardInteractive", label: t("sshHosts.keyboardInteractive.manage"), icon: KeyRound },
+  { id: "classification", label: t("sshHosts.manageClassification"), icon: Tag },
+]);
+
+function selectPageMenuItem(id: string) {
+  if (id === "importSshConfig") openOpenSshImport();
+  else if (id === "keyboardInteractive") openKeyboardInteractiveManager();
+  else if (id === "classification") openClassificationManager();
+}
+
+// Phone row overflow. Favorite is a plain action here, so its label carries the state
+// (add/remove) instead of the desktop button's aria-pressed.
+function rowMenuItems(host: HostSummary): NvxActionMenuItem[] {
+  return [
+    {
+      id: "favorite",
+      label: t(host.favorite ? "sshHosts.removeFavorite" : "sshHosts.addFavorite"),
+      icon: Star,
+      disabled: favoriteUpdatingHostId.value !== null,
+    },
+    { id: "connectionRoute", label: t("sshHosts.connectionRoute.manage"), icon: Network },
+    { id: "loginAutomation", label: t("sshHosts.loginAutomation.manage"), icon: Workflow },
+    { id: "edit", label: t("sshHosts.edit"), icon: Pencil },
+    { id: "delete", label: t("sshHosts.delete"), icon: Trash2, danger: true },
+  ];
+}
+
+function selectRowMenuItem(host: HostSummary, id: string) {
+  if (id === "favorite") void toggleFavorite(host);
+  else if (id === "connectionRoute") openConnectionRoute(host);
+  else if (id === "loginAutomation") openLoginAutomation(host);
+  else if (id === "edit") void openEdit(host);
+  else if (id === "delete") requestDelete(host);
+}
+
 function connect(host: HostSummary) {
   void openWorkspaceTerminalHost({ hostId: host.hostId })
     .catch((error: unknown) => showWorkspaceTabFailure(error, "hosts-connect"));
@@ -679,7 +720,38 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
       :description="t('sshHosts.description')"
     >
       <template #actions>
-        <div class="hosts-page__primary-actions">
+        <!-- Phone: one primary action plus an overflow sheet instead of a wrapping button row. -->
+        <div
+          v-if="mobileLayout"
+          class="hosts-page__primary-actions"
+        >
+          <NvxPluginExtensionTarget
+            target-id="hosts.toolbar"
+            instance-key="global"
+          />
+          <NvxButton
+            class="hosts-page__primary-action"
+            size="sm"
+            :disabled="!canUseDesktopCore()"
+            @click="openCreate"
+          >
+            <NvxIcon
+              :icon="Plus"
+              :size="16"
+            />
+            {{ t("sshHosts.add") }}
+          </NvxButton>
+          <NvxActionMenu
+            :label="t('sshHosts.moreActions')"
+            :items="pageMenuItems"
+            :disabled="!canUseDesktopCore()"
+            @select="selectPageMenuItem"
+          />
+        </div>
+        <div
+          v-else
+          class="hosts-page__primary-actions"
+        >
           <NvxPluginExtensionTarget
             target-id="hosts.toolbar"
             instance-key="global"
@@ -776,7 +848,7 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
       >
         <header class="hosts-list__section-header">
           <h2 :id="`hosts-list-group-${section.key}`">
-            {{ t("sshHosts.groupSection", { label: section.label, count: section.entries.length }) }}
+            {{ t("sshHosts.groupSection", { label: section.label, count: section.entries.length }, section.entries.length) }}
           </h2>
         </header>
         <article
@@ -796,6 +868,14 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
           <div class="hosts-list__identity">
             <div class="hosts-list__title-row">
               <strong :title="entry.host.label">{{ entry.host.label }}</strong>
+              <!-- Phone: the favorite toggle lives in the row menu, so the state is shown inline. -->
+              <NvxIcon
+                v-if="mobileLayout && entry.host.favorite"
+                class="hosts-list__favorite-mark"
+                :icon="Star"
+                :size="16"
+                :label="t('sshHosts.favorite')"
+              />
               <NvxHostMarker :marker="hostMarkers.visibleMarker(entry.host.hostId)" />
               <span
                 v-if="entry.group || entry.tags.length"
@@ -818,10 +898,16 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
             </div>
             <span class="hosts-list__endpoint">{{ entry.host.username || t("sshHosts.noUsername") }} · {{ entry.host.normalizedAddress }}:{{ entry.host.port }}</span>
           </div>
-          <NvxStatusLabel tone="neutral">
+          <NvxStatusLabel
+            v-if="!mobileLayout"
+            tone="neutral"
+          >
             {{ t("sshHosts.endpoint") }}
           </NvxStatusLabel>
-          <div class="hosts-list__actions">
+          <div
+            v-if="!mobileLayout"
+            class="hosts-list__actions"
+          >
             <NvxIconButton
               class="hosts-list__favorite"
               :label="t(entry.host.favorite ? 'sshHosts.removeFavorite' : 'sshHosts.addFavorite')"
@@ -887,6 +973,24 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
               {{ t("sshHosts.connect") }}
             </NvxButton>
           </div>
+          <template v-else>
+            <!-- Phone: Connect stays inline; every other row action sits in one overflow sheet. -->
+            <NvxButton
+              class="hosts-list__connect"
+              variant="secondary"
+              size="sm"
+              @click="connect(entry.host)"
+            >
+              {{ t("sshHosts.connect") }}
+            </NvxButton>
+            <NvxActionMenu
+              class="hosts-list__row-menu"
+              size="md"
+              :label="t('sshHosts.rowActions', { label: entry.host.label })"
+              :items="rowMenuItems(entry.host)"
+              @select="selectRowMenuItem(entry.host, $event)"
+            />
+          </template>
         </article>
       </section>
     </div>
@@ -900,7 +1004,11 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
       />
       <h2>{{ t("sshHosts.emptyTitle") }}</h2>
       <p>{{ t("sshHosts.emptyBody") }}</p>
-      <NvxButton @click="openCreate">
+      <!-- The phone header already carries Add Host; no second copy in the empty state. -->
+      <NvxButton
+        v-if="!mobileLayout"
+        @click="openCreate"
+      >
         <NvxIcon
           :icon="Plus"
           :size="16"
@@ -1043,7 +1151,7 @@ async function launchHostEditor(host: HostSummary | null, initialSection: "conne
           </span>
           <span v-else>{{ t("sshHosts.opensshImport.invalidEndpoint") }}</span>
           <small v-if="candidate.identityFileHints.length">
-            {{ t("sshHosts.opensshImport.identityHints", { count: candidate.identityFileHints.length }) }}
+            {{ t("sshHosts.opensshImport.identityHints", candidate.identityFileHints.length) }}
           </small>
           <small>{{ formatOpenSshRoute(candidate.route) }}</small>
           <small

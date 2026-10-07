@@ -5,6 +5,8 @@ export { default as NvxCodeEditor } from "./NvxCodeEditor.vue";
 export { default as NvxDialog } from "./NvxDialog.vue";
 export { default as NvxField } from "./NvxField.vue";
 export { default as NvxIcon } from "./NvxIcon.vue";
+export { default as NvxActionMenu } from "./NvxActionMenu.vue";
+export type { NvxActionMenuItem } from "./NvxActionMenu.vue";
 export { default as NvxIconButton } from "./NvxIconButton.vue";
 export { default as NvxInput } from "./NvxInput.vue";
 export { default as NvxInlineNotice } from "./NvxInlineNotice.vue";

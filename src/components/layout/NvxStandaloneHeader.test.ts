@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { i18n } from "../../locales";
 import NvxStandaloneHeader from "./NvxStandaloneHeader.vue";
 
-const native = vi.hoisted(() => ({ platform: "windows", invoke: vi.fn() }));
+const native = vi.hoisted(() => ({ platform: "windows", invoke: vi.fn(), requestClose: vi.fn() }));
 vi.mock("../../platform", () => ({ detectDesktopPlatform: () => native.platform }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: native.invoke }));
+vi.mock("../../secure-transport", () => ({ requestSecureWindowClose: native.requestClose }));
 vi.mock("./NvxWindowFrame.vue", () => ({ default: { template: "<div><slot /></div>" } }));
 
 function header() {
@@ -13,7 +14,31 @@ function header() {
 }
 
 describe("standalone header native gestures", () => {
-  beforeEach(() => { native.platform = "windows"; native.invoke.mockReset(); native.invoke.mockResolvedValue(undefined); });
+  beforeEach(() => {
+    native.platform = "windows";
+    native.invoke.mockReset();
+    native.invoke.mockResolvedValue(undefined);
+    native.requestClose.mockReset();
+  });
+
+  it("keeps the desktop brand chrome and has no back button on desktop", () => {
+    const wrapper = header();
+    expect(wrapper.find(".nvx-app-header__brand").exists()).toBe(true);
+    expect(wrapper.find(".nvx-standalone-header__back").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("renders a compact phone app bar whose back button runs the back-key close path on Android", async () => {
+    native.platform = "android";
+    const wrapper = header();
+    expect(wrapper.find(".nvx-app-header").exists()).toBe(false);
+    expect(wrapper.classes()).toContain("nvx-standalone-header--mobile");
+    expect(wrapper.get(".nvx-standalone-header__title").text()).toBe("Editor");
+    await wrapper.get(".nvx-standalone-header__back").trigger("click");
+    expect(native.requestClose).toHaveBeenCalledOnce();
+    expect(native.invoke).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
 
   it("drags and maximizes only the calling Windows window", async () => {
     const wrapper = header();

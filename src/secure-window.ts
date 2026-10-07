@@ -8,6 +8,8 @@ import {
 } from "./ui-preferences";
 import { disableDefaultWebviewContextMenu } from "./webview-context-menu";
 import { SECURE_WINDOW_APPEARANCE_KEY } from "./secure-window-appearance";
+import { installSecureSurfaceTransport, secureSurfaceAppearance } from "./secure-transport";
+import { isMobileLayout } from "./platform-host";
 import { applyUiZoom, isUiZoom, type UiZoom } from "./ui-zoom";
 
 let removeSystemThemeListener: (() => void) | undefined;
@@ -15,11 +17,17 @@ let removeSystemThemeListener: (() => void) | undefined;
 // Read only non-secret appearance preferences; never load the main-window store or any plugin runtime.
 export function applySecureWindowAppearance() {
   let stored: { locale?: unknown; theme?: unknown; themePreference?: unknown } = {};
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(SECURE_WINDOW_APPEARANCE_KEY)
-      ?? localStorage.getItem(UI_PREFERENCES_KEY) ?? "{}");
-    if (parsed && typeof parsed === "object") stored = parsed;
-  } catch { /* Corrupt or unavailable preferences fall back to application defaults. */ }
+  // An Android surface has its own origin (no shared storage); Core passes the appearance in its URL.
+  const surfaceAppearance = secureSurfaceAppearance();
+  if (surfaceAppearance) {
+    stored = surfaceAppearance;
+  } else {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(SECURE_WINDOW_APPEARANCE_KEY)
+        ?? localStorage.getItem(UI_PREFERENCES_KEY) ?? "{}");
+      if (parsed && typeof parsed === "object") stored = parsed;
+    } catch { /* Corrupt or unavailable preferences fall back to application defaults. */ }
+  }
   i18n.global.locale.value = resolveLocale(stored.locale === "en" || stored.locale === "zh-CN" ? stored.locale : "system");
   document.documentElement.lang = i18n.global.locale.value;
   const themePreference = parseThemePreference(stored.themePreference, stored.theme);
@@ -41,6 +49,10 @@ export function applySecureWindowAppearance() {
 }
 
 export function initializeSecureWindowAppearance() {
+  // Android surfaces share the phone variants of shared components (app bar, compact
+  // editor rails) through the same root marker as the main document.
+  if (isMobileLayout()) document.documentElement.dataset.nvxHost = "mobile";
+  installSecureSurfaceTransport();
   disableDefaultWebviewContextMenu();
   applySecureWindowAppearance();
   const onStorage = (event: StorageEvent) => {

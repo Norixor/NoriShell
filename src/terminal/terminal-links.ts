@@ -91,7 +91,7 @@ export function findTerminalHttpLinks(line: string): TerminalHttpLink[] {
   return links;
 }
 
-export function terminalLinkModifierPressed(event: MouseEvent, platform: "macos" | "windows" | "linux" | "other") {
+export function terminalLinkModifierPressed(event: MouseEvent, platform: "macos" | "windows" | "linux" | "android" | "other") {
   return platform === "macos" ? event.metaKey : event.ctrlKey;
 }
 

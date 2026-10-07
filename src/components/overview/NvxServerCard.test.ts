@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   MetricFieldState,
@@ -10,6 +10,12 @@ import type {
 import { i18n } from "../../locales";
 import NvxServerCard from "./NvxServerCard.vue";
 import { METRIC_HISTORY_LIMIT, nextMetricHistory } from "./overview-metrics";
+
+const host = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
 
 const card: ServerOverviewCard = {
   catalogEntry: {
@@ -110,7 +116,6 @@ function monitoredCard(
       failureCode,
       nextRetryAtUnixMs: failureCode ? 1_700_000_010_000 : null,
       latestSnapshot,
-      hostKeyChallenge: null,
       keyboardInteractiveChallenge: null,
     },
   };
@@ -119,6 +124,42 @@ function monitoredCard(
 describe("NvxServerCard", () => {
   beforeEach(() => {
     i18n.global.locale.value = "zh-CN";
+  });
+
+  afterEach(() => {
+    host.mobile = false;
+  });
+
+  it("renders the compact phone Card: status beside the name, tools on the meta line, no footer", async () => {
+    host.mobile = true;
+    const snapshot = metricSnapshot("available", true);
+    const wrapper = mount(NvxServerCard, {
+      props: { card: monitoredCard(snapshot), history: { cpu: [10, 20], memory: [], disk: [] } },
+      global: { plugins: [i18n] },
+    });
+
+    const root = wrapper.get(".nvx-server-card");
+    expect(root.classes()).toContain("nvx-server-card--compact");
+    expect(wrapper.find(".nvx-server-card__header").exists()).toBe(false);
+    expect(wrapper.find(".nvx-server-card__footer").exists()).toBe(false);
+    // One primary action and one status dot, both in the head row; the dot still names the state.
+    expect(wrapper.findAll(".nvx-server-card__new-terminal")).toHaveLength(1);
+    const dots = wrapper.findAll(".nvx-server-card__connection-dot");
+    expect(dots).toHaveLength(1);
+    expect(dots[0]!.element.closest(".nvx-server-card__compact-head")).not.toBeNull();
+    expect(dots[0]!.attributes("role")).toBe("status");
+    expect(dots[0]!.attributes("aria-label")).toBe("已连接");
+    // The meta line carries endpoint, session tools and the sample state; stale stays distinct from 0%.
+    const meta = wrapper.get(".nvx-server-card__compact-meta");
+    expect(meta.text()).toContain("server.example");
+    expect(meta.find('[aria-label="打开终端会话 1"]').exists()).toBe(true);
+    expect(meta.get(".nvx-server-card__sample").classes()).toContain("nvx-server-card__sample--stale");
+    expect(wrapper.findAll(".nvx-server-card__metric")).toHaveLength(4);
+    expect(wrapper.get('.nvx-server-card__metric[data-status="stale"]').text()).toContain("0%");
+    expect(wrapper.find(".nvx-sparkline--muted").exists()).toBe(true);
+
+    await wrapper.get(".nvx-server-card__new-terminal").trigger("click");
+    expect(wrapper.emitted("connect")).toEqual([[card.catalogEntry.host.hostId]]);
   });
 
   it("keeps a disabled metric distinct and creates a new terminal for a connected host", async () => {
@@ -271,6 +312,43 @@ describe("NvxServerCard", () => {
     expect(wrapper.find('button[aria-label="解锁并继续监控"]').exists()).toBe(true);
     expect(wrapper.text()).not.toContain("正在采样");
     expect(wrapper.get(".nvx-server-card__network").attributes("data-status")).toBe("disabled");
+  });
+
+  it("labels an untrusted server separately from disabled, stale, error and zero values", () => {
+    const base = monitoredCard(null);
+    const needsTrust: ServerOverviewCard = {
+      ...base,
+      connectionState: "disconnected",
+      metricsCounts: { connecting: 0, running: 0, lost: 0, failed: 0 },
+      metricsSession: { ...base.metricsSession!, state: "needsHostTrust" },
+    };
+    const wrapper = mount(NvxServerCard, {
+      props: { card: needsTrust },
+      global: { plugins: [i18n] },
+    });
+
+    expect(wrapper.text()).toContain("需要先完成首次连接确认");
+    expect(wrapper.text()).not.toContain("监控未启用");
+    expect(wrapper.text()).not.toContain("0%");
+    expect(wrapper.text()).not.toContain("正在采样");
+    expect(wrapper.find(".nvx-server-card__sample--needsHostTrust").exists()).toBe(true);
+    expect(wrapper.get(".nvx-server-card__network").attributes("data-status")).toBe("needsHostTrust");
+    // No metrics action: trust is granted only through an interactive connection.
+    expect(wrapper.find('button[aria-label="核验服务器指纹"]').exists()).toBe(false);
+  });
+
+  it("names a server refusal instead of a generic sampling failure", () => {
+    const base = monitoredCard(null);
+    const refused: ServerOverviewCard = {
+      ...base,
+      metricsSession: { ...base.metricsSession!, state: "backoff", failureCode: "connectionClosedByServer" },
+    };
+    const wrapper = mount(NvxServerCard, {
+      props: { card: refused },
+      global: { plugins: [i18n] },
+    });
+    expect(wrapper.text()).toContain("服务器暂时拒绝连接，稍后自动重试");
+    expect(wrapper.text()).not.toContain("采样失败");
   });
 
   it("keeps stale zero rates visible but labels them separately from fresh zero rates", () => {

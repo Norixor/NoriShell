@@ -5,15 +5,21 @@ import { useI18n } from "vue-i18n";
 import type { DesktopPreferences } from "../../core-api/generated/core-api";
 import { useDesktopPreferencesStore } from "../../stores/desktopPreferences";
 import { useTipsStore } from "../../stores/tips";
+import { isMobileLayout } from "../../platform-host";
 import { NvxButton, NvxCheckbox, NvxField, NvxInlineNotice, NvxSelect } from "../ui";
 
 const { t } = useI18n();
 const preferences = useDesktopPreferencesStore();
 const tips = useTipsStore();
 const draft = ref<DesktopPreferences | null>(null);
-const toggles = ["trayShowStatus", "trayShowHostNames", "notificationBackgroundOnly", "notifyTransferCompleted", "notifyTransferFailed", "notifyDisconnected"] as const;
+// Phones have no window chrome or tray: only the notification rules are shown, and the
+// hidden fields keep their stored values when the draft is saved.
+const mobileLayout = isMobileLayout();
+const toggles = mobileLayout
+  ? ["notificationBackgroundOnly", "notifyTransferCompleted", "notifyTransferFailed", "notifyDisconnected"] as const
+  : ["trayShowStatus", "trayShowHostNames", "notificationBackgroundOnly", "notifyTransferCompleted", "notifyTransferFailed", "notifyDisconnected"] as const;
 const closeOptions = computed(() => (["hide", "quit"] as const).map((value) => ({ value, label: t(`desktopPreferences.close.${value}`) })));
-const recentOptions = computed(() => Array.from({ length: 11 }, (_, value) => ({ value: String(value), label: value === 0 ? t("desktopPreferences.noRecent") : t("desktopPreferences.recentCount", { count: value }) })));
+const recentOptions = computed(() => Array.from({ length: 11 }, (_, value) => ({ value: String(value), label: value === 0 ? t("desktopPreferences.noRecent") : t("desktopPreferences.recentCount", value) })));
 watch(() => preferences.snapshot, (snapshot) => {
   if (snapshot) draft.value = { ...snapshot.preferences };
 }, { immediate: true });
@@ -40,9 +46,9 @@ onMounted(() => { void preferences.refresh(); });
   >
     <header>
       <h2 id="desktop-preferences-title">
-        {{ t('desktopPreferences.title') }}
+        {{ t(mobileLayout ? 'mobile.settings.notificationsTitle' : 'desktopPreferences.title') }}
       </h2>
-      <p>{{ t('desktopPreferences.description') }}</p>
+      <p>{{ t(mobileLayout ? 'mobile.settings.notificationsDescription' : 'desktopPreferences.description') }}</p>
     </header>
     <NvxInlineNotice
       v-if="preferences.error"
@@ -65,7 +71,10 @@ onMounted(() => { void preferences.refresh(); });
       {{ t('desktopPreferences.loading') }}
     </p>
     <template v-if="draft">
-      <NvxField :label="t('desktopPreferences.windowCloseBehavior')">
+      <NvxField
+        v-if="!mobileLayout"
+        :label="t('desktopPreferences.windowCloseBehavior')"
+      >
         <NvxSelect
           :model-value="draft.windowCloseBehavior"
           :options="closeOptions"
@@ -74,8 +83,13 @@ onMounted(() => { void preferences.refresh(); });
           @update:model-value="setClose"
         />
       </NvxField>
-      <p>{{ t('desktopPreferences.closeHint') }}</p>
-      <NvxField :label="t('desktopPreferences.trayRecentLimit')">
+      <p v-if="!mobileLayout">
+        {{ t('desktopPreferences.closeHint') }}
+      </p>
+      <NvxField
+        v-if="!mobileLayout"
+        :label="t('desktopPreferences.trayRecentLimit')"
+      >
         <NvxSelect
           :model-value="String(draft.trayRecentLimit)"
           :options="recentOptions"

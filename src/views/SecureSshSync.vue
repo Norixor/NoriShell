@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { closeSecureWindow } from "../secure-transport";
 import { Eye, EyeOff } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -109,7 +109,7 @@ function differenceSummary(difference: SshSyncSecureDifference, side: "local" | 
 async function closeWindow() {
   clearVaultPasswords();
   try {
-    await getCurrentWindow().close();
+    await closeSecureWindow();
   } catch {
     failed.value = true;
   }

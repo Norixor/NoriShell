@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import NvxSecureWindow from "../components/layout/NvxSecureWindow.vue";
 import { NvxButton, NvxField, NvxInlineNotice, NvxInput, NvxTextarea } from "../components/ui";
@@ -15,9 +15,31 @@ const passphrase = ref("");
 const pending = ref(false);
 const failed = ref(false);
 const failureText = ref("");
+// Passphrase problems are reported on the passphrase field, which is focused
+// for the retry. The private-key text is the only value kept across that retry:
+// it stays in this surface's memory while Core answers and after a passphrase
+// error, and is cleared on success, any other error, cancel, expiry or close.
+// Passwords and passphrases are cleared as soon as they are submitted.
+const PASSPHRASE_CODES = new Set([
+  "credential.passphrase_required",
+  "credential.incorrect_passphrase",
+  "credential_transient.passphrase_required",
+  "credential_transient.incorrect_passphrase",
+]);
+const passphraseError = ref(false);
+// Core reports unusable material with one code for both credential kinds; the prompt kind
+// (not the message text) picks the wording, so a broken key file is named as such.
+function failureMessageKey(failure: ReturnType<typeof parseCoreApiError>): string | null {
+  if (!failure?.messageKey || !te(failure.messageKey)) return null;
+  const invalidMaterial = failure.messageKey === "secureWindow.credential.invalidMaterial" || failure.code.endsWith(".invalid_material");
+  if (invalidMaterial && prompt.value?.kind === "privateKey") return "secureWindow.credential.invalidPrivateKey";
+  return failure.messageKey;
+}
 function showFailure(error: unknown) {
   const failure = parseCoreApiError(error);
-  failureText.value = (failure?.messageKey && te(failure.messageKey) ? t(failure.messageKey) : t("sshTerminal.connectFailedBody"))
+  passphraseError.value = !!failure && PASSPHRASE_CODES.has(failure.code);
+  const messageKey = failureMessageKey(failure);
+  failureText.value = (messageKey ? t(messageKey) : t("sshTerminal.connectFailedBody"))
     + (failure?.diagnosticId ? ` ${t("diagnostics.id", { id: failure.diagnosticId })}` : "");
   failed.value = true;
 }
@@ -36,23 +58,35 @@ function clear() {
   passphrase.value = "";
 }
 
+// Core closes the prompt after 180 s; clear independently so the key text never
+// outlives the prompt even if the window lingers.
+const PROMPT_LIFETIME_MS = 180_000;
+let expiry: ReturnType<typeof setTimeout> | undefined;
+
 async function submit() {
   if (pending.value || !valid.value || !prompt.value) return;
   pending.value = true;
   failed.value = false;
   failureText.value = "";
+  passphraseError.value = false;
   try {
     if (prompt.value.persistent && !await requestSecureVault("ensureUnlocked")) {
       pending.value = false;
       return;
     }
     const request = secureCredentialClient.submit(id, secret.value, privateKey.value ? passphrase.value : "");
-    clear();
+    passphrase.value = "";
+    if (!privateKey.value) secret.value = "";
     await request;
-  } catch (error) {
     clear();
+  } catch (error) {
     showFailure(error);
+    if (!(privateKey.value && passphraseError.value)) clear();
     pending.value = false;
+    if (passphraseError.value) {
+      await nextTick();
+      document.getElementById("secure-credential-passphrase")?.focus();
+    }
   }
 }
 
@@ -69,13 +103,19 @@ async function cancel() {
 }
 
 onMounted(async () => {
+  expiry = setTimeout(clear, PROMPT_LIFETIME_MS);
+  window.addEventListener("pagehide", clear);
   try {
     prompt.value = await secureCredentialClient.get(id);
   } catch (error) {
     showFailure(error);
   }
 });
-onBeforeUnmount(clear);
+onBeforeUnmount(() => {
+  clearTimeout(expiry);
+  window.removeEventListener("pagehide", clear);
+  clear();
+});
 </script>
 
 <template>
@@ -125,6 +165,7 @@ onBeforeUnmount(clear);
         v-if="privateKey"
         for-id="secure-credential-passphrase"
         :label="t('sshTerminal.passphrase')"
+        :error="passphraseError ? failureText : undefined"
       >
         <NvxInput
           id="secure-credential-passphrase"
@@ -133,11 +174,12 @@ onBeforeUnmount(clear);
           autocomplete="off"
           :placeholder="t('sshTerminal.passphrasePlaceholder')"
           :disabled="pending"
+          :invalid="passphraseError"
           :maxlength="65536"
         />
       </NvxField>
       <NvxInlineNotice
-        v-if="failed"
+        v-if="failed && !passphraseError"
         tone="error"
       >
         {{ failureText || t("sshTerminal.connectFailedBody") }}

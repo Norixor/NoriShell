@@ -49,6 +49,7 @@ export const shortcutMessages = {
         importConflict: "导入文件包含冲突的快捷键。",
         importRead: "无法读取导入文件。",
         exportWrite: "无法导出快捷键配置。",
+        exportWriteIncomplete: "快捷键配置写入中断，目标文件可能不完整。请重新导出。",
       },
       status: {
         saved: "快捷键已保存。",
@@ -143,6 +144,7 @@ export const shortcutMessages = {
         importConflict: "The import file contains conflicting shortcuts.",
         importRead: "The import file could not be read.",
         exportWrite: "The shortcut configuration could not be exported.",
+        exportWriteIncomplete: "Writing the shortcut configuration was interrupted; the target file may be incomplete. Export it again.",
       },
       status: {
         saved: "Shortcut saved.", disabled: "Shortcut disabled.", reset: "Shortcut restored to its default.", resetAll: "Shortcuts for this platform were restored to defaults.", imported: "Shortcuts imported.", exported: "Shortcuts exported.",

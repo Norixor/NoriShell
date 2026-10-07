@@ -20,7 +20,15 @@ vi.mock("../workspace-tab-shell-action", () => ({
   openWorkspaceDirectoryTerminal: terminalNavigation.directory,
   openWorkspaceTerminalHost: terminalNavigation.host,
 }));
-const pathApi = vi.hoisted(() => ({ homeDir: vi.fn(), sep: vi.fn(() => "/") }));
+const pathApi = vi.hoisted(() => ({
+  homeDir: vi.fn(), sep: vi.fn(() => "/"), appDataDir: vi.fn(async () => "/data/user/0/app/files"),
+  join: vi.fn(async (...parts: string[]) => parts.join("/")),
+}));
+const platformHost = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform-host")>()),
+  isMobileLayout: () => platformHost.mobile,
+}));
 const webview = vi.hoisted(() => ({
   handler: null as ((event: { payload: unknown }) => void) | null,
   unlisten: vi.fn(),
@@ -44,6 +52,7 @@ const client = vi.hoisted(() => ({
   listSftpDirectory: vi.fn(),
   listSftpLocalDirectory: vi.fn(),
   mutateSftpFile: vi.fn(),
+  mutateSftpLocalFile: vi.fn(),
   openSftpLocalDirectoryChild: vi.fn(),
   openSftpSession: vi.fn(),
   prepareSftpTransferIntent: vi.fn(),
@@ -1300,6 +1309,309 @@ describe("SftpView production boundaries", () => {
     wrapper.unmount();
   });
 
+  /** happy-dom's own matchMedia reports a landscape window; phone tests pick the orientation explicitly. */
+  function stubOrientation(initialLandscape: boolean) {
+    const listeners = new Set<() => void>();
+    let landscape = initialLandscape;
+    const original = Object.getOwnPropertyDescriptor(window, "matchMedia");
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: () => ({
+        get matches() { return landscape; },
+        addEventListener: (_: string, fn: () => void) => listeners.add(fn),
+        removeEventListener: (_: string, fn: () => void) => listeners.delete(fn),
+      }),
+    });
+    return {
+      rotate(next: boolean) { landscape = next; for (const fn of listeners) fn(); },
+      restore() {
+        if (original) Object.defineProperty(window, "matchMedia", original);
+        else Reflect.deleteProperty(window, "matchMedia");
+      },
+    };
+  }
+
+  it("keeps one file Pane with a switch in both orientations, a two-row top area and no split entries on the phone", async () => {
+    platformHost.mobile = true;
+    const orientation = stubOrientation(true);
+    try {
+      const { wrapper } = await mountView();
+      const expectSinglePane = () => {
+        // One visible Pane, the switch inside the top bar, no per-Pane identity row.
+        expect(wrapper.findAll(".sftp-view__pane")).toHaveLength(1);
+        expect(wrapper.findAll('.sftp-view__topbar [role="tablist"] [role="tab"]')).toHaveLength(2);
+        expect(wrapper.findAll(".sftp-view__pane-header")).toHaveLength(0);
+        expect(wrapper.find(".nvx-terminal-split-tree__separator").exists()).toBe(false);
+      };
+      // Landscape: same single-Pane projection as portrait; phones never show Panes side by side.
+      expectSinglePane();
+      // Phone rows: no desktop pane toolbar, no column header, no history arrows; up/path/search remain.
+      expect(wrapper.find(".sftp-view__pane-toolbar").exists()).toBe(false);
+      expect(wrapper.find(".sftp-view__columns").exists()).toBe(false);
+      expect(wrapper.find('button[aria-label="Back"]').exists()).toBe(false);
+      expect(wrapper.find('button[aria-label="Forward"]').exists()).toBe(false);
+      expect(wrapper.findAll('button[aria-label="Up"]')).toHaveLength(1);
+      expect(wrapper.findAll(".sftp-view__breadcrumbs")).toHaveLength(1);
+      expect(wrapper.find(".sftp-view__transfer-toggle").exists()).toBe(true);
+
+      // The top-bar Pane menu has no split or add-Pane entries (not even disabled ones); close stays.
+      await wrapper.get('.sftp-view__topbar button[aria-label="More file actions"]').trigger("click");
+      await flushPromises();
+      const items = Array.from(document.querySelectorAll('[role="menu"] [role="menuitem"]')).map((item) => item.textContent ?? "");
+      expect(items.some((text) => text.includes("Close current file Pane"))).toBe(true);
+      expect(items.filter((text) => /Split|Add (local|remote) pane/.test(text))).toEqual([]);
+
+      // Rotating changes nothing: the layout (both Panes) is kept and still switched, not split.
+      orientation.rotate(false);
+      await flushPromises();
+      expectSinglePane();
+      orientation.rotate(true);
+      await flushPromises();
+      expectSinglePane();
+      wrapper.unmount();
+    } finally {
+      orientation.restore();
+      platformHost.mobile = false;
+    }
+  });
+
+  it("projects the split layout as one visible Pane with a segmented switch on the phone shell", async () => {
+    platformHost.mobile = true;
+    const orientation = stubOrientation(false);
+    try {
+      const { wrapper } = await mountView();
+      const tabs = () => wrapper.findAll('[role="tablist"] [role="tab"]');
+      expect(tabs().map((tab) => tab.text())).toEqual(["Remote", "Local (NoriShell storage)"]);
+      expect(tabs()[0]!.attributes("aria-selected")).toBe("true");
+      // Only the remote Pane is rendered, while the layout keeps both Panes.
+      expect(wrapper.findAll(".sftp-view__pane")).toHaveLength(1);
+      expect(wrapper.find('[aria-label="Local path"]').exists()).toBe(false);
+      expect(wrapper.findAll("button").some((button) => button.text().includes("Connect SFTP"))).toBe(true);
+
+      await tabs()[1]!.trigger("click");
+      await flushPromises();
+      expect(tabs()[1]!.attributes("aria-selected")).toBe("true");
+      expect(wrapper.findAll(".sftp-view__pane")).toHaveLength(1);
+      expect(wrapper.find('[aria-label="Local path"]').exists()).toBe(true);
+      expect(wrapper.findAll("button").some((button) => button.text().includes("Connect SFTP"))).toBe(false);
+
+      await tabs()[0]!.trigger("click");
+      await flushPromises();
+      expect(wrapper.findAll("button").some((button) => button.text().includes("Connect SFTP"))).toBe(true);
+      // Both Panes survive the switching: the segment keeps two entries.
+      expect(tabs()).toHaveLength(2);
+      wrapper.unmount();
+    } finally {
+      orientation.restore();
+      platformHost.mobile = false;
+    }
+  });
+
+  it("stacks the phone context menu sheet and its scrim through the overlay stack", async () => {
+    platformHost.mobile = true;
+    try {
+      const { wrapper } = await mountView(readySnapshot(), undefined, "old.txt");
+      await wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button').trigger("contextmenu");
+      await flushPromises();
+      const backdrop = document.querySelector<HTMLElement>(".nvx-mobile-sheet-backdrop");
+      const menu = wrapper.get<HTMLElement>('[role="menu"][data-nvx-mobile-sheet]').element;
+      const z = menu.style.getPropertyValue("--nvx-mobile-overlay-z");
+      expect(z).not.toBe("");
+      expect(backdrop?.style.getPropertyValue("--nvx-mobile-overlay-z")).toBe(z);
+
+      backdrop?.dispatchEvent(new Event("pointerdown"));
+      await flushPromises();
+      expect(document.querySelector(".nvx-mobile-sheet-backdrop")).toBeNull();
+      expect(wrapper.find('[role="menu"][data-nvx-mobile-sheet]').exists()).toBe(false);
+      wrapper.unmount();
+    } finally {
+      platformHost.mobile = false;
+    }
+  });
+
+  it("tells the phone user that a copy is queued behind a running transfer", async () => {
+    platformHost.mobile = true;
+    client.registerSftpLocalDirectory.mockImplementation((path: string) => Promise.resolve({
+      directoryRef: "local-home", revision: "1", displayName: path, rememberablePath: null,
+    }));
+    client.listSftpLocalDirectory.mockResolvedValue({ directoryRef: "local-home", revision: "1", entries: [], nextCursor: null });
+    const sessionId = readySnapshot().sessions[0]!.sessionId;
+    const sourceFence = { kind: "remoteSession" as const, sessionId, generation: "1" };
+    const targetFence = { kind: "localCapability" as const, directoryRef: "local-home", revision: "1" };
+    client.prepareSftpTransferIntent.mockResolvedValue({ intentToken: "queued-intent", expiresAtUnixMs: Date.now() + 1_000, sourceFence, targetFence });
+    try {
+      const { wrapper, tips, setIntentSnapshot } = await mountView(readySnapshot(), undefined, "release.bin");
+      const queued = {
+        transferId: "019d0000-0000-7000-8000-000000000501", direction: "download" as const,
+        sourceDisplayName: "release.bin", targetDisplayName: "release.bin", sourcePaneId: "sftp-remote-pane", targetPaneId: "sftp-local-pane",
+        sourceEndpointRevision: "1", targetEndpointRevision: "1", sourceFence, targetFence, expectedBytes: 7, transferredBytes: 0,
+        bytesPerSecond: null, remainingSeconds: null, stateRevision: "1", state: "queued" as const, commitOutcome: "notCommitted" as const,
+        failureCode: null, cleanupResidual: null, cancellable: true,
+      };
+      client.enqueueSftpTransferIntent.mockImplementationOnce(() => {
+        setIntentSnapshot({ snapshotRevision: "1", transfers: [queued] });
+        return Promise.resolve(queued);
+      });
+      const row = wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button');
+      await row.trigger("click");
+      await row.trigger("contextmenu", { clientX: 40, clientY: 40 });
+      await wrapper.findAll('[role="menuitem"]').find((item) => item.text().includes("Copy to another pane"))!.trigger("click");
+      await flushPromises();
+      const local = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Local files");
+      expect(local).toBeTruthy();
+      local!.click();
+      await flushPromises();
+
+      expect(client.enqueueSftpTransferIntent).toHaveBeenCalledWith({ intentToken: "queued-intent" });
+      expect(tips.items.some((item) => item.tone === "info" && item.title === "Queued behind the running transfer.")).toBe(true);
+      wrapper.unmount();
+    } finally {
+      platformHost.mobile = false;
+    }
+  });
+
+  it("opens a folder with one tap and selects a file with one tap on the phone shell", async () => {
+    platformHost.mobile = true;
+    const entries = [
+      { entryRef: "folder", path: { bytes: Array.from(new TextEncoder().encode("/docs")) }, displayName: "docs", kind: "directory" as const, size: null, modifiedAtUnixMs: 1, permissionBits: null },
+      { entryRef: "file", path: { bytes: Array.from(new TextEncoder().encode("/notes.txt")) }, displayName: "notes.txt", kind: "file" as const, size: 3, modifiedAtUnixMs: 1, permissionBits: null },
+    ];
+    try {
+      const { wrapper } = await mountView(readySnapshot(), undefined, entries);
+      const rows = () => wrapper.findAll('[data-pane-id="sftp-remote-pane"] .sftp-view__entries > button');
+      await rows().find((row) => row.text().includes("notes.txt"))!.trigger("click");
+      await flushPromises();
+      expect(rows().find((row) => row.text().includes("notes.txt"))!.attributes("aria-selected")).toBe("true");
+      const listings = client.listSftpDirectory.mock.calls.length;
+      await rows().find((row) => row.text().includes("docs"))!.trigger("click");
+      await flushPromises();
+      expect(client.listSftpDirectory.mock.calls.length).toBe(listings + 1);
+      expect(client.listSftpDirectory).toHaveBeenLastCalledWith(expect.objectContaining({
+        path: { bytes: Array.from(new TextEncoder().encode("/docs")) },
+      }));
+      wrapper.unmount();
+    } finally {
+      platformHost.mobile = false;
+    }
+  });
+
+  it("offers local file actions from a long press and refreshes after a Core-confirmed rename", async () => {
+    platformHost.mobile = true;
+    const orientation = stubOrientation(false);
+    client.registerSftpLocalDirectory.mockImplementation((path: string) => Promise.resolve({
+      directoryRef: "local-home", revision: "1", displayName: path, rememberablePath: null,
+    }));
+    client.listSftpLocalDirectory.mockResolvedValue({
+      directoryRef: "local-home", revision: "1", nextCursor: null,
+      entries: [
+        { entryRef: "a", displayName: "a.bin", kind: "file", size: 1, modifiedAtUnixMs: null },
+        { entryRef: "dir", displayName: "sub", kind: "directory", size: null, modifiedAtUnixMs: null },
+      ],
+    });
+    client.mutateSftpLocalFile.mockResolvedValue({ directoryRef: "local-home", revision: "1" });
+    try {
+      const { wrapper } = await mountView();
+      await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes("Local"))!.trigger("click");
+      await flushPromises();
+      const row = (name: string) => wrapper.findAll(".sftp-view__entries > button").find((item) => item.text().includes(name))!;
+      await row("a.bin").trigger("contextmenu");
+      await flushPromises();
+      const items = () => wrapper.findAll('[role="menuitem"]').map((item) => item.text());
+      expect(items()).toEqual(expect.arrayContaining(["Refresh", "New folder", "New empty file", "Rename", "Delete"]));
+      expect(items().some((item) => item.includes("Open terminal") || item.includes("Compress") || item.includes("Permissions"))).toBe(false);
+      await wrapper.findAll('[role="menuitem"]').find((item) => item.text() === "Rename")!.trigger("click");
+      await flushPromises();
+      const input = document.body.querySelector<HTMLInputElement>("#sftp-mutation-name")!;
+      input.value = "b.bin";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await flushPromises();
+      const listings = client.listSftpLocalDirectory.mock.calls.length;
+      Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Confirm")!.click();
+      await flushPromises();
+      expect(client.mutateSftpLocalFile).toHaveBeenCalledWith({
+        directoryRef: "local-home", expectedRevision: "1", mutation: { kind: "rename", entryRef: "a", newName: "b.bin" },
+      });
+      expect(client.listSftpLocalDirectory.mock.calls.length).toBeGreaterThan(listings);
+
+      // Blank space raises the directory sheet; a folder delete is recursive and says so.
+      await wrapper.find(".sftp-view__entries").trigger("contextmenu");
+      await flushPromises();
+      expect(items()).toEqual(expect.arrayContaining(["New folder", "New empty file"]));
+      wrapper.unmount();
+    } finally {
+      orientation.restore();
+      platformHost.mobile = false;
+    }
+  });
+
+  it("deletes a local folder recursively and names a target that already exists", async () => {
+    pathApi.homeDir.mockResolvedValue("/Users/test");
+    client.registerSftpLocalDirectory.mockResolvedValue({ directoryRef: "local-home", revision: "1", displayName: "~/" });
+    client.listSftpLocalDirectory.mockResolvedValue({
+      directoryRef: "local-home", revision: "1", nextCursor: null,
+      entries: [{ entryRef: "dir", displayName: "sub", kind: "directory", size: null, modifiedAtUnixMs: null }],
+    });
+    client.mutateSftpLocalFile
+      .mockResolvedValueOnce({ directoryRef: "local-home", revision: "1" })
+      .mockRejectedValueOnce(JSON.stringify({ code: "sftp.local_target_exists", messageKey: "errors.sftp.operationFailed" }));
+    const { wrapper, tips } = await mountView();
+    const local = wrapper.find('[data-pane-id="sftp-local-pane"]');
+    await local.find(".sftp-view__entries > button").trigger("contextmenu", { clientX: 20, clientY: 20 });
+    await wrapper.findAll('[role="menuitem"]').find((item) => item.text() === "Delete")!.trigger("click");
+    await flushPromises();
+    expect(document.body.textContent).toContain("everything inside it are deleted");
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Confirm")!.click();
+    await flushPromises();
+    expect(client.mutateSftpLocalFile).toHaveBeenCalledWith({
+      directoryRef: "local-home", expectedRevision: "1",
+      mutation: { kind: "delete", entryRef: "dir", recursive: true, irreversibleConfirmed: true },
+    });
+
+    await local.find(".sftp-view__entries").trigger("contextmenu", { clientX: 20, clientY: 20 });
+    await wrapper.findAll('[role="menuitem"]').find((item) => item.text() === "New folder")!.trigger("click");
+    await flushPromises();
+    const input = document.body.querySelector<HTMLInputElement>("#sftp-mutation-name")!;
+    input.value = "sub";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Confirm")!.click();
+    await flushPromises();
+    expect(tips.items.some((item) => item.title === "An item with this name already exists. Nothing was replaced.")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("uses the NoriShell private area as the local home on the phone shell", async () => {
+    platformHost.mobile = true;
+    const orientation = stubOrientation(false);
+    // The shared storage root lists but blocks file access on Android, so it must never be registered.
+    pathApi.homeDir.mockResolvedValue("/storage/emulated/0");
+    client.registerSftpLocalDirectory.mockImplementation((path: string) => Promise.resolve({
+      directoryRef: `local:${path}`, revision: "1", displayName: path, rememberablePath: null,
+    }));
+    client.listSftpLocalDirectory.mockImplementation((input) => Promise.resolve({
+      directoryRef: input.directoryRef, revision: input.expectedRevision, entries: [], nextCursor: null,
+    }));
+    try {
+      const { wrapper } = await mountView();
+      expect(client.registerSftpLocalDirectory).toHaveBeenCalledWith("/data/user/0/app/files/home");
+      expect(client.registerSftpLocalDirectory).not.toHaveBeenCalledWith("/storage/emulated/0");
+      await wrapper.findAll('[role="tab"]').find((tab) => tab.text().includes("Local"))!.trigger("click");
+      await flushPromises();
+      expect(wrapper.findAll(".sftp-view__breadcrumbs button").map((crumb) => crumb.text())).toEqual(["NoriShell storage"]);
+      expect(wrapper.text()).not.toContain("~/");
+
+      const path = wrapper.find<HTMLInputElement>('[aria-label="Local path"]');
+      await path.setValue("~/Downloads");
+      await path.trigger("keydown", { key: "Enter" });
+      await flushPromises();
+      expect(client.registerSftpLocalDirectory).toHaveBeenLastCalledWith("/data/user/0/app/files/home/Downloads");
+      wrapper.unmount();
+    } finally {
+      orientation.restore();
+      platformHost.mobile = false;
+    }
+  });
+
   it("expands a home-relative typed local path before registering the directory", async () => {
     pathApi.homeDir.mockResolvedValue("/Users/test/");
     client.registerSftpLocalDirectory.mockImplementation((path: string) => Promise.resolve({
@@ -1667,6 +1979,7 @@ describe("SftpView production boundaries", () => {
       stateRevision: "7",
       state: "pausedByDisconnect" as const,
       commitOutcome: "notCommitted" as const,
+      cancellable: true,
       failureCode: "transportLost" as const,
       cleanupResidual: null,
     };
@@ -1724,6 +2037,7 @@ describe("SftpView production boundaries", () => {
       stateRevision: "8",
       state: "failed" as const,
       commitOutcome: "notCommitted" as const,
+      cancellable: false,
       failureCode: "cleanupIncomplete" as const,
       cleanupResidual: {
         kind: "localTemporaryTarget" as const,
@@ -1762,6 +2076,7 @@ describe("SftpView production boundaries", () => {
       stateRevision: "6",
       state: "transferring" as const,
       commitOutcome: "notCommitted" as const,
+      cancellable: true,
       failureCode: null,
       cleanupResidual: null,
     };
@@ -1777,6 +2092,108 @@ describe("SftpView production boundaries", () => {
       expectedGeneration: "2",
       expectedStateRevision: "6",
     });
+    wrapper.unmount();
+  });
+
+  function activeDownload(overrides: Partial<SftpSessionSnapshot["transfers"][number]> = {}) {
+    return {
+      transferId: "019d0000-0000-7000-8000-000000000313",
+      sessionId: readySnapshot().sessions[0]!.sessionId,
+      generation: "1",
+      direction: "download" as const,
+      source: { kind: "remote" as const, path: { bytes: [47, 97] } },
+      target: { kind: "localBoundaryToken" as const, token: "local", displayName: "a" },
+      expectedBytes: 10,
+      transferredBytes: 4,
+      bytesPerSecond: 2,
+      remainingSeconds: 3,
+      stateRevision: "6",
+      state: "transferring" as const,
+      commitOutcome: "notCommitted" as const,
+      cancellable: true,
+      failureCode: null,
+      cleanupResidual: null,
+      ...overrides,
+    } as SftpSessionSnapshot["transfers"][number];
+  }
+
+  it("offers cancel from Core's cancellable fact, including a cancellable commit", async () => {
+    const publishing = activeDownload({ state: "committing", cancellable: true });
+    const ordinary = activeDownload({ transferId: "019d0000-0000-7000-8000-000000000314", state: "committing", cancellable: false });
+    const { wrapper } = await mountView(readySnapshot([publishing, ordinary]));
+    await openTransferActivity(wrapper);
+    const cancels = wrapper.findAll("button").filter((button) => button.text().includes("Cancel and clean up"));
+    expect(cancels).toHaveLength(1);
+    client.cancelSftpTransfer.mockResolvedValueOnce({ ...publishing, state: "cancelling", cancellable: false });
+    await cancels[0]!.trigger("click");
+    await flushPromises();
+    expect(client.cancelSftpTransfer).toHaveBeenCalledWith(expect.objectContaining({ transferId: publishing.transferId }));
+    wrapper.unmount();
+  });
+
+  it("explains an uncertain commit by direction instead of one remote-only text", async () => {
+    const download = activeDownload({ state: "failed", failureCode: "commitOutcomeUncertain", commitOutcome: "uncertain", cancellable: false });
+    const upload = activeDownload({
+      transferId: "019d0000-0000-7000-8000-000000000315", direction: "upload", state: "failed",
+      source: { kind: "localBoundaryToken", token: "local", displayName: "b" }, target: { kind: "remote", path: { bytes: [47, 98] } },
+      failureCode: "commitOutcomeUncertain", commitOutcome: "uncertain", cancellable: false,
+    });
+    const { wrapper } = await mountView(readySnapshot([download, upload]));
+    await openTransferActivity(wrapper);
+    expect(wrapper.text()).toContain("The download did not finish safely. The local file may be incomplete; check it or download it again.");
+    expect(wrapper.text()).toContain("The upload may have been committed, but the result is unknown. Refresh the remote directory and verify the file.");
+    wrapper.unmount();
+  });
+
+  it("retries a conflicting cancel once on the refreshed lifecycle fact", async () => {
+    const transfer = activeDownload();
+    const { wrapper, setSnapshot } = await mountView(readySnapshot([transfer]));
+    await openTransferActivity(wrapper);
+    client.cancelSftpTransfer
+      .mockImplementationOnce(() => {
+        setSnapshot(readySnapshot([activeDownload({ state: "verifying", stateRevision: "9" })]));
+        return Promise.reject(JSON.stringify({ code: "sftp.conflict", messageKey: "errors.sftp.operationFailed" }));
+      })
+      .mockResolvedValueOnce({ ...transfer, state: "cancelling", stateRevision: "10" });
+    await wrapper.findAll("button").find((button) => button.text().includes("Cancel and clean up"))!.trigger("click");
+    await flushPromises();
+
+    expect(client.cancelSftpTransfer.mock.calls.map(([input]) => input.expectedStateRevision)).toEqual(["6", "9"]);
+    wrapper.unmount();
+  });
+
+  it("shows the Core failure code when a cancel is refused instead of failing silently", async () => {
+    const transfer = activeDownload();
+    client.cancelSftpTransfer.mockRejectedValueOnce(JSON.stringify({ code: "sftp.invalid_state", messageKey: "errors.sftp.operationFailed" }));
+    const { wrapper, tips } = await mountView(readySnapshot([transfer]));
+    await openTransferActivity(wrapper);
+    await wrapper.findAll("button").find((button) => button.text().includes("Cancel and clean up"))!.trigger("click");
+    await flushPromises();
+
+    expect(tips.items.some((item) => item.tone === "error" && item.message === "sftp.invalid_state")).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("cancels the session's running transfers before an explicit Disconnect", async () => {
+    const transfer = activeDownload();
+    const { wrapper, setSnapshot } = await mountView(readySnapshot([transfer]));
+    client.cancelSftpTransfer.mockImplementationOnce(() => {
+      setSnapshot(readySnapshot([{ ...transfer, state: "cancelled", stateRevision: "8" }]));
+      return Promise.resolve({ ...transfer, state: "cancelling", stateRevision: "7" });
+    });
+    const localPane = wrapper.find('[data-pane-id="sftp-local-pane"]');
+    await openPaneActions(localPane);
+    await paneAction(localPane, "Close current file Pane")?.trigger("click");
+    await flushPromises();
+    await wrapper.get('.sftp-view__topbar button[aria-label="Disconnect"]').trigger("click");
+    await flushPromises();
+
+    expect(client.cancelSftpTransfer).toHaveBeenCalledWith({
+      transferId: transfer.transferId, expectedGeneration: "1", expectedStateRevision: "6",
+    });
+    expect(client.disconnectSftpSession).toHaveBeenCalledTimes(1);
+    expect(client.cancelSftpTransfer.mock.invocationCallOrder[0]!)
+      .toBeLessThan(client.disconnectSftpSession.mock.invocationCallOrder[0]!);
     wrapper.unmount();
   });
 
@@ -1796,6 +2213,7 @@ describe("SftpView production boundaries", () => {
       stateRevision: "6",
       state: "transferring" as const,
       commitOutcome: "notCommitted" as const,
+      cancellable: true,
       failureCode: null,
       cleanupResidual: null,
     };
@@ -1823,6 +2241,7 @@ describe("SftpView production boundaries", () => {
       stateRevision: "6",
       state: "transferring" as const,
       commitOutcome: "notCommitted" as const,
+      cancellable: true,
       failureCode: null,
       cleanupResidual: null,
     };
@@ -1844,6 +2263,7 @@ describe("SftpView production boundaries", () => {
       stateRevision: "6",
       state: "transferring" as const,
       commitOutcome: "notCommitted" as const,
+      cancellable: true,
       failureCode: null,
       cleanupResidual: null,
     };
@@ -2231,6 +2651,7 @@ describe("SftpView production boundaries", () => {
       stateRevision: "9",
       state: "failed" as const,
       commitOutcome: "notCommitted" as const,
+      cancellable: false,
       failureCode: "cleanupIncomplete" as const,
       cleanupResidual: {
         kind: "remoteTemporaryTarget" as const,
@@ -2301,6 +2722,7 @@ describe("SftpView production boundaries", () => {
       stateRevision: "12",
       state: "failed" as const,
       commitOutcome: "committed" as const,
+      cancellable: false,
       failureCode: "cleanupIncomplete" as const,
       cleanupResidual: {
         kind: "remoteTemporaryTarget" as const,
@@ -2428,6 +2850,32 @@ describe("SftpView production boundaries", () => {
     wrapper.unmount();
   });
 
+  it("reports an expired pane reference as a pane change and reloads the source listing", async () => {
+    dialog.open.mockResolvedValue("/Users/test/Downloads");
+    client.registerSftpLocalDirectory.mockResolvedValue({ directoryRef: "local-directory-ref", revision: "3", displayName: "Downloads" });
+    client.listSftpLocalDirectory.mockResolvedValue({
+      directoryRef: "local-directory-ref",
+      revision: "3",
+      entries: [{ entryRef: "local-entry-ref", displayName: "payload.bin", kind: "file", size: 12, modifiedAtUnixMs: 1 }],
+      nextCursor: null,
+    });
+    client.prepareSftpTransferIntent.mockRejectedValueOnce(JSON.stringify({ code: "sftp.conflict", messageKey: "errors.sftp.operationFailed" }));
+    const { wrapper } = await mountView(readySnapshot());
+    const localPlacement = wrapper.find('[data-pane-id="sftp-local-pane"]');
+    await openPaneActions(localPlacement);
+    await paneAction(localPlacement, "Change local folder")?.trigger("click");
+    await flushPromises();
+    const listings = client.listSftpLocalDirectory.mock.calls.length;
+    const remotePane = wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__pane');
+    await dragEntryToPane(localPlacement.find(".sftp-view__entries > button"), remotePane);
+    await flushPromises();
+
+    expect(client.enqueueSftpTransferIntent).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("The source or target Pane changed.");
+    expect(client.listSftpLocalDirectory.mock.calls.length).toBeGreaterThan(listings);
+    wrapper.unmount();
+  });
+
   it("recursively copies a dragged local directory into a remote Pane", async () => {
     dialog.open.mockResolvedValue("/tmp/root");
     client.registerSftpLocalDirectory.mockResolvedValue({
@@ -2497,6 +2945,30 @@ describe("SftpView production boundaries", () => {
       expectedBytes: 12,
     }));
     expect(client.enqueueSftpTransferIntent).toHaveBeenCalledWith({ intentToken: "recursive-intent" });
+    wrapper.unmount();
+  });
+
+  it("names a file action refused because a running transfer uses the item", async () => {
+    client.mutateSftpFile.mockRejectedValueOnce(JSON.stringify({ code: "sftp.conflict", messageKey: "errors.sftp.operationFailed" }));
+    const running = {
+      transferId: "019d0000-0000-7000-8000-000000000601", sessionId: readySnapshot().sessions[0]!.sessionId, generation: "1",
+      direction: "download" as const, source: { kind: "remote" as const, path: { bytes: Array.from(new TextEncoder().encode("/empty.txt")) } },
+      target: { kind: "localBoundaryToken" as const, token: "local", displayName: "empty.txt" }, expectedBytes: 10, transferredBytes: 4,
+      bytesPerSecond: 2, remainingSeconds: 3, stateRevision: "6", state: "transferring" as const, commitOutcome: "notCommitted" as const,
+      failureCode: null, cleanupResidual: null, cancellable: true,
+    };
+    const { wrapper, tips } = await mountView(readySnapshot([running]));
+    await wrapper.find('[data-pane-id="sftp-remote-pane"] .sftp-view__entries').trigger("contextmenu", { clientX: 40, clientY: 40 });
+    await wrapper.findAll<HTMLButtonElement>('[role="menuitem"]').find((button) => button.text().trim() === "New empty file")?.trigger("click");
+    await flushPromises();
+    const nameInput = document.body.querySelector<HTMLInputElement>("#sftp-mutation-name")!;
+    nameInput.value = "empty.txt";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Confirm")!.click();
+    await flushPromises();
+
+    expect(tips.items.some((item) => item.title === "This item is in use by a running transfer. Try again after it finishes.")).toBe(true);
     wrapper.unmount();
   });
 

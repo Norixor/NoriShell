@@ -41,6 +41,9 @@ import {
 import NvxTerminalPaneControls from "./NvxTerminalPaneControls.vue";
 import NvxTerminalView from "./NvxTerminalView.vue";
 import { createFencedTerminalResize } from "./fencedTerminalResize";
+import { keepTerminalFocusOnPointerDown } from "./mobileToolbarPointer";
+import { useTerminalPaneImmersive } from "./useTerminalPaneImmersive";
+import { createTerminalInputWriter, TerminalInputDroppedError, type TerminalInputDispatch } from "../../terminal/input-coalescer";
 import NvxTerminalTools from "./NvxTerminalTools.vue";
 import type { ShortcutCommandId } from "../../shortcuts";
 import type { TerminalOutputGeometryMarker } from "../../terminal-output-geometry";
@@ -61,6 +64,7 @@ interface TerminalViewExpose {
   findPrevious(term: string): boolean;
   clearSearch(): void;
   pasteFromClipboard(): Promise<void> | undefined;
+  applicationCursorKeys?(): boolean;
 }
 
 const props = withDefaults(defineProps<{
@@ -87,6 +91,8 @@ const emit = defineEmits<{
 }>();
 
 const { t, te } = useI18n();
+// Landscape + soft keyboard on phones: the toolbar collapses to a state strip so the terminal keeps its rows.
+const immersive = useTerminalPaneImmersive();
 const terminalView = ref<TerminalViewExpose | null>(null);
 const session = ref<TelnetSessionSummary | null>(props.existingSession);
 const attachment = ref<TelnetSessionAttachment | null>(null);
@@ -406,24 +412,52 @@ async function renewLease() {
   }
 }
 
-async function send(value: string) {
+function prepareInputDispatch(): TerminalInputDispatch | null {
   const current = session.value;
   const currentAttachment = attachment.value;
   const currentLease = lease.value;
-  if (!current?.socketId || !currentAttachment || !currentLease || !writable.value) return;
-  clientSequence += 1n;
-  await sendTelnetInput({
+  const socketId = current?.socketId;
+  if (!current || !socketId || !currentAttachment || !currentLease || !writable.value) return null;
+  const fence = {
     sessionId: current.sessionId,
     expectedGeneration: current.generation,
-    expectedStateRevision: current.stateRevision,
-    socketId: current.socketId,
+    socketId,
     attachmentId: currentAttachment.attachmentId,
     viewId: props.paneId,
     leaseId: currentLease.leaseId,
     focusEpoch: currentLease.focusEpoch,
     inputEpoch: currentLease.inputEpoch,
-    clientSeq: clientSequence.toString(),
-    bytes: [...new TextEncoder().encode(value)],
+  };
+  // The state revision is re-read for every request but is not an ownership fence, so it does not split batches.
+  return {
+    key: JSON.stringify(fence),
+    async write(value: string) {
+      clientSequence += 1n;
+      const clientSeq = clientSequence;
+      await sendTelnetInput({
+        ...fence,
+        expectedStateRevision: current.stateRevision,
+        clientSeq: clientSeq.toString(),
+        bytes: [...new TextEncoder().encode(value)],
+      });
+      return clientSeq;
+    },
+  };
+}
+
+// One request in flight per Pane; input typed meanwhile is merged under the same fence.
+const inputWriter = createTerminalInputWriter(prepareInputDispatch);
+
+async function send(value: string) {
+  // Unwritable Telnet input stays a silent no-op, as before serialization.
+  if (!prepareInputDispatch()) return;
+  await inputWriter.send(value);
+}
+
+function handleTerminalInput(value: string) {
+  // Queued input dropped behind a failed write was never written; nothing to report again.
+  void send(value).catch((error: unknown) => {
+    if (!(error instanceof TerminalInputDroppedError)) throw error;
   });
 }
 
@@ -459,6 +493,7 @@ function registerInputTarget() {
     // Quick Commands are intentionally disabled for cleartext Telnet.
     canAcceptInput: () => false,
     canAcceptRawInput: () => writable.value,
+    cursorKeysMode: () => terminalView.value?.applicationCursorKeys?.() ? "application" : "normal",
     send,
   });
 }
@@ -574,7 +609,14 @@ onBeforeUnmount(() => {
     class="telnet-pane"
     @pointerdown="activateTerminalSurface"
   >
-    <header class="telnet-pane__toolbar">
+    <header
+      class="telnet-pane__toolbar"
+      :class="{ 'telnet-pane__toolbar--immersive': immersive }"
+      :data-tone="immersive ? (state === 'running' ? 'success' : state === 'failed' ? 'danger' : 'neutral') : undefined"
+      :role="immersive ? 'status' : undefined"
+      :aria-label="immersive ? stateLabel : undefined"
+      @pointerdown="keepTerminalFocusOnPointerDown"
+    >
       <span class="telnet-pane__identity">
         <NvxIcon
           :icon="Network"
@@ -649,7 +691,7 @@ onBeforeUnmount(() => {
       :read-only="!writable"
       :terminal-label="label"
       :gap-label="t('telnetSession.outputGap')"
-      @input="send"
+      @input="handleTerminalInput"
       @resize="resize"
       @selection-change="hasSelection = $event"
       @search-request="terminalTools?.openSearch()"
@@ -725,4 +767,26 @@ onBeforeUnmount(() => {
 .telnet-pane__identity small { color: var(--nvx-color-text-secondary); }
 .telnet-pane__risk { margin: 8px 8px 0; }
 .telnet-pane__terminal { min-height: 0; }
+
+/* Phone immersive mode: a 4px strip keeps the Session state visible (the status role and label carry it for assistive tech). */
+.telnet-pane__toolbar--immersive {
+  min-height: 0;
+  height: 4px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--nvx-color-text-tertiary);
+}
+
+.telnet-pane__toolbar--immersive > * {
+  display: none !important;
+}
+
+.telnet-pane__toolbar--immersive[data-tone="success"] {
+  background: var(--nvx-color-success);
+}
+
+.telnet-pane__toolbar--immersive[data-tone="danger"] {
+  background: var(--nvx-color-danger);
+}
 </style>

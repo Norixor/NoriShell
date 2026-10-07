@@ -104,7 +104,6 @@ function card(
           totalBytes: String(totalBytes),
         }],
       },
-      hostKeyChallenge: null,
       keyboardInteractiveChallenge: null,
     },
   };

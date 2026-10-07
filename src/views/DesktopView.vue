@@ -16,11 +16,14 @@ import NvxDesktopCanvas from "../components/desktop/NvxDesktopCanvas.vue";
 import { desktopClient } from "../core-api/desktop-client";
 import type { DesktopAvailability, DesktopProfile, DesktopSessionSummary } from "../core-api/generated/core-api";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
+import { workspaceTabStateTone } from "../workspace-tab-state-tone";
+import { isMobileLayout } from "../platform-host";
 import { useTipsStore } from "../stores/tips";
 import { onToolWindowChanged, openToolWindow } from "../tool-windows";
 import { useRouteReveal } from "../routeReveal";
 import { onSavedConnectionsChanged } from "../saved-connections";
-import { filterDesktopSessions, type DesktopTabHandoffSnapshot } from "../workspace-desktop-handoff";
+import { filterDesktopSessions, filterSingleDocumentDesktopSessions, type DesktopTabHandoffSnapshot } from "../workspace-desktop-handoff";
+import { hasTauriIpc, workspaceHostMode } from "../platform-host";
 import { snapshotWorkspaceTabs, updateOwnWorkspaceTabProjection } from "../workspace-tab-windows";
 import { runWorkspaceTabShellAction } from "../workspace-tab-shell-action";
 import { handOffClosingWorkspaceTabs, restoreClosedWorkspaceTabs } from "../workspace-tab-close-handoff";
@@ -36,6 +39,12 @@ const stagedIds = ref<ReadonlySet<string>>(new Set());
 // Sessions render only in their own Tab WebView; the shell page lists profiles.
 const nativeViewTabId = isWorkspaceTabView() ? new URLSearchParams(window.location.search).get("tabId") : null;
 const nativeSessionId = ref<string | null>(null);
+// Android hosts Desktop Tabs in this one document; Core binds each session to `desktop:<sessionId>` owned by it.
+const singleDocumentDesktop = !isWorkspaceTabView() && workspaceHostMode() !== "nativeTabs" && hasTauriIpc();
+function ownedSessions(result: DesktopSessionSummary[], ownership: Awaited<ReturnType<typeof snapshotWorkspaceTabs>>) {
+  return singleDocumentDesktop ? filterSingleDocumentDesktopSessions(result, ownership)
+    : filterDesktopSessions(result, ownership, stagedIds.value, nativeViewTabId, nativeSessionId.value);
+}
 const reconnectProfileId = ref<string | null>(null);
 const tabIdForSession = (sessionId: string) => nativeViewTabId || `desktop:${sessionId}`;
 let projectionRevision = 0;
@@ -44,6 +53,10 @@ const activeId = ref(""), active = ref(true), loading = ref(true), busy = ref(fa
 const failureText = ref("");
 let failureSource: "load" | "snapshot" | null = null;
 const sidebarCollapsed = ref(false), fullscreen = ref(false), fullscreenBusy = ref(false);
+// Phone shell: the profile list and the session are two screens (list -> detail); the list
+// overlays the session so an active canvas keeps its size while the user browses profiles.
+const mobileLayout = isMobileLayout();
+watch(activeId, (id) => { if (mobileLayout && id) sidebarCollapsed.value = true; });
 const fullscreenTarget = ref<HTMLElement | null>(null);
 const fullscreenButton = ref<InstanceType<typeof NvxIconButton> | null>(null);
 const exitFullscreenButton = ref<InstanceType<typeof NvxIconButton> | null>(null);
@@ -116,6 +129,27 @@ async function openInCurrentDesktopTab(profile: DesktopProfile): Promise<void> {
   sessions.value = [next];
   activeId.value = next.id;
 }
+/** Single document: Core records the new session as this document's Tab before it starts. */
+async function openInDocument(profile: DesktopProfile): Promise<void> {
+  if (!singleDocumentDesktop) throw new Error("workspace_tab.desktop_unavailable");
+  workspace.terminalController?.deactivate();
+  await desktopClient.focus(null);
+  const next = await desktopClient.openOwned(profile);
+  if (disposed) return; // The Registry still owns the session; the next snapshot shows it again.
+  projectionRevision++;
+  sessions.value = [...sessions.value.filter((item) => item.id !== next.id), next];
+  activeId.value = next.id;
+  active.value = true;
+}
+/** Reconnecting a single-document Tab replaces its ended session; a failed close keeps the old handle. */
+async function replaceDocumentDesktopSession(target: DesktopSessionSummary, profile: DesktopProfile, stillCurrent: () => boolean) {
+  if (!stillCurrent()) throw new Error("workspace_tab.desktop_session_changed");
+  await desktopClient.closeOwned(target);
+  projectionRevision++;
+  sessions.value = sessions.value.filter((item) => item.id !== target.id);
+  if (activeId.value === target.id) activeId.value = "";
+  await openInDocument(profile);
+}
 async function replaceNativeDesktopSession(target: DesktopSessionSummary, profile: DesktopProfile, stillCurrent: () => boolean) {
   if (!stillCurrent()) throw new Error("workspace_tab.desktop_session_changed");
   // A failed cleanup retains Core resources; keep the old handle until close succeeds.
@@ -150,8 +184,8 @@ async function applyDisplaySettings() {
     workspace.terminalController?.deactivate();
     await desktopClient.focus(null);
     if (!stillCurrent()) { settingsError.value = t("desktop.displaySettingsSessionChanged"); return; }
-    if (nativeViewTabId) {
-      await replaceNativeDesktopSession(target, saved, stillCurrent);
+    if (nativeViewTabId || singleDocumentDesktop) {
+      await (nativeViewTabId ? replaceNativeDesktopSession : replaceDocumentDesktopSession)(target, saved, stillCurrent);
       settingsDraft.value = null; settingsSession.value = null;
       return;
     }
@@ -197,7 +231,7 @@ async function refresh() {
   try {
     const [result, ownership] = await Promise.all([desktopClient.snapshot(), snapshotWorkspaceTabs()]);
     if (!disposed && revision === projectionRevision) {
-      sessions.value = filterDesktopSessions(result, ownership, stagedIds.value, nativeViewTabId, nativeSessionId.value);
+      sessions.value = ownedSessions(result, ownership);
       if (!sessions.value.some((item) => item.id === activeId.value)) activeId.value = sessions.value[0]?.id ?? "";
       if (failureSource === "snapshot") {
         failed.value = false;
@@ -252,6 +286,7 @@ async function open(profile: DesktopProfile) {
       await openInCurrentDesktopTab(profile);
       return;
     }
+    if (singleDocumentDesktop) { await openInDocument(profile); return; }
     if (!isWorkspaceTabView()) await desktopClient.focus(null);
     await runWorkspaceTabShellAction({ type: "new-desktop", profileId: profile.id });
   }
@@ -263,6 +298,15 @@ async function beginOpenProfile(profileId: string): Promise<void> {
   if (!profile) throw new Error("workspace_tab.desktop_profile_missing");
   busy.value = true;
   try { await openInCurrentDesktopTab(profile); }
+  finally { busy.value = false; }
+}
+async function openProfile(profileId: string): Promise<void> {
+  if (!singleDocumentDesktop) throw new Error("workspace_tab.desktop_unavailable");
+  if (busy.value) throw new Error("workspace_tab.busy");
+  const profile = (await desktopClient.profiles()).find((item) => item.id === profileId);
+  if (!profile) throw new Error("workspace_tab.desktop_profile_missing");
+  busy.value = true;
+  try { await openInDocument(profile); }
   finally { busy.value = false; }
 }
 async function close(tabId: string) {
@@ -292,10 +336,10 @@ async function toggleAudio() {
 async function reconnect(session: DesktopSessionSummary) {
   if (!["closed", "failed"].includes(session.state) || busy.value) return;
   const profile = profiles.value.find(item => item.id === session.profile.id) ?? session.profile;
-  if (!nativeViewTabId) { await open(profile); return; }
+  if (!nativeViewTabId && !singleDocumentDesktop) { await open(profile); return; }
   busy.value = true;
   try {
-    await replaceNativeDesktopSession(session, profile, () => !disposed && active.value
+    await (nativeViewTabId ? replaceNativeDesktopSession : replaceDocumentDesktopSession)(session, profile, () => !disposed && active.value
       && current.value?.id === session.id && current.value.generation === session.generation);
   } catch (error) { noticeFailure(error); await refresh(); }
   finally { busy.value = false; }
@@ -454,8 +498,8 @@ async function admitHandoff(tabId: string) {
   stagedIds.value = new Set([...stagedIds.value].filter((id) => id !== tabId));
   projectionRevision++;
 }
-const unregister = workspace.registerDesktopController({ activate, beginOpenProfile, close, deactivate: () => { active.value = false; void display.value?.invalidate(); }, isBusy: () => busy.value, snapshotHandoff, importHandoff, importIdle, discardHandoff, admitHandoff });
-watch([visibleSessions, activeId, busy, () => t("desktop.title")], () => workspace.syncDesktopState({ tabs: visibleSessions.value.map((session) => ({ groupId: tabIdForSession(session.id), label: session.profile.label, stateLabel: t(`desktop.states.${session.state}`) })), activeTabId: activeId.value ? tabIdForSession(activeId.value) : "", busy: busy.value }), { deep: true, immediate: true });
+const unregister = workspace.registerDesktopController({ activate, beginOpenProfile, openProfile, close, deactivate: () => { active.value = false; void display.value?.invalidate(); }, isBusy: () => busy.value, snapshotHandoff, importHandoff, importIdle, discardHandoff, admitHandoff });
+watch([visibleSessions, activeId, busy, () => t("desktop.title")], () => workspace.syncDesktopState({ tabs: visibleSessions.value.map((session) => ({ groupId: tabIdForSession(session.id), label: session.profile.label, stateLabel: t(`desktop.states.${session.state}`), stateTone: workspaceTabStateTone(session.state) })), activeTabId: activeId.value ? tabIdForSession(activeId.value) : "", busy: busy.value }), { deep: true, immediate: true });
 let focusOperation = "";
 let disposeToolWindowListener: (() => void) | undefined;
 let disposeSavedConnectionsListener: (() => void) | undefined;
@@ -471,7 +515,7 @@ watch(() => router.currentRoute.value.query.focusOperation, async (operation) =>
   try {
     const [snapshot, ownership] = await Promise.all([desktopClient.snapshot(), snapshotWorkspaceTabs()]);
     if (disposed || router.currentRoute.value.query.focusOperation !== operation) return;
-    const filtered = filterDesktopSessions(snapshot, ownership, stagedIds.value, nativeViewTabId, nativeSessionId.value);
+    const filtered = ownedSessions(snapshot, ownership);
     const target = filtered.find((session) => session.id === query.focusSessionId && session.generation === query.focusGeneration);
     if (!target || document.querySelector('[role="dialog"][aria-modal="true"]')) throw new Error("unavailable");
     sessions.value = filtered; activeId.value = target.id;
@@ -510,7 +554,7 @@ onBeforeUnmount(() => {
 <template>
   <section
     class="desktop-page"
-    :class="{ 'desktop-page--sidebar-collapsed': sidebarCollapsed }"
+    :class="{ 'desktop-page--sidebar-collapsed': sidebarCollapsed, 'desktop-page--mobile': mobileLayout }"
   >
     <aside
       v-show="!sidebarCollapsed"
@@ -519,7 +563,16 @@ onBeforeUnmount(() => {
       :aria-label="t('desktop.profiles')"
     >
       <header>
-        <h1>{{ t('desktop.title') }}</h1><NvxButton
+        <h1>{{ t('desktop.title') }}</h1>
+        <NvxButton
+          v-if="mobileLayout && current"
+          variant="ghost"
+          size="sm"
+          @click="sidebarCollapsed = true"
+        >
+          {{ t('mobile.desktopShowSession') }}
+        </NvxButton>
+        <NvxButton
           variant="ghost"
           size="sm"
           :disabled="busy"
@@ -1005,4 +1058,15 @@ h1 { font-size: var(--nvx-font-size-sm); margin: 0; white-space: nowrap; }
 @media (max-width: 850px) { .desktop-page { grid-template-columns: 245px minmax(0, 1fr); } }
 @media (max-width: 600px) { .desktop-page { grid-template-columns: 1fr; grid-template-rows: minmax(120px, 35%) 1fr; } .desktop-profiles { border-right: 0; border-bottom: 1px solid var(--nvx-color-border); } }
 .desktop-page--sidebar-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+
+/* Phone list -> detail flow (platform-gated; width rules above stay for desktop). */
+.desktop-page--mobile { position: relative; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.desktop-page--mobile .desktop-profiles { position: absolute; z-index: 2; inset: 0; border-right: 0; border-bottom: 0; }
+.desktop-page--mobile .desktop-profiles > header { min-height: 52px; padding-inline: var(--nvx-space-3); }
+.desktop-page--mobile .desktop-profiles > header h1 { flex: 1 1 auto; font-size: var(--nvx-font-size-md); }
+.desktop-page--mobile .desktop-profile { padding: var(--nvx-space-2) var(--nvx-space-3); }
+.desktop-page--mobile .desktop-profile__row { min-height: 56px; }
+.desktop-page--mobile .desktop-profile__actions > .nvx-button,
+.desktop-page--mobile .desktop-profiles > header > .nvx-button { min-height: 36px; font-size: var(--nvx-font-size-sm); }
+.desktop-page--mobile .desktop-toolbar { flex-wrap: wrap; row-gap: var(--nvx-space-1); }
 </style>

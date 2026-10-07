@@ -3,6 +3,7 @@ import { createPinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { mobileEn } from "../../locales/mobile";
 import { terminalInteractionEn } from "../../locales/terminal-interaction";
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
 import { useTipsStore } from "../../stores/tips";
@@ -11,11 +12,16 @@ import NvxTerminalInteractionSettings from "./NvxTerminalInteractionSettings.vue
 
 const coreApi = vi.hoisted(() => ({ listHostCatalog: vi.fn() }));
 vi.mock("../../core-api/client", () => ({ listHostCatalog: coreApi.listHostCatalog }));
+const host = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
 
 function setup() {
   const pinia = createPinia();
   const wrapper = mount(NvxTerminalInteractionSettings, {
-    global: { plugins: [pinia, createI18n({ legacy: false, locale: "en", messages: { en: { terminalInteraction: terminalInteractionEn } } })] },
+    global: { plugins: [pinia, createI18n({ legacy: false, locale: "en", messages: { en: { terminalInteraction: terminalInteractionEn, mobile: mobileEn } } })] },
   });
   return { wrapper, store: useTerminalPreferencesStore(pinia), tips: useTipsStore(pinia) };
 }
@@ -29,6 +35,34 @@ describe("NvxTerminalInteractionSettings", () => {
   function button(wrapper: ReturnType<typeof setup>["wrapper"], label: string) {
     return wrapper.findAllComponents(NvxButton).find((item) => item.text() === label)!;
   }
+  it("names the long-press action and hides the macOS Option rows on the phone shell", async () => {
+    host.mobile = true;
+    try {
+      const { wrapper } = setup();
+      await flushPromises();
+      const labels = wrapper.findAll("label").map((label) => label.text());
+      expect(labels).toContain("Long-press action");
+      expect(labels).not.toContain("Right-click action");
+      expect(labels).not.toContain(terminalInteractionEn.optionAsMetaLeft);
+      expect(labels).not.toContain(terminalInteractionEn.optionAsMetaRight);
+      // Touch wording replaces mouse, trackpad and Command-key copy; the preference keys stay the same.
+      expect(labels).toContain("Double-tap selection");
+      expect(labels).not.toContain("Double-click selection");
+      const text = wrapper.text();
+      expect(text).toContain("touch scrolling and hardware scroll wheels");
+      expect(text).not.toContain("mouse wheel and trackpad");
+      expect(text).toContain("Hold Ctrl on a hardware keyboard while tapping");
+      expect(text).not.toContain("Hold Command on macOS");
+      expect(text).toContain("Adjust terminal display, touch, keyboard");
+      expect(text).toContain("when a touch selection ends");
+      expect(text).not.toContain("mouse selection ends");
+      expect(text).toContain("Backspace without Ctrl or Alt");
+      wrapper.unmount();
+    } finally {
+      host.mobile = false;
+    }
+  });
+
   it("keeps a complete draft and persists it only after explicit save", async () => {
     const { wrapper, store } = setup();
     const inputs = wrapper.findAllComponents(NvxInput);

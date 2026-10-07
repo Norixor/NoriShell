@@ -99,7 +99,6 @@ import {
   type PluginTerminalObserveAttachResponse,
   type PluginTerminalObserveDetachRequest,
   type PluginUninstallRequest,
-  type MetricsHostKeyDecisionRequest,
   type MetricsKeyboardInteractiveAnswerPrepareRequest,
   type MetricsKeyboardInteractiveAnswerPrepareResponse,
   type MetricsKeyboardInteractiveRespondRequest,
@@ -224,6 +223,8 @@ import {
   type SftpLocalBoundaryKind,
   type SftpLocalDirectoryCapability,
   type SftpLocalDirectoryCreateChildRequest,
+  type SftpLocalFileMutationRequest,
+  type SftpLocalFileMutationResult,
   type SftpLocalDirectoryListRequest,
   type SftpLocalDirectoryListing,
   type SftpLocalDirectoryOpenChildRequest,
@@ -250,6 +251,7 @@ import {
   type VaultStatus,
 } from "./generated/core-api";
 import { createUuidV7 } from "./ids";
+import { secureInvoke } from "../secure-transport";
 
 function requestMeta() {
   return { requestId: crypto.randomUUID() };
@@ -309,7 +311,7 @@ export async function listInstalledPlugins(): Promise<InstalledPluginSummary[]> 
 }
 
 export async function getSshSyncSecurePrompt(promptId: string): Promise<SshSyncSecurePrompt> {
-  return invoke("ssh_sync_secure_prompt_get", {
+  return secureInvoke("ssh_sync_secure_prompt_get", {
     request: { meta: requestMeta(), promptId },
   });
 }
@@ -317,7 +319,7 @@ export async function getSshSyncSecurePrompt(promptId: string): Promise<SshSyncS
 export async function decideSshSyncSecurePrompt(
   input: Omit<SshSyncSecureDecisionRequest, "meta">,
 ): Promise<SshSyncSecureDecisionResponse> {
-  return invoke("ssh_sync_secure_prompt_decide", {
+  return secureInvoke("ssh_sync_secure_prompt_decide", {
     request: { meta: requestMeta(), ...input },
   });
 }
@@ -419,25 +421,25 @@ export async function openPluginHostApproval(approvalId: string): Promise<void> 
 export async function getPluginHostApproval(
   approvalId: string,
 ): Promise<PluginHostApprovalSummary> {
-  return invoke(coreApiCommands.pluginHostApprovalGet, {
+  return secureInvoke(coreApiCommands.pluginHostApprovalGet, {
     request: { meta: requestMeta(), approvalId } satisfies PluginHostApprovalGetRequest,
   });
 }
 
 export async function getPluginRemoteApproval(approvalId: string): Promise<PluginRemoteApprovalPrompt> {
-  return invoke(coreApiCommands.pluginRemoteApprovalGet, {
+  return secureInvoke(coreApiCommands.pluginRemoteApprovalGet, {
     request: { meta: requestMeta(), approvalId } satisfies PluginRemoteApprovalGetRequest,
   });
 }
 
 export async function decidePluginRemoteApproval(input: Omit<PluginRemoteApprovalDecisionRequest, "meta">): Promise<void> {
-  return invoke(coreApiCommands.pluginRemoteApprovalDecide, {
+  return secureInvoke(coreApiCommands.pluginRemoteApprovalDecide, {
     request: { meta: requestMeta(), ...input } satisfies PluginRemoteApprovalDecisionRequest,
   });
 }
 
 export async function submitPluginCredentialInput(input: Omit<PluginCredentialInputDecisionRequest, "meta">): Promise<void> {
-  return invoke(coreApiCommands.pluginCredentialInputSubmit, {
+  return secureInvoke(coreApiCommands.pluginCredentialInputSubmit, {
     request: { meta: requestMeta(), ...input } satisfies PluginCredentialInputDecisionRequest,
   });
 }
@@ -445,7 +447,7 @@ export async function submitPluginCredentialInput(input: Omit<PluginCredentialIn
 export async function decidePluginHostApproval(
   input: Omit<PluginHostApprovalDecisionRequest, "meta">,
 ): Promise<PluginHostApprovalDecisionResponse> {
-  return invoke(coreApiCommands.pluginHostApprovalDecide, {
+  return secureInvoke(coreApiCommands.pluginHostApprovalDecide, {
     request: { meta: requestMeta(), ...input } satisfies PluginHostApprovalDecisionRequest,
   });
 }
@@ -454,7 +456,7 @@ export async function getPluginIsolatedSurfaceContent(
   surfaceId: string,
   channelNonce: string,
 ): Promise<PluginIsolatedSurfaceContent> {
-  return invoke(coreApiCommands.pluginIsolatedSurfaceContent, {
+  return secureInvoke(coreApiCommands.pluginIsolatedSurfaceContent, {
     request: {
       meta: requestMeta(),
       surfaceId,
@@ -466,7 +468,7 @@ export async function getPluginIsolatedSurfaceContent(
 export async function invokePluginIsolatedBridge(
   input: Omit<PluginIsolatedBridgeRequest, "meta">,
 ): Promise<PluginIsolatedBridgeResponse> {
-  return invoke(coreApiCommands.pluginIsolatedBridge, {
+  return secureInvoke(coreApiCommands.pluginIsolatedBridge, {
     request: { meta: requestMeta(), ...input } satisfies PluginIsolatedBridgeRequest,
   });
 }
@@ -482,7 +484,7 @@ export async function openPluginSpecialPermission(
 export async function getPluginSpecialPermission(
   approvalId: string,
 ): Promise<PluginSpecialPermissionSnapshot> {
-  return invoke(coreApiCommands.pluginSpecialPermissionGet, {
+  return secureInvoke(coreApiCommands.pluginSpecialPermissionGet, {
     request: { meta: requestMeta(), approvalId } satisfies PluginSpecialPermissionGetRequest,
   });
 }
@@ -490,7 +492,7 @@ export async function getPluginSpecialPermission(
 export async function decidePluginSpecialPermission(
   input: Omit<PluginSpecialPermissionDecisionRequest, "meta">,
 ): Promise<PluginSpecialPermissionDecisionResponse> {
-  return invoke(coreApiCommands.pluginSpecialPermissionDecide, {
+  return secureInvoke(coreApiCommands.pluginSpecialPermissionDecide, {
     request: { meta: requestMeta(), ...input } satisfies PluginSpecialPermissionDecisionRequest,
   });
 }
@@ -686,7 +688,7 @@ export async function openPluginTerminalInput(
 export async function getPluginTerminalInput(
   approvalId: string,
 ): Promise<PluginTerminalInputProposal> {
-  return invoke(coreApiCommands.pluginTerminalInputGet, {
+  return secureInvoke(coreApiCommands.pluginTerminalInputGet, {
     request: {
       meta: requestMeta(),
       approvalId,
@@ -697,7 +699,7 @@ export async function getPluginTerminalInput(
 export async function decidePluginTerminalInput(
   input: Omit<PluginTerminalInputDecisionRequest, "meta">,
 ): Promise<PluginTerminalInputDecisionResponse> {
-  return invoke(coreApiCommands.pluginTerminalInputDecide, {
+  return secureInvoke(coreApiCommands.pluginTerminalInputDecide, {
     request: { meta: requestMeta(), ...input } satisfies PluginTerminalInputDecisionRequest,
   });
 }
@@ -1004,20 +1006,6 @@ export async function stopMetrics(
   });
 }
 
-export async function decideMetricsHostKey(
-  input: Omit<MetricsHostKeyDecisionRequest, "meta" | "operationId" | "idempotencyKey">,
-): Promise<MetricsSessionSummary> {
-  const operationId = createUuidV7();
-  return invoke(coreApiCommands.metricsHostKeyDecide, {
-    request: {
-      meta: requestMeta(),
-      operationId,
-      idempotencyKey: `metrics-host-key-${operationId}`,
-      ...input,
-    } satisfies MetricsHostKeyDecisionRequest,
-  });
-}
-
 export async function prepareMetricsKeyboardInteractiveAnswer(
   input: Omit<MetricsKeyboardInteractiveAnswerPrepareRequest, "meta" | "answerRefId">,
 ): Promise<MetricsKeyboardInteractiveAnswerPrepareResponse> {
@@ -1256,6 +1244,11 @@ export async function importPrivateKeyFile(input: {
     label: input.label,
   };
   return invoke(coreApiCommands.privateKeyFileImport, { request });
+}
+
+/** Releases the file Core kept for a private-key import retry (the import dialog closed). */
+export async function releasePrivateKeyFileImport(operationId: string): Promise<void> {
+  return invoke("private_key_file_import_release", { operationId });
 }
 
 export async function prepareTransientCredential(input: {
@@ -1987,6 +1980,21 @@ export async function createSftpLocalDirectoryChild(
       idempotencyKey: `sftp-local-create-child-${operationId}`,
       ...input,
     } satisfies SftpLocalDirectoryCreateChildRequest,
+  });
+}
+
+/** One file action inside a registered local directory capability; nothing is ever replaced. */
+export async function mutateSftpLocalFile(
+  input: Omit<SftpLocalFileMutationRequest, "meta" | "operationId" | "idempotencyKey">,
+): Promise<SftpLocalFileMutationResult> {
+  const operationId = createUuidV7();
+  return invoke(coreApiCommands.sftpLocalFileMutate, {
+    request: {
+      meta: requestMeta(),
+      operationId,
+      idempotencyKey: `sftp-local-file-mutate-${operationId}`,
+      ...input,
+    } satisfies SftpLocalFileMutationRequest,
   });
 }
 

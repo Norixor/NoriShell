@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { KeyRound, Pencil, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
-import { computed, onMounted, ref } from "vue";
+import { FileInput, KeyRound, Pencil, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import {
@@ -9,6 +9,7 @@ import {
   NvxDialog,
   NvxField,
   NvxIcon,
+  NvxIconButton,
   NvxInlineNotice,
   NvxInput,
   NvxStatusLabel,
@@ -27,10 +28,17 @@ import type {
   IdentitySummary,
 } from "../core-api/generated/core-api";
 import { requestSecureCredential } from "../core-api/secure-credential-client";
+import { isMobileLayout } from "../platform-host";
 import { useTipsStore } from "../stores/tips";
+import { onToolWindowChanged, openToolWindow } from "../tool-windows";
 
 const { t } = useI18n();
 const tips = useTipsStore();
+// Private key files are imported only inside the host editor tool surface: the
+// picker result and passphrase never enter this WebView, and Core authorizes
+// `private_key_file_import` to that surface alone. The phone has no Hosts-page
+// habit of reaching it, so Identities points there explicitly.
+const mobileLayout = isMobileLayout();
 
 const identities = ref<IdentitySummary[]>([]);
 const credentials = ref<Record<string, CredentialRefSummary[]>>({});
@@ -181,7 +189,31 @@ async function changePassword(identity: IdentitySummary, credential: CredentialR
   }
 }
 
-onMounted(load);
+const openingHostEditor = ref(false);
+let stopToolWindowListener: (() => void) | null = null;
+
+async function openHostEditorForKeyImport() {
+  if (openingHostEditor.value) return;
+  openingHostEditor.value = true;
+  tips.dismissScope("identity-settings-action");
+  try {
+    await openToolWindow({ kind: "hostEditor", hostId: null, initialSection: "connection", title: t("sshHosts.dialogTitle") });
+  } catch {
+    showActionFailed();
+  } finally {
+    openingHostEditor.value = false;
+  }
+}
+
+onMounted(async () => {
+  await load();
+  if (!mobileLayout) return;
+  // A key imported in the editor appears as a credential here once the surface closes.
+  try {
+    stopToolWindowListener = await onToolWindowChanged((kind) => { if (kind === "hostEditor") void load(); });
+  } catch { /* Without the event the Refresh action still reloads the list. */ }
+});
+onBeforeUnmount(() => { stopToolWindowListener?.(); stopToolWindowListener = null; });
 </script>
 
 <template>
@@ -192,7 +224,20 @@ onMounted(load);
         <p>{{ t('identitySettings.description') }}</p>
       </div>
       <div class="management-heading__actions">
+        <!-- The phone keeps one labelled primary action; Refresh becomes an icon button. -->
+        <NvxIconButton
+          v-if="mobileLayout"
+          :label="t('identitySettings.refresh')"
+          :disabled="loading"
+          @click="load"
+        >
+          <NvxIcon
+            :icon="RefreshCw"
+            :size="20"
+          />
+        </NvxIconButton>
         <NvxButton
+          v-else
           variant="secondary"
           size="sm"
           :loading="loading"
@@ -293,9 +338,7 @@ onMounted(load);
         </div>
         <div class="management-card__details">
           <NvxStatusLabel :tone="(credentials[identity.identityId]?.length ?? 0) > 0 ? 'info' : 'neutral'">
-            {{ t('identitySettings.credentialCount', {
-              count: credentials[identity.identityId]?.length ?? 0,
-            }) }}
+            {{ t('identitySettings.credentialCount', credentials[identity.identityId]?.length ?? 0) }}
           </NvxStatusLabel>
           <ul
             v-if="credentials[identity.identityId]?.length"
@@ -320,6 +363,30 @@ onMounted(load);
         </div>
       </NvxCard>
     </div>
+
+    <!-- Kept outside the list's v-if chain so the identities still render on the phone. -->
+    <NvxInlineNotice
+      v-if="mobileLayout && !loading"
+      tone="info"
+      :title="t('mobile.settings.importKeyFile')"
+    >
+      {{ t('mobile.settings.importKeyFileHint') }}
+      <div class="key-import__action">
+        <NvxButton
+          size="sm"
+          variant="secondary"
+          :loading="openingHostEditor"
+          @click="openHostEditorForKeyImport"
+        >
+          <NvxIcon
+            :icon="FileInput"
+            :size="16"
+            aria-hidden="true"
+          />
+          {{ t('mobile.settings.importKeyFileOpenEditor') }}
+        </NvxButton>
+      </div>
+    </NvxInlineNotice>
 
     <NvxDialog
       v-model="editorOpen"
@@ -546,6 +613,10 @@ onMounted(load);
 .delete-impact {
   display: grid;
   gap: var(--nvx-space-4);
+}
+
+.key-import__action {
+  margin-top: var(--nvx-space-2);
 }
 
 @media (max-width: 760px) {

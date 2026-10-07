@@ -30,6 +30,11 @@ vi.mock("../stores/tips", () => ({ useTipsStore: () => ({ show: mocks.tips }) })
 vi.mock("../platform-window", () => ({ performWindowAction: mocks.windowAction }));
 vi.mock("../tool-windows", () => ({ openToolWindow: vi.fn(), onToolWindowChanged: vi.fn().mockResolvedValue(() => undefined) }));
 vi.mock("../platform", () => ({ detectDesktopPlatform: () => "macos" }));
+// Default: no Core IPC (browser preview); Android sets IPC with a single-document host.
+const hostMode = vi.hoisted(() => ({ ipc: false, mode: "singleDocument" as "singleDocument" | "nativeTabs" }));
+vi.mock("../platform-host", () => ({ hasTauriIpc: () => hostMode.ipc, workspaceHostMode: () => hostMode.mode, isMobileLayout: () => false }));
+const shellAction = vi.hoisted(() => vi.fn());
+vi.mock("../workspace-tab-shell-action", () => ({ runWorkspaceTabShellAction: shellAction }));
 const canvas = defineComponent({
   props: { session: { type: Object, default: undefined }, active: Boolean, fit: Boolean, panning: Boolean, commandAsControl: Boolean, hiDpi: Boolean },
   setup(_, { expose }) {
@@ -102,6 +107,8 @@ beforeEach(() => {
   exit.mockImplementation(async () => changed(null));
 });
 afterEach(() => {
+  hostMode.ipc = false;
+  hostMode.mode = "singleDocument";
   for (const wrapper of wrappers.splice(0)) wrapper.unmount();
   vi.restoreAllMocks();
   for (const key of ["fullscreenElement", "exitFullscreen", "webkitFullscreenElement", "webkitExitFullscreen"]) Reflect.deleteProperty(document, key);
@@ -639,5 +646,65 @@ describe("desktop session state and local controls", () => {
     wrapper.findComponent({ name: "NvxDesktopProfileMenu" }).vm.$emit("delete");
     await flushPromises();
     expect(wrapper.text()).toContain("Delete the saved desktop “Desktop one”?");
+  });
+});
+
+describe("single-document Desktop Tabs (Android)", () => {
+  const owned = (id: string, generation = "1") => ({ id: `desktop:${id}`, kind: "desktop", owner: "main",
+    payload: { schemaVersion: 1, tabId: `desktop:${id}`, sessionId: id, generation } });
+
+  beforeEach(() => {
+    hostMode.ipc = true;
+    hostMode.mode = "singleDocument";
+  });
+
+  it("shows exactly the sessions whose main-document Tab holds their current handle", async () => {
+    mocks.snapshot.mockResolvedValue([session("one"), session("two"), session("three")]);
+    mocks.ownership.mockResolvedValue({ owned: [owned("one"), owned("two", "9")], others: [] });
+    const wrapper = await fixture(false, false);
+    expect(mocks.sync.mock.lastCall?.[0].tabs.map((tab: { groupId: string }) => tab.groupId)).toEqual(["desktop:one"]);
+    expect(wrapper.find("canvas").exists()).toBe(true);
+  });
+
+  it("opens a profile as a Tab of this document without a native Tab manager", async () => {
+    mocks.snapshot.mockResolvedValue([]);
+    mocks.ownership.mockResolvedValue({ owned: [], others: [] });
+    await fixture(false, false);
+    mocks.ownership.mockResolvedValue({ owned: [owned("new")], others: [] });
+    mocks.snapshot.mockResolvedValue([session("new")]);
+    await controller.openProfile!("one");
+    await flushPromises();
+    expect(mocks.focus).toHaveBeenCalledWith(null);
+    expect(mocks.openOwned).toHaveBeenCalledWith(expect.objectContaining({ id: "one" }));
+    expect(shellAction).not.toHaveBeenCalled();
+    expect(mocks.projectionUpdate).not.toHaveBeenCalled();
+    expect(mocks.sync.mock.lastCall?.[0]).toMatchObject({ activeTabId: "desktop:new" });
+    await expect(controller.openProfile!("missing")).rejects.toThrow("workspace_tab.desktop_profile_missing");
+  });
+
+  it("replaces an ended session on reconnect and keeps the old handle when its close fails", async () => {
+    mocks.snapshot.mockResolvedValue([{ ...session("one"), state: "failed", failure: "connectionLost" }]);
+    mocks.ownership.mockResolvedValue({ owned: [owned("one")], others: [] });
+    const wrapper = await fixture(false, false);
+    mocks.closeOwned.mockRejectedValueOnce(new Error("cleanup failed"));
+    await wrapper.get(".desktop-state--failed button").trigger("click");
+    await flushPromises();
+    expect(mocks.openOwned).not.toHaveBeenCalled();
+    expect(mocks.sync.mock.lastCall?.[0].tabs.map((tab: { groupId: string }) => tab.groupId)).toEqual(["desktop:one"]);
+
+    await wrapper.get(".desktop-state--failed button").trigger("click");
+    await flushPromises();
+    expect(mocks.closeOwned).toHaveBeenLastCalledWith(expect.objectContaining({ id: "one" }));
+    expect(mocks.openOwned).toHaveBeenCalledOnce();
+    expect(shellAction).not.toHaveBeenCalled();
+  });
+
+  it("keeps the desktop shell page free of sessions: native Tab WebViews own them", async () => {
+    hostMode.mode = "nativeTabs";
+    mocks.ownership.mockResolvedValue({ owned: [owned("one")], others: [] });
+    const wrapper = await fixture(false, false);
+    expect(wrapper.find("canvas").exists()).toBe(false);
+    expect(mocks.sync.mock.lastCall?.[0].tabs).toEqual([]);
+    await expect(controller.openProfile!("one")).rejects.toThrow("workspace_tab.desktop_unavailable");
   });
 });

@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { mobileEn } from "../../locales/mobile";
 import { releasesEn } from "../../locales/releases";
 import { useAppUpdateStore } from "../../stores/appUpdate";
 
@@ -19,6 +20,11 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: api.invoke, isTauri: () => true
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: api.openUrl }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: api.checkUpdate }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: api.relaunch }));
+const host = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
 
 import NvxReleaseSettings from "./NvxReleaseSettings.vue";
 
@@ -30,7 +36,7 @@ function mountSettings() {
     routes: [{ path: "/:pathMatch(.*)*", component: { template: "<div />" } }],
   });
   return mount(NvxReleaseSettings, {
-    global: { plugins: [pinia, router, createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn } } })] },
+    global: { plugins: [pinia, router, createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn, mobile: mobileEn } } })] },
   });
 }
 
@@ -91,6 +97,27 @@ describe("release settings", () => {
     expect(api.openUrl).toHaveBeenCalledWith("https://github.com/Norixor/NoriShell/releases");
   });
 
+  it("describes the Android package-installer flow on the phone shell", async () => {
+    host.mobile = true;
+    try {
+      api.invoke.mockResolvedValueOnce({ currentVersion: "0.1.2", status: "updateAvailable", latestVersion: "0.1.3", supportsAutoInstall: true });
+      const wrapper = mountSettings();
+      expect(wrapper.text()).toContain("A local-first client for SSH, SFTP, and terminal workflows.");
+      expect(wrapper.text()).not.toContain("desktop client");
+      await button(wrapper, "Check for updates").trigger("click");
+      await flushPromises();
+      expect(wrapper.findAll("button").some((item) => item.text().includes("Update and restart"))).toBe(false);
+      await button(wrapper, "Download and install APK").trigger("click");
+      await flushPromises();
+      expect(document.body.textContent).toContain("Android asks you to confirm the installation");
+      expect(document.body.textContent).toContain("The app restarts after the system installs the update");
+      wrapper.unmount();
+    } finally {
+      host.mobile = false;
+      document.body.innerHTML = "";
+    }
+  });
+
   it("offers the portable Windows edition a manual ZIP update", async () => {
     api.invoke.mockResolvedValueOnce({
       currentVersion: "0.1.2",
@@ -121,7 +148,7 @@ describe("release settings", () => {
     await router.push("/settings?section=about");
     await router.isReady();
     const wrapper = mount(NvxReleaseSettings, {
-      global: { plugins: [pinia, router, createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn } } })] },
+      global: { plugins: [pinia, router, createI18n({ legacy: false, locale: "en", messages: { en: { releases: releasesEn, mobile: mobileEn } } })] },
     });
     await flushPromises();
     expect(document.querySelector("[role='dialog']")?.textContent).toContain("Update NoriShell");

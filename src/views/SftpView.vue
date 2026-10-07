@@ -2,11 +2,14 @@
 import { ensureHostVault } from "../core-api/secure-vault-client";
 import { openToolWindow, onToolWindowChanged } from "../tool-windows";
 import { takeNativeTransferNavigation, matchesNativeTransferNavigation } from "../native-transfer-navigation";
-import { homeDir, sep } from "@tauri-apps/api/path";
+import { appDataDir, homeDir, join, sep } from "@tauri-apps/api/path";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Activity, Archive, ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Download, Eye, FileArchive, FilePlus2, FolderOpen, FolderPlus, HardDrive, Link2, ListFilter, Pause, Pencil, PlugZap, Plus, Radio, RefreshCw, RotateCcw, Save, Search, Server, ShieldCheck, Terminal, Trash2, Unplug, X } from "lucide-vue-next";
+import { Activity, Archive, ArrowLeft, ArrowRight, ArrowUp, ChevronRight, Copy, Download, Eye, FileArchive, FilePlus2, FolderOpen, FolderPlus, HardDrive, Link2, ListFilter, Pause, Pencil, PlugZap, Plus, Radio, RefreshCw, RotateCcw, Save, Search, Server, ShieldCheck, Terminal, Trash2, Unplug, Upload, X } from "lucide-vue-next";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
+
+import { mountMobileSheetBackdrop, pushMobileOverlay, type MobileOverlayHandle, type MobileSheetBackdropHandle } from "../mobile-overlays";
+import { isMobileLayout } from "../platform-host";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { useRouteReveal } from "../routeReveal";
@@ -27,7 +30,7 @@ import {
 import { NvxButton, NvxCheckbox, NvxCodeEditor, NvxDialog, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxProgress, NvxSelect, NvxStatusLabel } from "../components/ui";
 import {
   cancelSftpDirectoryListing, cancelSftpTransfer, cancelSftpTransferIntent, canUseDesktopCore, disconnectSftpSession,
-  createSftpLocalDirectoryChild, enqueueSftpTransfer, enqueueSftpTransferIntent, fetchSftpSessionSnapshot, fetchSftpTransferIntentSnapshot,
+  createSftpLocalDirectoryChild, mutateSftpLocalFile, enqueueSftpTransfer, enqueueSftpTransferIntent, fetchSftpSessionSnapshot, fetchSftpTransferIntentSnapshot,
   fetchSshSessionSnapshot,
   listHosts, listSftpDirectory, listSftpLocalDirectory, mutateSftpFile, openSftpLocalDirectoryChild, parseCoreApiError,
   openSftpSession, prepareSftpTransferIntent, previewSftpFile, registerSftpLocalBoundary, registerSftpLocalDirectory, tailSftpFile,
@@ -36,7 +39,7 @@ import {
 } from "../core-api/client";
 import type {
   HostSummary, SftpConflictPolicy, SftpFailureCode, SftpFilePreviewContent, SftpLocalDirectoryCapability, SftpSessionState, SftpTextLineEnding,
-  SftpSessionSummary, SftpTransferIntentSummary, SftpTransferState, SftpTransferSummary,
+  SftpSessionSummary, SftpTransferFailureCode, SftpTransferIntentSummary, SftpTransferState, SftpTransferSummary,
 } from "../core-api/generated/core-api";
 import { useSftpPreferencesStore } from "../stores/sftpPreferences";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
@@ -215,6 +218,99 @@ const dropPaneId = ref<string | null>(null);
 const pointerDrag = ref<PointerDragState | null>(null);
 const contextMenu = ref<SftpContextMenuState | null>(null);
 const contextMenuRoot = ref<HTMLElement | null>(null);
+
+// Phone shell: the file context menu is a bottom sheet that the Android back key closes, and
+// "Copy to another pane" replaces cross-Pane drag and drop (same intent, fence and commit path).
+const mobileLayout = isMobileLayout();
+const SFTP_PANE_MINIMUM_WIDTH = 420;
+const SFTP_PANE_MINIMUM_HEIGHT = 240;
+/** The desktop text asks to drag again; the phone copies through "Copy to another pane". */
+function paneFenceChangedText() {
+  return mobileLayout ? t("mobile.sftpPaneChanged") : t("sftp.paneFenceChanged");
+}
+/**
+ * Local home for the default Pane and `~` expansion. On Android homeDir() is the shared
+ * /storage/emulated/0, which lists but blocks file access; the app-private "home" (the same
+ * directory the local terminal uses as HOME) is the only local area the Core can read and write.
+ */
+async function localHomePath() {
+  return mobileLayout ? join(await appDataDir(), "home") : homeDir();
+}
+let contextMenuOverlay: MobileOverlayHandle | null = null;
+let transferActivityOverlay: MobileOverlayHandle | null = null;
+const transfersPanel = ref<HTMLElement | null>(null);
+watch(transfersOpen, (open) => {
+  if (!mobileLayout) return;
+  if (open) {
+    // The transfer sheet stacks by push order like every other mobile overlay.
+    transferActivityOverlay ??= pushMobileOverlay(
+      () => { closeTransferActivity(); return true; },
+      () => [transfersPanel.value],
+    );
+  } else { transferActivityOverlay?.release(); transferActivityOverlay = null; }
+});
+watch(transfersPanel, (panel) => { if (panel) transferActivityOverlay?.refresh(); });
+// Desktop popover is anchored to the toggle's end edge; when the toggle sits near the
+// left of a narrow Tab (split top bar) the panel would extend past the viewport, so
+// shift it back inside after layout.
+function clampTransfersPanel() {
+  const panel = transfersPanel.value;
+  if (!panel || mobileLayout) return;
+  panel.style.translate = "";
+  const rect = panel.getBoundingClientRect();
+  const margin = 8;
+  const shift = rect.left < margin ? margin - rect.left
+    : rect.right > window.innerWidth - margin ? window.innerWidth - margin - rect.right : 0;
+  if (shift !== 0) panel.style.translate = `${shift}px 0`;
+}
+watch(transfersPanel, (panel) => { if (panel) clampTransfersPanel(); }, { flush: "post" });
+onMounted(() => window.addEventListener("resize", clampTransfersPanel));
+onBeforeUnmount(() => window.removeEventListener("resize", clampTransfersPanel));
+let removeContextMenuBackdrop: MobileSheetBackdropHandle | null = null;
+watch(() => contextMenu.value !== null, (open) => {
+  if (!mobileLayout) return;
+  if (open) {
+    removeContextMenuBackdrop ??= mountMobileSheetBackdrop(() => { contextMenu.value = null; });
+    // The scrim and the sheet form one layer, stacked by push order above any open overlay.
+    contextMenuOverlay ??= pushMobileOverlay(
+      () => { contextMenu.value = null; return true; },
+      () => [removeContextMenuBackdrop?.element, contextMenuRoot.value],
+    );
+  } else {
+    removeContextMenuBackdrop?.();
+    removeContextMenuBackdrop = null;
+    contextMenuOverlay?.release();
+    contextMenuOverlay = null;
+  }
+});
+onBeforeUnmount(() => {
+  removeContextMenuBackdrop?.();
+  contextMenuOverlay?.release();
+});
+const sendToPane = ref<{ intent: SftpPaneDragIntent; entryName: string; candidates: string[] } | null>(null);
+function openSendToPane(pane: SftpPaneState) {
+  const entry = pane.entries.find((candidate) => candidate.key === pane.selectedEntryKey);
+  const intent = entry ? captureSftpPaneDragIntent(pane, entry) : null;
+  if (!entry || !intent) return;
+  const candidates = Object.keys(paneStates).filter((paneId) =>
+    resolveSftpPaneDropFence(intent, paneStates, paneId) !== null && !paneInteractionPending(paneId));
+  sendToPane.value = { intent, entryName: entry.displayName, candidates };
+}
+function sendToPaneLabel(paneId: string) {
+  const pane = paneStates[paneId];
+  if (!pane) return "";
+  if (pane.endpoint.kind === "local") return t("sftp.localPane");
+  const address = paneRemoteAddress(pane);
+  return address ? `${paneRemoteLabel(pane)} · ${address}` : paneRemoteLabel(pane);
+}
+async function confirmSendToPane(targetPaneId: string) {
+  const request = sendToPane.value;
+  sendToPane.value = null;
+  const target = request ? paneStates[targetPaneId] : null;
+  if (!request || !target) return;
+  dragIntent.value = request.intent;
+  await commitDrop(target);
+}
 const previewOpen = ref(false);
 const previewLoading = ref(false);
 const previewName = ref("");
@@ -323,6 +419,44 @@ const activePane = computed(() => paneStates[activeSftpPaneId.value] ?? null);
 const singlePane = computed(() => countTerminalPanes(sftpLayout.value) === 1 ? activePane.value : null);
 const singleLocalPane = computed(() => singlePane.value?.endpoint.kind === "local" ? singlePane.value : null);
 const singleRemotePane = computed(() => singlePane.value?.endpoint.kind === "remote" ? singlePane.value : null);
+/**
+ * Phones show one Pane at a time with a segmented switch above it. Only the rendered tree is
+ * projected: `sftpLayout`, pane state, selection, transfers and persistence stay exactly as on
+ * desktop, so a remote + local Tab created by the welcome page keeps both Panes.
+ */
+const mobilePaneIds = computed(() => {
+  if (!mobileLayout) return [];
+  // Remote Panes lead the switch; the local private area follows.
+  const ids = filePaneIds(sftpLayout.value);
+  const isRemote = (paneId: string) => paneStates[paneId]?.endpoint.kind === "remote";
+  return [...ids.filter(isRemote), ...ids.filter((paneId) => !isRemote(paneId))];
+});
+const mobileVisiblePaneId = computed(() => {
+  const ids = mobilePaneIds.value;
+  if (ids.includes(activeSftpPaneId.value)) return activeSftpPaneId.value;
+  return ids.find((paneId) => paneStates[paneId]?.endpoint.kind === "remote") ?? ids[0] ?? activeSftpPaneId.value;
+});
+const renderedSftpLayout = computed<TerminalLayoutNode>(() => (mobileLayout
+  ? findTerminalPane(sftpLayout.value, mobileVisiblePaneId.value) ?? sftpLayout.value
+  : sftpLayout.value));
+/** The Pane the phone top bar describes: the one the switch shows. */
+const mobileTopPane = computed(() => (mobileLayout
+  ? paneStates[mobileVisiblePaneId.value] ?? activePane.value
+  : activePane.value));
+function clearPaneSelection(pane: SftpPaneState) {
+  pane.selectedEntryKeys = [];
+}
+function mobilePaneSegmentLabel(paneId: string) {
+  const pane = paneStates[paneId];
+  if (!pane) return "";
+  if (pane.endpoint.kind === "local") return t("mobile.sftpLocalSegment");
+  return paneHasSession(pane) ? paneRemoteLabel(pane) : t("fileWorkspace.remotePane");
+}
+function showMobilePane(paneId: string) {
+  if (!paneStates[paneId] || activeSftpPaneId.value === paneId) return;
+  activeSftpPaneId.value = paneId;
+  void nextTick(() => focusFilePane(paneId));
+}
 const closeRemotePanePending = computed(() => {
   const paneId = closeRemotePaneTargetId.value;
   return paneId ? paneInteractionPending(paneId) : false;
@@ -348,6 +482,7 @@ const displayedLegacyTransfers = computed(() => legacyTransfers.value.filter(
   (transfer) => !intentTransferIds.value.has(transfer.transferId),
 ));
 const allTransferCount = computed(() => displayedLegacyTransfers.value.length + intentTransfers.value.length);
+watch(() => allTransferCount.value, () => { void nextTick(clampTransfersPanel); });
 const activeTransfers = computed(() => [...intentTransfers.value, ...displayedLegacyTransfers.value].filter(
   (transfer) => ["queued", "preparing", "transferring", "verifying", "committing", "cancelling"].includes(transfer.state),
 ));
@@ -373,6 +508,11 @@ const activeSelectedEntries = computed(() => activePane.value
 const contextSelectedEntry = computed(() => {
   const pane = contextMenu.value ? paneStates[contextMenu.value.paneId] : null;
   return pane?.entries.find((entry) => entry.key === pane.selectedEntryKey) ?? null;
+});
+/** Local panes offer only the file actions Core supports inside a local directory capability. */
+const contextIsLocal = computed(() => {
+  const pane = contextMenu.value ? paneStates[contextMenu.value.paneId] : null;
+  return pane?.endpoint.kind === "local";
 });
 const contextSelectedEntries = computed(() => {
   const pane = contextMenu.value ? paneStates[contextMenu.value.paneId] : null;
@@ -405,9 +545,30 @@ function showOperationFailed(error?: unknown) {
     scope: operationFeedbackScope,
     tone: "error",
     title: t("sftp.operationFailed"),
-    message: error instanceof Error && error.message === "workspace_tab.file_cleanup_incomplete"
+    message: error instanceof Error && (error.message === "workspace_tab.file_cleanup_incomplete" || error.message === "sftp.transfer_cancel_timeout")
       ? error.message : parseCoreApiError(error)?.code,
   });
+}
+/**
+ * While a transfer runs, file actions share its channel; Core refuses one that touches the
+ * transfer's own paths with a conflict, which is named here instead of a generic failure.
+ */
+function showMutationFailed(error: unknown, pane: SftpPaneState) {
+  const sessionId = pane.endpoint.kind === "remote" ? pane.endpoint.sessionId : null;
+  const transferRunning = sessionId !== null && (legacyTransfers.value.some((transfer) =>
+    transfer.sessionId === sessionId && !terminalTransferStates.has(transfer.state))
+    || intentTransfers.value.some((transfer) => !terminalTransferStates.has(transfer.state)
+      && [transfer.sourceFence, transfer.targetFence].some((fence) => fence.kind === "remoteSession" && fence.sessionId === sessionId)));
+  if (transferRunning && parseCoreApiError(error)?.code === "sftp.conflict") {
+    tips.show({ scope: operationFeedbackScope, tone: "error", title: t("sftp.itemInUseByTransfer"), message: "sftp.conflict" });
+    return;
+  }
+  showOperationFailed(error);
+}
+/** An uncertain commit means different things per direction: a possibly partial local file, or a possibly committed remote one. */
+function transferFailureTitle(code: SftpTransferFailureCode, direction: "upload" | "download" | "serverToServer") {
+  if (code !== "commitOutcomeUncertain") return t(`sftp.failures.${code}`);
+  return t(`sftp.commitOutcomeUncertainByDirection.${direction === "download" ? "download" : "upload"}`);
 }
 function showFileUtilityFailed(error: unknown) {
   const code = parseCoreApiError(error)?.code;
@@ -656,7 +817,7 @@ function paneActionsMenuProps(
   return {
     paneId: pane.paneId,
     kind,
-    ready: paneReady(pane),
+    ready: kind === "local" ? localPaneMutable(pane) : paneReady(pane),
     hasSelection: pane.selectedEntryKeys.length > 0,
     singleSelection: pane.selectedEntryKeys.length === 1,
     pending: paneInteractionPending(pane.paneId),
@@ -677,6 +838,7 @@ function paneActionsMenuListeners(pane: SftpPaneState, canSplitHorizontal: boole
     chooseFolder: () => chooseLocalFolder(pane),
     upload: () => uploadFilesFromPicker(pane),
     download: () => downloadSelectedFromPicker(pane),
+    sendToPane: () => openSendToPane(pane),
     mkdir: () => mutate("mkdir"),
     rename: () => mutate("rename"),
     delete: () => mutate("delete"),
@@ -689,6 +851,17 @@ function paneActionsMenuListeners(pane: SftpPaneState, canSplitHorizontal: boole
   };
 }
 function paneInteractionPending(paneId: string) { return pendingPaneIds.has(paneId) }
+/** While a restored or chosen server connects, say so instead of asking to choose a server. */
+function emptyRemoteTitle(pane: SftpPaneState) {
+  const session = sessionForPane(pane);
+  if (session && session.state !== "ready" && session.state !== "closed" && session.state !== "failed") {
+    return t(`sftp.states.${session.state}`);
+  }
+  if (pane.endpoint.kind === "remote" && pane.endpoint.hostId && paneInteractionPending(pane.paneId)) {
+    return t("sftp.states.connecting");
+  }
+  return t("fileWorkspace.emptyRemoteTitle");
+}
 function paneHostId(pane: SftpPaneState) {
   return pane.endpoint.kind === "remote" ? pane.endpoint.hostId ?? "" : "";
 }
@@ -931,6 +1104,8 @@ function focusFilePane(paneId: string) {
   paneElement?.querySelector<HTMLElement>(".sftp-view__pane-header button:not(:disabled), .sftp-view__commandbar button:not(:disabled), .sftp-view__entries button:not(:disabled)")?.focus();
 }
 function canSplitSftpPane(paneId: string, direction: TerminalSplitDirection) {
+  // Phones never split: one visible Pane per file Tab, switched by the segment control.
+  if (mobileLayout) return false;
   const paneElement = Array.from(sftpRoot.value?.querySelectorAll<HTMLElement>(".sftp-view__workspace [data-pane-id]") ?? [])
     .find((element) => element.dataset.paneId === paneId);
   const bounds = paneElement?.closest<HTMLElement>(".nvx-terminal-split-tree")?.getBoundingClientRect();
@@ -939,13 +1114,16 @@ function canSplitSftpPane(paneId: string, direction: TerminalSplitDirection) {
     : workspaceSize.value.height || bounds?.height || 0;
   if (available <= 0) return true;
   const minimum = terminalLayoutMinimumSpanAfterSplit(sftpLayout.value, paneId, direction);
-  return available >= (direction === "horizontal" ? minimum.widthUnits * 420 : minimum.heightUnits * 240);
+  return available >= (direction === "horizontal"
+    ? minimum.widthUnits * SFTP_PANE_MINIMUM_WIDTH
+    : minimum.heightUnits * SFTP_PANE_MINIMUM_HEIGHT);
 }
 function canSplitSftpWorkspaceRight() {
+  if (mobileLayout) return false;
   const tree = sftpRoot.value?.querySelector<HTMLElement>(".sftp-view__workspace");
   const available = workspaceSize.value.width || tree?.getBoundingClientRect().width || 0;
   if (available <= 0) return true;
-  return available >= terminalLayoutMinimumSpanAfterWorkspaceRightSplit(sftpLayout.value).widthUnits * 420;
+  return available >= terminalLayoutMinimumSpanAfterWorkspaceRightSplit(sftpLayout.value).widthUnits * SFTP_PANE_MINIMUM_WIDTH;
 }
 function splitSftpWorkspaceRight() {
   if (!paneStates[activeSftpPaneId.value] || paneInteractionPending(activeSftpPaneId.value) || !canSplitSftpWorkspaceRight()) return;
@@ -1307,6 +1485,7 @@ async function disconnectRemotePane(pane: SftpPaneState) {
   pendingPaneIds.add(pane.paneId);
   try {
     await cancelRemotePaneCursor(pane);
+    await cancelSessionTransfers(pane.endpoint.sessionId);
     await disconnectClosedSftpSession(pane.endpoint.sessionId, pane.endpoint.generation);
     if (props.workspaceTabId) workspaceTabs.releaseFileSession(pane.endpoint.sessionId, props.workspaceTabId);
     replaceSftpPaneEndpoint(pane, { kind: "remote", hostId: pane.endpoint.hostId, sessionId: null, generation: null }, "/", [47]);
@@ -1377,7 +1556,7 @@ async function loadLocalDirectory(pane: SftpPaneState, allowPanePending = false)
     const listing = await listSftpLocalDirectory({ directoryRef, expectedRevision: revision, cursor: null, pageSize: 256 });
     if (!paneStillActive(pane, fence.endpointRevision)) return false;
     if (listing.directoryRef !== directoryRef || listing.revision !== revision) {
-      failSftpPaneDirectoryLoad(pane, fence, t("sftp.paneFenceChanged"));
+      failSftpPaneDirectoryLoad(pane, fence, paneFenceChangedText());
       return false;
     }
     const applied = completeSftpPaneDirectoryLoad(pane, fence, pane.directory, listing.entries.map(mapLocalEntry), null, listing.directoryRef);
@@ -1485,7 +1664,7 @@ function pathCrumbs(pane: SftpPaneState): PathCrumb[] {
   const separator = path.includes("\\") && !path.includes("/") ? "\\" : "/";
   const root = /^[A-Za-z]:[\\/]/.exec(path)?.[0] ?? (path.startsWith("~/") ? "~/" : path.startsWith("/") ? "/" : "");
   if (!root) return [{ label: path, location: current, isCurrent: true }];
-  const crumbs: PathCrumb[] = [{ label: root, location: { kind: "local", displayPath: root, filesystemPath: root } }];
+  const crumbs: PathCrumb[] = [{ label: mobileLayout && root === "~/" ? t("mobile.sftpStorageRoot") : root, location: { kind: "local", displayPath: root, filesystemPath: root } }];
   let prefix = root;
   for (const segment of path.slice(root.length).split(/[\\/]+/).filter(Boolean)) {
     prefix = prefix.endsWith(separator) ? `${prefix}${segment}` : `${prefix}${separator}${segment}`;
@@ -1606,7 +1785,7 @@ async function openLocalPath(pane: SftpPaneState, requested: string, displayPath
       ? (() => {
         const separator = sep();
         const relativePath = requested.slice(1).replace(/^[\\/]+/, "").replace(/[\\/]+/g, separator);
-        return homeDir().then((home) => {
+        return localHomePath().then((home) => {
           const normalizedHome = home.replace(/[\\/]+$/, "");
           return relativePath ? `${normalizedHome}${separator}${relativePath}` : normalizedHome;
         });
@@ -1680,7 +1859,7 @@ async function initializeDefaultLocalPane(pane: SftpPaneState, useRememberedDire
   const defaultDisplayPath = localDefaultDisplayPath();
   const rememberedPath = useRememberedDirectory ? browserPreferences.rememberedLocalDirectory() : null;
   const displayPath = rememberedPath ?? defaultDisplayPath;
-  const selectedPath = rememberedPath ?? (defaultDisplayPath === "C:\\" ? defaultDisplayPath : await homeDir());
+  const selectedPath = rememberedPath ?? (defaultDisplayPath === "C:\\" ? defaultDisplayPath : await localHomePath());
   const capability = await registerSftpLocalDirectory(selectedPath);
   if (!paneStillActive(pane, endpointRevision) || pane.endpoint.kind !== "local" || pane.endpoint.directoryRef) {
     await releaseLocalCapability(capability);
@@ -1869,7 +2048,7 @@ async function uploadLocalFiles(target: SftpPaneState, paths: string[], paneAlre
         || current.endpointRevision !== targetEndpointRevision
         || current.directoryRevision !== targetDirectoryRevision
         || !paneReady(current)) {
-        target.error = t("sftp.paneFenceChanged");
+        target.error = paneFenceChangedText();
         return;
       }
       const existingTarget = matchingTargetEntry(current, boundary.displayName);
@@ -1885,7 +2064,7 @@ async function uploadLocalFiles(target: SftpPaneState, paths: string[], paneAlre
           || current.endpointRevision !== targetEndpointRevision
           || current.directoryRevision !== targetDirectoryRevision
           || !paneReady(current)) {
-          target.error = t("sftp.paneFenceChanged");
+          target.error = paneFenceChangedText();
           return;
         }
         if (decision === "replaceAll") replaceRemaining = true;
@@ -1931,7 +2110,7 @@ async function downloadSelectedFromPicker(pane: SftpPaneState) {
       || pane.selectionRevision !== selectionRevision
       || pane.selectedEntryKey !== entry.key
       || !paneReady(pane)) {
-      pane.error = t("sftp.paneFenceChanged");
+      pane.error = paneFenceChangedText();
       return;
     }
     const boundary = await registerSftpLocalBoundary("downloadTarget", selected);
@@ -1940,7 +2119,7 @@ async function downloadSelectedFromPicker(pane: SftpPaneState) {
       || pane.selectionRevision !== selectionRevision
       || pane.selectedEntryKey !== entry.key
       || !paneReady(pane)) {
-      pane.error = t("sftp.paneFenceChanged");
+      pane.error = paneFenceChangedText();
       return;
     }
     await enqueueSftpTransfer({
@@ -2224,9 +2403,15 @@ async function previewSelectedFile(
   }
 }
 
+/** A local pane can change files only inside a Core-registered directory capability. */
+function localPaneMutable(pane: SftpPaneState) {
+  return pane.endpoint.kind === "local" && Boolean(pane.endpoint.directoryRef && pane.endpoint.revision)
+    && pane.directoryRef === pane.endpoint.directoryRef;
+}
 function openMutation(kind: "mkdir" | "touch" | "rename" | "delete") {
   const pane = activePane.value;
-  if (!pane || pane.endpoint.kind !== "remote" || paneInteractionPending(pane.paneId)) return;
+  if (!pane || paneInteractionPending(pane.paneId)) return;
+  if (pane.endpoint.kind === "local" ? !localPaneMutable(pane) : pane.endpoint.kind !== "remote") return;
   const selectedEntry = pane.entries.find((entry) => entry.key === pane.selectedEntryKey) ?? null;
   const selectedEntries = pane.entries.filter((entry) => pane.selectedEntryKeys.includes(entry.key));
   if ((kind === "rename" || kind === "delete") && !selectedEntry) return;
@@ -2271,7 +2456,7 @@ async function applyPermissions() {
     || pane.directoryRevision !== target.directoryRevision || !paneReady(pane)
     || !entry || entry.permissionBits !== target.expectedPermissionBits
     || paneInteractionPending(pane.paneId)) {
-    if (pane) pane.error = t("sftp.paneFenceChanged");
+    if (pane) pane.error = paneFenceChangedText();
     permissionsTarget.value = null;
     return;
   }
@@ -2338,7 +2523,10 @@ function refreshPane(pane: SftpPaneState) {
 }
 
 function openSftpContextMenu(event: MouseEvent, pane: SftpPaneState, entry?: SftpPaneEntry) {
-  if (pane.endpoint.kind !== "remote" || !paneReady(pane) || paneInteractionPending(pane.paneId)) return;
+  // On the phone a long press raises the same menu as a sheet: on an entry for that entry,
+  // on blank space for the directory.
+  const actionable = pane.endpoint.kind === "remote" ? paneReady(pane) : localPaneMutable(pane);
+  if (!actionable || paneInteractionPending(pane.paneId)) return;
   event.preventDefault();
   event.stopPropagation();
   if (entry && !pane.selectedEntryKeys.includes(entry.key)) selectSftpPaneEntry(pane, entry.key);
@@ -2351,7 +2539,7 @@ function openSftpContextMenu(event: MouseEvent, pane: SftpPaneState, entry?: Sft
     top: event.clientY,
     endpointRevision: pane.endpointRevision,
     directoryRevision: pane.directoryRevision,
-    hostId: pane.endpoint.hostId ?? "",
+    hostId: pane.endpoint.kind === "remote" ? pane.endpoint.hostId ?? "" : "",
     directoryPathBytes: [...(entry?.kind === "directory" && entry.remotePathBytes
       ? entry.remotePathBytes
       : pane.remoteDirectoryPathBytes ?? [])],
@@ -2373,6 +2561,7 @@ function positionContextMenu() {
 }
 watch(contextMenuRoot, (element, _previous, onCleanup) => {
   if (!element) return;
+  contextMenuOverlay?.refresh();
   positionContextMenu();
   const observer = new ResizeObserver(positionContextMenu);
   observer.observe(element);
@@ -2384,12 +2573,16 @@ watch(contextMenuRoot, (element, _previous, onCleanup) => {
 }, { flush: "post" });
 watch(() => [contextMenu.value?.anchorX, contextMenu.value?.anchorY], positionContextMenu, { flush: "post" });
 
-function runSftpContextAction(action: "refresh" | "mkdir" | "touch" | "preview" | "tail" | "download" | "rename" | "delete" | "permissions" | "compress" | "extract" | "downloadUrl" | "openTerminal") {
+function runSftpContextAction(action: "refresh" | "mkdir" | "touch" | "preview" | "tail" | "download" | "rename" | "delete" | "permissions" | "compress" | "extract" | "downloadUrl" | "openTerminal" | "sendToPane") {
   const menu = contextMenu.value;
   const pane = menu ? paneStates[menu.paneId] : null;
   contextMenu.value = null;
   if (!pane) return;
   activeSftpPaneId.value = pane.paneId;
+  if (action === "sendToPane") {
+    openSendToPane(pane);
+    return;
+  }
   if (action === "openTerminal") {
     if (!menu || pane.endpoint.kind !== "remote" || !paneReady(pane)
       || pane.endpointRevision !== menu.endpointRevision
@@ -2459,10 +2652,52 @@ async function performFileUtility() {
   if (shouldRefresh) await loadRemoteDirectory(pane);
 }
 
+async function performLocalMutation(pane: SftpPaneState, kind: "mkdir" | "touch" | "rename" | "delete") {
+  if (pane.endpoint.kind !== "local" || !pane.endpoint.directoryRef || !pane.endpoint.revision) return;
+  const entry = pane.entries.find((candidate) => candidate.key === pane.selectedEntryKey) ?? null;
+  const name = mutationName.value.trim();
+  const deleteEntries = kind === "delete" ? pane.entries.filter((candidate) => pane.selectedEntryKeys.includes(candidate.key)) : [];
+  if (kind === "delete" ? deleteEntries.length === 0 : kind === "rename" ? !entry || !mutationNameValid.value : !mutationNameValid.value) return;
+  const target = { directoryRef: pane.endpoint.directoryRef, expectedRevision: pane.endpoint.revision };
+  pendingPaneIds.add(pane.paneId);
+  let shouldRefresh: boolean;
+  try {
+    if (kind === "delete") {
+      for (const candidate of deleteEntries) {
+        await mutateSftpLocalFile({ ...target, mutation: { kind: "delete", entryRef: candidate.entryRef, recursive: candidate.kind === "directory", irreversibleConfirmed: true } });
+      }
+    } else {
+      await mutateSftpLocalFile({ ...target, mutation: kind === "mkdir" ? { kind: "createDirectory", name }
+        : kind === "touch" ? { kind: "createEmptyFile", name }
+          : { kind: "rename", entryRef: entry!.entryRef, newName: name } });
+    }
+    mutationDialog.value = null;
+    mutationTargetPaneId.value = null;
+    shouldRefresh = true;
+  } catch (error) {
+    showLocalMutationFailed(error);
+    shouldRefresh = kind === "delete";
+  } finally { pendingPaneIds.delete(pane.paneId) }
+  if (shouldRefresh) await loadLocalDirectory(pane);
+}
+function showLocalMutationFailed(error: unknown) {
+  const code = parseCoreApiError(error)?.code;
+  const known = ["sftp.local_target_exists", "sftp.local_entry_changed", "sftp.local_directory_not_empty", "sftp.conflict",
+    "sftp.local_permission_denied", "sftp.local_invalid_name", "sftp.local_delete_limit_exceeded", "sftp.local_mutation_unsupported"];
+  const title = code === "sftp.conflict" ? t("sftp.itemInUseByTransfer")
+    : code && known.includes(code) ? t(`sftp.localMutationFailures.${code.slice("sftp.".length)}`)
+      : t("sftp.operationFailed");
+  tips.show({ scope: operationFeedbackScope, tone: "error", title, message: code });
+}
+
 async function performMutation() {
   const pane = mutationPane.value;
   const entry = pane?.entries.find((candidate) => candidate.key === pane.selectedEntryKey) ?? null;
   const kind = mutationDialog.value;
+  if (pane && kind && pane.endpoint.kind === "local" && !paneInteractionPending(pane.paneId)) {
+    await performLocalMutation(pane, kind);
+    return;
+  }
   if (!pane || pane.endpoint.kind !== "remote" || !pane.endpoint.sessionId || !pane.endpoint.generation
     || !kind || paneInteractionPending(pane.paneId)) return;
   const currentBytes = pane.remoteDirectoryPathBytes ?? [47];
@@ -2500,11 +2735,18 @@ async function performMutation() {
     mutationDialog.value = null;
     mutationTargetPaneId.value = null;
     shouldRefresh = true;
-  } catch { showOperationFailed(); } finally { pendingPaneIds.delete(pane.paneId) }
+  } catch (error) { showMutationFailed(error, pane); } finally { pendingPaneIds.delete(pane.paneId) }
   if (shouldRefresh) await loadRemoteDirectory(pane);
 }
 
 function selectEntryFromClick(event: MouseEvent, pane: SftpPaneState, entry: SftpPaneEntry) {
+  if (mobileLayout) {
+    // Phones have no double click: a tap opens a folder and selects a file; a long press
+    // raises the entry or directory action sheet.
+    if (entry.kind === "directory") { void activateEntry(pane, entry); return }
+    selectSftpPaneEntry(pane, entry.key);
+    return;
+  }
   if (event.shiftKey) {
     selectSftpPaneEntryRange(
       pane,
@@ -2806,22 +3048,33 @@ async function copyRecursiveDirectory(
   }
 }
 
+/** The phone shows one Pane at a time: a drop result on the hidden target Pane also becomes a tip. */
+function reportDropResult(target: SftpPaneState, title: string, tone: "error" | "info" = "error", code?: string) {
+  if (tone === "error") target.error = title;
+  if (mobileLayout) tips.show({ scope: operationFeedbackScope, tone, title, message: code });
+}
 async function commitDrop(target: SftpPaneState) {
-  if (paneInteractionPending(target.paneId)) return;
   const intent = dragIntent.value;
+  if (paneInteractionPending(target.paneId)) {
+    // A user's copy is never dropped silently: say the Pane is busy.
+    if (intent && mobileLayout) reportDropResult(target, t("mobile.sftpPaneBusy"));
+    return;
+  }
   dropPaneId.value = null;
   if (!intent) return;
   const fence = resolveSftpPaneDropFence(intent, paneStates, target.paneId);
   if (!fence || !fence.source.directoryRef || !fence.target.directoryRef) {
-    target.error = t("sftp.dropUnsupported");
+    reportDropResult(target, t("sftp.dropUnsupported"));
     return;
   }
   if (paneInteractionPending(fence.source.paneId) || paneInteractionPending(fence.target.paneId)) {
+    if (mobileLayout) reportDropResult(target, t("mobile.sftpPaneBusy"));
     return;
   }
   pendingPaneIds.add(fence.source.paneId);
   pendingPaneIds.add(fence.target.paneId);
   let directoryCopyCompleted = false;
+  let staleSourcePane: SftpPaneState | null = null;
   try {
     const existingTarget = matchingTargetEntry(fence.target, fence.entry.displayName);
     let conflictPolicy: SftpConflictPolicy = "failIfExists";
@@ -2837,7 +3090,7 @@ async function commitDrop(target: SftpPaneState) {
         || currentFence.targetEndpointRevision !== fence.targetEndpointRevision
         || currentFence.sourceDirectoryRevision !== fence.sourceDirectoryRevision
         || currentFence.targetDirectoryRevision !== fence.targetDirectoryRevision) {
-        target.error = t("sftp.paneFenceChanged");
+        target.error = paneFenceChangedText();
         return;
       }
       conflictPolicy = "replaceSafely";
@@ -2874,26 +3127,71 @@ async function commitDrop(target: SftpPaneState) {
         : { kind: "remoteDirectory" as const, sessionId: fence.target.endpoint.sessionId!, expectedGeneration: fence.target.endpoint.generation!, directoryRef: fence.target.directoryRef };
       const prepared = await prepareSftpTransferIntent({ sourcePaneId: fence.source.paneId, targetPaneId: fence.target.paneId, sourceEndpointRevision: String(fence.sourceEndpointRevision), targetEndpointRevision: String(fence.targetEndpointRevision), source, target: destination, expectedBytes: fence.entry.size, conflictPolicy });
       const currentFence = resolveSftpPaneDropFence(intent, paneStates, target.paneId);
-      if (!currentFence || currentFence.sourceEndpointRevision !== fence.sourceEndpointRevision || currentFence.targetEndpointRevision !== fence.targetEndpointRevision || currentFence.sourceDirectoryRevision !== fence.sourceDirectoryRevision || currentFence.targetDirectoryRevision !== fence.targetDirectoryRevision) { target.error = t("sftp.paneFenceChanged"); return }
+      if (!currentFence || currentFence.sourceEndpointRevision !== fence.sourceEndpointRevision || currentFence.targetEndpointRevision !== fence.targetEndpointRevision || currentFence.sourceDirectoryRevision !== fence.sourceDirectoryRevision || currentFence.targetDirectoryRevision !== fence.targetDirectoryRevision) { reportDropResult(target, paneFenceChangedText()); return }
       const transfer = await enqueueSftpTransferIntent({ intentToken: prepared.intentToken });
       rememberTransferTarget(transfer.transferId, fence.target);
       await refreshSnapshot();
+      // Still queued after Core tried to start it: it waits behind a running transfer.
+      if (intentTransfers.value.find((item) => item.transferId === transfer.transferId)?.state === "queued") {
+        reportDropResult(target, t("mobile.sftpCopyQueued"), "info");
+      }
     }
-  } catch {
-    target.error = t("sftp.dropUnsupported");
+  } catch (error) {
+    // Listed entry references expire (remote listings after a few minutes); Core then
+    // reports a conflict. Say so and reload the source listing instead of a generic failure.
+    const code = parseCoreApiError(error)?.code;
+    const stale = code === "sftp.conflict" || code === "sftp.invalid_input";
+    reportDropResult(target, stale ? paneFenceChangedText() : t("sftp.dropUnsupported"), "error", code);
     await refreshSnapshot().catch(() => undefined);
+    if (stale) staleSourcePane = paneStates[fence.source.paneId] ?? null;
   } finally {
     pendingPaneIds.delete(fence.source.paneId);
     pendingPaneIds.delete(fence.target.paneId);
     dragIntent.value = null;
   }
+  if (staleSourcePane) {
+    await (staleSourcePane.endpoint.kind === "local" ? loadLocalDirectory(staleSourcePane) : loadRemoteDirectory(staleSourcePane)).catch(() => undefined);
+  }
   if (directoryCopyCompleted) {
     await (target.endpoint.kind === "local" ? loadLocalDirectory(target) : loadRemoteDirectory(target));
   }
 }
+const terminalTransferStates: ReadonlySet<SftpTransferState> = new Set(["completed", "cancelled", "failed"]);
+/**
+ * Core accepts a row revision that is older only by progress. A lifecycle change in between
+ * (for example the transfer entering commit) is a real conflict: act once more on the
+ * refreshed fact, never on a guess.
+ */
+async function actOnFreshTransfer<T extends { transferId: string; state: SftpTransferState }>(
+  transfer: T, fresh: () => T | undefined, act: (current: T) => Promise<unknown>,
+) {
+  try {
+    await act(transfer);
+  } catch (error) {
+    if (parseCoreApiError(error)?.code !== "sftp.conflict") throw error;
+    await refreshSnapshot();
+    const current = fresh();
+    if (!current || terminalTransferStates.has(current.state)) return;
+    await act(current);
+  }
+}
+function cancelLegacyTransferFact(transfer: SftpTransferSummary) {
+  return actOnFreshTransfer(
+    transfer,
+    () => legacyTransfers.value.find((item) => item.transferId === transfer.transferId),
+    (current) => cancelSftpTransfer({ transferId: current.transferId, expectedGeneration: current.generation, expectedStateRevision: current.stateRevision }),
+  );
+}
+function cancelIntentTransferFact(transfer: SftpTransferIntentSummary) {
+  return actOnFreshTransfer(
+    transfer,
+    () => intentTransfers.value.find((item) => item.transferId === transfer.transferId),
+    (current) => cancelSftpTransferIntent({ transferId: current.transferId, expectedSourceFence: current.sourceFence, expectedTargetFence: current.targetFence, expectedStateRevision: current.stateRevision }),
+  );
+}
 async function cancelLegacyTransfer(transfer: SftpTransferSummary) {
-  await cancelSftpTransfer({ transferId: transfer.transferId, expectedGeneration: transfer.generation, expectedStateRevision: transfer.stateRevision });
-  await refreshSnapshot();
+  try { await cancelLegacyTransferFact(transfer); } catch (error) { showOperationFailed(error); }
+  await refreshSnapshot().catch(() => undefined);
 }
 async function resumeLegacyTransfer(transfer: SftpTransferSummary) {
   const session = sessions.value.find((item) => item.sessionId === transfer.sessionId);
@@ -2957,8 +3255,37 @@ async function confirmRetainRemoteCleanup() {
   } catch { showOperationFailed(); } finally { cleanupPendingTransferId.value = null }
 }
 async function cancelIntentTransfer(transfer: SftpTransferIntentSummary) {
-  await cancelSftpTransferIntent({ transferId: transfer.transferId, expectedSourceFence: transfer.sourceFence, expectedTargetFence: transfer.targetFence, expectedStateRevision: transfer.stateRevision });
+  try { await cancelIntentTransferFact(transfer); } catch (error) { showOperationFailed(error); }
+  await refreshSnapshot().catch(() => undefined);
+}
+/**
+ * An explicit Disconnect ends the session's transfers first: Core refuses to close a session
+ * that still owns one, and a transfer must never silently outlive the user's Disconnect.
+ */
+async function cancelSessionTransfers(sessionId: string) {
   await refreshSnapshot();
+  const sessionActive = () => ({
+    legacy: legacyTransfers.value.filter((item) => item.sessionId === sessionId && !terminalTransferStates.has(item.state)),
+    intents: intentTransfers.value.filter((item) => !terminalTransferStates.has(item.state)
+      && !legacyTransfers.value.some((legacy) => legacy.transferId === item.transferId)
+      && [item.sourceFence, item.targetFence].some((fence) => fence.kind === "remoteSession" && fence.sessionId === sessionId)),
+  });
+  const initial = sessionActive();
+  // A transfer Core cannot cancel right now (an ordinary commit) finishes on its own; wait for it.
+  for (const transfer of initial.legacy) {
+    if (transfer.cancellable) await cancelLegacyTransferFact(transfer);
+  }
+  for (const transfer of initial.intents) {
+    if (transfer.cancellable) await cancelIntentTransferFact(transfer);
+  }
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    await refreshSnapshot();
+    const active = sessionActive();
+    if (!active.legacy.length && !active.intents.length) return;
+    if (Date.now() > deadline) throw new Error("sftp.transfer_cancel_timeout");
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+  }
 }
 
 let nativeFocusOperation = "";
@@ -3210,9 +3537,74 @@ onBeforeUnmount(() => {
   >
     <header
       class="sftp-view__topbar"
-      :class="{ 'sftp-view__topbar--local': singleLocalPane, 'sftp-view__topbar--split': !singlePane }"
+      :class="{ 'sftp-view__topbar--local': singleLocalPane, 'sftp-view__topbar--split': !singlePane, 'sftp-view__topbar--mobile': mobileLayout }"
     >
-      <div class="sftp-view__title">
+      <!-- Phone: one app-bar row. Left: the visible Pane's selection (contextual), the Pane switch
+           (portrait with several Panes) or the Pane's identity and state; right: transfers + actions. -->
+      <template v-if="mobileLayout">
+        <div
+          v-if="mobileTopPane && mobileTopPane.selectedEntryKeys.length"
+          class="sftp-view__mobile-selection"
+        >
+          <strong>{{ t("sftp.selectedItems", { count: mobileTopPane.selectedEntryKeys.length }) }}</strong>
+          <NvxIconButton
+            :label="t('mobile.clearSelection')"
+            size="sm"
+            @click="clearPaneSelection(mobileTopPane)"
+          >
+            <NvxIcon
+              :icon="X"
+              :size="16"
+            />
+          </NvxIconButton>
+        </div>
+        <nav
+          v-else-if="mobilePaneIds.length > 1"
+          class="sftp-view__mobile-panes"
+          role="tablist"
+          :aria-label="t('mobile.sftpPaneSwitch')"
+        >
+          <button
+            v-for="paneId in mobilePaneIds"
+            :key="paneId"
+            type="button"
+            role="tab"
+            class="sftp-view__mobile-pane-tab"
+            :class="{ 'is-active': paneId === mobileVisiblePaneId }"
+            :aria-selected="paneId === mobileVisiblePaneId"
+            @click="showMobilePane(paneId)"
+          >
+            <NvxIcon
+              :icon="paneStates[paneId]?.endpoint.kind === 'local' ? HardDrive : Server"
+              :size="16"
+            />{{ mobilePaneSegmentLabel(paneId) }}
+          </button>
+        </nav>
+        <div
+          v-else
+          class="sftp-view__title sftp-view__title--mobile"
+        >
+          <NvxIcon
+            :icon="mobileTopPane?.endpoint.kind === 'local' ? HardDrive : Server"
+            :size="20"
+          />
+          <strong :title="mobileTopPane ? mobilePaneSegmentLabel(mobileTopPane.paneId) : undefined">
+            {{ mobileTopPane ? mobilePaneSegmentLabel(mobileTopPane.paneId) : t("navigation.sftp") }}
+          </strong>
+          <NvxStatusLabel
+            v-if="mobileTopPane && mobileTopPane.endpoint.kind === 'remote' && sessionForPane(mobileTopPane)"
+            class="sftp-view__topbar-status"
+            :tone="stateTone(sessionForPane(mobileTopPane)!.state)"
+            :title="paneSessionFailure(mobileTopPane) ? sessionFailureLabel(paneSessionFailure(mobileTopPane)!.code) : sessionForPane(mobileTopPane)!.state === 'ready' ? t('sftp.responseLatencyHint') : undefined"
+          >
+            {{ paneConnectionStatus(mobileTopPane) }}
+          </NvxStatusLabel>
+        </div>
+      </template>
+      <div
+        v-else
+        class="sftp-view__title"
+      >
         <NvxIcon
           v-if="singlePane"
           :icon="activePane?.endpoint.kind === 'local' ? HardDrive : Server"
@@ -3276,7 +3668,7 @@ onBeforeUnmount(() => {
             :icon="Activity"
             :size="16"
           />
-          {{ t("sftp.transferCount", { count: allTransferCount }) }}
+          {{ mobileLayout ? allTransferCount : t("sftp.transferCount", { count: allTransferCount }) }}
           <span
             v-if="activeTransferProgress !== null"
             class="sftp-view__transfer-toggle-percent"
@@ -3291,6 +3683,7 @@ onBeforeUnmount(() => {
         <section
           v-if="transfersOpen"
           :id="transferActivityId"
+          ref="transfersPanel"
           class="sftp-view__transfers"
           :class="{ 'is-empty': allTransferCount === 0 }"
           :aria-label="t('sftp.transferActivity')"
@@ -3311,6 +3704,12 @@ onBeforeUnmount(() => {
               />
             </NvxIconButton>
           </header>
+          <p
+            v-if="mobileLayout"
+            class="sftp-view__transfer-hint"
+          >
+            {{ t("mobile.sftpSavePickerHint") }}
+          </p>
           <p
             v-if="allTransferCount === 0"
             class="sftp-view__transfer-empty"
@@ -3347,7 +3746,7 @@ onBeforeUnmount(() => {
             <NvxInlineNotice
               v-if="transfer.failureCode"
               tone="error"
-              :title="t(`sftp.failures.${transfer.failureCode}`)"
+              :title="transferFailureTitle(transfer.failureCode, transfer.direction)"
             >
               <span v-if="transfer.cleanupResidual">{{ t("sftp.cleanupResidual", { path: cleanupResidualDisplay(transfer) }) }}</span>
               <span v-if="retainedForExit.has(transfer.transferId)">{{ t("sftp.cleanupRetainedForExit") }}</span>
@@ -3358,7 +3757,7 @@ onBeforeUnmount(() => {
                 :instance-key="transfer.transferId"
               />
               <NvxButton
-                v-if="!['committing', 'completed', 'cancelled', 'failed'].includes(transfer.state)"
+                v-if="transfer.cancellable"
                 size="sm"
                 variant="secondary"
                 @click="cancelIntentTransfer(transfer)"
@@ -3418,7 +3817,7 @@ onBeforeUnmount(() => {
             <NvxInlineNotice
               v-if="transfer.failureCode"
               tone="error"
-              :title="t(`sftp.failures.${transfer.failureCode}`)"
+              :title="transferFailureTitle(transfer.failureCode, transfer.direction)"
             >
               <span v-if="transfer.commitOutcome === 'uncertain'">{{ t('sftp.commitOutcomes.uncertain') }}</span>
               <span v-if="transfer.cleanupResidual">{{ t("sftp.cleanupResidual", { path: cleanupResidualDisplay(transfer) }) }}</span>
@@ -3435,7 +3834,7 @@ onBeforeUnmount(() => {
                 :instance-key="transfer.transferId"
               />
               <NvxButton
-                v-if="!['committing', 'completed', 'cancelled', 'failed'].includes(transfer.state)"
+                v-if="transfer.cancellable"
                 size="sm"
                 variant="secondary"
                 @click="cancelLegacyTransfer(transfer)"
@@ -3477,7 +3876,31 @@ onBeforeUnmount(() => {
           </article>
         </section>
       </div>
+      <template v-if="mobileLayout">
+        <template v-if="mobileTopPane">
+          <NvxIconButton
+            v-if="mobileTopPane.endpoint.kind === 'remote' && paneHasSession(mobileTopPane) && paneNeedsReconnect(mobileTopPane)"
+            :label="paneConnectionLabel(mobileTopPane)"
+            size="sm"
+            :disabled="loading || !paneHostId(mobileTopPane) || paneInteractionPending(mobileTopPane.paneId)"
+            @click="recoverRemotePane(mobileTopPane)"
+          >
+            <NvxIcon
+              :icon="PlugZap"
+              :size="16"
+            />
+          </NvxIconButton>
+          <NvxSftpPaneActionsMenu
+            class="sftp-view__topbar-more"
+            show-new-tab
+            v-bind="paneActionsMenuProps(mobileTopPane, mobileTopPane.endpoint.kind, false, false, countTerminalPanes(sftpLayout) > 1 || !!props.workspaceTabId)"
+            v-on="{ ...paneActionsMenuListeners(mobileTopPane, false), close: closeActiveSftpPane }"
+            @new-tab="workspaceTabs.showFileWelcome()"
+          />
+        </template>
+      </template>
       <NvxTerminalPaneControls
+        v-else
         class="sftp-view__pane-toolbar"
         :show-layout-actions="true"
         :show-plugin-slot="false"
@@ -3530,11 +3953,11 @@ onBeforeUnmount(() => {
     <section class="sftp-view__browser">
       <NvxTerminalSplitTree
         class="sftp-view__workspace"
-        :node="sftpLayout"
+        :node="renderedSftpLayout"
         :active-pane-id="activeSftpPaneId"
         :separator-label="t('sftp.resizePanes')"
-        :minimum-pane-width="420"
-        :minimum-pane-height="240"
+        :minimum-pane-width="SFTP_PANE_MINIMUM_WIDTH"
+        :minimum-pane-height="SFTP_PANE_MINIMUM_HEIGHT"
         @activate="activeSftpPaneId = $event"
         @resize="resizeSftpSplit"
       >
@@ -3544,8 +3967,9 @@ onBeforeUnmount(() => {
             class="sftp-view__pane"
             :class="{ 'is-drop-target': dropPaneId === pane.paneId, 'is-single-pane': Boolean(singlePane) }"
           >
+            <!-- Several visible Panes (desktop only) each carry their identity. -->
             <header
-              v-if="!singlePane"
+              v-if="!singlePane && !mobileLayout"
               class="sftp-view__pane-header"
             >
               <div class="sftp-view__pane-identity">
@@ -3616,7 +4040,9 @@ onBeforeUnmount(() => {
                   :size="16"
                 />
               </NvxIconButton>
+              <!-- Phones navigate with the parent action and the breadcrumbs; history arrows are desktop only. -->
               <NvxIconButton
+                v-if="!mobileLayout"
                 :label="t('sftp.back')"
                 size="sm"
                 :disabled="!canNavigateHistory(paneState(pane.paneId), 'back')"
@@ -3628,6 +4054,7 @@ onBeforeUnmount(() => {
                 />
               </NvxIconButton>
               <NvxIconButton
+                v-if="!mobileLayout"
                 :label="t('sftp.forward')"
                 size="sm"
                 :disabled="!canNavigateHistory(paneState(pane.paneId), 'forward')"
@@ -3725,6 +4152,33 @@ onBeforeUnmount(() => {
                   :size="16"
                 />
               </NvxIconButton>
+              <template v-if="mobileLayout && sftpPaneKind(pane) === 'remote'">
+                <span class="sftp-view__command-separator" />
+                <NvxIconButton
+                  class="sftp-view__mobile-transfer-action"
+                  :label="t('sftp.chooseUpload')"
+                  size="sm"
+                  :disabled="paneInteractionPending(pane.paneId) || !paneReady(paneState(pane.paneId))"
+                  @click="uploadFilesFromPicker(paneState(pane.paneId))"
+                >
+                  <NvxIcon
+                    :icon="Upload"
+                    :size="16"
+                  />
+                </NvxIconButton>
+                <NvxIconButton
+                  class="sftp-view__mobile-transfer-action"
+                  :label="t('mobile.sftpSaveAs')"
+                  size="sm"
+                  :disabled="paneInteractionPending(pane.paneId) || !paneReady(paneState(pane.paneId)) || paneState(pane.paneId).selectedEntryKeys.length !== 1"
+                  @click="downloadSelectedFromPicker(paneState(pane.paneId))"
+                >
+                  <NvxIcon
+                    :icon="Save"
+                    :size="16"
+                  />
+                </NvxIconButton>
+              </template>
               <span class="sftp-view__command-separator" />
               <div class="sftp-view__command-search">
                 <NvxIconButton
@@ -3764,6 +4218,7 @@ onBeforeUnmount(() => {
               </span>
             </div>
             <div
+              v-if="!mobileLayout"
               class="sftp-view__columns"
               aria-hidden="true"
             >
@@ -3790,7 +4245,7 @@ onBeforeUnmount(() => {
                 :aria-selected="paneState(pane.paneId).selectedEntryKeys.includes(entry.key)"
                 :class="{ 'is-selected': paneState(pane.paneId).selectedEntryKeys.includes(entry.key) }"
                 @click="selectEntryFromClick($event, paneState(pane.paneId), entry)"
-                @dblclick="activateEntry(paneState(pane.paneId), entry)"
+                @dblclick="!mobileLayout && activateEntry(paneState(pane.paneId), entry)"
                 @contextmenu="openSftpContextMenu($event, paneState(pane.paneId), entry)"
                 @pointerdown="beginPointerDrag($event, paneState(pane.paneId), entry)"
                 @pointermove="updatePointerDrag"
@@ -3802,7 +4257,7 @@ onBeforeUnmount(() => {
                   :size="16"
                   :class="{ 'sftp-view__folder-icon': entry.kind === 'directory' }"
                 /><span>{{ entry.displayName }}</span></span>
-                <small>{{ formatModified(entry.modifiedAtUnixMs) }}</small><small>{{ entry.kind === "file" && entry.size !== null ? t("sftp.bytes", { count: entry.size }) : "-" }}</small><small>{{ t(`sftp.entryKinds.${entry.kind}`) }}</small>
+                <small>{{ formatModified(entry.modifiedAtUnixMs) }}</small><small>{{ entry.kind === "file" && entry.size !== null ? t("sftp.bytes", entry.size) : "-" }}</small><small>{{ t(`sftp.entryKinds.${entry.kind}`) }}</small>
               </button>
               <div
                 v-if="paneState(pane.paneId).error && (sftpPaneKind(pane) === 'local' || sessionForPane(paneState(pane.paneId))?.state === 'ready')"
@@ -3827,7 +4282,7 @@ onBeforeUnmount(() => {
                   :size="44"
                   aria-hidden="true"
                 />
-                <h2>{{ t("fileWorkspace.emptyRemoteTitle") }}</h2>
+                <h2>{{ emptyRemoteTitle(paneState(pane.paneId)) }}</h2>
                 <p>{{ t("fileWorkspace.emptyRemoteDescription") }}</p>
                 <p
                   v-if="paneState(pane.paneId).error"
@@ -3885,8 +4340,10 @@ onBeforeUnmount(() => {
       role="menu"
       :aria-label="t('sftp.fileContextMenu')"
       :style="{ left: `${contextMenu.left}px`, top: `${contextMenu.top}px` }"
+      :data-nvx-mobile-sheet="mobileLayout ? '' : undefined"
     >
       <button
+        v-if="!contextIsLocal"
         type="button"
         role="menuitem"
         @click="runSftpContextAction('openTerminal')"
@@ -3897,7 +4354,10 @@ onBeforeUnmount(() => {
         />
         {{ t("sftp.openTerminalHere") }}
       </button>
-      <span role="separator" />
+      <span
+        v-if="!contextIsLocal"
+        role="separator"
+      />
       <button
         type="button"
         role="menuitem"
@@ -3932,6 +4392,7 @@ onBeforeUnmount(() => {
         {{ t("sftp.newEmptyFile") }}
       </button>
       <button
+        v-if="!contextIsLocal"
         type="button"
         role="menuitem"
         @click="runSftpContextAction('downloadUrl')"
@@ -3945,7 +4406,19 @@ onBeforeUnmount(() => {
       <template v-if="paneStates[contextMenu.paneId]?.selectedEntryKeys.length">
         <span role="separator" />
         <button
-          v-if="contextSelectedEntries.every((entry) => ['file', 'directory'].includes(entry.kind))"
+          v-if="mobileLayout && contextSelectedEntries.length === 1 && ['file', 'directory'].includes(contextSelectedEntry?.kind ?? '')"
+          type="button"
+          role="menuitem"
+          @click="runSftpContextAction('sendToPane')"
+        >
+          <NvxIcon
+            :icon="Copy"
+            :size="16"
+          />
+          {{ t("mobile.sftpSendTo") }}
+        </button>
+        <button
+          v-if="!contextIsLocal && contextSelectedEntries.every((entry) => ['file', 'directory'].includes(entry.kind))"
           type="button"
           role="menuitem"
           @click="runSftpContextAction('compress')"
@@ -3957,7 +4430,7 @@ onBeforeUnmount(() => {
           {{ t("sftp.compressZip") }}
         </button>
         <button
-          v-if="contextSelectedEntries.length === 1 && contextSelectedEntry?.kind === 'file' && contextSelectedEntry.displayName.toLowerCase().endsWith('.zip')"
+          v-if="!contextIsLocal && contextSelectedEntries.length === 1 && contextSelectedEntry?.kind === 'file' && contextSelectedEntry.displayName.toLowerCase().endsWith('.zip')"
           type="button"
           role="menuitem"
           @click="runSftpContextAction('extract')"
@@ -3969,7 +4442,7 @@ onBeforeUnmount(() => {
           {{ t("sftp.extractZip") }}
         </button>
         <button
-          v-if="contextSelectedEntries.length === 1 && contextSelectedEntry?.kind === 'file'"
+          v-if="!contextIsLocal && contextSelectedEntries.length === 1 && contextSelectedEntry?.kind === 'file'"
           type="button"
           role="menuitem"
           :disabled="!previewKindForEntry(contextSelectedEntry)"
@@ -3983,7 +4456,7 @@ onBeforeUnmount(() => {
           {{ t("sftp.preview") }}
         </button>
         <button
-          v-if="contextSelectedEntries.length === 1 && previewKindForEntry(contextSelectedEntry) === 'text'"
+          v-if="!contextIsLocal && contextSelectedEntries.length === 1 && previewKindForEntry(contextSelectedEntry) === 'text'"
           type="button"
           role="menuitem"
           @click="runSftpContextAction('tail')"
@@ -3995,7 +4468,7 @@ onBeforeUnmount(() => {
           {{ t("sftp.tailOpen") }}
         </button>
         <button
-          v-if="contextSelectedEntries.length === 1 && contextSelectedEntry?.kind === 'file'"
+          v-if="!contextIsLocal && contextSelectedEntries.length === 1 && contextSelectedEntry?.kind === 'file'"
           type="button"
           role="menuitem"
           @click="runSftpContextAction('download')"
@@ -4007,7 +4480,7 @@ onBeforeUnmount(() => {
           {{ t("sftp.downloadFile") }}
         </button>
         <span
-          v-if="contextSelectedEntries.length === 1 && contextSelectedEntry?.kind === 'file'"
+          v-if="!contextIsLocal && contextSelectedEntries.length === 1 && contextSelectedEntry?.kind === 'file'"
           role="separator"
         />
         <button
@@ -4023,7 +4496,7 @@ onBeforeUnmount(() => {
           {{ t("sftp.rename") }}
         </button>
         <button
-          v-if="contextSelectedEntries.length === 1 && contextSelectedEntry && ['file', 'directory'].includes(contextSelectedEntry.kind)"
+          v-if="!contextIsLocal && contextSelectedEntries.length === 1 && contextSelectedEntry && ['file', 'directory'].includes(contextSelectedEntry.kind)"
           type="button"
           role="menuitem"
           :disabled="contextSelectedEntry.permissionBits == null"
@@ -4166,7 +4639,7 @@ onBeforeUnmount(() => {
       plugin-protected
       :model-value="closeFileTabConfirm"
       :title="t('fileWorkspace.closeTabTitle')"
-      :description="t('fileWorkspace.closeTabDescription', { count: currentTabSessions().length })"
+      :description="t('fileWorkspace.closeTabDescription', currentTabSessions().length)"
       :close-label="t('fileWorkspace.closeDialog')"
       :dismissible="!closeFileTabPending"
       @update:model-value="(value) => { if (!value) cancelCloseFileTab() }"
@@ -4286,7 +4759,10 @@ onBeforeUnmount(() => {
         {{ t('sftp.deleteSelectionSummary', {
           count: activeSelectedEntries.length,
           names: activeSelectedEntries.slice(0, 3).map((entry) => entry.displayName).join(', '),
-        }) }}
+        }, activeSelectedEntries.length) }}
+        <template v-if="mutationPane?.endpoint.kind === 'local' && activeSelectedEntries.some((entry) => entry.kind === 'directory')">
+          {{ t('sftp.deleteLocalFoldersRecursive', { count: activeSelectedEntries.filter((entry) => entry.kind === 'directory').length }, activeSelectedEntries.filter((entry) => entry.kind === 'directory').length) }}
+        </template>
       </NvxInlineNotice>
       <template #actions>
         <NvxButton
@@ -4442,6 +4918,35 @@ onBeforeUnmount(() => {
         </NvxButton>
       </template>
     </NvxDialog>
+    <NvxDialog
+      :model-value="sendToPane !== null"
+      :title="t('mobile.sftpSendToTitle')"
+      :description="t('mobile.sftpSendToDescription')"
+      :close-label="t('sftp.retainRemoteDialog.close')"
+      @update:model-value="(value) => { if (!value) sendToPane = null }"
+    >
+      <NvxInlineNotice
+        v-if="sendToPane && !sendToPane.candidates.length"
+        :title="t('mobile.sftpSendToNone')"
+      />
+      <ul
+        v-else-if="sendToPane"
+        class="sftp-view__send-to-list"
+      >
+        <li
+          v-for="paneId in sendToPane.candidates"
+          :key="paneId"
+        >
+          <NvxButton
+            variant="secondary"
+            class="sftp-view__send-to-choice"
+            @click="void confirmSendToPane(paneId)"
+          >
+            {{ sendToPaneLabel(paneId) }}
+          </NvxButton>
+        </li>
+      </ul>
+    </NvxDialog>
   </main>
 </template>
 
@@ -4494,6 +4999,7 @@ onBeforeUnmount(() => {
 .sftp-view__empty-remote>small { color:var(--nvx-color-text-tertiary); }
 .sftp-view__context-menu { box-sizing:border-box; max-width:calc(100vw - 16px); max-height:calc(100dvh - 16px); overflow-y:auto; overscroll-behavior:contain; grid-auto-rows:max-content; position:fixed; z-index:var(--nvx-z-popover); display:grid; width:216px; padding:var(--nvx-space-1); border:var(--nvx-border-width) solid var(--nvx-color-border-strong); border-radius:var(--nvx-radius-md); background:var(--nvx-color-bg-surface); box-shadow:var(--nvx-shadow-overlay); }.sftp-view__context-menu button { display:flex; align-items:center; gap:var(--nvx-space-2); min-height:36px; padding:0 var(--nvx-space-3); border:0; border-radius:var(--nvx-radius-sm); background:transparent; color:var(--nvx-color-text-primary); font:inherit; text-align:start; }.sftp-view__context-menu button:hover,.sftp-view__context-menu button:focus-visible { background:var(--nvx-color-bg-hover); outline:none; }.sftp-view__context-menu span[role="separator"] { height:var(--nvx-border-width); margin:var(--nvx-space-1) var(--nvx-space-2); background:var(--nvx-color-border); }.sftp-view__context-menu button.sftp-view__context-menu-danger { color:var(--nvx-color-danger); }
 .sftp-view__context-menu button:disabled { cursor:not-allowed; opacity:.48; }.sftp-view__context-menu button:disabled:hover { background:transparent; }
+.sftp-view__send-to-list { display:grid; gap:var(--nvx-space-2); margin:0; padding:0; list-style:none; }.sftp-view__send-to-choice { width:100%; justify-content:flex-start; min-height:var(--nvx-control-height-touch); }
 .sftp-view__permissions-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:var(--nvx-space-2); }
 .sftp-view__permissions-group { display:grid; align-content:start; gap:var(--nvx-space-1); min-width:0; }
 .sftp-view__permissions-group>strong { margin-bottom:var(--nvx-space-1); font-size:var(--nvx-font-size-sm); }
@@ -4501,7 +5007,7 @@ onBeforeUnmount(() => {
 .sftp-view__permissions-mode { margin:var(--nvx-space-3) 0 0; color:var(--nvx-color-text-secondary); font-variant-numeric:tabular-nums; }
 .sftp-view__preview { display:grid; place-items:center; min-height:280px; max-height:min(62vh,560px); overflow:auto; border:var(--nvx-border-width) solid var(--nvx-color-border); border-radius:var(--nvx-radius-sm); background:var(--nvx-color-bg-subtle); }.sftp-view__preview>p { margin:0; color:var(--nvx-color-text-secondary); }.sftp-view__preview img { display:block; max-width:100%; max-height:min(62vh,560px); object-fit:contain; }
 .sftp-view__preview.is-text { display:flex; flex-direction:column; align-items:stretch; width:100%; height:min(62vh,500px); overflow:hidden; background:var(--nvx-color-bg-surface); }.sftp-view__preview-toolbar { display:flex; flex:0 0 auto; align-items:center; gap:var(--nvx-space-2); min-height:44px; padding:var(--nvx-space-2) var(--nvx-space-3); border-bottom:var(--nvx-border-width) solid var(--nvx-color-border); }.sftp-view__preview-toolbar>span:first-child { margin-inline-end:auto; color:var(--nvx-color-text-secondary); font-size:var(--nvx-font-size-sm); }.sftp-view__preview.is-text>:deep(.nvx-inline-notice) { flex:0 0 auto; margin:var(--nvx-space-2); }.sftp-view__code-editor { flex:1 1 auto; min-height:0; }
-.sftp-view__transfers { position:absolute; inset-block-start:calc(100% + var(--nvx-space-2)); inset-inline-end:0; z-index:var(--nvx-z-popover); display:grid; gap:var(--nvx-space-2); width:min(500px,calc(100vw - 112px)); max-height:min(500px,calc(100vh - 132px)); padding:var(--nvx-space-3); overflow:auto; border:var(--nvx-border-width) solid var(--nvx-color-border); border-radius:var(--nvx-radius-md); background:var(--nvx-color-bg-surface); box-shadow:var(--nvx-shadow-overlay); }.sftp-view__transfers.is-empty { width:min(360px,calc(100vw - 112px)); }.sftp-view__transfers>header { justify-content:space-between; }.sftp-view__transfers>header>div { min-width:0; }.sftp-view__transfers h2 { margin:0; font-size:var(--nvx-font-size-md); }.sftp-view__transfers header span { color:var(--nvx-color-text-tertiary); font-size:var(--nvx-font-size-xs); white-space:nowrap; }.sftp-view__transfer-empty { margin:0; color:var(--nvx-color-text-secondary); }.sftp-view__transfer { display:grid; gap:var(--nvx-space-1); min-width:0; padding-top:var(--nvx-space-2); border-top:var(--nvx-border-width) solid var(--nvx-color-border); }.sftp-view__transfer-title { min-width:0; }.sftp-view__transfer-title strong { margin-inline-end:auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__transfer-meta { display:flex; flex-wrap:wrap; gap:var(--nvx-space-2); color:var(--nvx-color-text-secondary); font-size:var(--nvx-font-size-xs); font-variant-numeric:tabular-nums; }.sftp-view__transfer-meta:empty { display:none; }.sftp-view__transfer-actions { flex-wrap:wrap; justify-content:flex-end; }
+.sftp-view__transfers { position:absolute; inset-block-start:calc(100% + var(--nvx-space-2)); inset-inline-end:0; z-index:var(--nvx-z-popover); display:grid; gap:var(--nvx-space-2); width:min(500px,calc(100vw - 112px)); max-height:min(500px,calc(100vh - 132px)); padding:var(--nvx-space-3); overflow:auto; border:var(--nvx-border-width) solid var(--nvx-color-border); border-radius:var(--nvx-radius-md); background:var(--nvx-color-bg-surface); box-shadow:var(--nvx-shadow-overlay); }.sftp-view__transfers.is-empty { width:min(360px,calc(100vw - 112px)); }.sftp-view__transfers>header { justify-content:space-between; }.sftp-view__transfers>header>div { min-width:0; }.sftp-view__transfers h2 { margin:0; font-size:var(--nvx-font-size-md); }.sftp-view__transfers header span { color:var(--nvx-color-text-tertiary); font-size:var(--nvx-font-size-xs); white-space:nowrap; }.sftp-view__transfer-empty { margin:0; color:var(--nvx-color-text-secondary); }.sftp-view__transfer-hint { margin:0; color:var(--nvx-color-text-tertiary); font-size:var(--nvx-font-size-xs); }.sftp-view__transfer { display:grid; gap:var(--nvx-space-1); min-width:0; padding-top:var(--nvx-space-2); border-top:var(--nvx-border-width) solid var(--nvx-color-border); }.sftp-view__transfer-title { min-width:0; }.sftp-view__transfer-title strong { margin-inline-end:auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.sftp-view__transfer-meta { display:flex; flex-wrap:wrap; gap:var(--nvx-space-2); color:var(--nvx-color-text-secondary); font-size:var(--nvx-font-size-xs); font-variant-numeric:tabular-nums; }.sftp-view__transfer-meta:empty { display:none; }.sftp-view__transfer-actions { flex-wrap:wrap; justify-content:flex-end; }
 @container sftp-file-pane (max-width:480px) {
   .sftp-view__pane-header,.sftp-view__commandbar { padding-inline:var(--nvx-space-2); }
   .sftp-view__pane-controls { gap:var(--nvx-space-1); }

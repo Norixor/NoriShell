@@ -18,10 +18,17 @@ const props = withDefaults(
     separatorLabel: string;
     minimumPaneWidth?: number;
     minimumPaneHeight?: number;
+    /**
+     * Phone: show only this Pane of a multi-Pane layout at full size and keep the other
+     * Panes mounted but hidden (no separators), so no attachment is dropped. The layout
+     * itself is untouched; `null` renders the whole tree.
+     */
+    soloPaneId?: string | null;
   }>(),
   {
     minimumPaneWidth: 400,
     minimumPaneHeight: 240,
+    soloPaneId: null,
   },
 );
 
@@ -198,6 +205,16 @@ function placementStyle(rect: LayoutRect) {
   };
 }
 
+// Solo mode applies only to a real split: a single Pane already fills the tree.
+const solo = computed(() => (props.soloPaneId !== null && placements.value.panes.length > 1 ? props.soloPaneId : null));
+
+function paneStyle(placement: PanePlacement) {
+  if (solo.value === null) return placementStyle(placement.rect);
+  return placement.pane.paneId === solo.value
+    ? { left: "0", top: "0", width: "100%", height: "100%" }
+    : { display: "none" };
+}
+
 function resolvedLength(value: LayoutLength, total: number) {
   return value.ratio * total + value.pixels;
 }
@@ -339,7 +356,7 @@ onBeforeUnmount(() => {
       :key="placement.pane.paneId"
       class="nvx-terminal-split-tree__pane"
       :class="{ 'nvx-terminal-split-tree__pane--active': placement.pane.paneId === activePaneId }"
-      :style="placementStyle(placement.rect)"
+      :style="paneStyle(placement)"
       :data-pane-id="placement.pane.paneId"
       @pointerdown="$emit('activate', placement.pane.paneId)"
       @focusin="$emit('activate', placement.pane.paneId)"
@@ -354,7 +371,7 @@ onBeforeUnmount(() => {
     </section>
 
     <div
-      v-for="placement in placements.separators"
+      v-for="placement in solo === null ? placements.separators : []"
       :key="placement.splitId"
       class="nvx-terminal-split-tree__separator"
       :class="`nvx-terminal-split-tree__separator--${placement.direction}`"

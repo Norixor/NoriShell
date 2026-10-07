@@ -1,5 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { defineStore } from "pinia";
@@ -8,11 +8,41 @@ import { computed, ref } from "vue";
 import type { ExitReadiness } from "../core-api/generated/core-api";
 import { i18n } from "../locales";
 import { flushTerminalWorkspaceBeforeExit } from "../terminal-workspace-persistence";
+import { detectDesktopPlatform } from "../platform";
 
 type ReleaseStatus = "idle" | "checking" | "upToDate" | "updateAvailable" | "noRelease" | "failed";
 type InstallStatus = "idle" | "checking" | "downloading" | "installing" | "resourcesActive" | "cancelled" | "failed" | "restartNeeded" | "restartRequired";
 type ReleaseFailureCode = "windowNotAllowed" | "requestFailed" | "httpRejected" | "responseTooLarge" | "invalidResponse" | "invalidCurrentVersion" | "internal";
-type InstallFailureCode = "packageUnavailable" | "versionChanged" | "downloadFailed" | "readinessFailed" | "installFailed" | "restartFailed";
+type InstallFailureCode = "packageUnavailable" | "versionChanged" | "downloadFailed" | "readinessFailed" | "installFailed" | "restartFailed"
+  | "signatureInvalid" | "permissionRequired" | "installBlocked";
+
+// Stable codes from src-tauri/src/android_update.rs (Android installs through PackageInstaller, not the desktop updater).
+const ANDROID_FAILURES: Record<string, InstallFailureCode> = {
+  "android_update.no_update": "packageUnavailable",
+  "android_update.package_unavailable": "packageUnavailable",
+  "android_update.manifest_invalid": "packageUnavailable",
+  "android_update.request_failed": "packageUnavailable",
+  "android_update.version_mismatch": "versionChanged",
+  "android_update.download_failed": "downloadFailed",
+  "android_update.size_exceeded": "downloadFailed",
+  "android_update.signature_invalid": "signatureInvalid",
+  "android_update.permission_required": "permissionRequired",
+  "android_update.install_blocked": "installBlocked",
+};
+const ANDROID_POLL_INTERVAL_MS = 1_000;
+const ANDROID_INSTALL_TIMEOUT_MS = 10 * 60_000;
+
+function isAndroid(): boolean {
+  return typeof navigator !== "undefined" && detectDesktopPlatform() === "android";
+}
+
+function failureCodeOf(error: unknown): string | null {
+  let failure: unknown = error;
+  if (typeof error === "string") {
+    try { failure = JSON.parse(error) as unknown; } catch { return null; }
+  }
+  return typeof failure === "object" && failure !== null && "code" in failure && typeof failure.code === "string" ? failure.code : null;
+}
 
 interface ReleaseCheckResponse {
   currentVersion: string;
@@ -113,7 +143,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     if (installInFlight) return installInFlight;
     if (!hasUpdate.value || !supportsAutoInstall.value) return Promise.resolve();
     if (installStatus.value === "restartNeeded" || installStatus.value === "restartRequired") return Promise.resolve();
-    installInFlight = performInstall(disconnectActiveResources).finally(() => { installInFlight = null; });
+    installInFlight = (isAndroid() ? performAndroidInstall(disconnectActiveResources) : performInstall(disconnectActiveResources)).finally(() => { installInFlight = null; });
     return installInFlight;
   }
 
@@ -127,6 +157,74 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
       installDiagnosticId.value = crypto.randomUUID();
       console.warn(`App restart failed; diagnosticId=${installDiagnosticId.value}`, error);
       installStatus.value = "restartRequired";
+    }
+  }
+
+  async function performAndroidInstall(disconnectActiveResources: boolean) {
+    let stage: "package" | "download" | "readiness" | "install" = "package";
+    let fenced = false;
+    installStatus.value = "checking";
+    installFailureCode.value = null;
+    installDiagnosticId.value = null;
+    progressPercent.value = null;
+    try {
+      const progress = new Channel<{ downloaded: number; total: number | null }>();
+      progress.onmessage = ({ downloaded, total }) => {
+        installStatus.value = "downloading";
+        if (total && total > 0) progressPercent.value = Math.min(100, Math.floor((downloaded / total) * 100));
+      };
+      stage = "download";
+      // Downloads and verifies the signed APK before any live resource is touched.
+      const prepared = await invoke<{ version: string; canInstall: boolean }>("android_update_prepare", {
+        expectedVersion: latestVersion.value, progress,
+      });
+      if (prepared.version !== latestVersion.value) {
+        installFailureCode.value = "versionChanged";
+        installStatus.value = "failed";
+        return;
+      }
+      if (!prepared.canInstall) {
+        // The package stays cached; returning from Settings and retrying reuses it.
+        await invoke("android_update_open_install_settings").catch(() => undefined);
+        installFailureCode.value = "permissionRequired";
+        installStatus.value = "failed";
+        return;
+      }
+      stage = "readiness";
+      const ready = await invoke<ExitReadiness>("release_update_readiness");
+      if (!ready.canExit && !disconnectActiveResources) {
+        installStatus.value = "resourcesActive";
+        return;
+      }
+      await flushTerminalWorkspaceBeforeExit();
+      const stillReady = await invoke<ExitReadiness>("release_update_prepare_install", { disconnectActiveResources });
+      if (!stillReady.canExit) {
+        installStatus.value = "resourcesActive";
+        return;
+      }
+      fenced = true;
+      stage = "install";
+      installStatus.value = "installing";
+      await invoke("android_update_install");
+      // Success normally replaces this process; otherwise the installer reports why not.
+      const deadline = Date.now() + ANDROID_INSTALL_TIMEOUT_MS;
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, ANDROID_POLL_INTERVAL_MS));
+        const result = await invoke<{ state: string }>("android_update_install_result");
+        if (result.state === "installed") return;
+        if (Date.now() > deadline) throw { code: "android_update.install_failed" };
+      }
+    } catch (error) {
+      const code = failureCodeOf(error);
+      if (fenced) await invoke("release_update_cancel_install").catch(() => undefined);
+      if (code === "android_update.user_cancelled" || code === "app.tool_window_exit_cancelled") installStatus.value = "cancelled";
+      else {
+        installFailureCode.value = (code ? ANDROID_FAILURES[code] : undefined)
+          ?? (stage === "readiness" ? "readinessFailed" : stage === "install" ? "installFailed" : stage === "download" ? "downloadFailed" : "packageUnavailable");
+        installStatus.value = "failed";
+        installDiagnosticId.value = crypto.randomUUID();
+        console.warn(`Android update failed during ${stage}; code=${code ?? "unknown"}; diagnosticId=${installDiagnosticId.value}`);
+      }
     }
   }
 

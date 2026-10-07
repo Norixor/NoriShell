@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import NvxSecureWindow from "../components/layout/NvxSecureWindow.vue";
 import { NvxButton, NvxCheckbox, NvxField, NvxInlineNotice, NvxInput } from "../components/ui";
@@ -15,11 +15,20 @@ const confirmed = ref(false);
 const pending = ref(false);
 const failed = ref(false);
 const failureText = ref("");
+// Core keeps the prompt open for these codes, so the user can correct the
+// password in place; every other failure ends the prompt.
+const RETRYABLE_VAULT_CODES = new Set([
+  "vault.authentication_failed",
+  "vault.password_confirmation_mismatch",
+  "vault.weak_password",
+  "vault.in_use",
+]);
 function showFailure(error: unknown) {
   const failure = parseCoreApiError(error);
-  failureText.value = (failure?.messageKey && te(failure.messageKey) ? t(failure.messageKey) : t("sshHosts.vault.failed"))
+  failureText.value = (failure?.messageKey && te(failure.messageKey) ? t(failure.messageKey) : t("secureWindow.vault.failed"))
     + (failure?.diagnosticId ? ` ${t("diagnostics.id", { id: failure.diagnosticId })}` : "");
   failed.value = true;
+  return failure;
 }
 const resetStep = ref(false);
 const resetPhrase = ref("");
@@ -82,7 +91,16 @@ async function submit() {
   failed.value = false;
   const request = secureVaultClient.submit(id, password.value, confirmation.value, confirmed.value);
   clear();
-  try { await request; } catch (error) { showFailure(error); pending.value = false; }
+  try {
+    await request;
+  } catch (error) {
+    const failure = showFailure(error);
+    pending.value = false;
+    if (failure && RETRYABLE_VAULT_CODES.has(failure.code)) {
+      await nextTick();
+      document.getElementById("secure-vault-password")?.focus();
+    }
+  }
 }
 async function cancel() {
   if (pending.value) return;
@@ -188,7 +206,7 @@ onBeforeUnmount(() => { clear(); clearReset(); });
           v-if="failed"
           tone="error"
         >
-          {{ failureText || t("sshHosts.vault.failed") }}
+          {{ failureText || t("secureWindow.vault.failed") }}
         </NvxInlineNotice>
       </template>
       <template v-else>

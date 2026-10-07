@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Ban, Download, Keyboard, RotateCcw, Upload } from "lucide-vue-next";
+import { Ban, Download, Ellipsis, Keyboard, RotateCcw, Upload } from "lucide-vue-next";
 import { computed, onBeforeUnmount, ref, useTemplateRef } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -12,16 +12,19 @@ import {
   type ShortcutPlatform,
 } from "../../shortcuts";
 import { detectDesktopPlatform, shortcutProfilePlatform } from "../../platform";
-import { exportJsonFile } from "../../platform-file-export";
+import { isMobileLayout } from "../../platform-host";
+import { exportJsonFile, isJsonExportWriteIncomplete } from "../../platform-file-export";
 import { useShortcutsStore, type ShortcutSaveResult } from "../../stores/shortcuts";
 import { applicationPreferenceFailure } from "../../core-api/application-preferences";
 import { useTipsStore } from "../../stores/tips";
-import { NvxButton, NvxDialog, NvxField, NvxIcon, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
+import { NvxActionMenu, NvxButton, NvxDialog, NvxField, NvxIcon, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
 
 const { t } = useI18n();
 const shortcuts = useShortcutsStore();
 const tips = useTipsStore();
 const initialPlatform = shortcutProfilePlatform(detectDesktopPlatform());
+// Phones run the Ctrl profile for a connected hardware keyboard; the macOS profile is not selectable there.
+const mobileLayout = isMobileLayout();
 
 const platform = ref<ShortcutPlatform>(initialPlatform);
 const query = ref("");
@@ -32,6 +35,17 @@ const resetDialogOpen = ref(false);
 const importInput = useTemplateRef<HTMLInputElement>("importInput");
 const exporting = ref(false);
 let alive = true;
+
+// Phone: Export and Import share one overflow menu beside the heading instead of a wrapping button row.
+const profileMenuItems = computed(() => [
+  { id: "export", label: t("shortcuts.export"), icon: Download, disabled: exporting.value },
+  { id: "import", label: t("shortcuts.import"), icon: Upload },
+]);
+
+function selectProfileMenuItem(id: string) {
+  if (id === "export") void exportProfile();
+  else if (id === "import") importInput.value?.click();
+}
 
 const platformOptions = computed(() => [
   { value: "macos", label: t("shortcuts.platforms.macos") },
@@ -162,8 +176,8 @@ async function exportProfile() {
   try {
     if (!await exportJsonFile("shortcuts", shortcuts.exportProfile())) return;
     if (alive) tips.show({ scope: "shortcuts", tone: "success", title: t("shortcuts.status.exported") });
-  } catch {
-    if (alive) tips.show({ scope: "shortcuts", tone: "error", title: t("shortcuts.errors.exportWrite") });
+  } catch (error) {
+    if (alive) tips.show({ scope: "shortcuts", tone: "error", title: t(isJsonExportWriteIncomplete(error) ? "shortcuts.errors.exportWriteIncomplete" : "shortcuts.errors.exportWrite") });
   } finally {
     if (alive) exporting.value = false;
   }
@@ -211,10 +225,19 @@ onBeforeUnmount(() => {
     <header class="nvx-shortcut-settings__header">
       <div>
         <h2>{{ t("shortcuts.title") }}</h2>
-        <p>{{ t("shortcuts.description") }}</p>
+        <p>{{ t(mobileLayout ? "mobile.settings.shortcutsDescription" : "shortcuts.description") }}</p>
       </div>
       <div class="nvx-shortcut-settings__actions">
+        <NvxActionMenu
+          v-if="mobileLayout"
+          :label="t('mobile.settings.moreActions')"
+          :icon="Ellipsis"
+          :items="profileMenuItems"
+          size="md"
+          @select="selectProfileMenuItem"
+        />
         <NvxButton
+          v-if="!mobileLayout"
           variant="ghost"
           size="sm"
           :disabled="exporting"
@@ -227,6 +250,7 @@ onBeforeUnmount(() => {
           {{ t("shortcuts.export") }}
         </NvxButton>
         <NvxButton
+          v-if="!mobileLayout"
           variant="ghost"
           size="sm"
           @click="importInput?.click()"
@@ -247,8 +271,18 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
+    <NvxInlineNotice
+      v-if="mobileLayout"
+      tone="info"
+    >
+      {{ t("mobile.settings.shortcutsHardwareKeyboard") }}
+    </NvxInlineNotice>
+
     <div class="nvx-shortcut-settings__filters">
-      <NvxField :label="t('shortcuts.platform')">
+      <NvxField
+        v-if="!mobileLayout"
+        :label="t('shortcuts.platform')"
+      >
         <NvxSelect
           v-model="platform"
           :options="platformOptions"

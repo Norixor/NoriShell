@@ -30,7 +30,7 @@ export const desktopPreferencesEn = {
   close: { hide: "Hide to tray", quit: "Request application exit" },
   closeHint: "Hiding keeps connections running. Exiting still checks active sessions and transfers. The window stays visible if the tray is unavailable.",
   trayRecentLimit: "Recent connections in tray",
-  recentCount: "{count} items",
+  recentCount: "{count} item | {count} items",
   noRecent: "Hide recent connections",
   trayShowStatus: "Show resource status and issue indicators",
   trayShowHostNames: "Show host names in the tray",

@@ -38,6 +38,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("./workspace-tab-boot-trace", () => ({ markTabBoot: vi.fn() }));
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tauri-apps/api/core")>(), isTauri: () => true,
+}));
 const hosts = vi.hoisted(() => ({ list: vi.fn(async () => [] as Array<{ hostId: string; label: string; hasReadyCredential: boolean }>) }));
 vi.mock("./core-api/client", async (importOriginal) => ({
   ...await importOriginal<typeof import("./core-api/client")>(), listHosts: hosts.list,

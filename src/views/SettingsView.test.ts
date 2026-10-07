@@ -1,9 +1,10 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18n } from "../locales";
+import { handleMobileBack, mobileBackStackDepth, resetMobileOverlaysForTests } from "../mobile-overlays";
 
 const client = vi.hoisted(() => ({
   secureVault: vi.fn(),
@@ -32,8 +33,14 @@ vi.mock("../core-api/client", async (importOriginal) => ({
 }));
 vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: client.secureVault }));
 vi.mock("../terminal-fonts", () => ({ detectInstalledTerminalFonts: vi.fn(async () => []) }));
+const host = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
 
 import SettingsView from "./SettingsView.vue";
+import { useUiStore } from "../stores/ui";
 
 async function mountSettings() {
   const router = createRouter({
@@ -57,6 +64,7 @@ async function mountSettings() {
 describe("Settings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetMobileOverlaysForTests();
     client.secureVault.mockReset().mockResolvedValue(true);
     localStorage.clear();
     localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ locale: "en" }));
@@ -72,6 +80,71 @@ describe("Settings", () => {
     client.listIdentities.mockResolvedValue([]);
     client.listCredentialRefs.mockResolvedValue([]);
     client.listKnownHosts.mockResolvedValue([]);
+  });
+
+  it("hides desktop-only controls on the phone shell and names Android Keystore for auto-unlock", async () => {
+    host.mobile = true;
+    try {
+      const wrapper = await mountSettings();
+      const navLabels = wrapper.findAll("nav button .settings-mobile-row__label").map((label) => label.text());
+      expect(navLabels).not.toContain("Window and tray");
+      expect(navLabels).toContain("Notifications");
+      expect(navLabels).toContain("Keyboard shortcuts");
+      await wrapper.get('nav button[data-section="application"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[aria-label="Interface zoom"]').exists()).toBe(false);
+      expect(wrapper.find('[aria-label="Interface language"]').exists()).toBe(true);
+      // The desktop deep link opens the notification subset: no window-close or tray fields.
+      await wrapper.vm.$router.push("/settings?section=desktop");
+      await flushPromises();
+      expect(wrapper.find("#desktop-preferences-title").text()).toBe("Notifications");
+      const labels = wrapper.findAll("label").map((label) => label.text());
+      expect(labels).not.toContain("When closing the main window");
+      expect(labels.some((label) => label.includes("Recent"))).toBe(false);
+      expect(wrapper.text()).toContain("System notification permission");
+      expect(wrapper.text()).not.toContain("Show resource status and issue indicators");
+      expect(wrapper.text()).not.toContain("Recent connections in tray");
+      // Application wording drops zoom and the mouse "click"; the transfer group names only notification rules.
+      await wrapper.vm.$router.push("/settings?section=application");
+      await flushPromises();
+      expect(wrapper.text()).toContain("plus the interface language");
+      expect(wrapper.text()).not.toContain("language and zoom");
+      expect(wrapper.text()).toContain("tap the plus button in the top bar");
+      await wrapper.vm.$router.push("/settings?section=transfer");
+      await flushPromises();
+      expect(wrapper.text()).toContain("Notification rules");
+      expect(wrapper.text()).not.toContain("Window, tray, and notification rules");
+      await wrapper.vm.$router.push("/settings?section=vault");
+      await flushPromises();
+      expect(wrapper.text()).toContain("Android Keystore auto-unlock stores only a random device key");
+      await wrapper.get('[role="combobox"]').trigger("click");
+      await flushPromises();
+      expect(document.body.textContent).toContain("Use Android Keystore to auto-unlock");
+      expect(document.body.textContent).not.toContain("Use the system secure store to auto-unlock");
+      wrapper.unmount();
+    } finally {
+      host.mobile = false;
+      document.body.innerHTML = "";
+    }
+  });
+
+  it("shows the Android default terminal size and follows a size changed outside the field", async () => {
+    host.mobile = true;
+    try {
+      const wrapper = await mountSettings();
+      await wrapper.vm.$router.push("/settings?section=terminal");
+      await flushPromises();
+      const field = wrapper.get<HTMLInputElement>("#terminal-font-size");
+      expect(field.element.value).toBe("11");
+      // A pinch on a terminal saves through the same preference while Settings stays mounted.
+      await useUiStore().setTerminalFontSize(15);
+      await flushPromises();
+      expect(field.element.value).toBe("15");
+      wrapper.unmount();
+    } finally {
+      host.mobile = false;
+      document.body.innerHTML = "";
+    }
   });
 
   it("renders only the appearance section when selected", async () => {
@@ -114,7 +187,8 @@ describe("Settings", () => {
     await flushPromises();
     expect(client.secureVault).toHaveBeenCalledWith("ensureUnlocked");
     expect(document.querySelector('input[type="password"]')).toBeNull();
-    expect(wrapper.text()).toContain(i18n.global.t("sshHosts.vault.failed"));
+    expect(wrapper.text()).toContain(i18n.global.t("secureWindow.vault.failed"));
+    expect(wrapper.text()).not.toContain("8 characters");
     expect(client.unlockVault).not.toHaveBeenCalled();
     wrapper.unmount();
   });
@@ -352,6 +426,95 @@ describe("Settings", () => {
     expect(theme.text()).toContain("Light");
     expect(wrapper.text()).toContain("Appearance could not be saved. Please retry.");
     setItem.mockRestore();
+    wrapper.unmount();
+  });
+  describe("phone list and detail levels", () => {
+    beforeEach(() => { host.mobile = true; });
+    afterEach(() => {
+      host.mobile = false;
+      document.body.innerHTML = "";
+    });
+
+    it("lists the sections in groups and opens one section in place of the list", async () => {
+      const wrapper = await mountSettings();
+      expect(wrapper.find(".settings-sidebar").exists()).toBe(false);
+      expect(wrapper.find("main.settings-detail").exists()).toBe(false);
+      expect(wrapper.findAll(".settings-mobile-list__group h2").map((heading) => heading.text()))
+        .toEqual(["General", "Security"]);
+      const vaultRow = wrapper.get('button[data-section="vault"]');
+      expect(vaultRow.text()).toContain("Encrypted Vault");
+      expect(vaultRow.find(".settings-mobile-row__summary").text()).toBe("Unlocked");
+      expect(wrapper.get('button[data-section="knownHosts"]').text()).toContain("Strict verification");
+      expect(wrapper.get('button[data-section="application"]').find(".settings-mobile-row__summary").text())
+        .toBe("Language, startup and new tabs");
+
+      await wrapper.get('button[data-section="terminal"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.find(".settings-mobile-list").exists()).toBe(false);
+      expect(wrapper.find('[aria-labelledby="terminal-appearance-title"]').exists()).toBe(true);
+      expect(wrapper.find('button[aria-label="Back to settings"]').exists()).toBe(true);
+      expect(wrapper.vm.$router.currentRoute.value.fullPath).toBe("/settings?section=terminal");
+
+      await wrapper.get('button[aria-label="Back to settings"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.find(".settings-mobile-list").exists()).toBe(true);
+      expect(wrapper.find("main.settings-detail").exists()).toBe(false);
+      expect(wrapper.get('button[data-section="terminal"]').attributes("aria-current")).toBe("true");
+      expect(wrapper.vm.$router.currentRoute.value.fullPath).toBe("/settings");
+      expect(mobileBackStackDepth()).toBe(0);
+      wrapper.unmount();
+    });
+
+    it("returns from the detail to the list on the Android back key, then leaves the key to history", async () => {
+      const wrapper = await mountSettings();
+      await wrapper.get('button[data-section="about"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[aria-labelledby="about-settings-title"]').exists()).toBe(true);
+
+      expect(handleMobileBack()).toBe(true);
+      await flushPromises();
+      expect(wrapper.find(".settings-mobile-list").exists()).toBe(true);
+      expect(wrapper.find('[aria-labelledby="about-settings-title"]').exists()).toBe(false);
+      expect(wrapper.vm.$router.currentRoute.value.fullPath).toBe("/settings");
+      expect(handleMobileBack()).toBe(false);
+      expect(wrapper.find(".settings-mobile-list").exists()).toBe(true);
+      wrapper.unmount();
+    });
+
+    it("opens a deep-linked section directly and drops the query when it closes", async () => {
+      const wrapper = await mountSettings();
+      await wrapper.vm.$router.push("/settings?section=vault");
+      await flushPromises();
+      expect(wrapper.find(".settings-mobile-list").exists()).toBe(false);
+      expect(wrapper.find(".settings-vault").exists()).toBe(true);
+      expect(mobileBackStackDepth()).toBe(1);
+
+      await wrapper.get('button[aria-label="Back to settings"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.vm.$router.currentRoute.value.fullPath).toBe("/settings");
+      expect(wrapper.find(".settings-mobile-list").exists()).toBe(true);
+
+      // The same deep link works again because the list level dropped the query.
+      await wrapper.vm.$router.push("/settings?section=vault");
+      await flushPromises();
+      expect(wrapper.find(".settings-vault").exists()).toBe(true);
+      wrapper.unmount();
+      expect(mobileBackStackDepth()).toBe(0);
+    });
+  });
+
+  it("keeps the desktop sidebar without phone list rows or a back button", async () => {
+    const wrapper = await mountSettings();
+    expect(wrapper.find("aside.settings-sidebar").exists()).toBe(true);
+    expect(wrapper.find(".settings-mobile-list").exists()).toBe(false);
+    expect(wrapper.find(".settings-mobile-row").exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="Back to settings"]').exists()).toBe(false);
+    expect(wrapper.find("main.settings-detail").exists()).toBe(true);
+    await wrapper.findAll("button").find((button) => button.text() === "About")!.trigger("click");
+    await flushPromises();
+    // Desktop selection does not mirror into the URL or the back stack.
+    expect(wrapper.vm.$router.currentRoute.value.fullPath).toBe("/settings");
+    expect(mobileBackStackDepth()).toBe(0);
     wrapper.unmount();
   });
 });

@@ -2,6 +2,7 @@
 import { Columns2, PanelRight, Rows2, X } from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
 
+import { isMobileLayout } from "../../platform-host";
 import { NvxIcon, NvxIconButton } from "../ui";
 import NvxPluginContributionSlot from "./NvxPluginContributionSlot.vue";
 
@@ -22,6 +23,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+// Phones never split a Terminal Tab; the close action stays.
+const mobileLayout = isMobileLayout();
 </script>
 
 <template>
@@ -32,7 +35,7 @@ const { t } = useI18n();
       toolbar-menu
       :instance-key="pluginContextKey"
     />
-    <template v-if="showLayoutActions">
+    <template v-if="showLayoutActions && !mobileLayout">
       <div class="terminal-pane-controls__group">
         <NvxIconButton
           size="sm"

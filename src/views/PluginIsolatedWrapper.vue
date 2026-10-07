@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { convertFileSrc } from "@tauri-apps/api/core";
 
 import NvxButton from "../components/ui/NvxButton.vue";
 import NvxStandaloneHeader from "../components/layout/NvxStandaloneHeader.vue";
 import { getPluginIsolatedSurfaceContent, invokePluginIsolatedBridge } from "../core-api/client";
 import type { PluginIsolatedPendingAction } from "../core-api/generated/core-api";
 import { PluginIsolatedBridge } from "../plugin-isolated-bridge";
+import { isolatedDocumentUrl } from "../secure-transport";
 
 const { t, locale } = useI18n();
 const frame = ref<HTMLIFrameElement | null>(null);
@@ -84,7 +84,7 @@ onMounted(async () => {
       pending: (value) => { pending.value = value; },
       unavailable: () => fail("surface-bridge"),
     });
-    documentUrl.value = convertFileSrc(content.documentToken, "norishell-plugin");
+    documentUrl.value = isolatedDocumentUrl(content.documentToken);
   } catch { fail("surface-content"); }
 });
 

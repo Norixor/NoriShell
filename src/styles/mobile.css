@@ -1,0 +1,1572 @@
+/*
+ * Phone-shell overrides. Every rule is gated by `html[data-nvx-host="mobile"]`,
+ * which `main.ts` sets only when the platform is Android (never by viewport
+ * width), so desktop windows are unaffected even when this file is loaded.
+ *
+ * `--nvx-mobile-viewport-height` mirrors the visual viewport (set by the shell);
+ * `--nvx-mobile-bottom-inset` is the height of the bottom bar stack (set by the
+ * bottom navigation). Sheets anchor to the visual viewport bottom through
+ * `--nvx-mobile-sheet-bottom`, which stays 0 while the soft keyboard is closed.
+ */
+html[data-nvx-host="mobile"] {
+  --nvx-mobile-header-height: 52px;
+  --nvx-mobile-sheet-bottom: calc(100vh - var(--nvx-mobile-viewport-height, 100vh));
+  --nvx-mobile-scrim: rgb(16 18 23 / 44%);
+  --nvx-mobile-touch-target: 48px;
+}
+
+/* The desktop root keeps a 1024x720 minimum (`html:has(#app)` in base.css, whose `:has(#app)`
+   outranks the plain mobile selector). A landscape phone is shorter than 720px, and a scrollable
+   document lets any focus change scroll the whole shell out of view; the phone has no minimum. */
+html[data-nvx-host="mobile"]:has(#app),
+html[data-nvx-host="mobile"]:has(#app) body,
+html[data-nvx-host="mobile"] #app {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---- Bottom-sheet menus (popover menus, context menus, select listboxes) ---- */
+
+/* Stacking order comes from the overlay stack (`--nvx-mobile-overlay-z`, two steps per overlay):
+   the scrim takes the entry's value, the sheet the step above it, so a surface opened from
+   inside another overlay always lands on top. The fallbacks keep unregistered sheets usable. */
+html[data-nvx-host="mobile"] .nvx-mobile-sheet-backdrop {
+  position: fixed;
+  z-index: var(--nvx-mobile-overlay-z, calc(var(--nvx-z-dialog) + 1));
+  inset: 0;
+  background: var(--nvx-mobile-scrim);
+  touch-action: none;
+}
+
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] {
+  position: fixed !important;
+  z-index: calc(var(--nvx-mobile-overlay-z, calc(var(--nvx-z-dialog) + 1)) + 1) !important;
+  top: auto !important;
+  right: 0 !important;
+  bottom: var(--nvx-mobile-sheet-bottom) !important;
+  left: 0 !important;
+  display: grid;
+  grid-auto-rows: max-content;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  max-height: calc(var(--nvx-mobile-viewport-height, 100vh) - var(--nvx-mobile-header-height) - env(safe-area-inset-top, 0px)) !important;
+  margin: 0 !important;
+  padding: var(--nvx-space-1) var(--nvx-space-2) calc(var(--nvx-space-2) + env(safe-area-inset-bottom, 0px)) !important;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 0 !important;
+  border-radius: var(--nvx-radius-sheet) var(--nvx-radius-sheet) 0 0 !important;
+  background: var(--nvx-color-bg-surface);
+  box-shadow: var(--nvx-shadow-overlay);
+  transform: none !important;
+  visibility: visible !important;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] {
+    animation: nvx-mobile-sheet-enter var(--nvx-motion-overlay) ease-out;
+  }
+}
+
+@keyframes nvx-mobile-sheet-enter {
+  from { transform: translateY(24px); opacity: 0; }
+}
+
+/* Drag-handle pill at the top of every sheet. */
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet]::before {
+  content: "";
+  grid-column: 1 / -1;
+  width: 36px;
+  height: 4px;
+  margin: var(--nvx-space-2) auto var(--nvx-space-2);
+  border-radius: 2px;
+  background: var(--nvx-color-border-strong);
+}
+
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] [role="menuitem"],
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] [role="option"] {
+  min-height: var(--nvx-mobile-touch-target);
+  gap: var(--nvx-space-3);
+  padding-inline: var(--nvx-space-3);
+  border-radius: var(--nvx-radius-md);
+  font-size: var(--nvx-font-size-body);
+  line-height: var(--nvx-line-height-body);
+}
+
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] [role="menuitem"] > svg,
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] [role="menuitem"] > .nvx-icon {
+  width: 20px;
+  height: 20px;
+}
+
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] [role="separator"] {
+  margin-block: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] [role="menuitem"]:hover:not(:disabled) {
+  background: transparent;
+}
+
+html[data-nvx-host="mobile"] [data-nvx-mobile-sheet] [role="menuitem"]:active:not(:disabled) {
+  background: var(--nvx-color-bg-hover);
+}
+
+/* Tips stay above every stacked overlay (the stack grows two z steps per entry). */
+html[data-nvx-host="mobile"] .nvx-tips--mobile {
+  z-index: calc(var(--nvx-z-toast) + 200);
+}
+
+/* Tooltip-style status hints open on tap (focus), not only on hover. */
+html[data-nvx-host="mobile"] .nvx-server-card__connection-dot--warning:focus::after,
+html[data-nvx-host="mobile"] .nvx-server-card__connection-dot--danger:focus::after {
+  opacity: 1;
+  transform: none;
+  visibility: visible;
+}
+
+/* ---- Touch targets for shared controls ---- */
+
+html[data-nvx-host="mobile"] .nvx-icon-button--sm,
+html[data-nvx-host="mobile"] .nvx-icon-button--md {
+  width: var(--nvx-control-height-touch);
+  height: var(--nvx-control-height-touch);
+}
+
+html[data-nvx-host="mobile"] .nvx-select__trigger,
+html[data-nvx-host="mobile"] .nvx-input {
+  min-height: var(--nvx-control-height-touch);
+}
+
+/* ---- Application shell ---- */
+
+/* The route row has no minimum on the phone: with the soft keyboard open in landscape the
+   content area can be shorter than the desktop 120px floor, and a floor would push the
+   terminal below the helper-key row (clipped by `.app-main`, cursor row hidden). */
+html[data-nvx-host="mobile"] .app-main {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+}
+
+html[data-nvx-host="mobile"] .app-plugin-region--sidebar {
+  grid-column: 1;
+  grid-row: 3;
+  width: auto;
+  max-height: min(112px, 14vh);
+  border-inline-start: 0;
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+}
+
+html[data-nvx-host="mobile"] .app-plugin-region--after { grid-row: 4; }
+html[data-nvx-host="mobile"] .app-plugin-region--footer { grid-row: 5; }
+
+/* ---- Overview ----
+   The shell pill already names the page, so the title is only spoken. One search + group row,
+   status chips that carry the counts (the desktop KPI tiles are not rendered), an optional
+   one-line averages strip, then compact Cards in one column with an 8px gap. A Card is at
+   least 108px and grows with its content (open-session row, wrapped text, the system font
+   scale, which the WebView applies as text zoom): text rows use relative line heights and
+   nothing fixes the height, so no state can clip the metrics row. NvxOverviewPanel assumes
+   a 116px pitch only for Cards it has not measured yet. */
+
+html[data-nvx-host="mobile"] .nvx-overview-panel {
+  padding: var(--nvx-space-2) var(--nvx-space-3) var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__topbar {
+  display: block;
+  min-height: 0;
+  margin-bottom: var(--nvx-space-2);
+  padding: 0;
+  border-bottom: 0;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__heading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--nvx-space-2);
+  width: 100%;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__search-field {
+  order: 1;
+  flex: 1 1 160px;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__group-filter {
+  order: 2;
+  flex: 0 1 150px;
+  min-width: 112px;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__toolbar > .plugin-extension-target {
+  order: 4;
+  flex: 1 1 100%;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__status-filters {
+  order: 3;
+  flex: 1 1 100%;
+  gap: var(--nvx-space-1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__status-filters::-webkit-scrollbar {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__status-filters .nvx-button {
+  flex: 1 0 auto;
+  gap: var(--nvx-space-1);
+  min-height: 32px;
+  padding-inline: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__status-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--nvx-color-bg-subtle);
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  text-align: center;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__status-filters .nvx-button[aria-pressed="true"] .nvx-overview-panel__status-count {
+  background: var(--nvx-color-accent-soft);
+  color: var(--nvx-color-accent);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__averages {
+  display: flex;
+  gap: var(--nvx-space-3);
+  margin: 0 0 var(--nvx-space-2);
+  padding: 0 var(--nvx-space-1);
+  overflow: hidden;
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-xs);
+  line-height: var(--nvx-line-height-xs);
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__average {
+  display: inline-flex;
+  gap: var(--nvx-space-1);
+  align-items: baseline;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__average strong {
+  color: var(--nvx-color-text-primary);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--nvx-font-weight-semibold);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__sections {
+  gap: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__section {
+  gap: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__section-header {
+  min-height: 24px;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__section-header h2 {
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-xs);
+  line-height: var(--nvx-line-height-xs);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__card {
+  contain-intrinsic-size: auto 108px;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__grid-viewport--virtual .nvx-overview-panel__card {
+  height: auto;
+  min-height: 108px;
+}
+
+/* Compact Server Card: dot + name + group + New Terminal; endpoint + resource tools + sample
+   time; four metric cells with the value and its trend side by side. */
+html[data-nvx-host="mobile"] .nvx-server-card--compact {
+  grid-template-rows: auto auto auto;
+  row-gap: var(--nvx-space-1);
+  height: auto;
+  min-height: 108px;
+  padding: 6px var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-head,
+html[data-nvx-host="mobile"] .nvx-server-card__compact-meta {
+  display: flex;
+  gap: var(--nvx-space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-head {
+  min-height: 32px;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-head h2 {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--nvx-font-size-body);
+  font-weight: var(--nvx-font-weight-semibold);
+  line-height: 1.43;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-head .nvx-server-card__connection-dot {
+  margin-inline-end: 0;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-head .nvx-server-card__group {
+  overflow: hidden;
+  max-width: 30%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-head .nvx-server-card__new-terminal {
+  flex: none;
+  margin-inline-start: auto;
+  min-width: 0;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-meta {
+  min-height: 20px;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-meta .nvx-server-card__endpoint {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card__compact-meta .nvx-server-card__sample {
+  flex: 0 1 auto;
+  max-width: 55%;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-icon-button {
+  width: 28px;
+  height: 28px;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--nvx-space-2);
+  margin: 0;
+  padding: 4px var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: var(--nvx-space-1);
+  row-gap: 0;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-label {
+  grid-column: 1 / -1;
+  line-height: 1.2;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric strong {
+  line-height: 1.4;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric .nvx-sparkline {
+  align-self: center;
+  height: 12px;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-skeleton {
+  height: 12px;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-caption {
+  line-height: 1.8;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__network-values {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0 var(--nvx-space-2);
+  align-items: center;
+  line-height: 1.5;
+}
+
+/* ---- Hosts ---- */
+
+/* Phone list: the header carries Add Host plus one overflow menu; each Host is a dense two-line
+   row (icon | label + endpoint | Connect | row menu) and the remaining row actions live in the
+   row's action sheet. Desktop markup and styles are untouched. */
+
+html[data-nvx-host="mobile"] .hosts-page {
+  padding: var(--nvx-space-3) var(--nvx-space-4) var(--nvx-space-6);
+}
+
+html[data-nvx-host="mobile"] .hosts-page__primary-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--nvx-space-1);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+html[data-nvx-host="mobile"] .hosts-page__primary-action {
+  min-height: var(--nvx-control-height-md);
+}
+
+html[data-nvx-host="mobile"] .hosts-list {
+  margin-top: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .hosts-list__section + .hosts-list__section {
+  margin-top: var(--nvx-space-4);
+}
+
+html[data-nvx-host="mobile"] .hosts-list__section-header {
+  min-height: 28px;
+}
+
+html[data-nvx-host="mobile"] .hosts-list__section-header h2 {
+  overflow: hidden;
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-sm);
+  line-height: var(--nvx-line-height-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .hosts-list__row {
+  grid-template-columns: 32px minmax(0, 1fr) auto auto;
+  gap: var(--nvx-space-2);
+  min-height: 60px;
+  padding-block: var(--nvx-space-1);
+}
+
+html[data-nvx-host="mobile"] .hosts-list__icon {
+  width: 32px;
+  height: 32px;
+}
+
+html[data-nvx-host="mobile"] .hosts-list__identity {
+  gap: 2px;
+}
+
+/* Line 1 never wraps: classifications give way first, then the label truncates. */
+html[data-nvx-host="mobile"] .hosts-list__title-row {
+  gap: var(--nvx-space-1);
+  overflow: hidden;
+}
+
+html[data-nvx-host="mobile"] .hosts-list__identity strong {
+  flex: 0 1 auto;
+  min-width: 3em;
+  font-size: var(--nvx-font-size-body);
+  font-weight: var(--nvx-font-weight-semibold);
+  line-height: var(--nvx-line-height-sm);
+}
+
+html[data-nvx-host="mobile"] .hosts-list__favorite-mark {
+  flex: none;
+  color: var(--nvx-color-warning);
+  fill: currentcolor;
+}
+
+html[data-nvx-host="mobile"] .hosts-list__title-row .nvx-host-marker {
+  max-width: 6em;
+}
+
+html[data-nvx-host="mobile"] .hosts-list__classification {
+  flex: 0 1000 auto;
+}
+
+html[data-nvx-host="mobile"] .hosts-list__classification .nvx-status-label {
+  flex: none;
+  gap: 2px;
+  font-size: var(--nvx-font-size-xs);
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .hosts-list__endpoint {
+  font-size: var(--nvx-font-size-sm);
+  line-height: var(--nvx-line-height-xs);
+}
+
+html[data-nvx-host="mobile"] .hosts-list__connect {
+  min-height: 36px;
+  padding-inline: var(--nvx-space-3);
+}
+
+/* A dense row keeps the menu trigger at 40px rather than the generic 44px touch square. */
+html[data-nvx-host="mobile"] .hosts-list__row-menu .nvx-icon-button {
+  width: var(--nvx-control-height-md);
+  height: var(--nvx-control-height-md);
+}
+
+html[data-nvx-host="mobile"] .hosts-empty {
+  margin: var(--nvx-space-8) auto 0;
+  padding-inline: var(--nvx-space-4);
+}
+
+html[data-nvx-host="mobile"] .hosts-empty h2 {
+  margin: var(--nvx-space-3) 0 var(--nvx-space-1);
+  font-size: var(--nvx-font-size-md);
+  line-height: var(--nvx-line-height-md);
+}
+
+html[data-nvx-host="mobile"] .hosts-empty p {
+  margin: 0;
+  font-size: var(--nvx-font-size-sm);
+}
+
+/* Host dialogs in the bottom sheet: the inline create button matches the 44px touch input it sits
+   beside, and classification rows keep their two text actions on one line. */
+html[data-nvx-host="mobile"] .hosts-classification-list__create .nvx-button {
+  min-height: var(--nvx-control-height-touch);
+}
+
+html[data-nvx-host="mobile"] .hosts-classification-list__row {
+  min-height: 44px;
+}
+
+html[data-nvx-host="mobile"] .hosts-classification-list__row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Host editor inside the full-height sheet: sections become a horizontal chip row. */
+html[data-nvx-host="mobile"] .nvx-dialog .hosts-editor {
+  grid-template-columns: minmax(0, 1fr) !important;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+html[data-nvx-host="mobile"] .nvx-dialog .hosts-editor__nav {
+  display: flex;
+  gap: var(--nvx-space-1);
+  padding: var(--nvx-space-2) var(--nvx-space-3) !important;
+  overflow-x: auto;
+  border-right: 0;
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+  scrollbar-width: none;
+}
+
+html[data-nvx-host="mobile"] .nvx-dialog .hosts-editor__nav-item {
+  flex: none;
+  width: auto;
+  min-height: 36px !important;
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .nvx-dialog .hosts-editor__content {
+  padding: var(--nvx-space-4) !important;
+}
+
+/* ---- Settings ---- */
+
+/* The phone shows Settings as two levels of one route (SettingsView `detailOpen`): a grouped
+   section list, then one section under a back bar. The desktop sidebar is not rendered here.
+   Section bodies keep their desktop markup; the rules below only make them denser. Scoped
+   component rules carry one attribute selector, so every rule here keeps the html prefix plus
+   at least the same class count to win without !important. */
+
+html[data-nvx-host="mobile"] .settings-shell {
+  display: flex;
+  flex-direction: column;
+}
+
+/* List level */
+html[data-nvx-host="mobile"] .settings-mobile-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--nvx-space-3) 0 var(--nvx-space-5);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-list__title {
+  margin: 0;
+  padding: 0 var(--nvx-space-4);
+  font-size: var(--nvx-font-size-lg);
+  line-height: var(--nvx-line-height-lg);
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-list__group h2 {
+  margin: 0;
+  padding: var(--nvx-space-4) var(--nvx-space-4) var(--nvx-space-1);
+  color: var(--nvx-color-text-tertiary);
+  font-size: var(--nvx-font-size-xs);
+  font-weight: var(--nvx-font-weight-semibold);
+  line-height: var(--nvx-line-height-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-list__group ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-block: var(--nvx-border-width) solid var(--nvx-color-border);
+  background: var(--nvx-color-bg-surface);
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 16px;
+  gap: var(--nvx-space-3);
+  align-items: center;
+  width: 100%;
+  min-height: 52px;
+  padding: var(--nvx-space-2) var(--nvx-space-4);
+  border: 0;
+  background: transparent;
+  color: var(--nvx-color-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Divider inset to the text column, drawn by the lower row so the tap targets stay full width. */
+html[data-nvx-host="mobile"] .settings-mobile-list__group li + li .settings-mobile-row::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: calc(var(--nvx-space-4) + 20px + var(--nvx-space-3));
+  border-top: var(--nvx-border-width) solid var(--nvx-color-border);
+  content: "";
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row:active {
+  background: var(--nvx-color-bg-hover);
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 var(--nvx-focus-ring-width) var(--nvx-color-focus-ring);
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row__icon {
+  display: grid;
+  place-items: center;
+  color: var(--nvx-color-text-secondary);
+}
+
+/* The last opened section (aria-current) is hinted, not required to read the list. */
+html[data-nvx-host="mobile"] .settings-mobile-row--current .settings-mobile-row__icon,
+html[data-nvx-host="mobile"] .settings-mobile-row--current .settings-mobile-row__label {
+  color: var(--nvx-color-accent);
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row__copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row__title {
+  display: flex;
+  gap: var(--nvx-space-2);
+  align-items: center;
+  min-width: 0;
+  font-size: var(--nvx-font-size-body);
+  font-weight: var(--nvx-font-weight-medium);
+  line-height: var(--nvx-line-height-body);
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row__label,
+html[data-nvx-host="mobile"] .settings-mobile-row__summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row__summary {
+  color: var(--nvx-color-text-tertiary);
+  font-size: var(--nvx-font-size-xs);
+  line-height: var(--nvx-line-height-xs);
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-row__summary--success { color: var(--nvx-color-success); }
+html[data-nvx-host="mobile"] .settings-mobile-row__summary--warning { color: var(--nvx-color-warning); }
+
+html[data-nvx-host="mobile"] .settings-mobile-row__chevron {
+  color: var(--nvx-color-text-tertiary);
+}
+
+/* Detail level: back bar ("Settings") above the scrolling section; the section's own h2 is the page title. */
+html[data-nvx-host="mobile"] .settings-mobile-bar {
+  display: flex;
+  flex: none;
+  gap: var(--nvx-space-1);
+  align-items: center;
+  min-height: 48px;
+  padding: 2px var(--nvx-space-2);
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+  background: var(--nvx-color-bg-surface);
+}
+
+html[data-nvx-host="mobile"] .settings-mobile-bar h1 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-body);
+  font-weight: var(--nvx-font-weight-medium);
+  line-height: var(--nvx-line-height-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .settings-shell .settings-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--nvx-space-3) var(--nvx-space-4) var(--nvx-space-6);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+html[data-nvx-host="mobile"] .settings-detail .settings-detail__tools {
+  position: static;
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .settings-detail .settings-detail__tools:empty {
+  display: none;
+}
+
+/* Section headings: one compact title plus a short description. */
+html[data-nvx-host="mobile"] .settings-detail h2 {
+  font-size: var(--nvx-font-size-md);
+  line-height: var(--nvx-line-height-md);
+}
+
+html[data-nvx-host="mobile"] .settings-detail header p,
+html[data-nvx-host="mobile"] .settings-detail .application-preferences__heading p,
+html[data-nvx-host="mobile"] .settings-detail .terminal-appearance__heading p,
+html[data-nvx-host="mobile"] .settings-detail .settings-vault__heading p {
+  margin-top: 2px;
+  font-size: var(--nvx-font-size-sm);
+  line-height: var(--nvx-line-height-sm);
+}
+
+html[data-nvx-host="mobile"] .settings-detail .application-preferences__heading,
+html[data-nvx-host="mobile"] .settings-detail .terminal-appearance__heading,
+html[data-nvx-host="mobile"] .settings-detail .settings-vault__heading,
+html[data-nvx-host="mobile"] .settings-detail .theme-settings__heading {
+  padding-bottom: var(--nvx-space-3);
+}
+
+/* Heading rows that carry an icon action keep it on the title row (desktop narrow-width rules
+   stack them); the description then spans the full width below. */
+html[data-nvx-host="mobile"] .settings-detail .known-hosts-heading,
+html[data-nvx-host="mobile"] .settings-detail .management-heading,
+html[data-nvx-host="mobile"] .settings-detail .theme-settings__heading,
+html[data-nvx-host="mobile"] .settings-detail .nvx-shortcut-settings__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--nvx-space-2);
+  align-items: center;
+}
+
+html[data-nvx-host="mobile"] .settings-detail .known-hosts-heading > div:first-child,
+html[data-nvx-host="mobile"] .settings-detail .management-heading > div:first-child,
+html[data-nvx-host="mobile"] .settings-detail .theme-settings__heading > div:first-child,
+html[data-nvx-host="mobile"] .settings-detail .nvx-shortcut-settings__header > div:first-child {
+  display: contents;
+}
+
+html[data-nvx-host="mobile"] .settings-detail .known-hosts-heading > div:first-child > p,
+html[data-nvx-host="mobile"] .settings-detail .management-heading > div:first-child > p,
+html[data-nvx-host="mobile"] .settings-detail .theme-settings__heading > div:first-child > p,
+html[data-nvx-host="mobile"] .settings-detail .nvx-shortcut-settings__header > div:first-child > p {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
+html[data-nvx-host="mobile"] .settings-detail .management-heading__actions,
+html[data-nvx-host="mobile"] .settings-detail .nvx-shortcut-settings__actions {
+  flex: none;
+  flex-wrap: nowrap;
+  gap: var(--nvx-space-1);
+}
+
+html[data-nvx-host="mobile"] .settings-detail .theme-settings__mode {
+  flex-direction: column;
+  gap: var(--nvx-space-2);
+  align-items: stretch;
+}
+
+/* Application preferences: icon, label and select in a dense block. */
+html[data-nvx-host="mobile"] .application-preferences__controls .application-preference {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  min-height: 0;
+  padding: 10px 0;
+}
+
+html[data-nvx-host="mobile"] .application-preferences__controls .application-preference__identity {
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .application-preferences__controls .application-preference__identity > :first-child {
+  width: 32px;
+  height: 32px;
+  padding: 6px;
+}
+
+/* Terminal appearance: one column of short scheme cards, two-column typography fields. */
+html[data-nvx-host="mobile"] .terminal-appearance .terminal-scheme-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--nvx-space-1);
+  margin-top: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .terminal-appearance .terminal-scheme {
+  grid-template-columns: 72px minmax(0, 1fr);
+  min-height: 52px;
+}
+
+html[data-nvx-host="mobile"] .terminal-appearance .terminal-scheme__preview {
+  min-height: 42px;
+  padding: var(--nvx-space-1);
+  font-size: 9px;
+}
+
+html[data-nvx-host="mobile"] .terminal-appearance .terminal-scheme__copy small {
+  margin-top: 0;
+}
+
+html[data-nvx-host="mobile"] .terminal-appearance .terminal-typography {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html[data-nvx-host="mobile"] .terminal-appearance .terminal-typography__icon {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .terminal-appearance .terminal-typography__controls {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .terminal-appearance .terminal-appearance__custom-action {
+  flex-wrap: wrap;
+  gap: var(--nvx-space-2);
+}
+
+/* Vault and offline backup. */
+html[data-nvx-host="mobile"] .settings-vault .settings-vault__heading,
+html[data-nvx-host="mobile"] .settings-vault .vault-controls {
+  flex-direction: column;
+  gap: var(--nvx-space-2);
+  align-items: stretch;
+}
+
+html[data-nvx-host="mobile"] .settings-vault .settings-vault__heading .nvx-status-label {
+  align-self: flex-start;
+}
+
+html[data-nvx-host="mobile"] .settings-vault .settings-vault__body {
+  padding-top: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .settings-vault .settings-vault__backup {
+  margin-top: var(--nvx-space-4);
+  padding-top: var(--nvx-space-4);
+}
+
+html[data-nvx-host="mobile"] .settings-vault__backup .offline-backup header h3 {
+  font-size: var(--nvx-font-size-md);
+  line-height: var(--nvx-line-height-md);
+}
+
+html[data-nvx-host="mobile"] .settings-vault__backup .offline-backup__panel {
+  padding: var(--nvx-space-3);
+}
+
+/* About: smaller identity block. */
+html[data-nvx-host="mobile"] .settings-detail .about-settings__hero {
+  gap: var(--nvx-space-3);
+  padding-bottom: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .settings-detail .about-settings__icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 11px;
+}
+
+html[data-nvx-host="mobile"] .settings-detail .about-settings h2 {
+  font-size: var(--nvx-font-size-lg);
+  line-height: var(--nvx-line-height-lg);
+}
+
+html[data-nvx-host="mobile"] .settings-detail .about-settings__version {
+  margin-top: var(--nvx-space-1);
+}
+
+/* ---- Terminal launcher / welcome ----
+   Compact heading, Quick Connect directly below it, dense method rows and recent-host rows. */
+
+html[data-nvx-host="mobile"] .terminal-launcher {
+  grid-template-columns: minmax(0, 1fr);
+  padding: var(--nvx-space-3) var(--nvx-space-4) var(--nvx-space-4);
+}
+
+/* The launcher hosts (empty workspace, launcher Pane) keep their desktop gutters; on the phone the
+   launcher carries its own 16px gutter instead. */
+html[data-nvx-host="mobile"] .ssh-terminal-empty,
+html[data-nvx-host="mobile"] .terminal-pane-launcher__body {
+  padding: 0;
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__start {
+  padding: 0;
+  border-right: 0;
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__heading h1 {
+  font-size: var(--nvx-font-size-lg);
+  line-height: var(--nvx-line-height-lg);
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__heading p {
+  margin-top: 2px;
+  font-size: var(--nvx-font-size-sm);
+  line-height: var(--nvx-line-height-sm);
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__quick {
+  margin-top: var(--nvx-space-4);
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__quick-row {
+  margin-top: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__methods {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__method {
+  min-height: 48px;
+  padding: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__recent {
+  padding: var(--nvx-space-5) 0 var(--nvx-space-4);
+}
+
+html[data-nvx-host="mobile"] .terminal-launcher__host-list {
+  margin-top: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .ssh-terminal-recent__item {
+  min-height: 52px;
+}
+
+/* Pane search tool spans the Pane width. */
+html[data-nvx-host="mobile"] .terminal-tools {
+  width: calc(100% - 16px);
+}
+
+/* Phones never split a Tab. A restored multi-Pane Tab gets a 40px Pane switcher above the single
+   visible Pane in every orientation (the split tree keeps every Pane mounted and shows the active
+   one at full size). */
+html[data-nvx-host="mobile"] .terminal-workspace {
+  display: flex;
+  flex-direction: column;
+}
+
+html[data-nvx-host="mobile"] .terminal-workspace > .nvx-terminal-split-tree {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+html[data-nvx-host="mobile"] .terminal-workspace__pane-switch {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--nvx-space-1);
+  padding: var(--nvx-space-1) var(--nvx-space-2);
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+  background: var(--nvx-color-bg-surface);
+}
+
+html[data-nvx-host="mobile"] .terminal-workspace__pane-switch::-webkit-scrollbar {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .terminal-workspace__pane-tab {
+  flex: 1 0 auto;
+  min-width: 0;
+  max-width: 60%;
+  min-height: 32px;
+  padding: 0 var(--nvx-space-3);
+  overflow: hidden;
+  border: var(--nvx-border-width) solid transparent;
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-subtle);
+  color: var(--nvx-color-text-secondary);
+  font: inherit;
+  font-size: var(--nvx-font-size-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+html[data-nvx-host="mobile"] .terminal-workspace__pane-tab.is-active {
+  border-color: var(--nvx-color-accent);
+  background: var(--nvx-color-accent-soft);
+  color: var(--nvx-color-accent);
+}
+
+html[data-nvx-host="mobile"] .terminal-workspace__pane-tab:focus-visible {
+  outline: var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---- SFTP ---- */
+
+/* Top bar: the "New file tab" action keeps only its icon, and the tab title truncates instead of
+   pushing the transfer toggle under the pane menu. */
+html[data-nvx-host="mobile"] .sftp-view__topbar {
+  gap: var(--nvx-space-2);
+  padding-inline: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .sftp-view__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__title strong {
+  flex: 0 1 auto;
+  min-width: 5ch;
+  max-width: 100%;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__topbar-address {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__new-tab {
+  width: 44px;
+  min-width: 44px;
+  padding-inline: 0;
+  justify-content: center;
+  font-size: 0;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__new-tab > svg {
+  font-size: 1rem;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__transfer-activity {
+  margin-inline-start: 0;
+}
+
+/* The transfer panel anchors to the toggle on desktop; on phones it is a sheet above the navigation bar. */
+html[data-nvx-host="mobile"] .sftp-view__transfers,
+html[data-nvx-host="mobile"] .sftp-view__transfers.is-empty {
+  position: fixed;
+  /* Sits above the bottom navigation (and the soft keyboard when it is open). */
+  inset: auto 0 calc(var(--nvx-mobile-bottom-inset, 0px) + var(--nvx-mobile-sheet-bottom, 0px)) 0;
+  z-index: calc(var(--nvx-mobile-overlay-z, calc(var(--nvx-z-dialog) + 1)) + 1);
+  width: auto;
+  max-height: min(70vh, calc(var(--nvx-mobile-viewport-height, 100vh) - 120px));
+  padding-bottom: calc(var(--nvx-space-3) + env(safe-area-inset-bottom, 0px));
+  border-inline: 0;
+  border-bottom: 0;
+  border-radius: var(--nvx-radius-sheet, 20px) var(--nvx-radius-sheet, 20px) 0 0;
+  animation: nvx-mobile-sheet-enter 0.24s ease-out;
+}
+
+/* Phone top area: one 48px app-bar row (selection / Pane switch / identity + transfers + actions)
+   and one 40px command row for the single visible Pane in every orientation; no per-Pane header,
+   no column header. */
+html[data-nvx-host="mobile"] .sftp-view__topbar--mobile {
+  gap: var(--nvx-space-1);
+  min-height: 48px;
+  padding: 0 var(--nvx-space-1) 0 var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .sftp-view__topbar--mobile .sftp-view__transfer-activity {
+  margin-inline-start: auto;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__topbar--mobile .sftp-view__transfer-toggle {
+  min-width: 44px;
+  padding-inline: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .sftp-view__title--mobile {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--nvx-space-2);
+  align-items: center;
+  min-width: 0;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__title--mobile strong {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__mobile-selection {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--nvx-space-1);
+  align-items: center;
+  min-width: 0;
+  color: var(--nvx-color-accent);
+}
+
+html[data-nvx-host="mobile"] .sftp-view__mobile-selection strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The Pane stacks its rows; the file list takes the rest and scrolls. */
+html[data-nvx-host="mobile"] .sftp-view__pane {
+  display: flex;
+  flex-direction: column;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__pane > .sftp-view__commandbar {
+  flex: 0 0 auto;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__pane > .sftp-view__entries {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__commandbar {
+  gap: 2px;
+  min-height: 40px;
+  padding: 2px var(--nvx-space-1);
+}
+
+html[data-nvx-host="mobile"] .sftp-view__command-separator {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__commandbar .nvx-icon-button--sm {
+  width: 36px;
+  height: 36px;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__command-path {
+  min-width: 72px;
+  height: 32px;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__entries > button {
+  min-height: 44px;
+}
+
+/* Segmented pane switch inside the top bar: one Pane is visible at a time in portrait. */
+html[data-nvx-host="mobile"] .sftp-view__mobile-panes {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--nvx-space-1);
+  min-width: 0;
+  padding: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  background: transparent;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__mobile-panes::-webkit-scrollbar {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__mobile-pane-tab {
+  display: inline-flex;
+  flex: 1 1 auto;
+  gap: var(--nvx-space-1);
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 var(--nvx-space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: var(--nvx-border-width) solid transparent;
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-subtle);
+  color: var(--nvx-color-text-secondary);
+  font: inherit;
+  font-size: var(--nvx-font-size-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__mobile-pane-tab.is-active {
+  border-color: var(--nvx-color-accent);
+  background: var(--nvx-color-accent-soft);
+  color: var(--nvx-color-accent);
+}
+
+html[data-nvx-host="mobile"] .sftp-view__mobile-pane-tab:focus-visible {
+  outline: var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* The command bar carries the phone transfer actions; keep every control reachable without clipping. */
+html[data-nvx-host="mobile"] .sftp-view__commandbar {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__commandbar::-webkit-scrollbar {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__command-path {
+  flex: 1 0 160px;
+}
+
+html[data-nvx-host="mobile"] .sftp-view__mobile-transfer-action {
+  color: var(--nvx-color-accent);
+}
+
+html[data-nvx-host="mobile"] .file-welcome__choices,
+html[data-nvx-host="mobile"] .file-welcome__hosts {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* Welcome page: left-aligned compact heading; the two start choices are rows without the
+   preview art, followed directly by the saved-host list. */
+html[data-nvx-host="mobile"] .file-welcome__content {
+  padding: var(--nvx-space-3) var(--nvx-space-4) var(--nvx-space-6);
+}
+
+html[data-nvx-host="mobile"] .file-welcome__header {
+  margin-bottom: var(--nvx-space-4);
+  text-align: start;
+}
+
+html[data-nvx-host="mobile"] .file-welcome__header h1 {
+  font-size: var(--nvx-font-size-lg);
+  line-height: var(--nvx-line-height-lg);
+}
+
+html[data-nvx-host="mobile"] .file-welcome__header p {
+  margin-top: 2px;
+  font-size: var(--nvx-font-size-sm);
+  line-height: var(--nvx-line-height-sm);
+}
+
+html[data-nvx-host="mobile"] .file-welcome__choices {
+  gap: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .file-welcome__choice {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  min-height: 0;
+  padding: var(--nvx-space-3) var(--nvx-space-4);
+  text-align: start;
+}
+
+html[data-nvx-host="mobile"] .file-welcome__preview,
+html[data-nvx-host="mobile"] .file-welcome__preview-labels {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .file-welcome__choice-title {
+  font-size: var(--nvx-font-size-body);
+  line-height: var(--nvx-line-height-body);
+}
+
+html[data-nvx-host="mobile"] .file-welcome__choice-description {
+  font-size: var(--nvx-font-size-xs);
+  line-height: var(--nvx-line-height-xs);
+}
+
+html[data-nvx-host="mobile"] .file-welcome__hosts {
+  margin-top: var(--nvx-space-5);
+  padding-top: var(--nvx-space-4);
+}
+
+html[data-nvx-host="mobile"] .file-welcome__host {
+  min-height: 52px;
+  padding: var(--nvx-space-2) var(--nvx-space-3);
+}
+
+/* ---- Plugin tool panels ----
+   Desktop docks the panel beside the terminal (or floats it over page content); on the phone every
+   tool panel is a bottom sheet above the navigation bar and the soft keyboard, with a full scrim.
+   The terminal-page host (`.ssh-terminal-page__tools`) is an absolutely positioned, pointer-transparent
+   overlay on narrow layouts, so the sheet uses fixed positioning against the viewport instead. */
+html[data-nvx-host="mobile"] .plugin-tool-panel,
+html[data-nvx-host="mobile"] .plugin-tool-panel.is-floating {
+  position: fixed;
+  z-index: calc(var(--nvx-mobile-overlay-z, calc(var(--nvx-z-dialog) + 1)) + 1);
+  inset: auto 0 calc(var(--nvx-mobile-bottom-inset, 0px) + var(--nvx-mobile-sheet-bottom, 0px)) 0;
+  width: auto;
+  height: auto;
+  max-height: min(72vh, calc(var(--nvx-mobile-viewport-height, 100vh) - var(--nvx-mobile-header-height) - env(safe-area-inset-top, 0px) - 16px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  border: 0;
+  border-radius: var(--nvx-radius-sheet) var(--nvx-radius-sheet) 0 0;
+  box-shadow: var(--nvx-shadow-overlay);
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html[data-nvx-host="mobile"] .plugin-tool-panel {
+    animation: nvx-mobile-sheet-enter var(--nvx-motion-overlay) ease-out;
+  }
+}
+
+html[data-nvx-host="mobile"] .plugin-tool-panel__resize {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .plugin-tool-panel__header {
+  padding-top: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .plugin-tool-panel__picker > button {
+  min-height: var(--nvx-mobile-touch-target);
+}
+
+html[data-nvx-host="mobile"] .plugin-tool-panel__choices [role="option"] {
+  min-height: var(--nvx-mobile-touch-target);
+}
+
+html[data-nvx-host="mobile"] .plugin-tool-panel__scrim,
+html[data-nvx-host="mobile"] .plugin-tool-panel__scrim.is-floating {
+  display: block;
+  position: fixed;
+  z-index: var(--nvx-mobile-overlay-z, calc(var(--nvx-z-dialog) + 1));
+  inset: 0;
+  background: var(--nvx-mobile-scrim);
+  pointer-events: auto;
+}
+
+/* ---- Tunnels / Plugins ---- */
+
+html[data-nvx-host="mobile"] .tunnels-view__workspace {
+  padding: var(--nvx-space-4);
+}
+
+html[data-nvx-host="mobile"] .tunnels-view__detail-grid,
+html[data-nvx-host="mobile"] .tunnels-view__endpoint-grid {
+  grid-template-columns: 1fr;
+}
+
+html[data-nvx-host="mobile"] .tunnels-view__filters {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .tunnels-view__search {
+  grid-column: 1 / -1;
+}
+
+/* The rule editor is docked beside the list on desktop; on the phone it is a full-height layer
+   between the top bar and the bottom navigation (TunnelsView registers a back target while it
+   is open). The list keeps the single column underneath. */
+html[data-nvx-host="mobile"] .tunnels-view--editor-open {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html[data-nvx-host="mobile"] .tunnels-view__editor {
+  position: fixed;
+  z-index: var(--nvx-z-sticky);
+  inset: calc(var(--nvx-mobile-header-height) + env(safe-area-inset-top, 0px)) 0 var(--nvx-mobile-bottom-inset, 0px);
+  grid-row: auto;
+  height: auto;
+  border-width: 0;
+  background: var(--nvx-color-bg-surface);
+}
+
+html[data-nvx-host="mobile"] .tunnels-view__editor-body {
+  overflow-y: auto;
+  padding: var(--nvx-space-4);
+}
+
+/* Plugins page: compact section headings and summary chips. */
+html[data-nvx-host="mobile"] .plugins-page__topbar {
+  min-height: 48px;
+}
+
+html[data-nvx-host="mobile"] .plugins-management {
+  padding: var(--nvx-space-3) var(--nvx-space-4) var(--nvx-space-5);
+}
+
+html[data-nvx-host="mobile"] .plugins-management .section-heading {
+  gap: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .plugins-management .section-heading h2 {
+  font-size: var(--nvx-font-size-md);
+  line-height: var(--nvx-line-height-md);
+}
+
+html[data-nvx-host="mobile"] .plugins-management .section-heading p {
+  font-size: var(--nvx-font-size-sm);
+  line-height: var(--nvx-line-height-sm);
+}
+
+html[data-nvx-host="mobile"] .plugin-summary > span {
+  min-height: 28px;
+  padding: 0 var(--nvx-space-2);
+  font-size: var(--nvx-font-size-xs);
+}
+
+/* ---- New page ---- */
+
+html[data-nvx-host="mobile"] .new-workspace__content {
+  padding: var(--nvx-space-3) var(--nvx-space-4) var(--nvx-space-5);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__header {
+  gap: var(--nvx-space-3);
+  margin-bottom: var(--nvx-space-4);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__header h1 {
+  margin: 0;
+  font-size: var(--nvx-font-size-lg);
+  line-height: var(--nvx-line-height-lg);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__header p {
+  font-size: var(--nvx-font-size-sm);
+  line-height: var(--nvx-line-height-sm);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__recent {
+  margin-bottom: var(--nvx-space-5);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__recent-heading {
+  gap: var(--nvx-space-2);
+  margin-bottom: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__recent-heading h2 {
+  font-size: var(--nvx-font-size-md);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__recent-hint {
+  display: none;
+}
+
+html[data-nvx-host="mobile"] .new-workspace__recent-row,
+html[data-nvx-host="mobile"] .new-workspace__skeleton-row {
+  min-height: 56px;
+}
+
+html[data-nvx-host="mobile"] .new-workspace__tile {
+  flex-wrap: wrap;
+  padding: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__tile-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+html[data-nvx-host="mobile"] .new-workspace__tile-link {
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .new-workspace__empty-actions {
+  flex-wrap: wrap;
+}
+
+html[data-nvx-host="mobile"] .new-workspace__tiles {
+  grid-template-columns: 1fr;
+}
+
+html[data-nvx-host="mobile"] .new-workspace__recent-row {
+  grid-template-columns: 28px minmax(0, 1fr) 20px;
+  padding: 0 var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .new-workspace__used { display: none; }
+
+html[data-nvx-host="mobile"] .new-workspace__row-actions {
+  grid-column: 1 / -1;
+  padding: var(--nvx-space-2) 0 var(--nvx-space-3);
+}
+
+/* ---- Page header ----
+   One row on the phone: a compact title on the left, the page's primary action (and overflow
+   menu) on the right. Breadcrumb and description are not rendered on the phone. */
+
+html[data-nvx-host="mobile"] .nvx-page-header--compact {
+  margin-bottom: var(--nvx-space-3);
+}
+
+html[data-nvx-host="mobile"] .nvx-page-header--compact .nvx-page-header__row {
+  gap: var(--nvx-space-3);
+  align-items: center;
+  min-height: 40px;
+}
+
+html[data-nvx-host="mobile"] .nvx-page-header--compact h1 {
+  margin: 0;
+  font-size: var(--nvx-font-size-lg);
+  line-height: var(--nvx-line-height-lg);
+}
+
+html[data-nvx-host="mobile"] .nvx-page-header--compact .nvx-page-header__actions {
+  flex: none;
+  gap: var(--nvx-space-1);
+}

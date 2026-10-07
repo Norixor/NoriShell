@@ -1,7 +1,8 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { requestWindowClose } from "./core-api/client";
+import { hasNativeWindowChrome } from "./platform-host";
 
 export type WindowAction = "close" | "minimize" | "toggleMaximize" | "toggleFullscreen";
 
@@ -13,13 +14,13 @@ export interface WindowsCaptionHitRegion {
 }
 
 export async function getNativeControlsInset(): Promise<number | null> {
-  if (!isTauri()) return null;
+  if (!hasNativeWindowChrome()) return null;
   const inset = await invoke<number | null>("window_native_controls_inset");
   return typeof inset === "number" && Number.isFinite(inset) && inset > 0 ? inset : null;
 }
 
 export async function setNativeHeaderHeight(height: number): Promise<void> {
-  if (!isTauri() || !Number.isFinite(height) || height <= 0) return;
+  if (!hasNativeWindowChrome() || !Number.isFinite(height) || height <= 0) return;
   await invoke("window_set_native_header_height", { height });
 }
 
@@ -53,7 +54,7 @@ export function physicalWindowsCaptionHitRegion(
 export async function setWindowsMaximizeHitRegion(
   region: WindowsCaptionHitRegion | null,
 ): Promise<void> {
-  if (!isTauri()) return;
+  if (!hasNativeWindowChrome()) return;
   await invoke("window_set_windows_maximize_hit_region", { region });
 }
 
@@ -64,7 +65,7 @@ export async function setWindowsMaximizeHitRegion(
  * the Windows caption component and by the shared draggable header gesture.
  */
 export async function performWindowAction(action: WindowAction): Promise<void> {
-  if (!isTauri()) return;
+  if (!hasNativeWindowChrome()) return;
   if (action === "close") {
     await requestWindowClose();
     return;

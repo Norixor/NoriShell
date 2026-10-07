@@ -15,6 +15,7 @@ import type { ShortcutCommandId } from "../shortcuts";
 import type { TerminalTabHandoffSnapshot } from "../terminal-workspace-handoff";
 import type { TerminalRestoreSeed } from "../workspace-tab-terminal-restore";
 import type { FileTabHandoffSnapshot } from "../views/fileTabHandoffSnapshot";
+import type { WorkspaceTabStateTone, WorkspaceTerminalKind } from "../workspace-tab-state-tone";
 
 export type WorkspacePageType = "newPage" | "knownHosts" | "sshIdentities" | "plugin";
 type BuiltinWorkspacePageType = Exclude<WorkspacePageType, "plugin">;
@@ -27,6 +28,9 @@ export interface TerminalHeaderTabSnapshot {
   hostId?: string | null;
   completionCount?: number;
   bellAttention?: boolean;
+  /** Resource type and semantic tone of the active Pane; the phone shell shows them as icon and status dot. */
+  terminalKind?: WorkspaceTerminalKind;
+  stateTone?: WorkspaceTabStateTone;
 }
 
 export interface WorkspacePageTab {
@@ -59,6 +63,10 @@ export interface TerminalHeaderController {
   }): Promise<void>;
   createInitialPluginProtocolTab?(id: string, request: { launchId: string; revision: string; paneId: string }): Promise<void>;
   createInitialApprovedPluginChannel?(id: string, payload: PluginApprovedTerminalChannelLaunch): Promise<void>;
+  /** Single-document hosts: open every pending Core plugin protocol launch as its own Tab. */
+  reconcilePluginProtocolLaunches?(): Promise<void>;
+  /** Single-document hosts: open a Core-approved plugin terminal channel in a new Tab. */
+  openApprovedPluginChannel?(payload: PluginApprovedTerminalChannelLaunch): Promise<void>;
   /** Restore this child WebView's first Tab from a startup seed planned by the main shell. */
   restoreInitialTab?(id: string, seed: TerminalRestoreSeed): Promise<void>;
   /** Read the Tab's bounded recovery projection: layout plus live Session identities. */
@@ -78,6 +86,8 @@ export interface TerminalHeaderController {
   /** A failed resource may have no PTY; focus only the existing local session and generation. */
   focusLocalSession(sessionId: LocalSessionId, generation: WireSequence): boolean;
   activate(tabId: string): void;
+  /** Single-document hosts: create and activate a blank or local Terminal Tab in this view. */
+  createTab?(behavior: "welcome" | "local"): void;
   close(tabId: string): boolean;
   closeMany(tabIds: readonly string[], confirmed?: boolean): boolean;
   quickConnect(target?: string): boolean;
@@ -95,6 +105,7 @@ export interface DesktopHeaderTabSnapshot {
   groupId: string;
   label: string;
   stateLabel: string;
+  stateTone?: WorkspaceTabStateTone;
 }
 export interface FileHeaderTab {
   groupId: string;
@@ -114,6 +125,8 @@ export interface FileHeaderController {
 export interface DesktopHeaderController {
   activate(tabId: string): void;
   beginOpenProfile(profileId: string): Promise<void>;
+  /** Single-document hosts: open a saved profile as a new Desktop Tab owned by this document. */
+  openProfile?(profileId: string): Promise<void>;
   close(tabId: string): Promise<void>;
   deactivate(): void;
   isBusy(): boolean;

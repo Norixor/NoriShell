@@ -3,6 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal, type IBufferLine, type IDecoration, type IDisposable, type ILink, type ILinkProvider, type IMarker } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { X } from "lucide-vue-next";
 import { nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -14,6 +15,25 @@ import { terminalFontCssFamily } from "../../terminal-theme";
 import { createTerminalHighlighter, type HighlightSuspensionReason } from "../../terminal/xtermHighlighting";
 import { TerminalDraftTracker } from "../../terminal/draft";
 import { captureTerminalInput } from "../../terminal-input-target";
+import { isMobileLayout } from "../../platform-host";
+import { useMobileImeVisible } from "../mobile/useMobileLandscape";
+import { applyStickyModifiers, stickyAlt, stickyCtrl } from "../../terminal/extra-keys";
+import { createMobileImeInput, type MobileImeInputController } from "../../terminal/mobile-ime-input";
+import { extendRange, wordColumnsAt, xtermSelectArgs, type LinearCellRange } from "../../terminal/touch-selection";
+import {
+  TouchLineAccumulator,
+  TouchScrollTracker,
+  classifyTouchDrag,
+  flingStep,
+  shouldFling,
+  type TouchDragAxis,
+} from "../../terminal/touch-scroll";
+import {
+  PinchFontSizeTracker,
+  nextTouchGesturePhase,
+  touchSpan,
+  type TouchGesturePhase,
+} from "../../terminal/touch-pinch";
 import { wordSeparatorForDoubleClickSelection } from "../../terminal/interaction-preferences";
 import { MacOptionKeyTracker, isPlainBackspace } from "../../terminal/keyboard-compatibility";
 import { TerminalBellAudio, type TerminalBellAudioAvailability } from "../../terminal/terminal-bell";
@@ -21,6 +41,7 @@ import { geometryForOutput, recordOutputGeometry, type TerminalOutputGeometryMar
 import { findTerminalHttpLinks, openSafeTerminalHttpUrl, safeTerminalHttpUrl, terminalLinkModifierPressed } from "../../terminal/terminal-links";
 import { usePopoverMenu } from "../ui/usePopoverMenu";
 import NvxTerminalPasteGuard from "./NvxTerminalPasteGuard.vue";
+import { NvxIcon } from "../ui";
 
 const props = defineProps<{
   readOnly: boolean;
@@ -100,10 +121,654 @@ let lastBellFeedbackAt = 0;
 let bellAudioAvailability: TerminalBellAudioAvailability | null = null;
 let hoveredLinkUrl: string | null = null;
 let bellAttentionActive = false;
+let mobileIme: MobileImeInputController | null = null;
+let selectionChangeDisposable: IDisposable | null = null;
+// Phone touch selection: the pending long-press, and the word it anchored while the same touch drags.
+let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+let touchOrigin: { identifier: number; x: number; y: number } | null = null;
+let touchSelectionAnchor: LinearCellRange | null = null;
+let touchSelectedRange: LinearCellRange | null = null;
+let discardingImeText = false;
+let touchSelectionDragging = false;
+// Phone touch scrolling: the locked axis of the current touch, the textarea `inputmode`
+// it found (restored when the touch turns out to be a drag), and the running fling.
+let touchDragAxis: TouchDragAxis = "pending";
+let touchInputModeBefore: string | null = null;
+let touchStoppedFling = false;
+const touchScrollTracker = new TouchScrollTracker();
+const touchScrollLines = new TouchLineAccumulator();
+let touchFlingFrame = 0;
+let touchFlingVelocity = 0;
+let touchFlingLastAt = 0;
+// Phone pinch zoom: the gesture phase (by finger count), the two fingers being followed,
+// the size shown while pinching (applied at most once per animation frame) and the
+// latest persist attempt, so an older failed save cannot undo a newer pinch.
+let touchGesturePhase: TouchGesturePhase = "idle";
+let pinchFingers: [number, number] | null = null;
+const pinchTracker = new PinchFontSizeTracker();
+let pinchPreviewSize: number | null = null;
+let pinchFrame = 0;
+let pinchCommitSeq = 0;
+const pinchIndicatorSize = ref<number | null>(null);
+// When the last plain tap landed on a still read-only view (input lease pending), so the
+// soft keyboard must be opened once the lease arrives. 0 when no such tap is pending.
+let mobileKeyboardTapAt = 0;
+const mobileSelectionOpen = ref(false);
+const mobileSelectionText = ref("");
 const optionKeyTracker = new MacOptionKeyTracker();
 const bellAudio = new TerminalBellAudio();
 
 function isMacPlatform() { return detectDesktopPlatform() === "macos"; }
+const mobileLayout = isMobileLayout();
+
+/**
+ * Android soft keyboards must treat the hidden xterm textarea as a terminal, not a
+ * sentence field: no auto-capitalisation, no autocorrect, no suggestions, and an
+ * Enter key hint rather than a "Go" action. The soft keyboard itself is governed by
+ * `inputmode` (see `setMobileInputMode`): it starts as `none`, so the many
+ * programmatic focus calls (Pane activation, dialog and menu focus restoration,
+ * paste guard) never open the keyboard; only a deliberate tap on the terminal
+ * surface switches it to `text`.
+ */
+function applyMobileTextareaAttributes(textarea: HTMLTextAreaElement | undefined) {
+  if (!textarea) return;
+  textarea.setAttribute("autocapitalize", "off");
+  textarea.setAttribute("autocorrect", "off");
+  textarea.setAttribute("autocomplete", "off");
+  textarea.setAttribute("spellcheck", "false");
+  textarea.setAttribute("enterkeyhint", "enter");
+  textarea.setAttribute("inputmode", "none");
+}
+
+/**
+ * The soft-keyboard state machine of the helper textarea. Android opens the IME
+ * whenever an editable element gains focus (also programmatically) and never for
+ * `inputmode="none"`. `text` is set only by a touch on the terminal surface, right
+ * before xterm focuses the textarea on the synthesized mousedown; `none` returns
+ * whenever focus leaves the textarea or the Activity reports the keyboard hidden, so
+ * toolbar buttons, popovers, sheets and the Tab switcher can restore focus to the
+ * terminal without raising the keyboard. Hardware keyboards are unaffected.
+ */
+function setMobileInputMode(mode: "text" | "none") {
+  const textarea = terminal?.textarea;
+  if (textarea && textarea.getAttribute("inputmode") !== mode) textarea.setAttribute("inputmode", mode);
+}
+
+/** The Activity's inset fact; `false` also where the signal does not exist (then only taps ever open the keyboard). */
+const mobileImeVisible = useMobileImeVisible();
+
+function applicationCursorKeys() {
+  return terminal?.modes.applicationCursorKeysMode ?? false;
+}
+
+function backspaceSequence() {
+  return preferences.resolvedKeyboard(props.hostId).backspaceMode === "bs" ? "\b" : "\x7f";
+}
+
+/**
+ * Committed soft-keyboard text enters xterm's normal user-input path, so the
+ * sticky helper modifiers, draft observation, read-only gate and input ownership
+ * all apply exactly as for a physical key.
+ */
+function deliverMobileText(data: string) {
+  if (!terminal || discardingImeText) return;
+  if (canRequestReconnect()) {
+    // A disconnected Pane treats typing as a recovery gesture and never replays the text.
+    emit("reconnectRequest");
+    return;
+  }
+  if (props.readOnly) return;
+  const characters = Array.from(data);
+  // Printable commits are fed per character so Shell draft observation sees ordinary typing;
+  // a pending sticky modifier keeps the whole commit together, as on desktop.
+  if (characters.length > 1 && !stickyCtrl.value && !stickyAlt.value && /^[\x20-\x7e]+$/.test(data)) {
+    for (const character of characters) terminal.input(character, true);
+  } else {
+    terminal.input(data, true);
+  }
+}
+
+/**
+ * IME text that is really a paste (a keyboard clipboard chip, drag and drop, any
+ * multi-line commit) takes the same guarded path as a paste event: multi-line
+ * confirmation, bracketed paste and the captured input ticket.
+ */
+function deliverMobilePaste(text: string) {
+  if (!terminal || discardingImeText || !text) return;
+  if (canRequestReconnect()) {
+    // Like a paste shortcut on a disconnected Pane: a recovery gesture whose payload is never kept.
+    emit("reconnectRequest");
+    return;
+  }
+  if (props.readOnly) return;
+  void pasteGuard.value?.requestPaste(text);
+}
+
+/**
+ * When the soft keyboard opens (most visibly in landscape), Android scrolls the
+ * focused helper textarea into view by scrolling `overflow: hidden` ancestors such
+ * as `.xterm` and the page container, which pushes the rendered rows above the
+ * visible area. The terminal fits itself to the visible viewport instead, so on
+ * phones those ancestors are returned to their origin while this terminal owns
+ * keyboard focus. Unfocused (e.g. kept-alive) views never touch shared ancestors.
+ */
+let mobileScrollResetFrame = 0;
+function terminalOwnsKeyboardFocus() {
+  return Boolean(terminal?.textarea) && document.activeElement === terminal?.textarea;
+}
+
+function resetMobileFocusScroll() {
+  mobileScrollResetFrame = 0;
+  const root = viewRoot.value;
+  if (!root || !terminalOwnsKeyboardFocus()) return;
+  const elements: HTMLElement[] = [];
+  if (terminal?.element) elements.push(terminal.element);
+  if (host.value) elements.push(host.value);
+  for (let element: HTMLElement | null = root; element && element !== document.body && element !== document.documentElement; element = element.parentElement) {
+    elements.push(element);
+  }
+  for (const element of elements) {
+    if (element.scrollTop) element.scrollTop = 0;
+    if (element.scrollLeft) element.scrollLeft = 0;
+  }
+}
+
+function scheduleMobileFocusScrollReset() {
+  if (mobileScrollResetFrame) return;
+  mobileScrollResetFrame = requestAnimationFrame(resetMobileFocusScroll);
+}
+
+function handleMobileAncestorScroll(event: Event) {
+  const target = event.target;
+  const root = viewRoot.value;
+  if (!(target instanceof HTMLElement) || !root) return;
+  if (target === terminal?.element || target === host.value || target.contains(root)) scheduleMobileFocusScrollReset();
+}
+
+function handleMobileViewportChange() {
+  if (!terminalOwnsKeyboardFocus()) return;
+  scheduleMobileFocusScrollReset();
+  // Fit to the new visible height so the cursor row stays on screen.
+  scheduleFit();
+}
+
+function terminalScreenGeometry() {
+  const screen = terminal?.element?.querySelector<HTMLElement>(".xterm-screen");
+  if (!terminal || !screen || !terminal.cols || !terminal.rows) return null;
+  const bounds = screen.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return null;
+  return { bounds, cellWidth: bounds.width / terminal.cols, cellHeight: bounds.height / terminal.rows };
+}
+
+/** Shows IME composition text at the cursor in xterm's own composition element. */
+function showCompositionPreview(text: string | null) {
+  const view = terminal?.element?.querySelector<HTMLElement>(".composition-view");
+  if (!terminal || !view) return;
+  if (text === null) {
+    view.classList.remove("active");
+    view.textContent = "";
+    return;
+  }
+  view.textContent = text;
+  view.classList.toggle("active", text.length > 0);
+  const geometry = terminalScreenGeometry();
+  const buffer = terminal.buffer.active;
+  if (!geometry) return;
+  const cursorRow = buffer.baseY + buffer.cursorY - buffer.viewportY;
+  view.style.left = `${Math.min(buffer.cursorX, terminal.cols - 1) * geometry.cellWidth}px`;
+  view.style.top = `${Math.max(0, Math.min(cursorRow, terminal.rows - 1)) * geometry.cellHeight}px`;
+  view.style.height = `${geometry.cellHeight}px`;
+  view.style.lineHeight = `${geometry.cellHeight}px`;
+  view.style.fontFamily = String(terminal.options.fontFamily ?? "");
+  view.style.fontSize = `${terminal.options.fontSize ?? ui.terminalFontSize}px`;
+}
+
+function linearCellAt(clientX: number, clientY: number) {
+  const geometry = terminalScreenGeometry();
+  if (!terminal || !geometry) return null;
+  const column = Math.max(0, Math.min(terminal.cols - 1, Math.floor((clientX - geometry.bounds.left) / geometry.cellWidth)));
+  const viewportRow = Math.max(0, Math.min(terminal.rows - 1, Math.floor((clientY - geometry.bounds.top) / geometry.cellHeight)));
+  const row = terminal.buffer.active.viewportY + viewportRow;
+  return { column, row, offset: row * terminal.cols + column };
+}
+
+function selectLinearRange(range: LinearCellRange) {
+  if (!terminal) return;
+  const { column, row, length } = xtermSelectArgs(range, terminal.cols);
+  terminal.select(column, row, length);
+  touchSelectedRange = { start: Math.min(range.start, range.end), end: Math.max(range.start, range.end) };
+}
+
+function cancelLongPress() {
+  if (longPressTimer !== null) clearTimeout(longPressTimer);
+  longPressTimer = null;
+}
+
+function closeMobileSelection(clearSelection = true) {
+  mobileSelectionOpen.value = false;
+  touchSelectionAnchor = null;
+  touchSelectedRange = null;
+  touchSelectionDragging = false;
+  if (clearSelection) terminal?.clearSelection();
+}
+
+function handleLongPress(x: number, y: number) {
+  longPressTimer = null;
+  if (!terminal || isMouseReportingEnabled()) return;
+  if (preferences.preferences.interaction.rightClickBehavior === "paste") {
+    // The "paste" preference makes a long-press the paste gesture, like a desktop right-click.
+    touchOrigin = null;
+    closeMobileSelection();
+    pasteFromMobileSelection();
+    return;
+  }
+  const cell = linearCellAt(x, y);
+  if (!cell) return;
+  const line = terminal.buffer.active.getLine(cell.row);
+  const word = line ? wordColumnsAt(line, cell.column, String(terminal.options.wordSeparator ?? "")) : null;
+  const pressed: LinearCellRange | null = word
+    ? { start: cell.row * terminal.cols + word.start, end: cell.row * terminal.cols + word.end }
+    : null;
+  const existing = touchSelectedRange;
+  if (pressed && mobileSelectionOpen.value && existing && terminal.hasSelection()) {
+    // A second long-press grows the existing selection to include the pressed word.
+    touchSelectionAnchor = { start: Math.min(existing.start, pressed.start), end: Math.max(existing.end, pressed.end) };
+  } else {
+    touchSelectionAnchor = pressed;
+    if (!pressed) {
+      terminal.clearSelection();
+      touchSelectedRange = null;
+    }
+  }
+  if (touchSelectionAnchor) selectLinearRange(touchSelectionAnchor);
+  touchSelectionDragging = Boolean(touchSelectionAnchor);
+  mobileSelectionOpen.value = true;
+  try { navigator.vibrate?.(12); } catch { /* Haptics are optional. */ }
+}
+
+function isMobileSelectionToolbarEvent(event: Event) {
+  const target = event.target;
+  return target instanceof Node && Boolean(viewRoot.value?.querySelector(".nvx-terminal-view__touch-actions")?.contains(target));
+}
+
+/**
+ * Whether a scroll step must reach the application as input, exactly like a desktop
+ * wheel: mouse-reporting apps get wheel reports and the alternate screen (less, vim,
+ * htop without mouse mode) gets cursor keys. Only the normal buffer scrolls locally.
+ */
+function touchScrollSendsInput() {
+  return isMouseReportingEnabled() || terminal?.buffer.active.type === "alternate";
+}
+
+/**
+ * Scrolls by whole lines (positive = toward newer output). For input-bound modes each
+ * line becomes one synthetic line-mode wheel event on the screen element, so xterm's
+ * own wheel handlers encode it (mouse protocol or DECCKM-aware arrows) as they do for
+ * a desktop wheel; the view never builds those sequences itself. Returns false when
+ * the normal buffer is already at the scrollback edge.
+ */
+function scrollTerminalByLines(lines: number, clientX: number, clientY: number) {
+  if (!terminal || !lines) return false;
+  if (touchScrollSendsInput()) {
+    const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
+    if (!screen) return false;
+    const steps = Math.min(Math.abs(lines), terminal.rows);
+    for (let step = 0; step < steps; step += 1) {
+      screen.dispatchEvent(new WheelEvent("wheel", {
+        deltaY: Math.sign(lines),
+        deltaMode: WheelEvent.DOM_DELTA_LINE,
+        clientX,
+        clientY,
+        bubbles: true,
+        cancelable: true,
+      }));
+    }
+    return true;
+  }
+  const before = terminal.buffer.active.viewportY;
+  terminal.scrollLines(lines);
+  return terminal.buffer.active.viewportY !== before;
+}
+
+function scrollTerminalByPixels(pixels: number, clientX: number, clientY: number) {
+  const geometry = terminalScreenGeometry();
+  if (!geometry) return false;
+  const lines = touchScrollLines.add(pixels, geometry.cellHeight);
+  return lines ? scrollTerminalByLines(lines, clientX, clientY) : true;
+}
+
+function stopTouchFling() {
+  if (!touchFlingFrame) return false;
+  cancelAnimationFrame(touchFlingFrame);
+  touchFlingFrame = 0;
+  touchFlingVelocity = 0;
+  return true;
+}
+
+/** Inertia after a released drag; scrollback only, so a flick never floods an app with input. */
+function startTouchFling(velocity: number) {
+  stopTouchFling();
+  if (!shouldFling(velocity) || reducedMotionQuery?.matches || touchScrollSendsInput()) return;
+  touchFlingVelocity = velocity;
+  touchFlingLastAt = performance.now();
+  touchFlingFrame = requestAnimationFrame(stepTouchFling);
+}
+
+function stepTouchFling(now: number) {
+  touchFlingFrame = 0;
+  // A buffer switch or mouse mode during the fling ends it instead of turning it into input.
+  if (!terminal || touchScrollSendsInput()) return;
+  const step = flingStep(touchFlingVelocity, now - touchFlingLastAt);
+  touchFlingLastAt = now;
+  touchFlingVelocity = step.velocity;
+  const geometry = terminalScreenGeometry();
+  if (!geometry) return;
+  const lines = touchScrollLines.add(step.distance, geometry.cellHeight);
+  if (lines && !scrollTerminalByLines(lines, 0, 0)) return;
+  if (!step.done) touchFlingFrame = requestAnimationFrame(stepTouchFling);
+}
+
+/**
+ * Fingers on this terminal surface. A finger on the selection toolbar or outside this
+ * view (the extra-keys row, another Pane) never takes part in a terminal gesture.
+ */
+function surfaceTouches(event: TouchEvent) {
+  const root = viewRoot.value;
+  const toolbar = root?.querySelector(".nvx-terminal-view__touch-actions") ?? null;
+  return Array.from(event.touches).filter((touch) => {
+    const target: unknown = touch.target;
+    if (!(target instanceof Node)) return true;
+    return Boolean(root?.contains(target)) && !toolbar?.contains(target);
+  });
+}
+
+/** The size xterm currently shows: a pinch preview, else the applied option, else the preference. */
+function shownTerminalFontSize() {
+  if (pinchPreviewSize !== null) return pinchPreviewSize;
+  const applied = terminal?.options.fontSize;
+  return typeof applied === "number" ? applied : ui.terminalFontSize;
+}
+
+/**
+ * Starts, or re-anchors when fingers change, a two-finger pinch. A pinch is never a tap,
+ * long-press, selection drag, scroll or fling, and it never raises or dismisses the soft
+ * keyboard: the speculative `text` mode of the first finger is undone exactly as for a
+ * drag, and the touchend that follows is cancelled so no compatibility mouse event
+ * focuses, selects or double-taps.
+ */
+function beginPinch(fingers: readonly Touch[]) {
+  const [first, second] = fingers;
+  if (!first || !second) return;
+  cancelLongPress();
+  stopTouchFling();
+  touchStoppedFling = false;
+  touchOrigin = null;
+  touchSelectionDragging = false;
+  touchDragAxis = "pending";
+  touchScrollLines.reset();
+  if (touchInputModeBefore === "text" || touchInputModeBefore === "none") setMobileInputMode(touchInputModeBefore);
+  pinchFingers = [first.identifier, second.identifier];
+  pinchTracker.begin(touchSpan(first, second), shownTerminalFontSize());
+  pinchIndicatorSize.value = pinchTracker.size;
+}
+
+function handlePinchMove(event: TouchEvent) {
+  if (event.cancelable) event.preventDefault();
+  const tracked = pinchFingers;
+  if (touchGesturePhase !== "pinch" || !tracked) return;
+  const touches = Array.from(event.touches);
+  const first = touches.find((touch) => touch.identifier === tracked[0]);
+  const second = touches.find((touch) => touch.identifier === tracked[1]);
+  if (!first || !second) return;
+  const size = pinchTracker.update(touchSpan(first, second));
+  if (size !== null) previewTerminalFontSize(size);
+}
+
+/** Live preview: xterm re-measures and refits at most once per frame, only when the integer size changed. */
+function previewTerminalFontSize(size: number) {
+  pinchPreviewSize = size;
+  pinchIndicatorSize.value = size;
+  if (!pinchFrame) pinchFrame = requestAnimationFrame(applyPinchPreview);
+}
+
+function applyPinchPreview() {
+  pinchFrame = 0;
+  if (!terminal || pinchPreviewSize === null || terminal.options.fontSize === pinchPreviewSize) return;
+  terminal.options.fontSize = pinchPreviewSize;
+  // New cell metrics change cols/rows; `fit` reports them through the normal resize event.
+  fit();
+}
+
+/** Fingers lifted or cancelled during a pinch; the size is persisted once all are up. */
+function handlePinchRelease(event: TouchEvent) {
+  if (event.cancelable) event.preventDefault();
+  const fingers = surfaceTouches(event);
+  touchGesturePhase = nextTouchGesturePhase(touchGesturePhase, fingers.length);
+  if (touchGesturePhase === "pinch") beginPinch(fingers);
+  else if (touchGesturePhase === "idle") finishPinch();
+}
+
+function finishPinch() {
+  pinchFingers = null;
+  pinchIndicatorSize.value = null;
+  if (pinchFrame) cancelAnimationFrame(pinchFrame);
+  pinchFrame = 0;
+  const size = pinchPreviewSize;
+  pinchPreviewSize = null;
+  if (size === null) return;
+  if (terminal && terminal.options.fontSize !== size) {
+    terminal.options.fontSize = size;
+    fit();
+  }
+  void persistPinchFontSize(size);
+}
+
+/**
+ * The pinch result becomes the one terminal font size preference (the same value the
+ * Settings field edits), so every terminal view follows it. A failed save restores the
+ * stored size in this view and says so, unless a newer pinch already owns the size.
+ */
+async function persistPinchFontSize(size: number) {
+  const attempt = ++pinchCommitSeq;
+  if (size === ui.terminalFontSize) return;
+  // A rejected save (Core conflict or persistence failure) is handled like a refused one.
+  const saved = await ui.setTerminalFontSize(size).catch(() => false);
+  if (saved || attempt !== pinchCommitSeq || pinchFingers !== null) return;
+  if (terminal && terminal.options.fontSize !== ui.terminalFontSize) {
+    terminal.options.fontSize = ui.terminalFontSize;
+    scheduleFit();
+  }
+  tips.show({ scope: `terminal-font-size:${props.paneId ?? "view"}`, tone: "error", title: t("terminalInteraction.fontSizeSaveFailed") });
+}
+
+function handleTouchStart(event: TouchEvent) {
+  if (isMobileSelectionToolbarEvent(event)) return;
+  // Every finger on the screen is new: a gesture whose end this view never saw (hidden,
+  // detached) must not leave the next one inert.
+  if (event.touches.length === event.changedTouches.length && touchGesturePhase !== "idle") {
+    if (pinchFingers !== null) finishPinch();
+    touchGesturePhase = "idle";
+  }
+  const fingers = surfaceTouches(event);
+  const phase = nextTouchGesturePhase(touchGesturePhase, fingers.length);
+  // Fingers that land together start a pinch directly; the mode it restores is the one found now.
+  if (touchGesturePhase === "idle") touchInputModeBefore = terminal?.textarea?.getAttribute("inputmode") ?? null;
+  if (phase === "pinch") {
+    // A second finger turns any single-finger gesture, including a running scroll, into a pinch.
+    touchGesturePhase = "pinch";
+    beginPinch(fingers);
+    return;
+  }
+  // The leftover finger of a pinch stays inert until every finger is up.
+  if (touchGesturePhase === "settling") return;
+  touchGesturePhase = phase;
+  // A finger landing on a running fling only stops it; it is neither a tap nor a keyboard request.
+  touchStoppedFling = stopTouchFling();
+  touchInputModeBefore = terminal?.textarea?.getAttribute("inputmode") ?? null;
+  // A finger on the terminal surface is the one deliberate way to the soft keyboard:
+  // xterm focuses the textarea on the synthesized mousedown that follows this tap.
+  if (!touchStoppedFling) setMobileInputMode("text");
+  cancelLongPress();
+  touchSelectionDragging = false;
+  touchDragAxis = "pending";
+  touchScrollLines.reset();
+  const touch = fingers.length === 1 ? fingers[0] : null;
+  if (!touch) {
+    touchOrigin = null;
+    return;
+  }
+  touchOrigin = { identifier: touch.identifier, x: touch.clientX, y: touch.clientY };
+  longPressTimer = setTimeout(() => handleLongPress(touch.clientX, touch.clientY), 450);
+}
+
+function trackedTouch(event: TouchEvent) {
+  if (!touchOrigin) return null;
+  return Array.from(event.changedTouches).find((touch) => touch.identifier === touchOrigin?.identifier) ?? null;
+}
+
+function handleTouchMove(event: TouchEvent) {
+  if (touchGesturePhase === "pinch" || touchGesturePhase === "settling") {
+    handlePinchMove(event);
+    return;
+  }
+  const touch = trackedTouch(event);
+  if (!touch || !touchOrigin) return;
+  if (touchSelectionDragging && touchSelectionAnchor) {
+    // After a long-press the same finger extends the selection instead of scrolling the terminal.
+    event.preventDefault();
+    event.stopPropagation();
+    const cell = linearCellAt(touch.clientX, touch.clientY);
+    if (cell) selectLinearRange(extendRange(touchSelectionAnchor, cell.offset));
+    return;
+  }
+  if (touchDragAxis === "pending") {
+    touchDragAxis = classifyTouchDrag(touch.clientX - touchOrigin.x, touch.clientY - touchOrigin.y);
+    if (touchDragAxis === "pending") return;
+    // Movement past the slop is a drag: no long-press, and the speculative `text` mode
+    // from touchstart is undone so a later programmatic focus cannot raise the keyboard.
+    // An open keyboard keeps its mode, so scrolling never dismisses it.
+    cancelLongPress();
+    if (touchInputModeBefore === "text" || touchInputModeBefore === "none") setMobileInputMode(touchInputModeBefore);
+    touchScrollTracker.begin(touch.clientY, event.timeStamp);
+  }
+  if (touchDragAxis !== "vertical") return;
+  // The terminal owns vertical drags (`touch-action: none`); nothing native would scroll it.
+  if (event.cancelable) event.preventDefault();
+  scrollTerminalByPixels(touchScrollTracker.move(touch.clientY, event.timeStamp), touch.clientX, touch.clientY);
+}
+
+function handleTouchEnd(event: TouchEvent) {
+  if (touchGesturePhase === "pinch" || touchGesturePhase === "settling") {
+    handlePinchRelease(event);
+    return;
+  }
+  if (!surfaceTouches(event).length) touchGesturePhase = "idle";
+  const touch = trackedTouch(event);
+  if (!touch) return;
+  const wasPending = longPressTimer !== null;
+  cancelLongPress();
+  touchOrigin = null;
+  if (touchSelectionDragging) {
+    touchSelectionDragging = false;
+    // Keep the long-press from turning into a tap that clears the new selection.
+    if (event.cancelable) event.preventDefault();
+    return;
+  }
+  if (touchDragAxis !== "pending") {
+    const axis = touchDragAxis;
+    touchDragAxis = "pending";
+    // A drag is never a tap: no compatibility mousedown, so focus, selection and keyboard stay as they were.
+    if (event.cancelable) event.preventDefault();
+    if (axis === "vertical") startTouchFling(touchScrollTracker.releaseVelocity(event.timeStamp));
+    return;
+  }
+  if (touchStoppedFling) {
+    touchStoppedFling = false;
+    if (event.cancelable) event.preventDefault();
+    return;
+  }
+  // A plain tap dismisses the selection actions and focuses the terminal as usual.
+  if (wasPending && mobileSelectionOpen.value) closeMobileSelection();
+  // The tap focuses the helper textarea through xterm; Android opens the soft keyboard only
+  // when that textarea is editable at this moment. A read-only view (input ownership still
+  // pending for this Pane) remembers the tap so the lease arrival can open the keyboard.
+  if (!wasPending) return;
+  if (props.readOnly) {
+    mobileKeyboardTapAt = Date.now();
+    return;
+  }
+  mobileKeyboardTapAt = 0;
+  // An already focused terminal gets no focus change from the tap, so the keyboard would
+  // stay closed (dismissed with Back, or focus restored without the keyboard): re-raise it.
+  if (document.activeElement === terminal?.textarea && !mobileImeVisible.value) raiseMobileKeyboard();
+}
+
+/**
+ * Opens the soft keyboard on the already focused textarea. The WebView shows the IME on
+ * a focus change of an editable element, not on a tap over the terminal canvas, so the
+ * textarea is re-focused once with `inputmode="text"`.
+ */
+function raiseMobileKeyboard() {
+  const textarea = terminal?.textarea;
+  if (!textarea || textarea.readOnly || document.activeElement !== textarea) return;
+  // The blur arms `inputmode="none"` through the focusout handler; `text` must be set after it.
+  textarea.blur();
+  setMobileInputMode("text");
+  textarea.focus({ preventScroll: true });
+  scheduleMobileFocusScrollReset();
+}
+
+/**
+ * Opens the soft keyboard for a tap that arrived while the view was still read-only.
+ * The tap itself focused the readonly textarea, and the WebView decides at focus time
+ * not to show the IME; removing `readonly` later does not revisit that decision. A
+ * focus change on the now editable textarea does, so the terminal re-focuses itself once
+ * within a short window after the tap. Programmatic activation without a tap (Tab
+ * switches, returning to the page) never opens the keyboard this way.
+ */
+const MOBILE_KEYBOARD_TAP_WINDOW_MS = 2500;
+function openMobileKeyboardAfterPendingTap() {
+  const tappedAt = mobileKeyboardTapAt;
+  mobileKeyboardTapAt = 0;
+  if (!tappedAt || Date.now() - tappedAt > MOBILE_KEYBOARD_TAP_WINDOW_MS) return;
+  raiseMobileKeyboard();
+}
+
+/** Focus leaving the textarea (a dialog field, a menu item) means the next focus must not bring the keyboard. */
+function handleMobileFocusOut(event: FocusEvent) {
+  if (event.target === terminal?.textarea) setMobileInputMode("none");
+}
+
+function handleTouchCancel(event: TouchEvent) {
+  if (touchGesturePhase === "pinch" || touchGesturePhase === "settling") {
+    handlePinchRelease(event);
+    return;
+  }
+  if (!surfaceTouches(event).length) touchGesturePhase = "idle";
+  cancelLongPress();
+  touchOrigin = null;
+  touchSelectionDragging = false;
+  touchDragAxis = "pending";
+  touchStoppedFling = false;
+}
+
+function copyFromMobileSelection() {
+  const text = terminal?.getSelection() ?? "";
+  closeMobileSelection();
+  copySelectionText(text);
+}
+
+function pasteFromMobileSelection() {
+  closeMobileSelection();
+  void pasteFromClipboard();
+}
+
+function selectAllFromMobileSelection() {
+  terminal?.selectAll();
+  touchSelectionAnchor = null;
+  touchSelectedRange = null;
+  mobileSelectionOpen.value = true;
+}
 
 function applyKeyboardOptions(event?: KeyboardEvent) {
   if (!terminal) return;
@@ -320,7 +985,9 @@ function dimensions() {
 }
 
 function focus() {
+  // xterm focuses its textarea with preventScroll; phones also undo any keyboard-driven ancestor scroll.
   terminal?.focus();
+  if (mobileLayout) scheduleMobileFocusScrollReset();
   clearBellAttention();
 }
 
@@ -495,6 +1162,12 @@ function selectAllFromContextMenu() {
 }
 
 function handleContextMenu(event: MouseEvent) {
+  if (mobileLayout) {
+    // Phones select by long-press touch tracking; the WebView's own long-press menu never opens.
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return;
+  }
   // TUI mouse reporting and Shift remain with xterm and the remote side; do not intercept and replay another input path here.
   if (event.shiftKey || isMouseReportingEnabled()) return;
   event.preventDefault();
@@ -514,6 +1187,11 @@ function handleContextMenuShortcut(event: KeyboardEvent) {
   if (!isContextMenuKey || isMouseReportingEnabled()) return;
   event.preventDefault();
   event.stopImmediatePropagation();
+  if (mobileLayout) {
+    // A hardware keyboard's menu key opens the same in-view selection actions as a long-press.
+    mobileSelectionOpen.value = true;
+    return;
+  }
   const root = event.currentTarget as HTMLElement;
   contextLinkUrl.value = null;
   const bounds = root.getBoundingClientRect();
@@ -603,7 +1281,10 @@ function handleTerminalKeyDownCapture(event: KeyboardEvent) {
   }
 }
 
-function handleTerminalFocusIn() { clearBellAttention(); }
+function handleTerminalFocusIn() {
+  clearBellAttention();
+  if (mobileLayout) scheduleMobileFocusScrollReset();
+}
 function resetOptionKeyState() { optionKeyTracker.reset(); }
 
 function activateTerminalLink(event: MouseEvent, candidate: string) {
@@ -695,6 +1376,9 @@ function terminalHttpLinkProvider(): ILinkProvider {
 function handleTerminalCustomKeyEvent(event: KeyboardEvent) {
   optionKeyTracker.observe(event);
   if (event.defaultPrevented) return false;
+  // On phones the IME text path owns composition and keyCode-229 events; xterm's
+  // textarea diffing would duplicate or drop that text. Real key codes still reach xterm.
+  if (mobileLayout && (event.keyCode === 229 || event.key === "Process" || mobileIme?.isComposing())) return false;
   applyKeyboardOptions(event);
   if (canRequestReconnect()
     && event.type === "keydown"
@@ -902,6 +1586,7 @@ defineExpose({
   appendDraftText,
   invalidateDraft,
   currentDraft,
+  applicationCursorKeys,
 });
 
 onMounted(async () => {
@@ -949,20 +1634,45 @@ onMounted(async () => {
     removeReducedMotionListener = () => reducedMotionQuery?.removeEventListener("change", updateForMotionPreference);
   }
   applyInteractionOptions();
-  terminal.onData((value) => {
+  terminal.onData((rawValue) => {
     if (!props.readOnly) {
+      // Phone helper-row Ctrl/Alt apply to the next on-screen keyboard character; desktop data is untouched.
+      const value = mobileLayout ? applyStickyModifiers(rawValue) : rawValue;
+      // Typing ends a touch selection the same way it clears xterm's own selection.
+      if (mobileSelectionOpen.value) closeMobileSelection(false);
       const observedCommand = observeSimpleInput(value);
       if (observedCommand) emit("input", value, observedCommand);
       else emit("input", value);
     }
   });
-  terminal.onSelectionChange(() => {
+  selectionChangeDisposable = terminal.onSelectionChange(() => {
+    if (mobileLayout) mobileSelectionText.value = terminal?.getSelection() ?? "";
     emit("selectionChange", terminal?.hasSelection() ?? false);
   });
   bellDisposable = terminal.onBell(handleBell);
   // Application shortcuts are handled centrally during window capture; no second non-configurable mapping may remain.
   terminal.attachCustomKeyEventHandler(handleTerminalCustomKeyEvent);
   if (host.value) terminal.open(host.value);
+  if (mobileLayout) {
+    applyMobileTextareaAttributes(terminal.textarea);
+    if (viewRoot.value) {
+      mobileIme = createMobileImeInput({
+        eventRoot: viewRoot.value,
+        textarea: () => terminal?.textarea,
+        deliver: deliverMobileText,
+        paste: deliverMobilePaste,
+        backspace: backspaceSequence,
+        preview: showCompositionPreview,
+      });
+      viewRoot.value.addEventListener("touchstart", handleTouchStart, { capture: true, passive: true });
+      viewRoot.value.addEventListener("touchmove", handleTouchMove, { capture: true, passive: false });
+      viewRoot.value.addEventListener("touchend", handleTouchEnd, { capture: true, passive: false });
+      viewRoot.value.addEventListener("touchcancel", handleTouchCancel, { capture: true });
+      viewRoot.value.addEventListener("focusout", handleMobileFocusOut, true);
+    }
+    document.addEventListener("scroll", handleMobileAncestorScroll, true);
+    window.visualViewport?.addEventListener("resize", handleMobileViewportChange);
+  }
   linkProviderDisposable = terminal.registerLinkProvider(terminalHttpLinkProvider());
   highlighter = createTerminalHighlighter(terminal, (reason) => { highlightFailure.value = reason; });
   highlighter.update(preferences.resolvedHighlights(props.hostId));
@@ -979,6 +1689,12 @@ onMounted(async () => {
 });
 
 watch(() => [props.ghostSuggestion, props.readOnly], scheduleGhost, { deep: true, flush: "post" });
+
+// The keyboard closed (Back key, system) while the terminal kept focus: the next
+// programmatic focus must not bring it back; only a tap does.
+watch(mobileImeVisible, (visible) => {
+  if (mobileLayout && !visible) setMobileInputMode("none");
+});
 
 watch(
   () => preferences.resolvedHighlights(props.hostId),
@@ -1002,9 +1718,15 @@ watch(
 watch(
   () => props.readOnly,
   (readOnly) => {
+    // Text composed before ownership was lost must not be committed into a read-only view later.
+    if (readOnly) {
+      discardingImeText = true;
+      try { mobileIme?.flush(); } finally { discardingImeText = false; }
+    }
     if (terminal) terminal.options.disableStdin = readOnly;
     // After input ownership is interrupted, another view or approved input may change the Shell editing area; wait for the next prompt before inferring again.
     if (readOnly) invalidateDraft();
+    else if (mobileLayout) openMobileKeyboardAfterPendingTap();
   },
 );
 
@@ -1057,6 +1779,27 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  cancelLongPress();
+  stopTouchFling();
+  // An unfinished pinch is dropped with the view; only a completed gesture is persisted.
+  cancelAnimationFrame(pinchFrame);
+  pinchFrame = 0;
+  pinchFingers = null;
+  pinchPreviewSize = null;
+  cancelAnimationFrame(mobileScrollResetFrame);
+  document.removeEventListener("scroll", handleMobileAncestorScroll, true);
+  window.visualViewport?.removeEventListener("resize", handleMobileViewportChange);
+  mobileIme?.dispose();
+  mobileIme = null;
+  selectionChangeDisposable?.dispose();
+  selectionChangeDisposable = null;
+  if (viewRoot.value) {
+    viewRoot.value.removeEventListener("touchstart", handleTouchStart, { capture: true });
+    viewRoot.value.removeEventListener("touchmove", handleTouchMove, { capture: true });
+    viewRoot.value.removeEventListener("touchend", handleTouchEnd, { capture: true });
+    viewRoot.value.removeEventListener("touchcancel", handleTouchCancel, { capture: true });
+    viewRoot.value.removeEventListener("focusout", handleMobileFocusOut, true);
+  }
   cancelAnimationFrame(visibleRefreshFrame);
   cancelAnimationFrame(ghostFrame);
   clearGhost();
@@ -1113,6 +1856,12 @@ onBeforeUnmount(() => {
       class="nvx-terminal-view__highlight-error"
       role="status"
     >{{ t(`terminalEnhancements.highlightSuspended.${highlightFailure}`) }}</span>
+    <span
+      v-if="pinchIndicatorSize !== null"
+      class="nvx-terminal-view__font-size-indicator"
+      role="status"
+      aria-live="polite"
+    >{{ t('terminalInteraction.fontSizeIndicator', { size: pinchIndicatorSize }) }}</span>
     <div
       v-if="contextMenuOpen"
       class="nvx-terminal-view__context-menu"
@@ -1155,6 +1904,52 @@ onBeforeUnmount(() => {
         @click="selectAllFromContextMenu"
       >
         {{ t('terminalInteraction.contextSelectAll') }}
+      </button>
+    </div>
+    <div
+      v-if="mobileSelectionOpen"
+      class="nvx-terminal-view__touch-actions"
+      role="toolbar"
+      :aria-label="t('terminalInteraction.contextMenu')"
+    >
+      <!-- Pointer-down is cancelled so the terminal keeps keyboard focus and its input lease. -->
+      <button
+        class="nvx-terminal-view__touch-action"
+        type="button"
+        :disabled="!mobileSelectionText"
+        @pointerdown.prevent
+        @click="copyFromMobileSelection"
+      >
+        {{ t('terminalInteraction.contextCopy') }}
+      </button>
+      <button
+        class="nvx-terminal-view__touch-action"
+        type="button"
+        :disabled="(readOnly && !reconnectOnInput) || !paneId"
+        @pointerdown.prevent
+        @click="pasteFromMobileSelection"
+      >
+        {{ t('terminalInteraction.contextPaste') }}
+      </button>
+      <button
+        class="nvx-terminal-view__touch-action"
+        type="button"
+        @pointerdown.prevent
+        @click="selectAllFromMobileSelection"
+      >
+        {{ t('terminalInteraction.contextSelectAll') }}
+      </button>
+      <button
+        class="nvx-terminal-view__touch-action nvx-terminal-view__touch-action--close"
+        type="button"
+        :aria-label="t('mobile.closeSheet')"
+        @pointerdown.prevent
+        @click="closeMobileSelection()"
+      >
+        <NvxIcon
+          :icon="X"
+          :size="20"
+        />
       </button>
     </div>
     <NvxTerminalPasteGuard
@@ -1235,6 +2030,49 @@ onBeforeUnmount(() => {
   color: var(--nvx-color-text-tertiary);
 }
 
+/* Phone selection actions stay inside the terminal surface, above the first rows. */
+.nvx-terminal-view__touch-actions {
+  position: absolute;
+  z-index: var(--nvx-z-popover);
+  top: var(--nvx-space-2);
+  right: var(--nvx-space-2);
+  left: var(--nvx-space-2);
+  display: flex;
+  gap: var(--nvx-space-1);
+  justify-content: flex-end;
+  pointer-events: none;
+}
+
+.nvx-terminal-view__touch-action {
+  display: inline-flex;
+  min-width: 48px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--nvx-space-3);
+  border: var(--nvx-border-width) solid var(--nvx-color-border-strong);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-surface);
+  box-shadow: var(--nvx-shadow-overlay);
+  color: var(--nvx-color-text-primary);
+  font: inherit;
+  font-size: var(--nvx-font-size-sm);
+  pointer-events: auto;
+}
+
+.nvx-terminal-view__touch-action--close {
+  padding: 0;
+}
+
+.nvx-terminal-view__touch-action:disabled {
+  color: var(--nvx-color-text-tertiary);
+}
+
+.nvx-terminal-view__touch-action:focus-visible {
+  outline: var(--nvx-focus-ring-width) solid var(--nvx-color-focus-ring);
+  outline-offset: 1px;
+}
+
 .nvx-terminal-view__highlight-error {
   position: absolute;
   top: 4px;
@@ -1246,6 +2084,21 @@ onBeforeUnmount(() => {
   background: var(--nvx-color-bg-surface);
   color: var(--nvx-color-text-secondary);
   font-size: 11px;
+}
+
+.nvx-terminal-view__font-size-indicator {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border: 1px solid var(--nvx-color-border);
+  border-radius: var(--nvx-radius-sm);
+  background: var(--nvx-color-bg-surface);
+  color: var(--nvx-color-text-primary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
 .nvx-terminal-view :deep(.xterm) {
@@ -1279,5 +2132,14 @@ onBeforeUnmount(() => {
 .nvx-terminal-view :deep(.composition-view) {
   background: var(--nvx-color-terminal-bg, #101217);
   color: var(--nvx-color-terminal-fg);
+}
+
+/* A long press opens the application's terminal menu, never the WebView's own callout.
+   xterm 6 has no natively scrollable element, so the view handles every drag itself
+   (scrollback, wheel input, selection); the WebView must not claim pans or zoom. */
+html[data-nvx-host="mobile"] .nvx-terminal-view,
+html[data-nvx-host="mobile"] .nvx-terminal-view :deep(.xterm) {
+  -webkit-touch-callout: none;
+  touch-action: none;
 }
 </style>

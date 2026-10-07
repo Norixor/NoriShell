@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { closeSecureWindow } from "../secure-transport";
 import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -122,7 +122,7 @@ async function decide(decision: PluginApprovalDecision) {
       hostSelections: selections.value,
     });
     outcome.value = response.decision === "approve" ? "approved" : "rejected";
-    window.setTimeout(() => void getCurrentWindow().close(), 800);
+    window.setTimeout(() => void closeSecureWindow(), 800);
   } catch {
     failed.value = true;
   } finally {

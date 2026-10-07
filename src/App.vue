@@ -3,13 +3,17 @@ import { takeNativeTrayAction, readyNativeTrayActions } from "./core-api/native-
 import { navigateNativeResourceNotification } from "./native-resource-navigation";
 import { navigateNativeTrayAction } from "./native-tray-navigation";
 import { initializeStartupVaultTip } from "./startup-vault-tip";
-import { isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { createPinia, getActivePinia } from "pinia";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { startPluginAppNavigation } from "./stores/pluginAppIntegrations";
+import { hasNativeWindowChrome, hasTauriIpc, isMobileLayout, workspaceHostMode } from "./platform-host";
+import {
+  openSingleDocumentApprovedPluginChannel, openSingleDocumentPluginProtocolLaunches, restoreSingleDocumentResources,
+  setSingleDocumentRouter,
+} from "./single-document-workspace";
 
 import {
   NvxAppHeader,
@@ -18,6 +22,7 @@ import {
   NvxWorkspaceTabBar,
   NvxWorkspaceTabPlaceholder,
 } from "./components/layout";
+import { NvxMobileBottomNav, NvxMobileShell } from "./components/mobile";
 import { NvxPluginCommandPalette } from "./components/terminal";
 import { NvxPluginExtensionTarget } from "./components/plugins";
 import NvxPluginFloatingControls from "./components/plugins/NvxPluginFloatingControls.vue";
@@ -53,16 +58,22 @@ function isToolWindowExitCancelled(error: unknown) { return typeof error === "ob
 
 const ui = useUiStore();
 const appTheme = useAppThemeStore();
+// Android keeps Tauri IPC but hosts every Tab in this one document behind a phone shell;
+// desktop windows keep the native Tab WebViews, rail and window chrome unchanged.
+const mobileLayout = isMobileLayout();
+const nativeTabsHost = workspaceHostMode() === "nativeTabs";
 const { t } = useI18n();
 const router = useRouter();
 const pinia = getActivePinia() ?? createPinia();
 const plugins = usePluginsStore(pinia);
 const pluginExtensions = usePluginExtensionsStore(pinia);
 watch(() => plugins.installed.map((item) => `${item.pluginId}:${item.stateVersion}:${item.state}`).join("|"), () => {
-  if (isTauri()) void appTheme.refreshThemes();
+  if (hasTauriIpc()) void appTheme.refreshThemes();
 }, { immediate: true });
 const tips = useTipsStore(pinia);
 const showWorkspaceTabCreationFailure = (error: unknown) => showWorkspaceTabFailure(error, "workspace-tab-create");
+const showWorkspaceTabRestoreFailure = (error: unknown) =>
+  showWorkspaceTabFailure(error, "workspace-tab-restore", "workspace_tab.restoration_failed");
 const workspaceTabs = useWorkspaceTabsStore(pinia);
 const nativeTerminal = useNativeTerminalStore(pinia);
 const appUpdate = useAppUpdateStore(pinia);
@@ -70,7 +81,7 @@ let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
 let stopWorkspaceTabWindows: (() => void) | null = null;
 let workspaceWindowUiDisposed = false;
 watch(() => ui.locale, () => {
-  if (isTauri()) void setNativeNotificationContext(ui.locale).catch(() => { /* Settings exposes permission and availability. */ });
+  if (hasTauriIpc()) void setNativeNotificationContext(ui.locale).catch(() => { /* Settings exposes permission and availability. */ });
 }, { immediate: true });
 
 type ContentRegion = "before" | "after" | "sidebar" | "footer";
@@ -197,7 +208,7 @@ async function refreshTrayReady() {
 }
 watch(() => ui.locale, () => { if (trayReady) void refreshTrayReady(); });
 watch(() => ui.locale, (locale) => {
-  if (!isTauri()) return;
+  if (!hasTauriIpc()) return;
   void setPluginLocale(locale).catch(() => {
     tips.show({ tone: "error", title: t("sshSettings.applicationPreferences.languageChangeFailed") });
   });
@@ -237,7 +248,7 @@ const exitBlockerLabels = computed(() => {
   for (const blocker of exitReadiness.value?.blockers ?? []) {
     counts.set(blocker.kind, (counts.get(blocker.kind) ?? 0) + 1);
   }
-  return Array.from(counts, ([kind, count]) => t(`lifecycle.blockers.${kind}`, { count }));
+  return Array.from(counts, ([kind, count]) => t(`lifecycle.blockers.${kind}`, { count }, count));
 });
 
 async function confirmResourceCleanupAndExit() {
@@ -257,35 +268,47 @@ async function confirmResourceCleanupAndExit() {
 let disposeStartupVaultTip: (() => void) | undefined;
 let stopNativeBackground: (() => void) | null = null;
 onMounted(async () => {
-  if (!isTauri()) return;
-  stopNativeBackground = startNativeBackgroundSync("window-and-webview");
-  workspaceContentObserver = new ResizeObserver(syncWorkspaceContentBounds);
-  if (workspaceContent.value) workspaceContentObserver.observe(workspaceContent.value);
-  window.addEventListener("resize", syncWorkspaceContentBounds);
-  syncWorkspaceContentBounds();
-  void startWorkspaceTabWindowUi(router).then((stop) => {
-    if (workspaceWindowUiDisposed) stop(); else stopWorkspaceTabWindows = stop;
-  }).catch(() => {
-    tips.show({ scope: "workspace-tab-windows", tone: "error", title: t("workspaceTabs.unavailable") });
-  });
+  if (!nativeTabsHost) setSingleDocumentRouter(router);
+  if (!hasTauriIpc()) return;
+  // A reloaded single document finds its live File and Desktop resources again.
+  if (!nativeTabsHost) void restoreSingleDocumentResources().catch(showWorkspaceTabRestoreFailure);
+  if (hasNativeWindowChrome()) stopNativeBackground = startNativeBackgroundSync("window-and-webview");
+  if (nativeTabsHost) {
+    workspaceContentObserver = new ResizeObserver(syncWorkspaceContentBounds);
+    if (workspaceContent.value) workspaceContentObserver.observe(workspaceContent.value);
+    window.addEventListener("resize", syncWorkspaceContentBounds);
+    syncWorkspaceContentBounds();
+    void startWorkspaceTabWindowUi(router).then((stop) => {
+      if (workspaceWindowUiDisposed) stop(); else stopWorkspaceTabWindows = stop;
+    }).catch(() => {
+      tips.show({ scope: "workspace-tab-windows", tone: "error", title: t("workspaceTabs.unavailable") });
+    });
+  }
   void appUpdate.checkForUpdates();
   updateCheckTimer = setInterval(() => { void appUpdate.checkForUpdates(); }, 6 * 60 * 60 * 1000);
   disposeStartupVaultTip = initializeStartupVaultTip({ t, tips });
   stopPluginAppNavigation = await startPluginAppNavigation(router);
+  // Plugin terminal launches and approved channels open as Terminal Tabs: native Tab
+  // WebViews on desktop, Tabs of this document on Android. Core claims and tokens are the same.
+  const openPluginProtocolTabs = nativeTabsHost ? reconcilePluginProtocolTabs : openSingleDocumentPluginProtocolLaunches;
+  const openApprovedPluginChannel = nativeTabsHost ? createManagedApprovedPluginChannel : openSingleDocumentApprovedPluginChannel;
   unlistenPluginProtocolLaunch = await listen("plugin-protocol-launch", () => {
-    void reconcilePluginProtocolTabs().catch(showWorkspaceTabCreationFailure);
+    void openPluginProtocolTabs().catch(showWorkspaceTabCreationFailure);
   });
-  void reconcilePluginProtocolTabs().catch(showWorkspaceTabCreationFailure);
+  void openPluginProtocolTabs().catch(showWorkspaceTabCreationFailure);
   unlistenPluginTerminalChannel = await listen<PluginApprovedTerminalChannelLaunch>("plugin-terminal-channel-approved", ({ payload }) => {
     if (!payload?.operationId || approvedPluginChannels.has(payload.operationId)) return;
     approvedPluginChannels.add(payload.operationId);
-    void createManagedApprovedPluginChannel(payload).catch(showWorkspaceTabCreationFailure);
+    void openApprovedPluginChannel(payload).catch(showWorkspaceTabCreationFailure);
   });
   nativeTerminal.start();
-  void startTrayNavigation().catch(trayUnavailable);
-  unlistenNativeResourceNotification = await listen<NativeResourceNotificationClick>("native-resource-notification-click", ({ payload }) => {
-    void navigateNativeResourceNotification(payload, router, workspaceTabs, () => !trayDisposed);
-  });
+  // The tray is a desktop window feature; resource notifications also arrive from the Android service.
+  if (hasNativeWindowChrome()) void startTrayNavigation().catch(trayUnavailable);
+  if (hasNativeWindowChrome() || isMobileLayout()) {
+    unlistenNativeResourceNotification = await listen<NativeResourceNotificationClick>("native-resource-notification-click", ({ payload }) => {
+      void navigateNativeResourceNotification(payload, router, workspaceTabs, () => !trayDisposed);
+    });
+  }
   await setPluginLocale(ui.locale).catch(() => {
     tips.show({
       tone: "error",
@@ -311,10 +334,13 @@ onMounted(async () => {
     "plugin-host-session-approved",
     ({ payload }) => {
       if (payload.kind === "terminal") {
-        void createManagedTerminalForHost({ hostId: payload.hostId, connectOperationId: payload.operationId,
-          pluginAuthorizationToken: payload.authorizationToken, source: "plugin" }).catch(showWorkspaceTabCreationFailure);
+        const query = { hostId: payload.hostId, connectOperationId: payload.operationId,
+          pluginAuthorizationToken: payload.authorizationToken, source: "plugin" };
+        if (nativeTabsHost) void createManagedTerminalForHost(query).catch(showWorkspaceTabCreationFailure);
+        else void router.push({ path: "/terminal", query });
       } else if (payload.kind === "sftp") {
-        void createManagedFileTab("remote", payload.hostId).catch(showWorkspaceTabCreationFailure);
+        if (nativeTabsHost) void createManagedFileTab("remote", payload.hostId).catch(showWorkspaceTabCreationFailure);
+        else void router.push({ path: "/sftp", query: { hostId: payload.hostId, fileOperationId: payload.operationId } });
       } else {
         void router.push({ path: "/tunnels", query: { hostId: payload.hostId } });
       }
@@ -324,6 +350,8 @@ onMounted(async () => {
     "plugin-host-navigation-requested",
     ({ payload }) => {
       if (acceptSftpPluginNavigation(payload)) {
+        // The file page claims the pending navigation itself when Tabs live in this document.
+        if (!nativeTabsHost) { void router.push("/sftp"); return; }
         const intent = takeSftpPluginNavigation();
         if (intent) void createManagedFileTab("remote", null, "", intent).catch(showWorkspaceTabCreationFailure);
       }
@@ -377,6 +405,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  setSingleDocumentRouter(null);
   releaseTabViews?.();
   releaseTabViews = null;
   stopShellRouteSettled();
@@ -426,14 +455,21 @@ onBeforeUnmount(() => {
   >
     <NvxTips />
     <NvxPluginCommandPalette />
-    <div class="app-shell">
-      <NvxAppHeader :platform="platform">
+    <div
+      class="app-shell"
+      :class="{ 'app-shell--mobile': mobileLayout }"
+    >
+      <NvxMobileShell v-if="mobileLayout" />
+      <NvxAppHeader
+        v-else
+        :platform="platform"
+      >
         <template #tabs>
           <NvxWorkspaceTabBar />
         </template>
       </NvxAppHeader>
       <div class="app-workspace">
-        <NvxNavigationRail />
+        <NvxNavigationRail v-if="!mobileLayout" />
         <main
           ref="workspaceContent"
           class="app-main"
@@ -494,9 +530,10 @@ onBeforeUnmount(() => {
           >
             {{ t("navigation.loading") }}
           </div>
-          <NvxWorkspaceTabPlaceholder />
+          <NvxWorkspaceTabPlaceholder v-if="nativeTabsHost" />
         </main>
       </div>
+      <NvxMobileBottomNav v-if="mobileLayout" />
     </div>
 
     <NvxDialog
@@ -545,6 +582,25 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app-workspace { flex-basis: 0; }
+
+/* The phone shell stacks top bar, content and bottom bar; the content keeps the desktop grid. */
+.app-shell--mobile {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.app-shell--mobile .app-workspace {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-shell--mobile .app-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 
 
 .app-main {

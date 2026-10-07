@@ -5,7 +5,6 @@ import {
   Clock3,
   KeyRound,
   RefreshCcw,
-  ShieldCheck,
   Star,
   TerminalSquare,
 } from "lucide-vue-next";
@@ -13,6 +12,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 
 import type { MetricFieldState, ServerOverviewCard } from "../../core-api/generated/core-api";
+import { isMobileLayout } from "../../platform-host";
 import {
   NvxButton,
   NvxCard,
@@ -31,6 +31,9 @@ defineEmits<{
 }>();
 
 const { locale, t } = useI18n();
+// The phone shows the compact Card: status dot beside the name, endpoint + resource tools on one
+// meta line, the same four metric cells below; no separate footer. A platform fact, never width.
+const compact = isMobileLayout();
 const host = computed(() => props.card.catalogEntry.host);
 const endpoint = computed(() => (
   `${host.value.username ? `${host.value.username}@` : ""}${host.value.address}:${host.value.port}`
@@ -81,6 +84,10 @@ const metricStatus = computed(() => {
     return { state: "disabled" as const, label: t("overview.monitoringDisabled") };
   }
   const session = props.card.metricsSession;
+  if (session?.state === "needsHostTrust") {
+    // Core makes no monitoring connection until the server identity is trusted.
+    return { state: "needsHostTrust" as const, label: t("overview.waitingForHostTrust") };
+  }
   const failure = session?.failureCode;
   if (failure === "providerUnsupported") {
     return { state: "unsupported" as const, label: t("overview.unsupported") };
@@ -88,13 +95,13 @@ const metricStatus = computed(() => {
   if (failure === "permissionDenied") {
     return { state: "permissionDenied" as const, label: t("overview.permissionDenied") };
   }
+  if (failure === "connectionClosedByServer") {
+    return { state: "error" as const, label: t("overview.serverRefusedConnection") };
+  }
   if (latest.value?.stale) {
     return { state: "stale" as const, label: t("overview.stale") };
   }
   if (failure) return { state: "error" as const, label: t("overview.metricError") };
-  if (session?.hostKeyChallenge || session?.state === "needsHostKeyReview") {
-    return { state: "disabled" as const, label: t("overview.waitingForHostKey") };
-  }
   if (session?.authenticationReason === "vaultLocked") {
     return { state: "disabled" as const, label: t("overview.waitingForVault") };
   }
@@ -175,7 +182,6 @@ const sampleTitle = computed(() => {
 const metricsActionLabel = computed(() => {
   const session = props.card.metricsSession;
   if (!session || !props.card.monitoringPolicy.policy.enabled) return null;
-  if (session.hostKeyChallenge) return t("overview.reviewHostKey");
   if (session.keyboardInteractiveChallenge) return t("overview.answerAuthentication");
   if (session.authenticationReason === "vaultLocked") return t("overview.unlockVault");
   if (session.authenticationReason === "credentialUnavailable") return t("overview.manageCredentials");
@@ -186,7 +192,6 @@ const metricsActionLabel = computed(() => {
 });
 const metricsActionIcon = computed(() => {
   const session = props.card.metricsSession;
-  if (session?.hostKeyChallenge) return ShieldCheck;
   if (session?.authenticationReason === "vaultLocked") return KeyRound;
   if (session?.keyboardInteractiveChallenge
     || session?.authenticationReason === "credentialUnavailable") return KeyRound;
@@ -238,8 +243,8 @@ function metricsIssueReason(session: ServerOverviewCard['metricsSession']) {
   if (session.failureCode) {
     return t(`overview.resourceIssue.metricsFailure.${session.failureCode}`);
   }
-  if (session.hostKeyChallenge || session.state === 'needsHostKeyReview') {
-    return t('overview.resourceIssue.hostKeyReview');
+  if (session.state === 'needsHostTrust') {
+    return t('overview.resourceIssue.hostTrustRequired');
   }
   return '';
 }
@@ -300,9 +305,123 @@ function formatBytes(value: string) {
 <template>
   <NvxCard
     class="nvx-server-card"
+    :class="{ 'nvx-server-card--compact': compact }"
     :aria-labelledby="`server-card-${host.hostId}`"
   >
-    <header class="nvx-server-card__header">
+    <template v-if="compact">
+      <header class="nvx-server-card__compact-head">
+        <span
+          class="nvx-server-card__connection-dot"
+          :class="`nvx-server-card__connection-dot--${statusDotTone}`"
+          :title="connectionStatusDescription"
+          :data-tooltip="connectionStatusDescription"
+          :aria-label="connectionStatusDescription"
+          role="status"
+          tabindex="0"
+        />
+        <h2
+          :id="`server-card-${host.hostId}`"
+          :title="host.label"
+        >
+          {{ host.label }}
+        </h2>
+        <span
+          v-if="host.favorite"
+          class="nvx-server-card__favorite"
+          :title="t('sshTerminal.favoriteHost')"
+          aria-hidden="true"
+        >
+          <NvxIcon
+            :icon="Star"
+            :size="16"
+          />
+        </span>
+        <span
+          v-if="card.catalogEntry.group"
+          class="nvx-server-card__group"
+          :title="card.catalogEntry.group.label"
+        >
+          {{ card.catalogEntry.group.label }}
+        </span>
+        <NvxButton
+          class="nvx-server-card__new-terminal"
+          size="sm"
+          @click="$emit('connect', host.hostId)"
+        >
+          <NvxIcon
+            :icon="TerminalSquare"
+            :size="16"
+          />
+          {{ t('overview.newTerminal') }}
+        </NvxButton>
+      </header>
+      <div class="nvx-server-card__compact-meta">
+        <span
+          class="nvx-server-card__endpoint"
+          :aria-label="t('overview.endpoint')"
+          :title="endpoint"
+        >
+          {{ compactEndpoint }}
+        </span>
+        <span class="nvx-server-card__actions">
+          <NvxPluginContributionSlot
+            extension-slot="overviewCardActions"
+            :instance-key="host.hostId"
+            :display-label="host.label"
+          />
+          <span
+            v-if="card.terminalSessionIds.length"
+            class="nvx-server-card__sessions"
+          >
+            <span class="nvx-server-card__session-count">
+              <NvxIcon
+                :icon="TerminalSquare"
+                :size="16"
+              />
+              {{ terminalSessionCountLabel }}
+            </span>
+            <NvxIconButton
+              v-for="(sessionId, index) in card.terminalSessionIds"
+              :key="sessionId"
+              :label="t('overview.openTerminalNumber', { index: index + 1 })"
+              size="sm"
+              @click="$emit('focusTerminal', sessionId)"
+            >
+              <NvxIcon
+                :icon="TerminalSquare"
+                :size="16"
+              />
+            </NvxIconButton>
+          </span>
+          <NvxIconButton
+            v-if="metricsActionLabel"
+            :label="metricsActionLabel"
+            size="sm"
+            @click="$emit('metricsAction', host.hostId)"
+          >
+            <NvxIcon
+              :icon="metricsActionIcon"
+              :size="16"
+            />
+          </NvxIconButton>
+        </span>
+        <span
+          class="nvx-server-card__sample"
+          :class="`nvx-server-card__sample--${metricStatus.state}`"
+          :title="sampleTitle"
+        >
+          <NvxIcon
+            :icon="Clock3"
+            :size="16"
+          />
+          {{ sampleLabel }}
+        </span>
+      </div>
+    </template>
+    <header
+      v-else
+      class="nvx-server-card__header"
+    >
       <div class="nvx-server-card__identity">
         <div class="nvx-server-card__title">
           <h2
@@ -417,7 +536,10 @@ function formatBytes(value: string) {
       </div>
     </div>
 
-    <footer class="nvx-server-card__footer">
+    <footer
+      v-if="!compact"
+      class="nvx-server-card__footer"
+    >
       <span class="nvx-server-card__actions">
         <NvxPluginContributionSlot
           extension-slot="overviewCardActions"
@@ -699,7 +821,8 @@ function formatBytes(value: string) {
   white-space: nowrap;
 }
 
-.nvx-server-card__sample--stale {
+.nvx-server-card__sample--stale,
+.nvx-server-card__sample--needsHostTrust {
   color: var(--nvx-color-warning);
 }
 

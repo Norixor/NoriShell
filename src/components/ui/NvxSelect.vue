@@ -18,6 +18,8 @@ import {
   type CSSProperties,
 } from "vue";
 
+import { mountMobileSheetBackdrop, pushMobileOverlay, type MobileOverlayHandle, type MobileSheetBackdropHandle } from "../../mobile-overlays";
+import { isMobileLayout } from "../../platform-host";
 import NvxIcon from "./NvxIcon.vue";
 
 const props = withDefaults(
@@ -29,6 +31,8 @@ const props = withDefaults(
     disabled?: boolean;
     ariaLabel?: string;
     popupMinWidth?: number;
+    /** Phone sheet only: accessible name and placeholder of the option filter shown for long lists. */
+    searchLabel?: string;
   }>(),
   {
     id: undefined,
@@ -37,6 +41,7 @@ const props = withDefaults(
     disabled: false,
     ariaLabel: undefined,
     popupMinWidth: undefined,
+    searchLabel: undefined,
   },
 );
 
@@ -52,6 +57,41 @@ const opensAbove = ref(false);
 const isInDialog = ref(false);
 const popupStyle = ref<CSSProperties>({});
 const generatedId = useId();
+
+// Phone shell: the listbox is a bottom sheet with a filter for long lists (platform fact, not width).
+const mobile = isMobileLayout();
+const MOBILE_SEARCH_THRESHOLD = 8;
+const sheet = ref<HTMLElement>();
+const searchInput = ref<HTMLInputElement>();
+const filter = ref("");
+const showSearch = computed(() => mobile && props.options.length > MOBILE_SEARCH_THRESHOLD);
+const visibleIndexes = computed(() => {
+  const needle = filter.value.trim().toLowerCase();
+  const indexes: number[] = [];
+  props.options.forEach((option, index) => {
+    if (!needle || option.label.toLowerCase().includes(needle)) indexes.push(index);
+  });
+  return indexes;
+});
+let overlay: MobileOverlayHandle | null = null;
+let removeBackdrop: MobileSheetBackdropHandle | null = null;
+
+function presentMobileSheet() {
+  removeBackdrop ??= mountMobileSheetBackdrop(() => close({ restoreFocus: true }));
+  overlay ??= pushMobileOverlay(() => { close({ restoreFocus: true }); return true; }, () => [removeBackdrop?.element, sheet.value]);
+  void nextTick(() => {
+    overlay?.refresh();
+    if (showSearch.value) searchInput.value?.focus();
+  });
+}
+
+function dismissMobileSheet() {
+  removeBackdrop?.();
+  removeBackdrop = null;
+  overlay?.release();
+  overlay = null;
+  filter.value = "";
+}
 
 const listboxId = computed(() => `${props.id ?? generatedId}-listbox`);
 const selectedIndex = computed(() =>
@@ -139,14 +179,17 @@ function open(direction: "first" | "last" = "first") {
   activeIndex.value = initialActiveIndex(direction);
   isInDialog.value = Boolean(root.value?.closest('[role="dialog"]'));
   isProtected.value = Boolean(root.value?.closest("[data-theme-protected]"));
-  updatePopupPosition();
+  if (mobile) popupStyle.value = {};
+  else updatePopupPosition();
   isOpen.value = true;
+  if (mobile) presentMobileSheet();
   scrollActiveOptionIntoView();
 }
 
 function close({ restoreFocus = false } = {}) {
   if (!isOpen.value) return;
   isOpen.value = false;
+  if (mobile) dismissMobileSheet();
   if (restoreFocus) void nextTick(() => trigger.value?.focus());
 }
 
@@ -158,9 +201,13 @@ function toggle() {
 function moveActive(step: 1 | -1) {
   if (firstEnabledIndex() < 0) return;
 
-  let next = activeIndex.value;
-  for (let attempts = 0; attempts < props.options.length; attempts += 1) {
-    next = (next + step + props.options.length) % props.options.length;
+  // The filtered sheet only cycles through the options that are currently listed.
+  const candidates = showSearch.value ? visibleIndexes.value : props.options.map((_, index) => index);
+  if (!candidates.length) return;
+  let position = candidates.indexOf(activeIndex.value);
+  for (let attempts = 0; attempts < candidates.length; attempts += 1) {
+    position = (position + step + candidates.length) % candidates.length;
+    const next = candidates[position]!;
     if (!props.options[next]?.disabled) {
       activeIndex.value = next;
       scrollActiveOptionIntoView();
@@ -221,12 +268,12 @@ function onKeydown(event: KeyboardEvent) {
 
 function onDocumentPointerDown(event: PointerEvent) {
   const target = event.target as Node | null;
-  if (root.value?.contains(target) || listbox.value?.contains(target)) return;
+  if (root.value?.contains(target) || listbox.value?.contains(target) || sheet.value?.contains(target)) return;
   close();
 }
 
 function onViewportChange() {
-  if (isOpen.value) updatePopupPosition();
+  if (isOpen.value && !mobile) updatePopupPosition();
 }
 
 watch(isOpen, (open) => {
@@ -250,13 +297,14 @@ watch(
     }
     if (isOpen.value) {
       activeIndex.value = initialActiveIndex();
-      updatePopupPosition();
+      if (!mobile) updatePopupPosition();
       scrollActiveOptionIntoView();
     }
   },
 );
 
 onBeforeUnmount(() => {
+  dismissMobileSheet();
   document.removeEventListener("pointerdown", onDocumentPointerDown, true);
   window.removeEventListener("resize", onViewportChange);
   window.removeEventListener("scroll", onViewportChange, true);
@@ -293,45 +341,99 @@ onBeforeUnmount(() => {
     </button>
 
     <Teleport to="body">
-      <ul
-        v-if="isOpen"
-        :id="listboxId"
-        ref="listbox"
-        class="nvx-select__listbox"
-        :class="{
-          'nvx-select__listbox--above': opensAbove,
-          'nvx-select__listbox--in-dialog': isInDialog,
-        }"
-        :data-theme-protected="isProtected ? '' : undefined"
-        role="listbox"
-        :style="popupStyle"
-      >
-        <li
-          v-for="(option, index) in options"
-          :id="optionId(index)"
-          :key="`${option.value}-${index}`"
-          class="nvx-select__option"
-          :class="{
-            'nvx-select__option--active': activeIndex === index,
-            'nvx-select__option--selected': modelValue === option.value,
-            'nvx-select__option--disabled': option.disabled,
-          }"
-          role="option"
-          :aria-selected="modelValue === option.value"
-          :aria-disabled="option.disabled || undefined"
-          @pointerdown.prevent
-          @mouseenter="!option.disabled && (activeIndex = index)"
-          @click="select(index)"
+      <template v-if="isOpen">
+        <div
+          v-if="mobile"
+          ref="sheet"
+          class="nvx-select__sheet"
+          :class="{ 'nvx-select__sheet--in-dialog': isInDialog }"
+          :data-theme-protected="isProtected ? '' : undefined"
+          data-nvx-mobile-sheet
         >
-          <span class="nvx-select__option-label">{{ option.label }}</span>
-          <NvxIcon
-            v-if="modelValue === option.value"
-            class="nvx-select__check"
-            :icon="Check"
-            :size="16"
-          />
-        </li>
-      </ul>
+          <input
+            v-if="showSearch"
+            ref="searchInput"
+            v-model="filter"
+            class="nvx-select__search"
+            type="search"
+            :aria-label="searchLabel ?? ariaLabel"
+            :placeholder="searchLabel"
+            :aria-controls="listboxId"
+            autocomplete="off"
+            @keydown="onKeydown"
+          >
+          <ul
+            :id="listboxId"
+            ref="listbox"
+            class="nvx-select__listbox nvx-select__listbox--sheet"
+            role="listbox"
+          >
+            <li
+              v-for="index in visibleIndexes"
+              :id="optionId(index)"
+              :key="`${options[index]!.value}-${index}`"
+              class="nvx-select__option"
+              :class="{
+                'nvx-select__option--active': activeIndex === index,
+                'nvx-select__option--selected': modelValue === options[index]!.value,
+                'nvx-select__option--disabled': options[index]!.disabled,
+              }"
+              role="option"
+              :aria-selected="modelValue === options[index]!.value"
+              :aria-disabled="options[index]!.disabled || undefined"
+              @pointerdown.prevent
+              @click="select(index)"
+            >
+              <span class="nvx-select__option-label">{{ options[index]!.label }}</span>
+              <NvxIcon
+                v-if="modelValue === options[index]!.value"
+                class="nvx-select__check"
+                :icon="Check"
+                :size="16"
+              />
+            </li>
+          </ul>
+        </div>
+        <ul
+          v-else
+          :id="listboxId"
+          ref="listbox"
+          class="nvx-select__listbox"
+          :class="{
+            'nvx-select__listbox--above': opensAbove,
+            'nvx-select__listbox--in-dialog': isInDialog,
+          }"
+          :data-theme-protected="isProtected ? '' : undefined"
+          role="listbox"
+          :style="popupStyle"
+        >
+          <li
+            v-for="(option, index) in options"
+            :id="optionId(index)"
+            :key="`${option.value}-${index}`"
+            class="nvx-select__option"
+            :class="{
+              'nvx-select__option--active': activeIndex === index,
+              'nvx-select__option--selected': modelValue === option.value,
+              'nvx-select__option--disabled': option.disabled,
+            }"
+            role="option"
+            :aria-selected="modelValue === option.value"
+            :aria-disabled="option.disabled || undefined"
+            @pointerdown.prevent
+            @mouseenter="!option.disabled && (activeIndex = index)"
+            @click="select(index)"
+          >
+            <span class="nvx-select__option-label">{{ option.label }}</span>
+            <NvxIcon
+              v-if="modelValue === option.value"
+              class="nvx-select__check"
+              :icon="Check"
+              :size="16"
+            />
+          </li>
+        </ul>
+      </template>
     </Teleport>
   </span>
 </template>
@@ -454,5 +556,40 @@ onBeforeUnmount(() => {
   .nvx-select__chevron {
     transition: none;
   }
+}
+
+/* Phone sheet: the global `[data-nvx-mobile-sheet]` rules place the wrapper; the list flows inside it. */
+.nvx-select__sheet {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  color: var(--nvx-color-text-primary);
+}
+
+.nvx-select__search {
+  min-height: var(--nvx-control-height-touch);
+  margin: var(--nvx-space-1) var(--nvx-space-2) var(--nvx-space-2);
+  padding: 0 var(--nvx-space-3);
+  border: var(--nvx-border-width) solid var(--nvx-color-border-strong);
+  border-radius: var(--nvx-radius-md);
+  background: var(--nvx-color-bg-canvas);
+  color: inherit;
+  font: inherit;
+}
+
+.nvx-select__search:focus-visible {
+  border-color: var(--nvx-color-accent);
+  outline: none;
+  box-shadow: 0 0 0 var(--nvx-focus-ring-width) var(--nvx-color-focus-ring);
+}
+
+.nvx-select__listbox--sheet {
+  position: static;
+  z-index: auto;
+  min-height: 0;
+  padding: 0;
+  overflow-y: auto;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 </style>

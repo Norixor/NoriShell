@@ -10,6 +10,7 @@ import { validateTerminalKeyboardPreferences, type HostKeyboardMode, type Termin
 import { useTipsStore } from "../../stores/tips";
 import { NvxButton, NvxCheckbox, NvxField, NvxInlineNotice, NvxInput, NvxSelect } from "../ui";
 import { onSavedConnectionsChanged } from "../../saved-connections";
+import { isMobileLayout } from "../../platform-host";
 
 interface InteractionDraft {
   scrollback: string;
@@ -33,6 +34,8 @@ interface HostOption {
 
 const { t } = useI18n();
 const preferences = useTerminalPreferencesStore();
+// Phones trigger the context action by long-press and have no macOS Option key.
+const mobileLayout = isMobileLayout();
 const tips = useTipsStore();
 function createDraft(interaction: InteractionPreferences): InteractionDraft {
   return {
@@ -211,7 +214,7 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
   >
     <header>
       <h2>{{ t('terminalInteraction.title') }}</h2>
-      <p>{{ t('terminalInteraction.description') }}</p>
+      <p>{{ t(mobileLayout ? 'mobile.settings.interactionDescription' : 'terminalInteraction.description') }}</p>
     </header>
     <div class="nvx-terminal-interaction-settings__fields">
       <NvxField
@@ -232,7 +235,7 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
       </NvxField>
       <NvxField
         :label="t('terminalInteraction.scrollSensitivity')"
-        :hint="t('terminalInteraction.scrollSensitivityHint')"
+        :hint="t(mobileLayout ? 'mobile.settings.scrollSensitivityHint' : 'terminalInteraction.scrollSensitivityHint')"
         :error="scrollSensitivityInvalid ? t('terminalInteraction.scrollSensitivityInvalid') : undefined"
       >
         <NvxInput
@@ -258,19 +261,19 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
         />
       </NvxField>
       <NvxField
-        :label="t('terminalInteraction.doubleClickSelection')"
-        :hint="t('terminalInteraction.doubleClickSelectionHint')"
+        :label="t(mobileLayout ? 'mobile.settings.doubleTapSelection' : 'terminalInteraction.doubleClickSelection')"
+        :hint="t(mobileLayout ? 'mobile.settings.doubleTapSelectionHint' : 'terminalInteraction.doubleClickSelectionHint')"
       >
         <NvxSelect
           :model-value="draft.doubleClickSelection"
           :options="selectionOptions"
-          :aria-label="t('terminalInteraction.doubleClickSelection')"
+          :aria-label="t(mobileLayout ? 'mobile.settings.doubleTapSelection' : 'terminalInteraction.doubleClickSelection')"
           @update:model-value="selectMode"
         />
       </NvxField>
       <NvxField
         :label="t('terminalInteraction.copyOnSelect')"
-        :hint="t('terminalInteraction.copyOnSelectHint')"
+        :hint="t(mobileLayout ? 'mobile.settings.copyOnSelectHint' : 'terminalInteraction.copyOnSelectHint')"
       >
         <NvxSelect
           :model-value="String(draft.copyOnSelect)"
@@ -280,17 +283,18 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
         />
       </NvxField>
       <NvxField
-        :label="t('terminalInteraction.rightClickBehavior')"
-        :hint="t('terminalInteraction.rightClickBehaviorHint')"
+        :label="t(mobileLayout ? 'mobile.settings.longPressBehavior' : 'terminalInteraction.rightClickBehavior')"
+        :hint="t(mobileLayout ? 'mobile.settings.longPressBehaviorHint' : 'terminalInteraction.rightClickBehaviorHint')"
       >
         <NvxSelect
           :model-value="draft.rightClickBehavior"
           :options="rightClickOptions"
-          :aria-label="t('terminalInteraction.rightClickBehavior')"
+          :aria-label="t(mobileLayout ? 'mobile.settings.longPressBehavior' : 'terminalInteraction.rightClickBehavior')"
           @update:model-value="selectRightClickBehavior"
         />
       </NvxField>
       <NvxField
+        v-if="!mobileLayout"
         :label="t('terminalInteraction.optionAsMetaLeft')"
         :hint="t('terminalInteraction.optionAsMetaHint')"
       >
@@ -301,7 +305,10 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
           @update:model-value="selectOptionMeta('optionAsMetaLeft', $event)"
         />
       </NvxField>
-      <NvxField :label="t('terminalInteraction.optionAsMetaRight')">
+      <NvxField
+        v-if="!mobileLayout"
+        :label="t('terminalInteraction.optionAsMetaRight')"
+      >
         <NvxSelect
           :model-value="String(draft.optionAsMetaRight)"
           :options="optionMetaOptions"
@@ -311,7 +318,7 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
       </NvxField>
       <NvxField
         :label="t('terminalInteraction.backspaceMode')"
-        :hint="t('terminalInteraction.backspaceModeHint')"
+        :hint="t(mobileLayout ? 'mobile.settings.backspaceModeHint' : 'terminalInteraction.backspaceModeHint')"
       >
         <NvxSelect
           :model-value="draft.backspaceMode"
@@ -333,7 +340,7 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
       </NvxField>
       <NvxField
         :label="t('terminalInteraction.linksEnabled')"
-        :hint="t('terminalInteraction.linksEnabledHint')"
+        :hint="t(mobileLayout ? 'mobile.settings.linksEnabledHint' : 'terminalInteraction.linksEnabledHint')"
       >
         <NvxSelect
           :model-value="String(draft.linksEnabled)"
@@ -400,7 +407,10 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
           />
         </NvxField>
         <template v-if="keyboardScope && hostKeyboardMode === 'override'">
-          <NvxField :label="t('terminalInteraction.optionAsMetaLeft')">
+          <NvxField
+            v-if="!mobileLayout"
+            :label="t('terminalInteraction.optionAsMetaLeft')"
+          >
             <NvxSelect
               :model-value="String(hostKeyboardDraft.optionAsMetaLeft)"
               :options="optionMetaOptions"
@@ -408,7 +418,10 @@ onBeforeUnmount(() => { disposed = true; stopSavedConnectionsListener?.(); });
               @update:model-value="selectHostKeyboardOption('optionAsMetaLeft', $event)"
             />
           </NvxField>
-          <NvxField :label="t('terminalInteraction.optionAsMetaRight')">
+          <NvxField
+            v-if="!mobileLayout"
+            :label="t('terminalInteraction.optionAsMetaRight')"
+          >
             <NvxSelect
               :model-value="String(hostKeyboardDraft.optionAsMetaRight)"
               :options="optionMetaOptions"

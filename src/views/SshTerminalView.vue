@@ -14,7 +14,6 @@ import {
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { useRouteReveal } from "../routeReveal";
-import { isTauri } from "@tauri-apps/api/core";
 import { onSavedConnectionsChanged } from "../saved-connections";
 
 import {
@@ -59,6 +58,7 @@ import {
   canUseDesktopCore,
   createHost,
   createIdentity,
+  listIdentities,
   fetchTelnetSessionSnapshot,
   fetchTerminalWorkspaceLayout,
   fetchVaultStatus,
@@ -103,6 +103,7 @@ import { registerTerminalWorkspaceFlush } from "../terminal-workspace-persistenc
 import { useUiStore } from "../stores/ui";
 import type { NativeTerminalSessionScope } from "../core-api/generated/core-api";
 import { useWorkspaceTabsStore, type TerminalHostOpenRequest } from "../stores/workspaceTabs";
+import { workspaceTabStateTone, type WorkspaceTabStateTone, type WorkspaceTerminalKind } from "../workspace-tab-state-tone";
 import { useTipsStore } from "../stores/tips";
 import { applicationPreferenceFailure } from "../core-api/application-preferences";
 import { createManagedQuickConnect, createManagedTelnet, createManagedTerminalForHost, createManagedTerminalTab } from "../workspace-tab-view-shell";
@@ -118,6 +119,7 @@ import {
   type TerminalHandoffPane,
   type TerminalTabHandoffSnapshot,
 } from "../terminal-workspace-handoff";
+import { hasTauriIpc, isMobileLayout, workspaceHostMode } from "../platform-host";
 import { isWorkspaceChildWindow, isWorkspaceTabView } from "../workspace-window-context";
 import { showWorkspaceTabFailure } from "../workspace-tab-errors";
 import { handOffClosingWorkspaceTabs, restoreClosedWorkspaceTabs } from "../workspace-tab-close-handoff";
@@ -126,6 +128,7 @@ import {
   isActivePluginSession,
   isActiveSshSession,
   isActiveTelnetSession,
+  planTerminalWorkspaceRestore,
   type TerminalRestoreLivePane,
   type TerminalRestoreSeed,
 } from "../workspace-tab-terminal-restore";
@@ -272,6 +275,31 @@ const ownedTabIds = new Set<string>();
 const handoffSnapshotListeners = new Set<(snapshots: readonly TerminalTabHandoffSnapshot[]) => void>();
 let lastObservedHandoffProjection = "";
 const childWorkspace = isWorkspaceChildWindow();
+// Desktop shells hand launches to native Tab WebViews; Android and the browser preview open them in this document.
+const nativeTabsHost = workspaceHostMode() === "nativeTabs";
+// Android: this document owns, persists and restores every Terminal Tab through Core.
+const singleDocumentCore = !nativeTabsHost && !childWorkspace && hasTauriIpc() && canUseDesktopCore();
+const mobileLayout = isMobileLayout();
+const PANE_MINIMUM_WIDTH = 400;
+const PANE_MINIMUM_HEIGHT = 240;
+/**
+ * Phones never split a Tab, but a restored or adopted layout can already hold several Panes
+ * (orphan Sessions are grouped into one Tab on restore). Show only the active Pane with a
+ * switcher; the layout and every Session stay untouched.
+ */
+function soloPaneIdFor(tab: TerminalWorkspaceTab): string | null {
+  return mobileLayout && countTerminalPanes(tab.layout) > 1 ? tab.activePaneId : null;
+}
+/** Panes in layout order (left to right, top to bottom) for the phone Pane switcher. */
+function tabPanesInLayoutOrder(tab: TerminalWorkspaceTab) {
+  const order: string[] = [];
+  const walk = (node: TerminalLayoutNode) => {
+    if (node.kind === "pane") order.push(node.paneId);
+    else { walk(node.first); walk(node.second); }
+  };
+  walk(tab.layout);
+  return order.map((paneId) => tab.panes.find((pane) => pane.paneId === paneId)).filter((pane) => pane !== undefined);
+}
 // A Tab WebView is hidden until its owner shell activates it; a hidden or background
 // Tab must never mark a Pane active, which would take the global input focus.
 const viewActive = ref(!isWorkspaceTabView());
@@ -279,6 +307,8 @@ let vaultUnlockAwaitingDisplay = false;
 // BEL attention is renderer-only projection state: it never changes the session or workspace layout.
 const bellAttentionPaneIds = ref<Set<string>>(new Set());
 const requestedHost = ref<HostSummary | null>(null);
+// The username a saved Host actually connects with: its own override, else the bound Identity's username.
+const requestedHostEffectiveUsername = ref<{ hostId: string; username: string } | null>(null);
 const requestedInitialDirectory = ref<{ hostId: string; paneId: string; directory: string } | null>(null);
 const requestedPluginAuthorizationToken = ref<string | null>(null);
 const savedHosts = ref<HostSummary[]>([]);
@@ -595,9 +625,24 @@ async function createInitialPluginProtocolTab(
 }
 
 async function createInitialApprovedPluginChannel(id: string, payload: PluginApprovedTerminalChannelLaunch): Promise<void> {
-  if (!isWorkspaceTabView() || tabs.value.length !== 0 || !payload.operationId || !payload.authorizationToken) {
-    throw new Error("workspace_tab.invalid_plugin_channel");
-  }
+  if (!isWorkspaceTabView() || tabs.value.length !== 0) throw new Error("workspace_tab.invalid_plugin_channel");
+  await addApprovedPluginChannelTab(id, payload);
+}
+
+/** The single document opens an approved plugin channel as a new Tab of its own. */
+async function openApprovedPluginChannel(payload: PluginApprovedTerminalChannelLaunch): Promise<void> {
+  if (!singleDocumentCore) throw new Error("workspace_tab.invalid_plugin_channel");
+  await ensureTerminalWorkspaceInitialized();
+  viewActive.value = true;
+  await addApprovedPluginChannelTab(createUuidV7(), payload);
+}
+
+/**
+ * Binds one Core-approved channel (one-time authorization token) to a new Tab. The
+ * operation is consumed once, so a repeated approval event never opens a second Pane.
+ */
+async function addApprovedPluginChannelTab(id: string, payload: PluginApprovedTerminalChannelLaunch): Promise<void> {
+  if (!payload.operationId || !payload.authorizationToken) throw new Error("workspace_tab.invalid_plugin_channel");
   if (approvedPluginChannelOperations.has(payload.operationId)) throw new Error("workspace_tab.plugin_channel_consumed");
   approvedPluginChannelOperations.add(payload.operationId);
   const paneId = createLauncherTab(false, id);
@@ -631,22 +676,22 @@ function launchManagedFromEmptyWorkspace(action: () => Promise<unknown>) {
 }
 
 function openEmptyWorkspaceQuickConnect(target: string) {
-  if (isTauri() && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedQuickConnect(target));
+  if (nativeTabsHost && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedQuickConnect(target));
   else openInlineQuickConnect(target);
 }
 
 function openEmptyWorkspaceHost(hostId: string) {
-  if (isTauri() && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedTerminalForHost({ hostId, source: "launcher" }));
+  if (nativeTabsHost && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedTerminalForHost({ hostId, source: "launcher" }));
   else void openRequestedHost(hostId);
 }
 
 function openEmptyWorkspaceLocalTerminal() {
-  if (isTauri() && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedTerminalTab("local"));
+  if (nativeTabsHost && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(() => createManagedTerminalTab("local"));
   else createLocalTerminal(null);
 }
 
 function openEmptyWorkspaceTelnet() {
-  if (isTauri() && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(createManagedTelnet);
+  if (nativeTabsHost && !isWorkspaceTabView()) launchManagedFromEmptyWorkspace(createManagedTelnet);
   else openTelnetLauncher(null);
 }
 
@@ -1173,7 +1218,54 @@ async function refreshSavedHosts() {
   }
 }
 
+async function effectiveHostUsername(host: HostSummary): Promise<string | null> {
+  if (host.username) return host.username;
+  if (!host.identityId) return null;
+  try {
+    return (await listIdentities()).find((identity) => identity.identityId === host.identityId)?.username ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Prefills the connection form from a saved Host, including an Identity-provided username. */
+async function prefillFromHost(host: HostSummary) {
+  requestedHost.value = host;
+  address.value = host.address;
+  port.value = String(host.port);
+  username.value = host.username ?? "";
+  const effective = await effectiveHostUsername(host);
+  // A later request may have replaced the Host while the Identity was read.
+  if (requestedHost.value?.hostId !== host.hostId) return;
+  requestedHostEffectiveUsername.value = effective ? { hostId: host.hostId, username: effective } : null;
+  if (effective && !username.value.trim()) username.value = effective;
+}
+
+/**
+ * Whether the form still describes the requested saved Host. A Host whose
+ * username comes from its Identity has `username: null`; matching uses the
+ * effective username so re-authentication stays bound to the Host (its HostId,
+ * label and resources) instead of turning into Quick Connect. Only an edited
+ * endpoint becomes Quick Connect.
+ */
+function formMatchesHost(host: HostSummary) {
+  if (host.address !== address.value.trim() || host.port !== parsedConnectionPort()) return false;
+  const formUsername = username.value.trim();
+  if (host.username !== null) return host.username === formUsername;
+  const effective = requestedHostEffectiveUsername.value;
+  return effective?.hostId === host.hostId && effective.username === formUsername;
+}
+
+function reauthenticationSessionPane() {
+  const paneId = reauthenticationPaneId.value;
+  const pane = paneId ? findWorkspacePane(paneId)?.pane : null;
+  return pane?.kind === "session" ? pane : null;
+}
+
 function currentLabel() {
+  // Re-authenticating an existing Pane keeps its Tab title (Host label or the Quick Connect endpoint).
+  const reauthenticating = reauthenticationSessionPane();
+  if (reauthenticating) return reauthenticating.label;
   return requestedHost.value?.label ?? `${username.value.trim()}@${address.value.trim()}`;
 }
 
@@ -1194,6 +1286,15 @@ function connectionFormIsValid() {
 
 async function ensureHostSavedWithoutCredential() {
   if (requestedHost.value) return requestedHost.value;
+  const reauthenticating = reauthenticationSessionPane();
+  if (reauthenticating?.target.kind === "host") {
+    // Saving a credential while re-authenticating a saved Host's Pane belongs to that HostId; never create a duplicate Host.
+    const hostId = reauthenticating.target.hostId;
+    const host = (await listHosts()).find((candidate) => candidate.hostId === hostId);
+    if (!host) throw new Error("The re-authenticated Host no longer exists");
+    requestedHost.value = host;
+    return host;
+  }
   const host = await createHost({
     label: currentLabel(),
     address: address.value.trim(),
@@ -1220,10 +1321,7 @@ async function connectWithCredentialRef(credentialRefId: string) {
   const labelValue = currentLabel();
   const host = requestedHost.value;
   // Temporary credentials do not change a saved Host identity; only editing the endpoint turns this into Quick Connect.
-  const matchesRequestedHost = host
-    && host.address === address.value.trim()
-    && host.port === parsedConnectionPort()
-    && host.username === username.value.trim();
+  const matchesRequestedHost = host && formMatchesHost(host);
   if (requestedInitialDirectory.value && !matchesRequestedHost) {
     tips.show({ scope: "ssh-sftp-directory-launch", tone: "error", title: t("sshTerminal.sftpDirectoryConnectFailed") });
     return;
@@ -1380,12 +1478,7 @@ async function requestSessionCredential(
     if (canUseDesktopCore()) {
       try {
         const host = (await listHosts()).find((candidate) => candidate.hostId === target.hostId);
-        if (host) {
-          requestedHost.value = host;
-          address.value = host.address;
-          port.value = String(host.port);
-          username.value = host.username ?? "";
-        }
+        if (host) await prefillFromHost(host);
       } catch {
         connectionErrorVisible.value = true;
       }
@@ -1563,10 +1656,7 @@ async function attemptConnect() {
   if (validationVisible.value) return;
   const requestedDirectory = requestedInitialDirectory.value;
   const host = requestedHost.value;
-  if (requestedDirectory && (!host || host.hostId !== requestedDirectory.hostId
-    || host.address !== address.value.trim()
-    || host.port !== parsedConnectionPort()
-    || host.username !== username.value.trim())) {
+  if (requestedDirectory && (!host || host.hostId !== requestedDirectory.hostId || !formMatchesHost(host))) {
     tips.show({ scope: "ssh-sftp-directory-launch", tone: "error", title: t("sshTerminal.sftpDirectoryConnectFailed") });
     return;
   }
@@ -1695,7 +1785,12 @@ function updatePluginTabState(paneId: string, state: PluginTerminalSessionState,
 
 let protocolLaunchReconciliation: Promise<void> | null = null;
 function reconcilePluginProtocolLaunches() {
-  if (!childWorkspace || !requestedPluginProtocolLaunch || !canUseDesktopCore()) return Promise.resolve();
+  // A Tab WebView takes only the one launch bound to its bootstrap; the single document
+  // hosts every pending launch as its own Tab, keeping the Core-assigned Tab and Pane ids.
+  const takesEveryLaunch = singleDocumentCore;
+  if (!takesEveryLaunch && (!childWorkspace || !requestedPluginProtocolLaunch || !canUseDesktopCore())) {
+    return Promise.resolve();
+  }
   if (protocolLaunchReconciliation) return protocolLaunchReconciliation;
   protocolLaunchReconciliation = (async () => {
     await ensureTerminalWorkspaceInitialized();
@@ -1703,9 +1798,10 @@ function reconcilePluginProtocolLaunches() {
     pluginLaunchErrorVisible.value = false;
     for (const launch of launches) {
       const requested = requestedPluginProtocolLaunch;
-      if (!requested || launch.launchId !== requested.launchId || launch.revision !== requested.revision
-        || launch.tabId !== requested.tabId || launch.paneId !== requested.paneId) continue;
-      if (launch.claimed || launch.expiresAtUnixMs <= Date.now() || findWorkspacePane(launch.paneId)) continue;
+      if (!takesEveryLaunch && (!requested || launch.launchId !== requested.launchId || launch.revision !== requested.revision
+        || launch.tabId !== requested.tabId || launch.paneId !== requested.paneId)) continue;
+      if (launch.claimed || launch.expiresAtUnixMs <= Date.now() || findWorkspacePane(launch.paneId)
+        || tabs.value.some((tab) => tab.tabId === launch.tabId)) continue;
       const pane: PluginSessionPane = { kind: "plugin", paneId: launch.paneId,
         label: launch.label, profile: null, launch, state: "connecting", summary: null, deferredStart: false };
       tabs.value.push({ tabId: launch.tabId, activePaneId: launch.paneId,
@@ -1723,13 +1819,25 @@ function sshLabel(summary: SshSessionSummary) {
   return endpoint ? `${endpoint.username ? `${endpoint.username}@` : ""}${endpoint.address}` : summary.sessionId;
 }
 
+/** A saved Host's Tab keeps its Host label after restore; Quick Connect and missing Hosts show user@host. */
+async function restoredSshLabel(summary: SshSessionSummary) {
+  const target = summary.target;
+  if (target.kind === "host") {
+    try {
+      const host = (await listHosts()).find((candidate) => candidate.hostId === target.hostId);
+      if (host) return host.label;
+    } catch { /* Fall back to the endpoint; the Session itself is unaffected. */ }
+  }
+  return sshLabel(summary);
+}
+
 /** Rebuilds a Pane bound to a still-live Core Session; stale or ended Sessions return null. */
 async function restoreLivePane(live: TerminalRestoreLivePane, tabId: string): Promise<TerminalWorkspacePane | null> {
   const { paneId } = live;
   if (live.kind === "ssh") {
     const summary = (await getSshSession(live.sessionId)).session;
     if (summary.generation !== live.generation || !isActiveSshSession(summary)) return null;
-    return { kind: "session", paneId, label: sshLabel(summary), state: summary.state, target: summary.target,
+    return { kind: "session", paneId, label: await restoredSshLabel(summary), state: summary.state, target: summary.target,
       credentialRefId: summary.credentialRefId, summary, deferredStart: false, deferredRecovery: "reconnect" };
   }
   if (live.kind === "local") {
@@ -1754,6 +1862,17 @@ async function restoreLivePane(live: TerminalRestoreLivePane, tabId: string): Pr
 /** Restores this child's first Tab from the startup seed; live Sessions attach before any restart. */
 async function restoreInitialTab(id: string, seed: TerminalRestoreSeed): Promise<void> {
   if (!isWorkspaceTabView() || tabs.value.length !== 0) throw new Error("workspace_tab.invalid_initial_tab");
+  tabs.value.push(await buildRestoredTab(id, seed));
+  ownedTabIds.add(id);
+  activateTab(id);
+  await nextTick();
+}
+
+/**
+ * Rebuilds one Tab from a startup restore seed. Live Sessions replace their persisted
+ * Panes first; only without live Sessions does history restart saved Host and local Panes.
+ */
+async function buildRestoredTab(id: string, seed: TerminalRestoreSeed): Promise<TerminalWorkspaceTab> {
   const tab = parseTerminalWorkspaceLayout({ schemaVersion: 1, activeTabId: id, tabs: [seed?.tab] })?.tabs[0];
   if (!tab || tab.tabId !== id || !Array.isArray(seed.live) || typeof seed.autoReconnect !== "boolean") {
     throw new Error("workspace_tab.invalid_terminal");
@@ -1774,9 +1893,35 @@ async function restoreInitialTab(id: string, seed: TerminalRestoreSeed): Promise
     const pane = index < 0 ? null : await restoreLivePane(live, id).catch(() => null);
     if (pane) panes.splice(index, 1, pane);
   }
-  tabs.value.push({ tabId: id, layout: tab.layout, activePaneId: tab.activePaneId, panes });
-  ownedTabIds.add(id);
-  activateTab(id);
+  return { tabId: id, layout: tab.layout, activePaneId: tab.activePaneId, panes };
+}
+
+/**
+ * The single document (Android) owns every Terminal Tab itself, so it restores the
+ * workspace in place with the same plan the desktop main shell turns into Tab WebViews:
+ * live Core Sessions attach first, history restarts Sessions only when none are live,
+ * and the welcome preference keeps the saved history untouched until a new Tab exists.
+ */
+async function restoreSingleDocumentWorkspace(): Promise<void> {
+  let plan: Awaited<ReturnType<typeof planTerminalWorkspaceRestore>>;
+  try { plan = await planTerminalWorkspaceRestore(ui.terminalStartupBehavior === "restoreHistory"); }
+  catch (error) {
+    showWorkspaceTabFailure(error, "workspace-tab-restore", "workspace_tab.restoration_failed");
+    return;
+  }
+  for (const seed of plan.tabs) {
+    // A Tab that already exists here (a launch that raced the restore) keeps its content.
+    if (tabs.value.some((tab) => tab.tabId === seed.tab.tabId)) continue;
+    try {
+      tabs.value.push(await buildRestoredTab(seed.tab.tabId, seed));
+      ownedTabIds.add(seed.tab.tabId);
+    } catch (error) {
+      showWorkspaceTabFailure(error, `workspace-tab-restore:${seed.tab.tabId}`, "workspace_tab.restoration_failed");
+    }
+  }
+  const activeId = plan.activeTabId && tabs.value.some((tab) => tab.tabId === plan.activeTabId)
+    ? plan.activeTabId : tabs.value[0]?.tabId;
+  if (activeId) activateTab(activeId);
   await nextTick();
 }
 
@@ -1936,10 +2081,19 @@ async function flushTerminalWorkspaceLayout() {
 watch(workspaceProjection, queueWorkspaceSave);
 
 async function initializeTerminalWorkspace() {
-  // Each Tab WebView persists only the Tabs it owns. The main shell restores the
-  // workspace by creating one Tab WebView per Tab, so its own /terminal keeps none.
-  if (!childWorkspace) return;
-  workspacePersistenceEnabled = canUseDesktopCore();
+  // Each Tab WebView persists only the Tabs it owns. The desktop main shell restores
+  // the workspace by creating one Tab WebView per Tab, so its own /terminal keeps none.
+  if (childWorkspace) {
+    workspacePersistenceEnabled = canUseDesktopCore();
+    workspaceInitialized = true;
+    return;
+  }
+  // A single document without Core IPC (the browser preview) has nothing to restore.
+  if (nativeTabsHost || !singleDocumentCore) return;
+  // Enabled first: a restore that cannot read the Host catalog turns it off again so
+  // the saved history is never overwritten by Launcher placeholders.
+  workspacePersistenceEnabled = true;
+  await restoreSingleDocumentWorkspace();
   workspaceInitialized = true;
 }
 
@@ -1964,10 +2118,14 @@ const tabItems = computed(() => tabs.value.filter((tab) => !pendingImportedTabId
   return {
     groupId: tab.tabId,
     label: pane.label,
-    stateLabel: `${state} · ${t("sshTerminal.paneCount", { count: countTerminalPanes(tab.layout) })}`,
+    stateLabel: `${state} · ${t("sshTerminal.paneCount", countTerminalPanes(tab.layout))}`,
     paneCount: countTerminalPanes(tab.layout),
     hostId: pane.kind === "session" && pane.target.kind === "host" ? pane.target.hostId : null,
     bellAttention,
+    terminalKind: (pane.kind === "session" ? "ssh" : pane.kind) as WorkspaceTerminalKind,
+    stateTone: (pane.kind === "launcher" ? "neutral"
+      : pane.kind === "local" && pane.viewFailure ? "danger"
+        : workspaceTabStateTone(pane.state)) as WorkspaceTabStateTone,
   };
 }));
 
@@ -2328,7 +2486,7 @@ function splitWorkspaceRight() {
 
 function workspaceRightSplitAllowed() {
   const tab = activeTab.value;
-  if (!tab) return false;
+  if (!tab || mobileLayout) return false;
   const activePaneElement = Array.from(
     document.querySelectorAll<HTMLElement>(".nvx-terminal-split-tree__pane--active"),
   ).find((element) => element.dataset.paneId === tab.activePaneId);
@@ -2336,12 +2494,14 @@ function workspaceRightSplitAllowed() {
   const available = tree?.getBoundingClientRect().width ?? 0;
   if (available <= 0) return true;
   const minimum = terminalLayoutMinimumSpanAfterWorkspaceRightSplit(tab.layout);
-  return available >= minimum.widthUnits * 400;
+  return available >= minimum.widthUnits * PANE_MINIMUM_WIDTH;
 }
 
 function canSplitActivePane(direction: TerminalSplitDirection) {
   const tab = activeTab.value;
   if (!tab) return false;
+  // Phones never split: one Pane per Terminal Tab (hardware-keyboard shortcuts are no-ops).
+  if (mobileLayout) return false;
   const activePaneElement = Array.from(
     document.querySelectorAll<HTMLElement>(".nvx-terminal-split-tree__pane--active"),
   ).find((element) => element.dataset.paneId === tab.activePaneId);
@@ -2352,7 +2512,9 @@ function canSplitActivePane(direction: TerminalSplitDirection) {
   // surface as unconstrained. Match that rule instead of rejecting a valid action.
   if (available <= 0) return true;
   const minimum = terminalLayoutMinimumSpanAfterSplit(tab.layout, tab.activePaneId, direction);
-  const required = direction === "horizontal" ? minimum.widthUnits * 400 : minimum.heightUnits * 240;
+  const required = direction === "horizontal"
+    ? minimum.widthUnits * PANE_MINIMUM_WIDTH
+    : minimum.heightUnits * PANE_MINIMUM_HEIGHT;
   return available >= required;
 }
 
@@ -2455,18 +2617,14 @@ async function openRequestedHost(
         return;
       }
       if (state === null) {
-        address.value = host.address;
-        port.value = String(host.port);
-        username.value = host.username ?? "";
+        await prefillFromHost(host);
         openLauncher();
         showVaultStatusUnavailable();
         await router.replace({ path: "/terminal" });
         return;
       }
     }
-    address.value = host.address;
-    port.value = String(host.port);
-    username.value = host.username ?? "";
+    await prefillFromHost(host);
     openLauncher();
     await router.replace({ path: "/terminal" });
   } catch {
@@ -2580,8 +2738,32 @@ onActivated(() => {
   void refreshSavedHosts();
   void consumeRequestedHostRoute();
   reconcileTerminalAfterForeground();
+  reactivateSingleDocumentWorkspace();
   if (initialRouteReady) revealRoute();
 });
+
+/**
+ * The single document (Android, browser preview) comes back to the Terminal page through
+ * the bottom navigation, the back key or a page route, not through a Workspace Tab
+ * activation, so nothing re-establishes the view's active state: the Panes stay without
+ * input ownership (read-only xterm, helper keys disabled) until a tap, and that tap then
+ * focuses a readonly textarea, which never opens the Android soft keyboard. Every return
+ * re-activates the current Pane exactly like a Tab activation does (same Core focus
+ * intent, same lease); it never creates, attaches or reconnects a Session. Desktop windows
+ * host Panes in native Tab views that are activated by their owner, never through here.
+ */
+function reactivateSingleDocumentWorkspace() {
+  // A Tab WebView is activated only by its owner shell, never by itself.
+  if (workspaceHostMode() !== "singleDocument" || isWorkspaceTabView() || route.path !== "/terminal") return;
+  viewActive.value = true;
+  const tab = activeTab.value;
+  if (!tab) return;
+  void nextTick(() => {
+    if (activeTabId.value !== tab.tabId || route.path !== "/terminal" || !viewActive.value || terminalFocusIsBlocked()) return;
+    const pane = tab.panes.find((candidate) => candidate.paneId === tab.activePaneId);
+    if (pane && pane.kind !== "launcher") paneRefs.get(pane.paneId)?.activateFromTab();
+  });
+}
 
 onBeforeUnmount(() => {
   terminalViewDisposed = true;
@@ -2612,12 +2794,20 @@ onMounted(async () => {
       createInitialTab,
       createInitialPluginProtocolTab,
       createInitialApprovedPluginChannel,
+      reconcilePluginProtocolLaunches,
+      openApprovedPluginChannel,
       restoreInitialTab,
       snapshotTabHandoff,
       observeTabHandoffSnapshots,
       importTabHandoff,
       commitImportedTabHandoff,
       discardImportedTab,
+      createTab: (behavior) => {
+        if (terminalFocusIsBlocked()) return;
+        viewActive.value = true;
+        if (behavior === "local") createLocalTerminalTab();
+        else createLauncherTab();
+      },
       activate: (tabId: string) => {
         viewActive.value = true;
         activateTab(tabId);
@@ -2703,10 +2893,32 @@ onMounted(async () => {
           v-show="tab.tabId === activeTabId"
           class="terminal-workspace"
         >
+          <nav
+            v-if="soloPaneIdFor(tab) !== null"
+            class="terminal-workspace__pane-switch"
+            role="tablist"
+            :aria-label="t('mobile.paneSwitch')"
+          >
+            <button
+              v-for="pane in tabPanesInLayoutOrder(tab)"
+              :key="pane.paneId"
+              type="button"
+              role="tab"
+              class="terminal-workspace__pane-tab"
+              :class="{ 'is-active': pane.paneId === tab.activePaneId }"
+              :aria-selected="pane.paneId === tab.activePaneId"
+              @click="activatePane(tab.tabId, pane.paneId)"
+            >
+              {{ pane.label }}
+            </button>
+          </nav>
           <NvxTerminalSplitTree
             :node="tab.layout"
             :active-pane-id="tab.activePaneId"
             :separator-label="t('sshTerminal.resizeSeparator')"
+            :minimum-pane-width="PANE_MINIMUM_WIDTH"
+            :minimum-pane-height="PANE_MINIMUM_HEIGHT"
+            :solo-pane-id="soloPaneIdFor(tab)"
             @activate="activatePane(tab.tabId, $event)"
             @resize="(splitId, ratio) => resizeSplit(tab.tabId, splitId, ratio)"
           >
@@ -2852,11 +3064,11 @@ onMounted(async () => {
     </section>
 
     <aside
-      v-show="quickCommandsOpen || pluginToolsOpen || embeddedSidebarCount > 0"
+      v-show="(quickCommandsOpen && !mobileLayout) || pluginToolsOpen || embeddedSidebarCount > 0"
       class="ssh-terminal-page__tools"
     >
       <Transition name="quick-commands">
-        <NvxQuickCommandsSidebar v-if="quickCommandsOpen" />
+        <NvxQuickCommandsSidebar v-if="quickCommandsOpen && !mobileLayout" />
       </Transition>
       <NvxPluginToolPanel
         v-model="pluginToolsOpen"
@@ -2904,7 +3116,7 @@ onMounted(async () => {
             count: closeCandidateSessionCount,
             tabs: closeCandidate.tabIds.length,
           })
-          : t('sshTerminal.closeActiveTabBody', { count: closeCandidateSessionCount })"
+          : t('sshTerminal.closeActiveTabBody', closeCandidateSessionCount)"
       :close-label="t('sshTerminal.cancel')"
       :dismissible="!closingTab && !closePreferenceSaving"
       @update:model-value="(open) => { if (!open) cancelCloseTab(); }"
@@ -2943,7 +3155,7 @@ onMounted(async () => {
                 count: closeCandidateSessionCount,
                 tabs: closeCandidate.tabIds.length,
               })
-              : t("sshTerminal.disconnectSessionsAndClose", { count: closeCandidateSessionCount }) }}
+              : t("sshTerminal.disconnectSessionsAndClose", closeCandidateSessionCount) }}
         </NvxButton>
       </template>
     </NvxDialog>

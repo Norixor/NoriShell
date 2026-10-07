@@ -8,15 +8,19 @@ import {
   NvxCard,
   NvxDialog,
   NvxIcon,
+  NvxIconButton,
   NvxInlineNotice,
   NvxStatusLabel,
 } from "../components/ui";
 import { deleteKnownHost, listKnownHosts } from "../core-api/client";
 import type { KnownHostSummary } from "../core-api/generated/core-api";
+import { isMobileLayout } from "../platform-host";
 import { useTipsStore } from "../stores/tips";
 
 const { t, locale } = useI18n();
 const tips = useTipsStore();
+// The phone keeps the heading on one row: Refresh becomes an icon button beside the title.
+const mobileLayout = isMobileLayout();
 
 const knownHosts = ref<KnownHostSummary[]>([]);
 const loading = ref(true);
@@ -80,7 +84,19 @@ onMounted(load);
         <h2>{{ t('knownHostsSettings.title') }}</h2>
         <p>{{ t('knownHostsSettings.description') }}</p>
       </div>
+      <NvxIconButton
+        v-if="mobileLayout"
+        :label="t('knownHostsSettings.refresh')"
+        :disabled="loading"
+        @click="load"
+      >
+        <NvxIcon
+          :icon="RefreshCw"
+          :size="20"
+        />
+      </NvxIconButton>
       <NvxButton
+        v-else
         variant="secondary"
         size="sm"
         :loading="loading"

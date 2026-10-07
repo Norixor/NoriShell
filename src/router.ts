@@ -1,5 +1,5 @@
 import { createRouter, createWebHashHistory, START_LOCATION } from "vue-router";
-import { isTauri } from "@tauri-apps/api/core";
+import { workspaceHostMode } from "./platform-host";
 import { usePluginExtensionsStore } from "./stores/pluginExtensions";
 import { showWorkspaceTabFailure } from "./workspace-tab-errors";
 import { openManagedPluginPage } from "./workspace-tab-view-shell";
@@ -35,7 +35,7 @@ export const router = createRouter({
  * renders the page in the shell. The page's own Tab WebView renders it normally.
  */
 export async function guardPluginPageRoute(path: string, initial = false): Promise<string | false | void> {
-  if (!isTauri() || isWorkspaceTabView()) return;
+  if (workspaceHostMode() !== "nativeTabs" || isWorkspaceTabView()) return;
   const pluginPage = /^\/plugin\/([^/]+)\/([^/]+)$/.exec(path);
   if (!pluginPage) return;
   const fallback = initial ? (workspaceWindowLabel() === "main" ? "/terminal" : "/workspace-window") : false;
