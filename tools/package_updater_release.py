@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Stage signed Tauri update assets and the manifest for all Release targets.
 
-Updater platforms: macOS arm64/x64 (.app.tar.gz), Windows x64/arm64 (NSIS setup.exe)
-and Linux x64/arm64 (AppImage, Preview). Linux .deb files are manual downloads and
-are never signed. Signatures live only inside latest.json; no .sig file is ever
-written to (or tolerated in) the upload stage. Linux build metadata JSON files are
-read from --linux-metadata-dir and are not Release assets.
+Updater platforms: macOS arm64/x64 (.app.tar.gz), Windows x64/arm64 (NSIS setup.exe),
+Linux x64/arm64 (AppImage, Preview) and Android arm64 (APK, Preview). Linux .deb files
+are manual downloads and are never signed. Signatures live only inside latest.json; no
+.sig file is ever written to (or tolerated in) the upload stage. Linux build metadata
+JSON files are read from --linux-metadata-dir and are not Release assets.
+
+The Android APK is required. Before it is signed for the updater it must carry the
+release package id, the release version, a non-debuggable manifest and exactly the
+pinned release signing certificate, so a debug-signed or stale APK cannot ship.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -35,8 +40,15 @@ PLATFORMS = {
     "linux-x86_64": ("linux_x64", None),
     "linux-aarch64": ("linux_arm64", None),
 }
+# Android Preview APK, sideloaded and updated in-app through PackageInstaller.
+ANDROID_PLATFORM = ("android-aarch64", "android_arm64")
+ANDROID_PACKAGE = "app.norishell.android"
+# SHA-256 of the release signing certificate (public). Android refuses in-place
+# upgrades signed by any other certificate, so this must never change silently.
+ANDROID_CERT_SHA256 = "9dff144319c4c1cb6cee1dcacb6cd9b2c02bd63d6259ce2486afea8d95574a1c"
 LINUX_ARCHES = {"x64": "linux_x64", "arm64": "linux_arm64"}
-EXPECTED_ASSET_COUNT = 17
+# 15 user packages + 2 macOS updater archives + latest.json.
+EXPECTED_ASSET_COUNT = 18
 
 
 def digest(data: bytes) -> str:
@@ -126,6 +138,67 @@ def check_linux_metadata(stage: Path, metadata_dir: Path, version: str) -> None:
                 raise ValueError(f"Linux package differs from {meta_file} ({key}): {package}")
 
 
+def android_version_code(version: str) -> int:
+    """Tauri's default Android versionCode: major * 1_000_000 + minor * 1_000 + patch."""
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        raise ValueError(f"Android release version must be MAJOR.MINOR.PATCH: {version}")
+    major, minor, patch = (int(part) for part in match.groups())
+    return major * 1_000_000 + minor * 1_000 + patch
+
+
+def check_android_badging(badging: str, version: str) -> None:
+    """Validate `aapt dump badging` output for the release APK."""
+    package = re.search(r"^package: name='([^']*)' versionCode='([^']*)' versionName='([^']*)'", badging, re.M)
+    if not package:
+        raise ValueError("Android APK badging has no package line")
+    name, code, version_name = package.groups()
+    if name != ANDROID_PACKAGE:
+        raise ValueError(f"Android APK package is {name}, expected {ANDROID_PACKAGE}")
+    if version_name != version or code != str(android_version_code(version)):
+        raise ValueError(f"Android APK version {version_name} ({code}) differs from {version}")
+    if re.search(r"^application-debuggable", badging, re.M):
+        raise ValueError("Android APK is debuggable; only a release build may ship")
+    if not re.search(r"^native-code: 'arm64-v8a'$", badging, re.M):
+        raise ValueError("Android APK must contain only arm64-v8a native code")
+
+
+def check_android_certificates(certs: str) -> None:
+    """Validate `apksigner verify --print-certs` output: exactly the pinned signer."""
+    digests = re.findall(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-f]{64})$", certs, re.M)
+    if digests != [ANDROID_CERT_SHA256]:
+        raise ValueError(f"Android APK signer differs from the release certificate: {digests}")
+
+
+def build_tool(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    sdk = Path(os.environ.get("ANDROID_HOME") or Path.home() / "Library/Android/sdk")
+    candidates = sorted((sdk / "build-tools").glob(f"*/{name}"), key=lambda path: [
+        int(part) if part.isdigit() else 0 for part in path.parent.name.split(".")
+    ])
+    if not candidates:
+        raise ValueError(f"Android build tool not found: {name} (set ANDROID_HOME)")
+    return str(candidates[-1])
+
+
+def check_android_apk(apk: Path, version: str) -> None:
+    if not apk.is_file():
+        raise ValueError(f"missing Android APK: {apk}")
+    badging = subprocess.run(
+        [build_tool("aapt"), "dump", "badging", str(apk)], check=True, capture_output=True, text=True
+    ).stdout
+    check_android_badging(badging, version)
+    certs = subprocess.run(
+        [build_tool("apksigner"), "verify", "--min-sdk-version", "29", "--print-certs", str(apk)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    check_android_certificates(certs)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", type=Path, required=True)
@@ -138,6 +211,8 @@ def main() -> None:
     if stale:
         raise ValueError(f"signature files must not be staged for upload (remove them): {stale}")
     check_linux_metadata(stage, args.linux_metadata_dir.resolve(strict=True), args.version)
+    android_apk = stage / f"NoriShell_{args.version}_{ANDROID_PLATFORM[1]}.apk"
+    check_android_apk(android_apk, args.version)
     key = args.private_key.resolve(strict=True)
     public_key = Path(f"{key}.pub").resolve(strict=True)
     config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
@@ -177,6 +252,9 @@ def main() -> None:
                 raise ValueError(f"Windows installer differs from application ZIP: {target}")
         signature = sign(archive, key, public_key, args.version)
         platforms[target] = {"url": release_url + archive.name, "signature": signature}
+
+    signature = sign(android_apk, key, public_key, args.version)
+    platforms[ANDROID_PLATFORM[0]] = {"url": release_url + android_apk.name, "signature": signature}
 
     manifest = {"version": args.version, "platforms": platforms}
     (stage / "latest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
