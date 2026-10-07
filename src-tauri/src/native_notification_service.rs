@@ -18,7 +18,8 @@ use uuid::Uuid;
 use crate::{
     desktop_preferences::DesktopPreferencesService,
     native_notifications::{
-        DispatchResult, NativeNotifications, NotificationError, NotificationPermission,
+        DispatchResult, NativeNotifications, NotificationCategory, NotificationError,
+        NotificationPermission,
     },
     sftp_session_service::{
         NotificationTransferKind, NotificationTransferState, NotificationTransferSummary,
@@ -190,6 +191,16 @@ impl NotificationKind {
             | Self::TelnetDisconnected
             | Self::DesktopDisconnected
             | Self::ForwardFailed => preferences.notify_disconnected,
+        }
+    }
+
+    fn category(self) -> NotificationCategory {
+        match self {
+            Self::TransferCompleted | Self::TransferFailed => NotificationCategory::Transfers,
+            Self::SshDisconnected
+            | Self::TelnetDisconnected
+            | Self::DesktopDisconnected
+            | Self::ForwardFailed => NotificationCategory::Alerts,
         }
     }
 }
@@ -933,7 +944,7 @@ impl NativeNotificationService {
         match self
             .0
             .adapter
-            .send_if(&id, title, body, move || {
+            .send_if(&id, NotificationCategory::Alerts, title, body, move || {
                 state
                     .lock()
                     .is_ok_and(|mut state| !state.stopped && !state.is_paused(Instant::now()))
@@ -1076,7 +1087,7 @@ impl Inner {
         let kind = candidate.kind;
         let result = self
             .adapter
-            .send_if(&id, title, body, move || {
+            .send_if(&id, kind.category(), title, body, move || {
                 if !state
                     .lock()
                     .is_ok_and(|mut state| !state.stopped && !state.is_paused(Instant::now()))
@@ -1127,6 +1138,15 @@ fn background_eligible(preferences: &DesktopPreferences, application_focused: bo
     !preferences.notification_background_only || !application_focused
 }
 
+#[cfg(target_os = "android")]
+fn application_is_focused(app: &AppHandle) -> bool {
+    // tao never reports window focus on Android; any resumed app Activity
+    // (main or a Kotlin secure/tool surface) means the user is in the app.
+    let _ = app;
+    crate::native_notifications::android_activity_resumed()
+}
+
+#[cfg(not(target_os = "android"))]
 fn application_is_focused(app: &AppHandle) -> bool {
     // `main` is not the only focusable WebView. Focus in a protected window also means the user is
     // using the application; a hidden main window alone must not trigger a notification.
@@ -1135,6 +1155,13 @@ fn application_is_focused(app: &AppHandle) -> bool {
         .any(|window| window.is_focused().unwrap_or(false))
 }
 
+#[cfg(target_os = "android")]
+async fn read_application_focus(app: &AppHandle) -> bool {
+    // An atomic set from the Activity lifecycle; no UI-thread hop needed.
+    application_is_focused(app)
+}
+
+#[cfg(not(target_os = "android"))]
 async fn read_application_focus(app: &AppHandle) -> bool {
     // Never synchronously wait for the UI thread from a runtime worker; exit can cancel the query without waiting on the main thread.
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1173,7 +1200,58 @@ fn emit_click(app: &AppHandle, state: &Arc<Mutex<NotificationState>>, click: Not
     });
 }
 
+#[cfg(not(target_os = "android"))]
 fn notification_text(
+    locale: NotificationLocale,
+    kind: NotificationKind,
+) -> (&'static str, &'static str) {
+    pointer_notification_text(locale, kind)
+}
+
+/// Android notifications are tapped, not clicked; only the call to action differs.
+#[cfg(target_os = "android")]
+fn notification_text(
+    locale: NotificationLocale,
+    kind: NotificationKind,
+) -> (&'static str, &'static str) {
+    let (title, body) = pointer_notification_text(locale, kind);
+    let body = match body {
+        "一项文件传输已完成。点击返回对应资源查看状态。" => {
+            "一项文件传输已完成。轻点返回对应资源查看状态。"
+        }
+        "一项文件传输失败。点击返回对应资源查看状态。" => {
+            "一项文件传输失败。轻点返回对应资源查看状态。"
+        }
+        "一个远程连接意外断开。点击返回对应资源查看状态。" => {
+            "一个远程连接意外断开。轻点返回对应资源查看状态。"
+        }
+        "一个远程桌面连接意外断开。点击返回对应资源查看状态。" => {
+            "一个远程桌面连接意外断开。轻点返回对应资源查看状态。"
+        }
+        "一项端口转发失败。点击返回对应资源查看状态。" => {
+            "一项端口转发失败。轻点返回对应资源查看状态。"
+        }
+        "A file transfer completed. Click to return to the related resource." => {
+            "A file transfer completed. Tap to return to the related resource."
+        }
+        "A file transfer failed. Click to return to the related resource." => {
+            "A file transfer failed. Tap to return to the related resource."
+        }
+        "A remote connection ended unexpectedly. Click to return to the related resource." => {
+            "A remote connection ended unexpectedly. Tap to return to the related resource."
+        }
+        "A remote desktop connection ended unexpectedly. Click to return to the related resource." => {
+            "A remote desktop connection ended unexpectedly. Tap to return to the related resource."
+        }
+        "A port-forwarding session failed. Click to return to the related resource." => {
+            "A port-forwarding session failed. Tap to return to the related resource."
+        }
+        other => other,
+    };
+    (title, body)
+}
+
+fn pointer_notification_text(
     locale: NotificationLocale,
     kind: NotificationKind,
 ) -> (&'static str, &'static str) {

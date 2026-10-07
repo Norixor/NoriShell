@@ -215,6 +215,8 @@ pub(crate) fn was_revealed<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool 
         .unwrap_or(false)
 }
 
+// Only desktop secure windows are Tauri windows; Android surfaces are Activities.
+#[cfg(desktop)]
 pub(crate) fn focus_if_revealed<R: tauri::Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
     #[cfg(any(windows, target_os = "macos"))]
     if !was_revealed(window.app_handle(), window.label()) {
@@ -230,6 +232,7 @@ pub(crate) fn show_if_revealed<R: tauri::Runtime>(
     if !was_revealed(window.app_handle(), window.label()) {
         return Ok(false);
     }
+    #[cfg(desktop)]
     window.unminimize()?;
     window.show()?;
     window.set_focus()?;

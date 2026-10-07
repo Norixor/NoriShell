@@ -137,6 +137,13 @@ pub async fn window_standalone_action(
     window: WebviewWindow,
     action: StandaloneWindowAction,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        // Android hosts a single activity; standalone window chrome does not exist there.
+        let _ = (window, action);
+        Err("window.action_unavailable".to_owned())
+    }
+    #[cfg(desktop)]
     let result = match action {
         StandaloneWindowAction::Drag => window.start_dragging(),
         StandaloneWindowAction::Close => window.close(),
@@ -158,6 +165,7 @@ pub async fn window_standalone_action(
             }
         }
     };
+    #[cfg(desktop)]
     result.map_err(|_| "window.action_unavailable".to_owned())
 }
 

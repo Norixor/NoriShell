@@ -56,11 +56,31 @@ object PluginManager {
   }
 
   fun onActivityCreate(activity: AppCompatActivity) {
-    // TODO: on destroy, we should change to a different activity
+    // NoriShell: a relaunched host Activity (configuration change outside
+    // `configChanges`, e.g. a navigation-mode overlay) takes over the plugin
+    // state. Upstream returned here and kept the launchers registered on the
+    // destroyed Activity ("unregistered ActivityResultLauncher": pickers fail
+    // silently) and every plugin pointed at the dead Activity.
     if (::activity.isInitialized) {
+      if (this.activity === activity) return
+      this.activity = activity
+      registerLaunchers(activity)
+      for (plugin in plugins.values) {
+        plugin.instance.triggerActivityRecreated(activity)
+      }
       return
     }
     this.activity = activity
+    registerLaunchers(activity)
+  }
+
+  /**
+   * NoriShell: called from onCreate (before STARTED) in the same order on every
+   * Activity instance, so the registry's restored keys match and a result that
+   * arrives across a relaunch (picker open while the Activity is recreated) is
+   * delivered to the new launcher; callbacks are read when the result arrives.
+   */
+  private fun registerLaunchers(activity: AppCompatActivity) {
     startActivityForResultLauncher =
       activity.registerForActivityResult(ActivityResultContracts.StartActivityForResult()
       ) { result ->

@@ -1,0 +1,34 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "android-main-capability",
+  "description": "Android main WebView: the main capability without updater, process restart or window chrome. The bridge plugin grants nothing to the WebView.",
+  "platforms": [
+    "android"
+  ],
+  "webviews": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-set-webview-zoom",
+    "core:window:allow-set-background-color",
+    "core:webview:allow-set-webview-background-color",
+    "dialog:allow-open",
+    "dialog:allow-ask",
+    "dialog:allow-save",
+    "clipboard-manager:allow-read-text",
+    "main-window-commands",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "http://*"
+        },
+        {
+          "url": "https://*"
+        }
+      ]
+    },
+    "norishell-android:default"
+  ]
+}

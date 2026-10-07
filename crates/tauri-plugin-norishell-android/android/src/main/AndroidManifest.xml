@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Library manifest merged into the NoriShell app. Every component and permission
+  the Android packages need is declared here once so later packages only own
+  their Kotlin files.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application>
+        <!-- Keeps the process alive while SSH/SFTP/forward/desktop resources exist. -->
+        <service
+            android:name="app.norishell.android.bridge.SessionForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps user-opened SSH terminal sessions, file transfers and port forwards connected while the app is in the background." />
+        </service>
+
+        <!-- One isolated process per plugin instance via bindIsolatedService. -->
+        <service
+            android:name="app.norishell.android.bridge.PluginHostService"
+            android:exported="false"
+            android:isolatedProcess="true"
+            android:process=":plugin_host" />
+
+        <!-- Secure surfaces and tool windows: plain WebView, never Tauri-managed. -->
+        <activity
+            android:name="app.norishell.android.bridge.SecureSurfaceActivity"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|screenSize|smallestScreenSize|layoutDirection|density|colorMode|fontWeightAdjustment|grammaticalGender"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!--
+          Translucent host for Core-initiated document picks (ContentPicker.kt): it
+          sits on top of the surface that asked, so the picker result reaches a
+          resumed Activity even while a Secure Surface covers MainActivity.
+        -->
+        <activity
+            android:name="app.norishell.android.bridge.ContentPickerActivity"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|screenSize|smallestScreenSize|layoutDirection|density|colorMode|fontWeightAdjustment|grammaticalGender"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- PackageInstaller session status callback for APK self-update. -->
+        <receiver
+            android:name="app.norishell.android.bridge.ApkInstallResultReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

@@ -322,6 +322,170 @@ impl Registry {
     }
 }
 
+impl Registry {
+    /// Registers a Desktop Tab that the single-document host renders inside its main
+    /// WebView. The record carries the session handle from the start, exactly like a
+    /// native Desktop Tab after its owned open, so ownership checks stay identical.
+    /// Replaces the File Tab records a single-document host keeps for itself. Each record
+    /// holds the same bounded File Tab projection a native File Tab view writes, so the
+    /// ownership checks and recovery reads stay identical. The whole set is validated
+    /// before anything changes; Desktop and Terminal records are never touched.
+    fn replace_main_document_file_tabs(&mut self, tabs: Vec<Value>) -> Result<Vec<String>, String> {
+        if tabs.len() > MAX_MAIN_DOCUMENT_FILE_TABS {
+            return Err("workspace_tab.payload_too_large".into());
+        }
+        let mut next = BTreeMap::new();
+        for payload in tabs {
+            validate_payload(&payload)?;
+            if payload.get("version") != Some(&Value::from(1)) {
+                return Err("workspace_tab.invalid_payload".into());
+            }
+            let id = payload
+                .pointer("/tab/groupId")
+                .and_then(Value::as_str)
+                .ok_or("workspace_tab.invalid_payload")?
+                .to_owned();
+            validate_identity(&id, "file")?;
+            if !id.starts_with("file:") {
+                return Err("workspace_tab.invalid_identity".into());
+            }
+            if self.pending(&id) {
+                return Err("workspace_tab.transfer_pending".into());
+            }
+            if self
+                .tabs
+                .get(&id)
+                .is_some_and(|tab| tab.owner != MAIN_DOCUMENT_OWNER || tab.kind != "file")
+            {
+                return Err("workspace_tab.conflict".into());
+            }
+            if next.insert(id, payload).is_some() {
+                return Err("workspace_tab.invalid_payload".into());
+            }
+        }
+        let removed: Vec<String> = self
+            .tabs
+            .values()
+            .filter(|tab| {
+                tab.owner == MAIN_DOCUMENT_OWNER
+                    && tab.kind == "file"
+                    && !next.contains_key(&tab.id)
+                    && !self.pending(&tab.id)
+            })
+            .map(|tab| tab.id.clone())
+            .collect();
+        let mut changed = removed.clone();
+        for id in removed {
+            self.tabs.remove(&id);
+        }
+        for (id, payload) in next {
+            match self.tabs.get_mut(&id) {
+                Some(record) if record.payload == payload => {}
+                Some(record) => {
+                    record.payload = payload;
+                    changed.push(id);
+                }
+                None => {
+                    self.tabs.insert(
+                        id.clone(),
+                        TabRecord {
+                            id: id.clone(),
+                            kind: "file".into(),
+                            owner: MAIN_DOCUMENT_OWNER.into(),
+                            payload,
+                        },
+                    );
+                    changed.push(id);
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    fn adopt_main_document_desktop(&mut self, session_id: &str) -> Result<String, String> {
+        let id = main_document_desktop_tab_id(session_id);
+        validate_identity(&id, "desktop")?;
+        let payload = serde_json::json!({
+            "schemaVersion": 1, "tabId": id, "sessionId": session_id, "generation": "1",
+        });
+        validate_payload(&payload)?;
+        let record = TabRecord {
+            id: id.clone(),
+            kind: "desktop".into(),
+            owner: MAIN_DOCUMENT_OWNER.into(),
+            payload,
+        };
+        // A malformed handle would leave a record that no ownership check can match.
+        if desktop_session_owners(&record).is_empty() {
+            return Err("workspace_tab.invalid_identity".into());
+        }
+        if self.pending(&id) || self.tabs.contains_key(&id) {
+            return Err("workspace_tab.conflict".into());
+        }
+        self.tabs.insert(id.clone(), record);
+        Ok(id)
+    }
+
+    /// Removes a main-document Desktop Tab only while it still holds this exact handle.
+    fn release_main_document_desktop(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<String, String> {
+        let id = main_document_desktop_tab_id(session_id);
+        if self.pending(&id) {
+            return Err("workspace_tab.transfer_pending".into());
+        }
+        let tab = self.tabs.get(&id).ok_or("workspace_tab.missing")?;
+        let generation = generation.to_string();
+        if tab.owner != MAIN_DOCUMENT_OWNER
+            || tab.kind != "desktop"
+            || !desktop_session_owners(tab)
+                .iter()
+                .any(|owned| owned.session_id == session_id && owned.generation == generation)
+        {
+            return Err("workspace_tab.wrong_owner".into());
+        }
+        self.tabs.remove(&id);
+        Ok(id)
+    }
+}
+
+/// The owner label of every Tab in a single-document host (Android): its only WebView.
+pub(crate) const MAIN_DOCUMENT_OWNER: &str = "main";
+
+/// Upper bound for the File Tabs one single-document host records at once.
+const MAX_MAIN_DOCUMENT_FILE_TABS: usize = 64;
+
+/// The projection a single-document host writes for itself: every File Tab it shows,
+/// each in the same structure a native File Tab view writes for its own record.
+fn main_document_file_tabs(payload: Value) -> Result<Vec<Value>, String> {
+    let Value::Object(mut object) = payload else {
+        return Err("workspace_tab.invalid_payload".into());
+    };
+    if object.len() != 3
+        || object.get("schemaVersion") != Some(&Value::from(1))
+        || object.get("kind").and_then(Value::as_str) != Some("mainDocumentFileTabs")
+    {
+        return Err("workspace_tab.invalid_payload".into());
+    }
+    match object.remove("tabs") {
+        Some(Value::Array(tabs)) => Ok(tabs),
+        _ => Err("workspace_tab.invalid_payload".into()),
+    }
+}
+
+/// A main-document Desktop Tab has no child view label to carry its id, so the id is
+/// derived from the session handle; the frontend uses the same `desktop:<sessionId>`.
+pub(crate) fn main_document_desktop_tab_id(session_id: &str) -> String {
+    format!("desktop:{session_id}")
+}
+
+/// Whether a caller is the main WebView of the main window (not a Tab child view).
+pub(crate) fn is_main_document(webview_label: &str, window_label: &str) -> bool {
+    webview_label == MAIN_DOCUMENT_OWNER && window_label == MAIN_DOCUMENT_OWNER
+}
+
 fn validate_identity(id: &str, kind: &str) -> Result<(), String> {
     if id.is_empty()
         || id.len() > 512
@@ -402,6 +566,48 @@ impl WorkspaceWindows {
         Ok(desktop_session_owners(tab).iter().any(|owned| {
             owned.session_id == session_id && owned.generation == generation.to_string()
         }))
+    }
+
+    /// Records a single-document Desktop Tab before its session is created; see
+    /// `Registry::adopt_main_document_desktop`.
+    pub(crate) fn adopt_main_document_desktop(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+    ) -> Result<String, String> {
+        let id = with_registry(self, |registry| {
+            registry.adopt_main_document_desktop(session_id)
+        })?;
+        notify_tab(app, self, &id);
+        Ok(id)
+    }
+
+    pub(crate) fn replace_main_document_file_tabs(
+        &self,
+        app: &AppHandle,
+        payload: Value,
+    ) -> Result<(), String> {
+        let tabs = main_document_file_tabs(payload)?;
+        let changed = with_registry(self, |registry| {
+            registry.replace_main_document_file_tabs(tabs)
+        })?;
+        for id in changed {
+            notify_tab(app, self, &id);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release_main_document_desktop(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        let id = with_registry(self, |registry| {
+            registry.release_main_document_desktop(session_id, generation)
+        })?;
+        notify_tab(app, self, &id);
+        Ok(())
     }
 
     pub(crate) fn begin_close_with_views(
@@ -874,6 +1080,11 @@ pub(crate) async fn workspace_tab_projection_update(
     views: State<'_, crate::workspace_tab_views::WorkspaceTabViews>,
     payload: Value,
 ) -> Result<(), String> {
+    // A single-document host (Android) has no Tab child views: its main WebView records
+    // the projections of the File Tabs it shows itself. Desktop keeps the per-view path.
+    if cfg!(mobile) && is_main_document(webview.label(), webview.window().label()) {
+        return state.replace_main_document_file_tabs(&app, payload);
+    }
     let (id, changed) = {
         let (operation, live) = views.projection_operation(&webview)?;
         // Native reparenting holds this lock until the Core owner is committed.
@@ -970,6 +1181,225 @@ mod tests {
 
     fn terminal(registry: &mut Registry, owner: &str, id: &str) {
         insert(registry, owner, id, "terminal", json!({"paneIds":["one"]}));
+    }
+
+    #[test]
+    fn main_document_desktop_tab_owns_exactly_its_session_handle() {
+        let state = WorkspaceWindows::default();
+        let session = "019d0000-0000-7000-8000-000000000501";
+        let id = with_registry(&state, |registry| {
+            registry.adopt_main_document_desktop(session)
+        })
+        .unwrap();
+        assert_eq!(id, format!("desktop:{session}"));
+        assert_eq!(
+            state.owns_desktop_session("main", &id, session, 1),
+            Ok(true)
+        );
+        assert_eq!(
+            state.owns_desktop_session("main", &id, session, 2),
+            Ok(false)
+        );
+        assert_eq!(
+            state.owns_desktop_session("main", &id, "other", 1),
+            Ok(false)
+        );
+        // The same handle cannot be adopted twice, and a child window never owns it.
+        assert_eq!(
+            with_registry(&state, |registry| registry
+                .adopt_main_document_desktop(session)),
+            Err("workspace_tab.conflict".into())
+        );
+        assert_eq!(
+            state.owns_desktop_session("workspace-a", &id, session, 1),
+            Err("workspace_tab.wrong_owner".into())
+        );
+        let snapshot = with_registry(&state, |registry| registry.snapshot("main")).unwrap();
+        assert_eq!(snapshot.owned.len(), 1);
+        assert_eq!(
+            snapshot.owned[0].payload,
+            json!({"schemaVersion":1,"tabId":id,"sessionId":session,"generation":"1"})
+        );
+        // Release requires the exact current handle and then removes the record.
+        assert_eq!(
+            with_registry(&state, |registry| registry
+                .release_main_document_desktop(session, 2)),
+            Err("workspace_tab.wrong_owner".into())
+        );
+        assert_eq!(
+            with_registry(&state, |registry| registry
+                .release_main_document_desktop(session, 1)),
+            Ok(id.clone())
+        );
+        assert_eq!(
+            state.owns_desktop_session("main", &id, session, 1),
+            Err("workspace_tab.missing".into())
+        );
+    }
+
+    #[test]
+    fn main_document_desktop_tab_never_replaces_a_native_tab_record() {
+        let mut registry = Registry::default();
+        insert(
+            &mut registry,
+            "workspace-a",
+            "desktop:session-one",
+            "desktop",
+            json!({"schemaVersion":1,"tabId":"desktop:session-one","sessionId":"session-one","generation":"1"}),
+        );
+        assert_eq!(
+            registry.adopt_main_document_desktop("session-one"),
+            Err("workspace_tab.conflict".into())
+        );
+        assert_eq!(
+            registry.release_main_document_desktop("session-one", 1),
+            Err("workspace_tab.wrong_owner".into())
+        );
+        assert_eq!(registry.tabs["desktop:session-one"].owner, "workspace-a");
+        assert_eq!(
+            registry.adopt_main_document_desktop("line\u{7}"),
+            Err("workspace_tab.invalid_identity".into())
+        );
+    }
+
+    fn file_tab(id: &str, directory: &str) -> Value {
+        json!({"version":1,"tab":{"groupId":id,"kind":"remote","hostId":"h","label":"web","paneCount":1},
+            "layout":{"kind":"pane","paneId":"p","terminalId":"remote"},"activePaneId":"p",
+            "panes":[{"paneId":"p","directory":directory,"endpoint":{"kind":"remote","hostId":"h",
+                "sessionId":"019d0000-0000-7000-8000-000000000601","generation":"2"}}]})
+    }
+
+    #[test]
+    fn main_document_file_tabs_replace_only_its_own_file_records() {
+        let mut registry = Registry::default();
+        let one = "file:019d0000-0000-7000-8000-000000000611";
+        let two = "file:019d0000-0000-7000-8000-000000000612";
+        insert(
+            &mut registry,
+            "main",
+            "desktop:session-one",
+            "desktop",
+            json!({"schemaVersion":1,"tabId":"desktop:session-one","sessionId":"session-one","generation":"1"}),
+        );
+        terminal(&mut registry, "main", "terminal-one");
+        assert_eq!(
+            registry
+                .replace_main_document_file_tabs(vec![file_tab(one, "/a"), file_tab(two, "/b")]),
+            Ok(vec![one.to_owned(), two.to_owned()])
+        );
+        let snapshot = registry.snapshot("main").unwrap();
+        assert_eq!(
+            snapshot
+                .owned
+                .iter()
+                .filter(|tab| tab.kind == "file")
+                .map(|tab| tab.payload.clone())
+                .collect::<Vec<_>>(),
+            vec![file_tab(one, "/a"), file_tab(two, "/b")]
+        );
+        // The bounded session handle is visible to other owners like a native File Tab.
+        registry.windows.insert("workspace-a".into());
+        let others = registry.snapshot("workspace-a").unwrap().others;
+        assert_eq!(
+            others
+                .iter()
+                .find(|tab| tab.id == one)
+                .map(|tab| tab.file_sessions.len()),
+            Some(1)
+        );
+        // Unchanged payloads report nothing; a closed Tab's record is removed; others stay.
+        assert_eq!(
+            registry.replace_main_document_file_tabs(vec![file_tab(one, "/a")]),
+            Ok(vec![two.to_owned()])
+        );
+        assert_eq!(
+            registry.replace_main_document_file_tabs(vec![file_tab(one, "/c")]),
+            Ok(vec![one.to_owned()])
+        );
+        assert!(registry.tabs.contains_key("desktop:session-one"));
+        assert!(registry.tabs.contains_key("terminal-one"));
+        assert_eq!(
+            registry.replace_main_document_file_tabs(Vec::new()),
+            Ok(vec![one.to_owned()])
+        );
+        assert!(!registry.tabs.contains_key(one));
+    }
+
+    #[test]
+    fn main_document_file_tabs_reject_the_whole_set_on_any_invalid_tab() {
+        let mut registry = Registry::default();
+        let one = "file:019d0000-0000-7000-8000-000000000621";
+        let foreign = "file:019d0000-0000-7000-8000-000000000622";
+        insert(&mut registry, "workspace-a", foreign, "file", json!({}));
+        registry
+            .replace_main_document_file_tabs(vec![file_tab(one, "/a")])
+            .unwrap();
+        for (tabs, code) in [
+            (
+                vec![file_tab(one, "/b"), file_tab(foreign, "/x")],
+                "workspace_tab.conflict",
+            ),
+            (
+                vec![file_tab(one, "/b"), file_tab(one, "/c")],
+                "workspace_tab.invalid_payload",
+            ),
+            (
+                vec![file_tab("desktop:x", "/b")],
+                "workspace_tab.invalid_identity",
+            ),
+            (
+                vec![json!({"version":2,"tab":{"groupId":one}})],
+                "workspace_tab.invalid_payload",
+            ),
+            (
+                vec![file_tab(one, &"x".repeat(MAX_PAYLOAD_BYTES))],
+                "workspace_tab.payload_too_large",
+            ),
+        ] {
+            assert_eq!(
+                registry.replace_main_document_file_tabs(tabs),
+                Err(code.into())
+            );
+            assert_eq!(registry.tabs[one].payload, file_tab(one, "/a"));
+            assert_eq!(registry.tabs[foreign].owner, "workspace-a");
+        }
+        assert_eq!(
+            registry.replace_main_document_file_tabs(vec![
+                file_tab(one, "/a");
+                MAX_MAIN_DOCUMENT_FILE_TABS + 1
+            ]),
+            Err("workspace_tab.payload_too_large".into())
+        );
+    }
+
+    #[test]
+    fn main_document_projection_envelope_is_exact() {
+        assert_eq!(
+            main_document_file_tabs(
+                json!({"schemaVersion":1,"kind":"mainDocumentFileTabs","tabs":[]})
+            ),
+            Ok(Vec::new())
+        );
+        for payload in [
+            json!({"schemaVersion":2,"kind":"mainDocumentFileTabs","tabs":[]}),
+            json!({"schemaVersion":1,"kind":"other","tabs":[]}),
+            json!({"schemaVersion":1,"kind":"mainDocumentFileTabs","tabs":{}}),
+            json!({"schemaVersion":1,"kind":"mainDocumentFileTabs","tabs":[],"extra":1}),
+            json!([]),
+        ] {
+            assert_eq!(
+                main_document_file_tabs(payload),
+                Err("workspace_tab.invalid_payload".into())
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_main_webview_of_the_main_window_is_the_main_document() {
+        assert!(is_main_document("main", "main"));
+        assert!(!is_main_document("workspace-tab-ZGVza3RvcDpvbmU", "main"));
+        assert!(!is_main_document("main", "workspace-window-a"));
+        assert!(!is_main_document("secure-desktop-1", "secure-desktop-1"));
     }
 
     #[test]

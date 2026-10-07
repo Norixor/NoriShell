@@ -26,6 +26,8 @@
 
 能力提示：`localFiles`。声明能力后仍须有当前有效授权及适用的受保护操作批准。
 
+平台说明：Android（预览）上选择结果是系统文档，plugin 只能得到 ≤64 MiB 的只读私有快照；write、rename、remove、watchStart 返回 Unsupported。
+
 rootHandle 来自 filePick。单次读写块最多 16 KiB，物化文件最多 64 MiB，列表最多 100 项。修改现有文件必须回传最新 fingerprint；write 省略 expectedFingerprint 仅允许新建。rename 不覆盖目标。watchStart 返回独立事件句柄。
 
 ## 调用示例

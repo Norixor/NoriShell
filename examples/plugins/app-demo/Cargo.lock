@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-core-api"
-version = "0.1.0"
+version = "0.1.7"
 dependencies = [
  "hex",
  "serde",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-plugin-platform"
-version = "0.1.0"
+version = "0.1.7"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "norishell-plugin-sdk"
-version = "0.1.0"
+version = "0.1.7"
 dependencies = [
  "norishell-core-api",
  "norishell-plugin-platform",

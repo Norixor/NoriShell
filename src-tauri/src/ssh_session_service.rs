@@ -10,7 +10,7 @@ use std::{
 #[path = "ssh_session_service/local_terminal.rs"]
 mod local_terminal;
 
-use norishell_app_persistence::KnownHostObservation;
+use norishell_app_persistence::{AppPersistenceError, KnownHostObservation};
 #[cfg(test)]
 use norishell_app_persistence::{CredentialRecord, CredentialRecordDetails};
 use norishell_core_api::{
@@ -54,7 +54,6 @@ use norishell_core_api::{
 use norishell_core_api::{SshSessionInputLeaseAcquireRequest, SshTerminalInputFocusTarget};
 use norishell_secret_vault::SecretKind;
 use norishell_ssh_domain::Endpoint;
-#[cfg(test)]
 use norishell_ssh_transport::RouteIngressError;
 use norishell_ssh_transport::{
     HostKeyDecision, HostKeyVerifier, IngressFailureKind, IngressStage,
@@ -72,8 +71,8 @@ use zeroize::Zeroizing;
 use crate::connection_profile::{
     ConnectionCredential, ConnectionProfileError, ResolvedAlgorithmPolicy,
     ResolvedConnectionProfile, ResolvedHeartbeatPolicy, ResolvedJumpHost, ResolvedLoginAutomation,
-    ResolvedRouteIngress, ResolvedSshConnectionBase, resolve_connection_profile,
-    resolve_reconnect_connection_profile,
+    ResolvedRouteIngress, ResolvedSshConnectionBase, connection_has_vault_credentials,
+    connection_requires_vault, resolve_connection_profile, resolve_reconnect_connection_profile,
 };
 use crate::local_terminal_platform::{LocalPtyExit, LocalPtyMetadata, LocalPtyProcess};
 use crate::ssh_connection_orchestrator::{
@@ -381,6 +380,7 @@ impl SshSessionService {
         ssh_agent: crate::ssh_agent_service::SshAgentService,
         native_terminal: NativeTerminalService,
     ) -> Self {
+        norishell_ssh_transport::set_diagnostic_sink(ssh_diagnostic);
         let (tx, rx) = mpsc::channel(ACTOR_MAILBOX_CAPACITY);
         let live_sessions = Arc::new(Mutex::new(BTreeSet::new()));
         let live_local_sessions = Arc::new(Mutex::new(BTreeSet::new()));
@@ -1467,6 +1467,89 @@ fn validate_lease(
     Ok(())
 }
 
+/// Writes a fixed-format, secret-free host-key diagnostic line. Android has no
+/// stderr, so it goes to logcat there.
+fn ssh_diagnostic(message: &str) {
+    #[cfg(target_os = "android")]
+    tauri_plugin_norishell_android::log::warn(message);
+    #[cfg(not(target_os = "android"))]
+    eprintln!("{message}");
+}
+
+fn session_state_label(state: SshSessionState) -> &'static str {
+    match state {
+        SshSessionState::Resolving => "resolving",
+        SshSessionState::Connecting => "connecting",
+        SshSessionState::VerifyingHostKey => "verifying_host_key",
+        SshSessionState::AwaitingHostKeyDecision => "awaiting_host_key_decision",
+        SshSessionState::Authenticating => "authenticating",
+        SshSessionState::OpeningChannel => "opening_channel",
+        SshSessionState::AutomatingLogin => "automating_login",
+        SshSessionState::Running => "running",
+        SshSessionState::Disconnecting => "disconnecting",
+        SshSessionState::Closed => "closed",
+        SshSessionState::Failed => "failed",
+    }
+}
+
+fn route_stage_label(stage: &SshSessionRouteStage) -> &'static str {
+    match stage {
+        SshSessionRouteStage::Ingress => "ingress",
+        SshSessionRouteStage::Target => "target",
+        _ => "jump",
+    }
+}
+
+/// Logs the Core-side host-key failure path with only stable categories and
+/// SQLite result codes (never addresses, keys or SQL).
+fn log_host_key_failure(
+    session_id: &str,
+    generation: u64,
+    path: &'static str,
+    error: Option<&AppPersistenceError>,
+) {
+    let (category, sqlite_code) =
+        error.map_or(("none", None), AppPersistenceError::safe_diagnostic);
+    ssh_diagnostic(&format!(
+        "SSH host-key check: session={session_id} generation={generation} path={path} \
+         persistence={category} sqlite_code={}",
+        sqlite_code.map_or_else(|| "none".to_owned(), |code| code.to_string())
+    ));
+}
+
+/// Distinct failure for a saved credential plan that cannot authenticate
+/// because its Vault-backed secrets are locked. It is never a server rejection.
+fn vault_locked_failure_reason(
+    route_stage: Option<SshSessionRouteStage>,
+) -> SshSessionFailureReason {
+    SshSessionFailureReason {
+        code: SshSessionFailureCode::VaultLocked,
+        stage: SshSessionFailureStage::Authentication,
+        route_stage,
+        algorithm_negotiation: None,
+        retry_strategy: SshSessionRetryStrategy::UnlockVault,
+        message_key: "errors.sshSession.vaultLocked".to_owned(),
+        diagnostic_id: None,
+    }
+}
+
+/// Mirrors the SFTP and Forward rule: a locked Vault only explains failures
+/// while acquiring or applying a credential. Host-key, route and transport
+/// failures keep their protocol origin, and an unlocked Vault means the server
+/// really rejected the material.
+fn terminal_vault_locked_after_failure(
+    has_vault_credentials: bool,
+    vault_unlocked: bool,
+    error: &TransportError,
+) -> bool {
+    has_vault_credentials
+        && !vault_unlocked
+        && matches!(
+            error,
+            TransportError::AuthenticationRejected | TransportError::InvalidPrivateKey
+        )
+}
+
 fn failure_from_route(
     error: TransportError,
     route_stage: Option<SshSessionRouteStage>,
@@ -1504,6 +1587,12 @@ fn failure_from_route(
             SshSessionFailureStage::Connecting,
             SshSessionRetryStrategy::RetryOpen,
             "errors.sshSession.connectionTimedOut",
+        ),
+        TransportError::ServerClosedBeforeHandshake => (
+            SshSessionFailureCode::ConnectionClosedByServer,
+            SshSessionFailureStage::Connecting,
+            SshSessionRetryStrategy::RetryOpen,
+            "errors.sshSession.connectionClosedByServer",
         ),
         TransportError::ConnectFailed => (
             SshSessionFailureCode::ConnectionRefused,
@@ -1564,6 +1653,12 @@ fn failure_from_route(
             SshSessionFailureStage::HostKeyVerification,
             SshSessionRetryStrategy::ReviewHostKey,
             "errors.sshSession.hostKeyMismatch",
+        ),
+        TransportError::HostKeyVerificationFailed => (
+            SshSessionFailureCode::HostKeyVerificationFailed,
+            SshSessionFailureStage::HostKeyVerification,
+            SshSessionRetryStrategy::RetryOpen,
+            "errors.sshSession.hostKeyVerificationFailed",
         ),
         TransportError::HostKeyDecisionTimeout => (
             SshSessionFailureCode::HostKeyDecisionExpired,
@@ -2303,6 +2398,9 @@ struct SessionRecord {
     output_ring_bytes: usize,
     shell: Option<mpsc::Sender<ShellCommand>>,
     shell_stop: Option<watch::Sender<Option<ShellStopSignal>>>,
+    /// Fixed category of the last Core-side host-key check failure for the
+    /// current generation, logged with the session failure's diagnostic id.
+    host_key_failure_path: Option<(u64, &'static str)>,
 }
 
 struct ActiveLoginAutomation {
@@ -2638,6 +2736,13 @@ enum Message {
         session_id: String,
         generation: u64,
         error: TransportError,
+        route_stage: Option<SshSessionRouteStage>,
+    },
+    /// The saved credential plan needs the locked Vault. Kept separate from
+    /// `ConnectionFailed` so the server-rejection mapping can never claim it.
+    ConnectionVaultLocked {
+        session_id: String,
+        generation: u64,
         route_stage: Option<SshSessionRouteStage>,
     },
     LocalProcessReady {
@@ -3408,6 +3513,17 @@ impl Actor {
             } => {
                 self.connection_failed(&session_id, generation, error, route_stage);
             }
+            Message::ConnectionVaultLocked {
+                session_id,
+                generation,
+                route_stage,
+            } => {
+                self.connection_failure(
+                    &session_id,
+                    generation,
+                    vault_locked_failure_reason(route_stage),
+                );
+            }
             Message::LocalProcessReady {
                 session_id,
                 generation,
@@ -3738,6 +3854,7 @@ impl Actor {
                 attachments,
                 active_challenge: None,
                 active_keyboard_interactive_challenge: None,
+                host_key_failure_path: None,
                 prepared_keyboard_interactive_answers: BTreeMap::new(),
                 active_login_automation: None,
                 heartbeat_policy: heartbeat_policy.clone(),
@@ -4011,19 +4128,57 @@ impl Actor {
                 generation,
                 keyboard_interactive_deadline: None,
             };
+            let connection_base = ResolvedSshConnectionBase {
+                endpoint,
+                username,
+                ingress,
+                jump_hosts,
+                credentials,
+                algorithm_policy,
+                revision_token: profile_revision_token,
+            };
+            // Same rule as SFTP and Forward: a plan whose every route needs the
+            // Vault fails as VaultLocked before any network contact, so a
+            // background restore never opens a pre-authentication connection.
+            if connection_requires_vault(&connection_base) && !vault.is_unlocked() {
+                let proxy_locked = matches!(
+                    &connection_base.ingress,
+                    ResolvedRouteIngress::HttpConnectProxy {
+                        authentication: Some(_),
+                        ..
+                    } | ResolvedRouteIngress::Socks5Proxy {
+                        authentication: Some(_),
+                        ..
+                    }
+                );
+                // A locked proxy credential keeps its existing, more specific
+                // ProxyCredentialLocked code; both recover through unlockVault.
+                let message = if proxy_locked {
+                    Message::ConnectionFailed {
+                        session_id,
+                        generation,
+                        error: TransportError::RouteIngress(RouteIngressError {
+                            stage: IngressStage::Configuration,
+                            kind: IngressFailureKind::CredentialLocked,
+                        }),
+                        route_stage: Some(SshSessionRouteStage::Ingress),
+                    }
+                } else {
+                    Message::ConnectionVaultLocked {
+                        session_id,
+                        generation,
+                        route_stage: None,
+                    }
+                };
+                let _ = tx.send(message).await;
+                return;
+            }
+            let has_vault_credentials = connection_has_vault_credentials(&connection_base);
             let result = async {
                 let connection =
                     SshConnectionOrchestrator::new(&vault, &transient_credentials, &ssh_agent)
                         .connect(
-                            ResolvedSshConnectionBase {
-                                endpoint,
-                                username,
-                                ingress,
-                                jump_hosts,
-                                credentials,
-                                algorithm_policy,
-                                revision_token: profile_revision_token,
-                            },
+                            connection_base,
                             verifier,
                             &mut interaction,
                             transport_keepalive_interval,
@@ -4103,14 +4258,26 @@ impl Actor {
                         .await;
                 }
                 Err(failure) => {
-                    let _ = tx
-                        .send(Message::ConnectionFailed {
+                    let route_stage = Some(connection_route_stage_to_wire(failure.route_stage));
+                    let message = if terminal_vault_locked_after_failure(
+                        has_vault_credentials,
+                        vault.is_unlocked(),
+                        &failure.error,
+                    ) {
+                        Message::ConnectionVaultLocked {
+                            session_id,
+                            generation,
+                            route_stage,
+                        }
+                    } else {
+                        Message::ConnectionFailed {
                             session_id,
                             generation,
                             error: failure.error,
-                            route_stage: Some(connection_route_stage_to_wire(failure.route_stage)),
-                        })
-                        .await;
+                            route_stage,
+                        }
+                    };
+                    let _ = tx.send(message).await;
                 }
             }
         });
@@ -4480,6 +4647,9 @@ impl Actor {
         reply: oneshot::Sender<Result<HostKeyDecision, TransportError>>,
     ) {
         if !self.connection_active(&session_id, generation) {
+            // The session already ended or moved to another generation; the
+            // stale transport is discarded and no record is updated.
+            log_host_key_failure(&session_id, generation, "session_inactive", None);
             let _ = reply.send(Err(TransportError::HostKeyVerificationFailed));
             return;
         }
@@ -4492,20 +4662,59 @@ impl Actor {
         );
         match observation {
             Ok(KnownHostObservation::Trusted(trusted)) => {
-                let decision = self.hosts.record_known_host_verified(
+                let decision = match self.hosts.record_known_host_verified(
                     endpoint.normalized_address(),
                     endpoint.port(),
                     &observed.algorithm,
                     &observed.public_key_blob,
-                );
-                let _ = reply.send(if decision.is_ok() {
-                    Ok(HostKeyDecision::Trusted)
-                } else {
-                    Err(TransportError::HostKeyVerificationFailed)
-                });
-                let _ = trusted;
+                ) {
+                    Ok(_) => Ok(HostKeyDecision::Trusted),
+                    // The pin changed between the read and the write: still block.
+                    Err(AppPersistenceError::KnownHostMismatch {
+                        trusted_fingerprint,
+                        ..
+                    }) => Ok(HostKeyDecision::Mismatch {
+                        trusted_fingerprint,
+                    }),
+                    Err(AppPersistenceError::KnownHostAlgorithmChanged { .. }) => {
+                        Ok(HostKeyDecision::Mismatch {
+                            trusted_fingerprint: trusted.fingerprint_sha256.clone(),
+                        })
+                    }
+                    // The trust record vanished: never treat the key as trusted.
+                    Err(error @ AppPersistenceError::NotFound) => {
+                        self.mark_host_key_failure(&session_id, "trusted_record_removed", &error);
+                        Err(TransportError::HostKeyVerificationFailed)
+                    }
+                    // Only the "last verified" timestamp failed to persist. The
+                    // key already matched the stored pin, so trust is unchanged.
+                    Err(error) => {
+                        log_host_key_failure(
+                            &session_id,
+                            generation,
+                            "last_verified_update_failed",
+                            Some(&error),
+                        );
+                        Ok(HostKeyDecision::Trusted)
+                    }
+                };
+                let _ = reply.send(decision);
             }
             Ok(KnownHostObservation::Unknown(_)) => {
+                if self
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|record| record.active_challenge.is_some())
+                {
+                    // Never overwrite (and silently drop) a pending decision.
+                    log_host_key_failure(&session_id, generation, "challenge_already_active", None);
+                    if let Some(record) = self.sessions.get_mut(&session_id) {
+                        record.host_key_failure_path =
+                            Some((generation, "challenge_already_active"));
+                    }
+                    let _ = reply.send(Err(TransportError::HostKeyVerificationFailed));
+                    return;
+                }
                 self.transition(
                     &session_id,
                     SshSessionState::AwaitingHostKeyDecision,
@@ -4513,6 +4722,7 @@ impl Actor {
                     None,
                 );
                 let Some(record) = self.sessions.get_mut(&session_id) else {
+                    log_host_key_failure(&session_id, generation, "session_missing", None);
                     let _ = reply.send(Err(TransportError::HostKeyVerificationFailed));
                     return;
                 };
@@ -4545,9 +4755,25 @@ impl Actor {
                     trusted_fingerprint: trusted.fingerprint_sha256,
                 }));
             }
-            Err(_) => {
+            Err(error) => {
+                // Without a readable trust store the key can be neither
+                // trusted nor offered for first trust: fail closed.
+                self.mark_host_key_failure(&session_id, "known_host_lookup_failed", &error);
                 let _ = reply.send(Err(TransportError::HostKeyVerificationFailed));
             }
+        }
+    }
+
+    fn mark_host_key_failure(
+        &mut self,
+        session_id: &str,
+        path: &'static str,
+        error: &AppPersistenceError,
+    ) {
+        if let Some(record) = self.sessions.get_mut(session_id) {
+            let generation = record.summary.generation.get();
+            record.host_key_failure_path = Some((generation, path));
+            log_host_key_failure(session_id, generation, path, Some(error));
         }
     }
 
@@ -4612,15 +4838,53 @@ impl Actor {
             SshHostKeyDecision::Reject => HostKeyDecision::Rejected,
             SshHostKeyDecision::AcceptAndStore => {
                 let endpoint = &active.challenge.endpoint;
-                self.hosts
-                    .trust_known_host(
-                        &endpoint.address,
-                        endpoint.port,
-                        &active.observed.algorithm,
-                        &active.observed.public_key_blob,
-                    )
-                    .map_err(|_| conflict_error(request.meta.request_id.clone()))?;
-                HostKeyDecision::Trusted
+                match self.hosts.trust_known_host(
+                    &endpoint.address,
+                    endpoint.port,
+                    &active.observed.algorithm,
+                    &active.observed.public_key_blob,
+                ) {
+                    Ok(_) => HostKeyDecision::Trusted,
+                    // Another connection pinned a different key meanwhile; the
+                    // accepted key is not trusted and the connection is blocked.
+                    Err(AppPersistenceError::KnownHostMismatch {
+                        trusted_fingerprint,
+                        ..
+                    }) => HostKeyDecision::Mismatch {
+                        trusted_fingerprint,
+                    },
+                    Err(error @ AppPersistenceError::KnownHostAlgorithmChanged { .. }) => {
+                        log_host_key_failure(
+                            request.session_id.as_str(),
+                            request.expected_generation.get(),
+                            "trust_store_algorithm_changed",
+                            Some(&error),
+                        );
+                        record.host_key_failure_path = Some((
+                            request.expected_generation.get(),
+                            "trust_store_algorithm_changed",
+                        ));
+                        HostKeyDecision::Rejected
+                    }
+                    Err(error) => {
+                        // Keep the challenge (and the transport's decision
+                        // channel) so the user can retry or reject explicitly.
+                        log_host_key_failure(
+                            request.session_id.as_str(),
+                            request.expected_generation.get(),
+                            "trust_store_write_failed",
+                            Some(&error),
+                        );
+                        record.active_challenge = Some(active);
+                        return Err(core_error(
+                            request.meta.request_id,
+                            "ssh_terminal.host_key_trust_failed",
+                            ErrorCategory::Unavailable,
+                            RetryStrategy::WaitForUser,
+                            "errors.sshSession.hostKeyTrustFailed",
+                        ));
+                    }
+                }
             }
         };
         let _ = active.decision.send(Ok(decision));
@@ -7677,6 +7941,47 @@ impl Actor {
         error: TransportError,
         route_stage: Option<SshSessionRouteStage>,
     ) {
+        let mut failure = failure_from_route(error, route_stage);
+        if failure.code == SshSessionFailureCode::ProtocolError {
+            // Correlates with the transport's own protocol category line.
+            let state = self.sessions.get(session_id).map_or("missing", |record| {
+                session_state_label(record.summary.state)
+            });
+            let diagnostic_id = uuid::Uuid::new_v4().to_string();
+            ssh_diagnostic(&format!(
+                "SSH protocol failure: diagnostic_id={diagnostic_id} session={session_id} \
+                 generation={generation} state={state} route_stage={}",
+                failure
+                    .route_stage
+                    .as_ref()
+                    .map_or("none", route_stage_label)
+            ));
+            failure.diagnostic_id = Some(diagnostic_id);
+        }
+        if failure.code == SshSessionFailureCode::HostKeyVerificationFailed {
+            // The transport only reports that verification did not complete;
+            // the Core-side path (if any) was recorded on the session.
+            let path = self
+                .sessions
+                .get(session_id)
+                .and_then(|record| record.host_key_failure_path)
+                .filter(|(path_generation, _)| *path_generation == generation)
+                .map_or("decision_channel_closed", |(_, path)| path);
+            let diagnostic_id = uuid::Uuid::new_v4().to_string();
+            ssh_diagnostic(&format!(
+                "SSH host-key verification failed: diagnostic_id={diagnostic_id} path={path}"
+            ));
+            failure.diagnostic_id = Some(diagnostic_id);
+        }
+        self.connection_failure(session_id, generation, failure);
+    }
+
+    fn connection_failure(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        failure: SshSessionFailureReason,
+    ) {
         self.finish_connect(session_id, generation);
         if self.sessions.get(session_id).is_some_and(|record| {
             record.summary.generation.get() == generation
@@ -7688,7 +7993,6 @@ impl Actor {
         if !self.connection_active(session_id, generation) {
             return;
         }
-        let failure = failure_from_route(error, route_stage);
         if let Some(record) = self.sessions.get_mut(session_id) {
             clear_keyboard_interactive_challenge(record, TransportError::AuthenticationRejected);
         }
@@ -9963,6 +10267,7 @@ mod tests {
                 )]),
                 active_challenge: None,
                 active_keyboard_interactive_challenge: None,
+                host_key_failure_path: None,
                 prepared_keyboard_interactive_answers: BTreeMap::new(),
                 active_login_automation: None,
                 heartbeat_policy: test_heartbeat_policy(),
@@ -12286,6 +12591,387 @@ mod tests {
         .expect("aborting an unpolled task drops the captured cleanup guard");
     }
 
+    fn test_host_key() -> ObservedHostKey {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
+            .expect("generate isolated host key");
+        let public_key_blob = key.public_key().public_key_bytes();
+        ObservedHostKey {
+            algorithm: "ssh-ed25519".to_owned(),
+            fingerprint_sha256: ssh_sha256_fingerprint(&public_key_blob),
+            public_key_blob,
+        }
+    }
+
+    /// Holds a SQLite write lock from a second connection for longer than the
+    /// repository busy timeout, so the next Known Hosts write fails with BUSY.
+    fn hold_database_write_lock(directory: &std::path::Path) -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open(directory.join("ssh/norishell.sqlite3"))
+            .expect("second database connection");
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold write lock");
+        connection
+    }
+
+    fn observe_host_key(
+        actor: &mut Actor,
+        session: &TestSession,
+        generation: u64,
+        observed: ObservedHostKey,
+    ) -> oneshot::Receiver<Result<HostKeyDecision, TransportError>> {
+        let (reply, decision) = oneshot::channel();
+        actor.host_key_observed(
+            session.session_id.as_str().to_owned(),
+            generation,
+            Endpoint::parse("127.0.0.1", 2241).expect("endpoint"),
+            observed,
+            reply,
+        );
+        decision
+    }
+
+    /// N5 path: a trusted key whose "last verified" timestamp cannot be written
+    /// must still connect as Trusted instead of failing the handshake.
+    #[test]
+    fn trusted_host_key_survives_last_verified_write_failure() {
+        let (directory, mut actor, _live_sessions, _rx) = actor_fixture();
+        let observed = test_host_key();
+        actor
+            .hosts
+            .trust_known_host(
+                "127.0.0.1",
+                2241,
+                &observed.algorithm,
+                &observed.public_key_blob,
+            )
+            .expect("pre-trust key");
+        let session = insert_test_session(&mut actor, SshSessionState::Connecting, 1, 1, None);
+        let lock = hold_database_write_lock(directory.path());
+        let mut decision = observe_host_key(&mut actor, &session, 1, observed);
+        drop(lock);
+        assert!(matches!(
+            decision.try_recv().expect("decision delivered"),
+            Ok(HostKeyDecision::Trusted)
+        ));
+    }
+
+    #[test]
+    fn trusted_lookup_still_blocks_a_changed_key() {
+        let (_directory, mut actor, _live_sessions, _rx) = actor_fixture();
+        let trusted = test_host_key();
+        actor
+            .hosts
+            .trust_known_host(
+                "127.0.0.1",
+                2241,
+                &trusted.algorithm,
+                &trusted.public_key_blob,
+            )
+            .expect("pre-trust key");
+        let session = insert_test_session(&mut actor, SshSessionState::Connecting, 1, 1, None);
+        let mut decision = observe_host_key(&mut actor, &session, 1, test_host_key());
+        assert!(matches!(
+            decision.try_recv().expect("decision delivered"),
+            Ok(HostKeyDecision::Mismatch { trusted_fingerprint })
+                if trusted_fingerprint == trusted.fingerprint_sha256
+        ));
+    }
+
+    /// N5 path: accepting a first-seen key while the Known Hosts write fails
+    /// must keep the challenge pending (retry or reject) instead of dropping
+    /// the transport's decision channel.
+    #[test]
+    fn accept_and_store_failure_keeps_the_challenge_pending() {
+        let (directory, mut actor, _live_sessions, _rx) = actor_fixture();
+        let session = insert_test_session(&mut actor, SshSessionState::Connecting, 1, 1, None);
+        let observed = test_host_key();
+        let mut decision = observe_host_key(&mut actor, &session, 1, observed.clone());
+        assert!(matches!(
+            decision.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let challenge = actor.sessions[session.session_id.as_str()]
+            .active_challenge
+            .as_ref()
+            .expect("first-seen key waits for a decision")
+            .challenge
+            .clone();
+        let accept = |key: &str| SshHostKeyDecisionRequest {
+            meta: RequestMeta {
+                request_id: RequestId::new(),
+            },
+            operation_id: OperationId::new(),
+            idempotency_key: key.to_owned(),
+            session_id: session.session_id.clone(),
+            expected_generation: challenge.generation,
+            challenge_id: challenge.challenge_id.clone(),
+            expected_state_revision: challenge.state_revision,
+            attachment_id: session.attachment_id.clone(),
+            view_id: session.view_id.clone(),
+            decision: SshHostKeyDecision::AcceptAndStore,
+        };
+        let lock = hold_database_write_lock(directory.path());
+        let error = actor
+            .host_key_decide(accept("accept-while-busy"))
+            .expect_err("store failure is reported");
+        drop(lock);
+        assert_eq!(error.code, "ssh_terminal.host_key_trust_failed");
+        assert!(matches!(
+            decision.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(
+            actor.sessions[session.session_id.as_str()]
+                .active_challenge
+                .is_some()
+        );
+        actor
+            .host_key_decide(accept("accept-after-busy"))
+            .expect("retry stores the key");
+        assert!(matches!(
+            decision.try_recv().expect("decision delivered"),
+            Ok(HostKeyDecision::Trusted)
+        ));
+    }
+
+    #[test]
+    fn server_closed_before_handshake_is_not_a_protocol_error() {
+        let reason = failure_from_route(
+            TransportError::ServerClosedBeforeHandshake,
+            Some(SshSessionRouteStage::Target),
+        );
+        assert_eq!(reason.code, SshSessionFailureCode::ConnectionClosedByServer);
+        assert_eq!(reason.stage, SshSessionFailureStage::Connecting);
+        assert_eq!(reason.retry_strategy, SshSessionRetryStrategy::RetryOpen);
+        assert_eq!(
+            reason.message_key,
+            "errors.sshSession.connectionClosedByServer"
+        );
+    }
+
+    #[test]
+    fn host_key_verification_failure_carries_a_diagnostic_id() {
+        let (_directory, mut actor, _live_sessions, _rx) = actor_fixture();
+        let session = insert_test_session(&mut actor, SshSessionState::Connecting, 1, 1, None);
+        actor.handle(Message::ConnectionFailed {
+            session_id: session.session_id.as_str().to_owned(),
+            generation: 1,
+            error: TransportError::HostKeyVerificationFailed,
+            route_stage: Some(SshSessionRouteStage::Target),
+        });
+        let failure = actor.sessions[session.session_id.as_str()]
+            .summary
+            .failure_reason
+            .clone()
+            .expect("failure recorded");
+        assert_eq!(
+            failure.code,
+            SshSessionFailureCode::HostKeyVerificationFailed
+        );
+        assert!(failure.diagnostic_id.is_some());
+    }
+
+    #[test]
+    fn host_key_verification_failure_has_a_distinct_retryable_code() {
+        let reason = failure_from_route(
+            TransportError::HostKeyVerificationFailed,
+            Some(SshSessionRouteStage::Target),
+        );
+        assert_eq!(
+            reason.code,
+            SshSessionFailureCode::HostKeyVerificationFailed
+        );
+        assert_eq!(reason.stage, SshSessionFailureStage::HostKeyVerification);
+        assert_eq!(reason.retry_strategy, SshSessionRetryStrategy::RetryOpen);
+        assert_eq!(
+            reason.message_key,
+            "errors.sshSession.hostKeyVerificationFailed"
+        );
+    }
+
+    fn locked_vault_password_credential() -> ConnectionCredential {
+        ConnectionCredential::Stored(Box::new(CredentialRecord {
+            credential_ref_id: CredentialRefId::new(),
+            identity_id: IdentityId::new(),
+            method: AuthenticationMethodKind::Password,
+            details: CredentialRecordDetails::Password {
+                secret_ref_id: SecretRefId::new(),
+            },
+            priority: 0,
+            label: "Vault password".to_owned(),
+            state_version: WireSequence::new(1),
+            import_operation_id: None,
+            import_idempotency_key: None,
+            import_state: CredentialImportState::Ready,
+        }))
+    }
+
+    async fn drive_until_failed(
+        actor: &mut Actor,
+        rx: &mut mpsc::Receiver<Message>,
+        session_id: &str,
+    ) -> SshSessionFailureReason {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let message = rx.recv().await.expect("actor mailbox stays open");
+                actor.handle(message);
+                let record = &actor.sessions[session_id];
+                if record.summary.state == SshSessionState::Failed {
+                    break record
+                        .summary
+                        .failure_reason
+                        .clone()
+                        .expect("failed session carries a reason");
+                }
+            }
+        })
+        .await
+        .expect("connect task reports a terminal failure")
+    }
+
+    /// Startup history restore with a locked Vault must surface an explicit
+    /// unlock action, not a server credential rejection, and must not open a
+    /// pre-authentication connection that cannot authenticate anyway.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn locked_vault_saved_password_fails_as_vault_locked_without_contacting_server() {
+        let server = NetworkTestServer::start().await;
+        let (_directory, mut actor, _live_sessions, mut rx) = actor_fixture();
+        actor
+            .hosts
+            .trust_known_host(
+                "127.0.0.1",
+                server.port,
+                "ssh-ed25519",
+                &server.host_key_blob,
+            )
+            .expect("trust isolated server key");
+        let session = insert_test_session(&mut actor, SshSessionState::Resolving, 1, 1, None);
+        actor.start_connect(ConnectPlan {
+            session_id: session.session_id.as_str().to_owned(),
+            generation: 1,
+            endpoint: SshSessionEndpoint {
+                address: "127.0.0.1".to_owned(),
+                port: server.port,
+                username: Some(NETWORK_TEST_USER.to_owned()),
+            },
+            username: NETWORK_TEST_USER.to_owned(),
+            ingress: ResolvedRouteIngress::DirectTcp,
+            jump_hosts: Vec::new(),
+            credentials: vec![locked_vault_password_credential()],
+            algorithm_policy: test_algorithm_policy(),
+            heartbeat_policy: test_heartbeat_policy(),
+            login_automation: None,
+            automation_attachment_id: SshAttachmentId::new(),
+            automation_view_id: norishell_core_api::SshViewId::new(),
+            profile_revision_token: "test-locked-vault-restore".to_owned(),
+            rows: 24,
+            cols: 80,
+        });
+        let failure = drive_until_failed(&mut actor, &mut rx, session.session_id.as_str()).await;
+        assert_eq!(failure.code, SshSessionFailureCode::VaultLocked);
+        assert_eq!(failure.stage, SshSessionFailureStage::Authentication);
+        assert_eq!(failure.retry_strategy, SshSessionRetryStrategy::UnlockVault);
+        assert_eq!(failure.message_key, "errors.sshSession.vaultLocked");
+        assert_eq!(server.evidence.auth_attempts.load(Ordering::SeqCst), 0);
+        assert!(
+            server
+                .connection_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a Vault-only credential plan must not connect while the Vault is locked"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn locked_vault_proxy_credential_keeps_proxy_locked_code_without_network() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind proxy probe");
+        let port = listener.local_addr().expect("proxy probe address").port();
+        let (_directory, mut actor, _live_sessions, mut rx) = actor_fixture();
+        let session = insert_test_session(&mut actor, SshSessionState::Resolving, 1, 1, None);
+        let ConnectionCredential::Stored(proxy_credential) = locked_vault_password_credential()
+        else {
+            unreachable!("stored fixture");
+        };
+        actor.start_connect(ConnectPlan {
+            session_id: session.session_id.as_str().to_owned(),
+            generation: 1,
+            endpoint: SshSessionEndpoint {
+                address: "127.0.0.1".to_owned(),
+                port: 22,
+                username: Some(NETWORK_TEST_USER.to_owned()),
+            },
+            username: NETWORK_TEST_USER.to_owned(),
+            ingress: ResolvedRouteIngress::HttpConnectProxy {
+                endpoint: norishell_core_api::ProxyEndpoint {
+                    address: "127.0.0.1".to_owned(),
+                    normalized_address: "127.0.0.1".to_owned(),
+                    port,
+                },
+                authentication: Some(crate::connection_profile::ResolvedProxyAuthentication {
+                    username: "proxy-user".to_owned(),
+                    credential: proxy_credential,
+                }),
+            },
+            jump_hosts: Vec::new(),
+            credentials: vec![locked_vault_password_credential()],
+            algorithm_policy: test_algorithm_policy(),
+            heartbeat_policy: test_heartbeat_policy(),
+            login_automation: None,
+            automation_attachment_id: SshAttachmentId::new(),
+            automation_view_id: norishell_core_api::SshViewId::new(),
+            profile_revision_token: "test-locked-vault-proxy".to_owned(),
+            rows: 24,
+            cols: 80,
+        });
+        let failure = drive_until_failed(&mut actor, &mut rx, session.session_id.as_str()).await;
+        assert_eq!(failure.code, SshSessionFailureCode::ProxyCredentialLocked);
+        assert_eq!(failure.retry_strategy, SshSessionRetryStrategy::UnlockVault);
+        assert!(
+            timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "the proxy must not be contacted while its credential is locked"
+        );
+    }
+
+    /// A mixed plan may still try its Agent/transient credential, but when the
+    /// server rejects that route and the Vault-backed alternative was skipped
+    /// because the Vault is locked, the recovery is unlocking the Vault.
+    #[test]
+    fn credential_failure_with_skipped_locked_vault_credential_is_vault_locked() {
+        assert!(terminal_vault_locked_after_failure(
+            true,
+            false,
+            &TransportError::AuthenticationRejected
+        ));
+        assert!(terminal_vault_locked_after_failure(
+            true,
+            false,
+            &TransportError::InvalidPrivateKey
+        ));
+        assert!(!terminal_vault_locked_after_failure(
+            true,
+            true,
+            &TransportError::AuthenticationRejected
+        ));
+        assert!(!terminal_vault_locked_after_failure(
+            false,
+            false,
+            &TransportError::AuthenticationRejected
+        ));
+        assert!(!terminal_vault_locked_after_failure(
+            true,
+            false,
+            &TransportError::HostKeyRejected
+        ));
+        let reason = vault_locked_failure_reason(Some(SshSessionRouteStage::Target));
+        assert_eq!(reason.code, SshSessionFailureCode::VaultLocked);
+        assert_eq!(reason.retry_strategy, SshSessionRetryStrategy::UnlockVault);
+    }
+
     #[test]
     fn locked_proxy_secret_maps_to_ingress_unlock_instead_of_target_authentication() {
         let directory = tempfile::tempdir().expect("temporary locked vault");
@@ -12541,6 +13227,7 @@ mod tests {
                 )]),
                 active_challenge: None,
                 active_keyboard_interactive_challenge: None,
+                host_key_failure_path: None,
                 prepared_keyboard_interactive_answers: BTreeMap::new(),
                 active_login_automation: None,
                 heartbeat_policy: test_heartbeat_policy(),

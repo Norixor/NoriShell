@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Porcelain base color of the desktop app icon (src/assets/branding/norishell-app-icon.png). -->
+  <color name="ic_launcher_background">#F5F8FD</color>
+</resources>

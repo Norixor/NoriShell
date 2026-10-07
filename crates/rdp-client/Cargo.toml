@@ -23,3 +23,8 @@ x509-cert = "0.2"
 
 [dev-dependencies]
 rcgen = "0.14"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Android has no readable system root store for rustls-native-certs; the platform
+# verifier delegates to the system TrustManager instead.
+rustls-platform-verifier = "0.7"

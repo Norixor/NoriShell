@@ -10,11 +10,12 @@ use norishell_core_api::{
     ApplicationExitRequest, CoreApiError, DesktopWindowCloseBehavior, ExitBlocker, ExitReadiness,
     RequestId, WindowCloseRequest,
 };
+#[cfg(desktop)]
+use tauri::menu::{Menu, MenuItem};
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuItemKind, PredefinedMenuItem};
 use tauri::{
     App, AppHandle, Emitter, Manager, Runtime, State, Webview, WebviewWindow, Window, WindowEvent,
-    menu::{Menu, MenuItem},
 };
 use uuid::Uuid;
 
@@ -29,6 +30,7 @@ type CoreResult<T> = Result<T, Box<CoreApiError>>;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "norishell-main";
+#[cfg(desktop)]
 const APPLICATION_QUIT_ID: &str = "norishell-application-quit";
 
 const LIFECYCLE_IDLE: u8 = 0;
@@ -40,6 +42,9 @@ struct LifecycleGateInner {
     phase: AtomicU8,
     active_resource_creators: AtomicUsize,
     creators_drained: tokio::sync::Notify,
+    /// Set once the Android exit without a frontend has started.
+    #[cfg(target_os = "android")]
+    unattended_exit: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Default)]
@@ -195,8 +200,15 @@ fn main_window_close_action(
     (label == MAIN_WINDOW_LABEL && !exit_authorized).then(|| close_action_for_behavior(behavior))
 }
 
+#[cfg(desktop)]
 fn tray_is_available<R: Runtime>(app: &AppHandle<R>) -> bool {
     app.tray_by_id(TRAY_ID).is_some()
+}
+
+// Android has no system tray; hiding the only activity would strand the user.
+#[cfg(mobile)]
+fn tray_is_available<R: Runtime>(_app: &AppHandle<R>) -> bool {
+    false
 }
 
 fn keep_main_window_visible<R: Runtime>(window: &Window<R>) {
@@ -268,6 +280,14 @@ pub fn hide_window_on_close<R: Runtime>(window: &Window<R>, event: &WindowEvent)
 }
 
 pub fn request_application_exit<R: Runtime>(app: &AppHandle<R>) {
+    // Android: the main WebView dies with its Activity and this process cannot
+    // build a new one for a re-created Activity. Nobody can answer the frontend
+    // exit request any more, so Core disconnects everything and exits.
+    #[cfg(target_os = "android")]
+    if app.get_webview_window(MAIN_WINDOW_LABEL).is_none() {
+        exit_without_frontend(app, "main_webview_gone");
+        return;
+    }
     if let Err(error) = show_main_window(app) {
         eprintln!("failed to show application before exit request: {error}");
     }
@@ -280,11 +300,114 @@ pub fn request_application_exit<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Upper bound for the Android unattended cleanup. Without a frontend there is
+/// no one to report a residual to, so the process exits after this bound.
+#[cfg(target_os = "android")]
+const UNATTENDED_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+/// Part of [`UNATTENDED_EXIT_TIMEOUT`] an open tool editor gets to answer.
+#[cfg(target_os = "android")]
+const UNATTENDED_TOOL_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Android exit that does not depend on the WebView: the task was swiped away
+/// from recents, or the main Activity (and with it the WebView) was destroyed.
+/// Runs the same Core cleanup as an explicit "disconnect all and exit", bounded
+/// by [`UNATTENDED_EXIT_TIMEOUT`], then exits even when cleanup failed — a
+/// process without UI would otherwise keep sessions alive with no way back to
+/// them. Repeated triggers (task removal and Activity destruction arrive
+/// together) start the sequence once.
+#[cfg(target_os = "android")]
+pub(crate) fn exit_without_frontend<R: Runtime>(app: &AppHandle<R>, reason: &str) {
+    use tauri_plugin_norishell_android::log;
+    let Some(lifecycle) = app.try_state::<LifecycleState>() else {
+        return;
+    };
+    if lifecycle.gate.unattended_exit.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    log::info(&format!("unattended exit started: {reason}"));
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Own task: a panic inside an owner's cleanup (for example a Kotlin
+        // bridge call that finds no Activity) must not skip the exit below.
+        let cleanup_app = app.clone();
+        let cleanup =
+            tauri::async_runtime::spawn(
+                async move { disconnect_all_unattended(&cleanup_app).await },
+            );
+        match tokio::time::timeout(UNATTENDED_EXIT_TIMEOUT, cleanup).await {
+            Ok(Ok(Ok(()))) => log::info("unattended exit cleanup completed"),
+            Ok(Ok(Err(code))) => log::warn(&format!("unattended exit cleanup failed: {code}")),
+            Ok(Err(_)) => log::warn("unattended exit cleanup panicked"),
+            Err(_) => log::warn("unattended exit cleanup timed out"),
+        }
+        app.state::<LifecycleState>().authorize_exit();
+        app.exit(0);
+    });
+}
+
+#[cfg(target_os = "android")]
+async fn disconnect_all_unattended<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let request_id = RequestId::new();
+    // Fences new tool windows and gives a still-visible editor surface a short
+    // chance to settle its draft. The user already chose to leave the app, so
+    // an unanswered or refused draft check never keeps sessions alive.
+    let tool_exit_permit = match (
+        app.try_state::<crate::tool_window_exit::ToolWindowExit>(),
+        app.try_state::<crate::tool_windows::ToolWindows>(),
+    ) {
+        (Some(tool_exit), Some(tool_windows)) => tokio::time::timeout(
+            UNATTENDED_TOOL_EXIT_TIMEOUT,
+            tool_exit.prepare(app, &tool_windows),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok),
+        _ => None,
+    };
+    let lifecycle = app.state::<LifecycleState>();
+    if lifecycle.is_exit_authorized() {
+        return Ok(());
+    }
+    // `false` means another exit or update cleanup already fenced resource
+    // creation; owner shutdown is repeatable, so finish it here regardless.
+    let _ = lifecycle.begin_cleanup().await;
+    let (
+        Some(sessions),
+        Some(metrics),
+        Some(telnet),
+        Some(forwards),
+        Some(sftp),
+        Some(plugins),
+        Some(hosts),
+    ) = (
+        app.try_state::<SshSessionService>(),
+        app.try_state::<MetricsSessionService>(),
+        app.try_state::<TelnetSessionService>(),
+        app.try_state::<ForwardSessionService>(),
+        app.try_state::<SftpSessionService>(),
+        app.try_state::<PluginService>(),
+        app.try_state::<HostService>(),
+    )
+    else {
+        return Err("app.core_unavailable".to_owned());
+    };
+    shutdown_all_resources(
+        request_id, app, &sessions, &metrics, &telnet, &forwards, &sftp, &plugins, &hosts,
+    )
+    .await
+    .map_err(|error| error.code)?;
+    if let Some(permit) = tool_exit_permit {
+        permit.commit();
+    }
+    Ok(())
+}
+
 /// The macOS predefined Quit item invokes AppKit's `terminate:` selector
 /// directly, which bypasses Tauri's preventable `ExitRequested` event. Replace
 /// it with an ordinary menu item so Cmd-Q follows the same readiness gate as
 /// the tray and frontend exit intents.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg(desktop)]
 pub fn application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let menu = Menu::default(app)?;
     #[cfg(target_os = "macos")]
@@ -353,6 +476,7 @@ pub fn application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>
     Ok(menu)
 }
 
+#[cfg(desktop)]
 pub fn handle_application_menu_event<R: Runtime>(
     app: &AppHandle<R>,
     event: tauri::menu::MenuEvent,
@@ -670,6 +794,29 @@ pub(crate) fn release_update_allow_relaunch<R: Runtime>(
         return Err("unavailable");
     }
     lifecycle.authorize_exit();
+    Ok(())
+}
+
+/// Android installs through a system confirmation dialog the user may cancel.
+/// Lifts the resource-creation fence taken by `release_update_prepare_install`
+/// when the install did not replace the app; closed resources stay closed.
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) fn release_update_cancel_install<R: Runtime>(
+    webview: Webview<R>,
+    lifecycle: State<'_, LifecycleState>,
+    update_exit: State<'_, UpdateExitState>,
+) -> Result<(), &'static str> {
+    if !webview
+        .app_handle()
+        .state::<crate::workspace_windows::WorkspaceWindows>()
+        .is_main_or_page(&webview)
+    {
+        return Err("unavailable");
+    }
+    // Dropping an uncommitted permit clears the tool-window exit fence.
+    drop(update_exit.permit.lock().map_err(|_| "unavailable")?.take());
+    lifecycle.cancel_cleanup();
     Ok(())
 }
 

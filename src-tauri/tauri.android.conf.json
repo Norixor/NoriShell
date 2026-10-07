@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "app.norishell.android",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "NoriShell"
+      }
+    ]
+  },
+  "bundle": {
+    "android": {
+      "minSdkVersion": 29
+    }
+  }
+}

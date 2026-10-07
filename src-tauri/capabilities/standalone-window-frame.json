@@ -2,6 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "standalone-window-frame",
   "description": "Shared frame only for Core-owned editor and protected prompt windows.",
+  "platforms": ["macOS", "windows", "linux"],
   "windows": [
     "tool-hostEditor-*", "tool-desktopEditor-*", "tool-sftpFile-*",
     "secure-credential-*", "desktop-auth-*", "secure-vault-*",

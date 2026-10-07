@@ -141,7 +141,7 @@ impl PluginService {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             runtime
                 .isolated_surfaces
-                .retain(|label, _| app.get_webview_window(label).is_some());
+                .retain(|label, _| crate::secure_surface::exists(&app, label));
             let count = runtime
                 .isolated_surfaces
                 .values()
@@ -184,27 +184,22 @@ impl PluginService {
                 },
             );
         }
-        let result = crate::secure_window_frame::apply_secure_window_frame(
+        let result = crate::secure_surface::open(
             &app,
-            &label,
-            WebviewWindowBuilder::new(
-                &app,
-                &label,
-                WebviewUrl::App(
-                    format!(
-                        "plugin-isolated.html?surfaceId={}&channelNonce={channel_nonce}",
-                        surface.surface_id
-                    )
-                    .into(),
-                ),
-            ),
-        )
-        .title(format!("NoriShell — {}", surface.title))
-        .inner_size(f64::from(surface.width), f64::from(surface.height))
-        .min_inner_size(480.0, 360.0)
-        .resizable(true)
-        .center()
-        .build();
+            crate::secure_surface::SurfaceSpec::new(
+                crate::secure_surface::SurfaceKind::PluginIsolated,
+                label.clone(),
+            )
+            .query(format!(
+                "surfaceId={}&channelNonce={channel_nonce}",
+                surface.surface_id
+            ))
+            .title(format!("NoriShell — {}", surface.title))
+            .size(f64::from(surface.width), f64::from(surface.height))
+            .min_size(480.0, 360.0)
+            .resizable(true)
+            .centered(),
+        );
         let window = match result {
             Ok(window) => window,
             Err(_) => {
@@ -213,18 +208,14 @@ impl PluginService {
             }
         };
         let service = self.clone();
-        window.on_window_event(move |event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                service.retire_isolated_surface(&label);
-            }
-        });
+        window.on_destroyed(move || service.retire_isolated_surface(&label));
         Ok(())
     }
 
-    pub(super) fn isolated_surface_content(
+    pub(crate) fn isolated_surface_content(
         &self,
         request: PluginIsolatedSurfaceContentRequest,
-        window: &WebviewWindow,
+        surface_label: &str,
     ) -> CoreResult<PluginIsolatedSurfaceContent> {
         let (owner, epoch, active) = {
             let runtime = self
@@ -233,7 +224,7 @@ impl PluginService {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let surface = runtime
                 .isolated_surfaces
-                .get(window.label())
+                .get(surface_label)
                 .filter(|surface| {
                     surface.surface_id == request.surface_id
                         && surface.channel_nonce == request.channel_nonce
@@ -257,7 +248,7 @@ impl PluginService {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let surface = runtime
             .isolated_surfaces
-            .get_mut(window.label())
+            .get_mut(surface_label)
             .filter(|surface| surface.channel_nonce == request.channel_nonce && !surface.loaded)
             .ok_or_else(|| plugin_permission_error(request.meta.request_id.clone()))?;
         surface.loaded = true;
@@ -300,9 +291,7 @@ impl PluginService {
             .clone()
         {
             for label in labels {
-                if let Some(window) = app.get_webview_window(&label) {
-                    let _ = window.close();
-                }
+                crate::secure_surface::close(&app, &label);
             }
         }
     }
@@ -323,9 +312,9 @@ impl PluginService {
             .map(|surface| surface.html.as_bytes().to_vec())
     }
 
-    async fn isolated_bridge(
+    pub(crate) async fn isolated_bridge(
         &self,
-        window: &WebviewWindow,
+        surface_label: &str,
         request: PluginIsolatedBridgeRequest,
     ) -> CoreResult<PluginIsolatedBridgeResponse> {
         if serde_json::to_vec(&request).map_or(true, |bytes| bytes.len() > 66 * 1024) {
@@ -339,7 +328,7 @@ impl PluginService {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let surface = runtime
                 .isolated_surfaces
-                .get_mut(window.label())
+                .get_mut(surface_label)
                 .ok_or_else(|| plugin_permission_error(request_id.clone()))?;
             surface
                 .admit(&request)
@@ -408,7 +397,7 @@ impl PluginService {
         };
         let _guard = BridgeCallGuard {
             service: self.clone(),
-            label: window.label().to_owned(),
+            label: surface_label.to_owned(),
             nonce: request.channel_nonce.clone(),
         };
         let runtime_fence = self.api_resource_fence(
@@ -461,7 +450,7 @@ impl PluginService {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let surface = runtime
                 .isolated_surfaces
-                .get_mut(window.label())
+                .get_mut(surface_label)
                 .filter(|surface| {
                     surface.channel_nonce == request.channel_nonce
                         && surface.authority.load(Ordering::Acquire)
@@ -533,7 +522,32 @@ pub(crate) async fn plugin_isolated_bridge(
 ) -> CoreResult<PluginIsolatedBridgeResponse> {
     // This broker has the same large async state as declarative plugin actions.
     // Allocate it when polled by the runtime, not in the UI thread's IPC future.
-    Box::pin(service.isolated_bridge(&window, request)).await
+    Box::pin(service.isolated_bridge(window.label(), request)).await
+}
+
+/// Response headers of a guest document; shared by the desktop custom
+/// protocol and the Android Secure Surface interception.
+pub(crate) const DOCUMENT_HEADERS: [(&str, &str); 5] = [
+    ("Content-Type", "text/html; charset=utf-8"),
+    ("Cache-Control", "no-store"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+    (
+        "Content-Security-Policy",
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+    ),
+];
+
+/// Guest HTML of the surface `label` for request `path` (`/<documentToken>`).
+pub(crate) fn document_body(
+    service: Option<&PluginService>,
+    label: &str,
+    path: &str,
+) -> Option<Vec<u8>> {
+    let token = path
+        .strip_prefix('/')
+        .filter(|token| Uuid::parse_str(token).is_ok())?;
+    service.and_then(|service| service.isolated_document(label, token))
 }
 
 /// Guest HTML has its own response policy; the trusted wrapper keeps script-src 'self'.
@@ -542,18 +556,15 @@ pub(crate) fn document_response(
     label: &str,
     path: &str,
 ) -> tauri::http::Response<Vec<u8>> {
-    let token = path
-        .strip_prefix('/')
-        .filter(|token| Uuid::parse_str(token).is_ok());
-    let body =
-        token.and_then(|token| service.and_then(|service| service.isolated_document(label, token)));
-    tauri::http::Response::builder().status(if body.is_some() { 200 } else { 404 })
-        .header("Content-Type", "text/html; charset=utf-8")
-        .header("Cache-Control", "no-store")
-        .header("X-Content-Type-Options", "nosniff")
-        .header("Referrer-Policy", "no-referrer")
-        .header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'")
-        .body(body.unwrap_or_default()).expect("static response headers are valid")
+    let body = document_body(service, label, path);
+    let mut response =
+        tauri::http::Response::builder().status(if body.is_some() { 200 } else { 404 });
+    for (name, value) in DOCUMENT_HEADERS {
+        response = response.header(name, value);
+    }
+    response
+        .body(body.unwrap_or_default())
+        .expect("static response headers are valid")
 }
 
 #[cfg(test)]

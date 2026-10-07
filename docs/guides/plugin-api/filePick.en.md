@@ -28,6 +28,8 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 Capability hint: `localFiles`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
+Platform note: Android (preview) does not support directory selection and returns Unsupported; file selection yields a read-only snapshot of the system document, see [file](file.en.md).
+
 Native selection requires an explicit user action. Each omitted access boolean defaults to false. Use an empty relativePath for a file handle and relative paths for a directory handle; arbitrary absolute paths cannot replace selection.
 
 ## Example call

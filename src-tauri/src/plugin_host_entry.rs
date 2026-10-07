@@ -41,9 +41,18 @@ pub fn run_if_requested() -> Option<i32> {
 fn run() -> io::Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut reader = stdin.lock();
-    let mut writer = stdout.lock();
-    let initialization: ParentFrame = read_frame(&mut reader)?;
+    run_with_streams(&mut stdin.lock(), &mut stdout.lock())
+}
+
+/// Runs the Plugin Host frame loop over an already isolated channel until the
+/// parent sends `Shutdown`, closes the channel, or violates the protocol.
+/// Desktop uses the child's stdin/stdout; Android passes one end of a
+/// socketpair owned by the isolated `PluginHostService` process.
+pub(crate) fn run_with_streams(
+    reader: &mut impl io::Read,
+    writer: &mut impl io::Write,
+) -> io::Result<()> {
+    let initialization: ParentFrame = read_frame(reader)?;
     let ParentFrame::Initialize {
         protocol_major,
         protocol_minor,
@@ -74,7 +83,7 @@ fn run() -> io::Result<()> {
         return Err(invalid_data());
     }
     write_frame(
-        &mut writer,
+        writer,
         &ChildFrame::Ready {
             protocol_major: PLUGIN_HOST_PROTOCOL_MAJOR,
             protocol_minor: PLUGIN_HOST_PROTOCOL_MINOR,
@@ -89,7 +98,7 @@ fn run() -> io::Result<()> {
     let mut requests_in_window = 0_usize;
     let mut runtime = None;
     loop {
-        let frame: ParentFrame = read_frame_bounded(&mut reader, PLUGIN_HOST_FRAME_MAX_BYTES)?;
+        let frame: ParentFrame = read_frame_bounded(reader, PLUGIN_HOST_FRAME_MAX_BYTES)?;
         match frame {
             ParentFrame::Execute {
                 instance_generation: observed_generation,
@@ -102,7 +111,7 @@ fn run() -> io::Result<()> {
                     || sequence != expected_sequence
                 {
                     write_rejection(
-                        &mut writer,
+                        writer,
                         instance_generation,
                         &nonce,
                         sequence,
@@ -118,7 +127,7 @@ fn run() -> io::Result<()> {
                 requests_in_window = requests_in_window.saturating_add(1);
                 if requests_in_window > MAX_REQUESTS_PER_WINDOW {
                     write_rejection(
-                        &mut writer,
+                        writer,
                         instance_generation,
                         &nonce,
                         sequence,
@@ -130,7 +139,7 @@ fn run() -> io::Result<()> {
                     || request.protocol_minor != PLUGIN_PROTOCOL_MINOR
                 {
                     write_rejection(
-                        &mut writer,
+                        writer,
                         instance_generation,
                         &nonce,
                         sequence,
@@ -144,7 +153,7 @@ fn run() -> io::Result<()> {
                             Ok(runtime) => Box::new(runtime),
                             Err(error) => {
                                 write_rejection(
-                                    &mut writer,
+                                    writer,
                                     instance_generation,
                                     &nonce,
                                     sequence,
@@ -164,7 +173,7 @@ fn run() -> io::Result<()> {
                 match execution {
                     Ok(report) => {
                         write_frame(
-                            &mut writer,
+                            writer,
                             &ChildFrame::Result {
                                 instance_generation,
                                 nonce: nonce.clone(),
@@ -177,7 +186,7 @@ fn run() -> io::Result<()> {
                         )?;
                     }
                     Err(error) => write_rejection(
-                        &mut writer,
+                        writer,
                         instance_generation,
                         &nonce,
                         sequence,
@@ -197,7 +206,7 @@ fn run() -> io::Result<()> {
                     return Err(invalid_data());
                 }
                 write_frame(
-                    &mut writer,
+                    writer,
                     &ChildFrame::Stopped {
                         instance_generation,
                         nonce,

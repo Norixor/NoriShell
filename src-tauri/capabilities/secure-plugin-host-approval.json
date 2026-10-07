@@ -2,6 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "secure-plugin-host-approval-capability",
   "description": "Protected plugin Host approval window with no access to the main command surface.",
+  "platforms": ["macOS", "windows", "linux"],
   "windows": ["secure-plugin-host-*"],
   "permissions": [
     "core:window:allow-close",

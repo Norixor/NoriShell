@@ -19,9 +19,8 @@ use norishell_ssh_profile_sync::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tauri::{
-    AppHandle, Manager as _, State, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Manager as _, State, Webview, WebviewWindow};
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_dialog::DialogExt as _;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -154,12 +153,20 @@ impl From<&str> for OfflineBackupCommandError {
                 RetryStrategy::Never,
                 "offlineBackup.exportFailed",
             ),
+            // Android only: the content URI was truncated and may hold a partial backup.
+            "offline-backup-write-incomplete" => (
+                ErrorCategory::Internal,
+                RetryStrategy::Never,
+                "offlineBackupErrors.writeIncomplete",
+            ),
             "offline-backup-snapshot-stale" => (
                 ErrorCategory::Conflict,
                 RetryStrategy::RefreshSnapshot,
                 "offlineBackupErrors.snapshotChanged",
             ),
             "offline-backup-dialog-unavailable"
+            | "offline-backup-dialog-busy"
+            | "offline-backup-dialog-timeout"
             | "offline-backup-secure-unavailable"
             | "offline-backup-unavailable" => (
                 ErrorCategory::Unavailable,
@@ -194,6 +201,7 @@ impl From<&str> for OfflineBackupCommandError {
                 | "offline-backup-export-failed"
                 | "offline-backup-snapshot-failed"
                 | "offline-backup-write-failed"
+                | "offline-backup-write-incomplete"
         ) {
             let diagnostic_id = Uuid::new_v4().to_string();
             eprintln!(
@@ -536,8 +544,8 @@ fn secure_window_label_matches(id: &str, label: &str) -> bool {
     Uuid::parse_str(id).is_ok() && label == secure_window_label(id)
 }
 
-fn require_secure_window(window: &WebviewWindow, id: &str) -> Result<(), String> {
-    if !secure_window_label_matches(id, window.label()) {
+fn require_secure_label(surface_label: &str, id: &str) -> Result<(), String> {
+    if !secure_window_label_matches(id, surface_label) {
         return Err("offline-backup-secure-denied".into());
     }
     Ok(())
@@ -558,9 +566,7 @@ impl Drop for SecurePromptGuard {
         {
             pending.remove(&self.id);
         }
-        if let Some(window) = self.app.get_webview_window(&secure_window_label(&self.id)) {
-            let _ = window.destroy();
-        }
+        crate::secure_surface::destroy(&self.app, &secure_window_label(&self.id));
     }
 }
 
@@ -627,51 +633,30 @@ async fn request_secure_password(
         app: app.clone(),
         id: id.clone(),
     };
-    let prompt_path = format!("secure-backup.html?prompt={id}");
-    let expected = app
-        .config()
-        .build
-        .dev_url
-        .as_ref()
-        .and_then(|url| url.join(&prompt_path).ok());
-    let expected_query = format!("prompt={id}");
-    let child = crate::secure_window_frame::apply_secure_window_frame(
+    let child = crate::secure_surface::open(
         app,
-        &secure_window_label(&id),
-        WebviewWindowBuilder::new(
-            app,
+        crate::secure_surface::SurfaceSpec::new(
+            crate::secure_surface::SurfaceKind::Backup,
             secure_window_label(&id),
-            WebviewUrl::App(prompt_path.into()),
         )
-        .title("NoriShell"),
+        .query(format!("prompt={id}"))
+        .size(600.0, 460.0)
+        .min_size(480.0, 300.0)
+        .navigation_guard(),
     )
-    .inner_size(600.0, 460.0)
-    .min_inner_size(480.0, 300.0)
-    .on_navigation(move |url| {
-        (cfg!(debug_assertions) && expected.as_ref().is_some_and(|expected| expected == url))
-            || (((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
-                || (matches!(url.scheme(), "http" | "https")
-                    && url.host_str() == Some("tauri.localhost")
-                    && url.port().is_none()))
-                && url.path() == "/secure-backup.html"
-                && url.query() == Some(expected_query.as_str()))
-    })
-    .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-    .build()
     .map_err(|_| "offline-backup-secure-unavailable".to_owned())?;
     let cancelled_app = app.clone();
     let cancelled_id = id.clone();
-    child.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed)
-            && let Ok(mut pending) = cancelled_app
-                .state::<OfflineBackupService>()
-                .secure_pending
-                .lock()
+    child.on_destroyed(move || {
+        if let Ok(mut pending) = cancelled_app
+            .state::<OfflineBackupService>()
+            .secure_pending
+            .lock()
         {
             pending.remove(&cancelled_id);
         }
     });
-    let _ = crate::window_first_show::focus_if_revealed(&child);
+    let _ = child.focus();
 
     let mut receiver = receiver;
     let deadline = tokio::time::sleep(SECURE_PROMPT_LIFETIME);
@@ -713,7 +698,15 @@ pub(crate) fn offline_backup_secure_get(
     window: WebviewWindow,
     service: State<'_, OfflineBackupService>,
 ) -> Result<OfflineBackupSecurePrompt, OfflineBackupCommandError> {
-    require_secure_window(&window, &id)?;
+    offline_backup_secure_get_for_label(window.label(), id, &service)
+}
+
+pub(crate) fn offline_backup_secure_get_for_label(
+    surface_label: &str,
+    id: String,
+    service: &OfflineBackupService,
+) -> Result<OfflineBackupSecurePrompt, OfflineBackupCommandError> {
+    require_secure_label(surface_label, &id)?;
     service
         .secure_pending
         .lock()
@@ -732,7 +725,25 @@ pub(crate) fn offline_backup_secure_submit(
     window: WebviewWindow,
     service: State<'_, OfflineBackupService>,
 ) -> Result<(), OfflineBackupCommandError> {
-    require_secure_window(&window, &id)?;
+    offline_backup_secure_submit_for_label(
+        window.label(),
+        id,
+        Zeroizing::new(password),
+        Zeroizing::new(password_confirmation),
+        confirmed,
+        &service,
+    )
+}
+
+pub(crate) fn offline_backup_secure_submit_for_label(
+    surface_label: &str,
+    id: String,
+    password: Zeroizing<String>,
+    password_confirmation: Zeroizing<String>,
+    confirmed: bool,
+    service: &OfflineBackupService,
+) -> Result<(), OfflineBackupCommandError> {
+    require_secure_label(surface_label, &id)?;
     let kind = service
         .secure_pending
         .lock()
@@ -741,8 +752,8 @@ pub(crate) fn offline_backup_secure_submit(
         .map(|entry| entry.prompt.kind)
         .ok_or_else(|| "offline-backup-secure-expired".to_owned())?;
     let answer = SecureBackupAnswer {
-        password: Zeroizing::new(password),
-        password_confirmation: Zeroizing::new(password_confirmation),
+        password,
+        password_confirmation,
         confirmed,
     };
     validate_secure_answer(kind, &answer)?;
@@ -764,7 +775,15 @@ pub(crate) fn offline_backup_secure_cancel(
     window: WebviewWindow,
     service: State<'_, OfflineBackupService>,
 ) -> Result<(), OfflineBackupCommandError> {
-    require_secure_window(&window, &id)?;
+    offline_backup_secure_cancel_for_label(window.label(), id, &service)
+}
+
+pub(crate) fn offline_backup_secure_cancel_for_label(
+    surface_label: &str,
+    id: String,
+    service: &OfflineBackupService,
+) -> Result<(), OfflineBackupCommandError> {
+    require_secure_label(surface_label, &id)?;
     service
         .secure_pending
         .lock()
@@ -1117,17 +1136,69 @@ fn read_backup_bounded(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Android: reads a picked backup document through the provider descriptor
+/// with the same size bound as a desktop path; nothing is spooled to disk.
+#[cfg(target_os = "android")]
+fn read_backup_content(uri: &crate::content_access::ContentUri) -> Result<Vec<u8>, String> {
+    let opened = uri
+        .open_read()
+        .map_err(|_| "offline-backup-open-failed".to_owned())?;
+    if opened
+        .len
+        .is_some_and(|len| len > MAX_OFFLINE_BACKUP_FILE_BYTES as u64)
+    {
+        return Err("offline-backup-open-failed".into());
+    }
+    let mut bytes = Vec::new();
+    opened
+        .file
+        .take(MAX_OFFLINE_BACKUP_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "offline-backup-open-failed".to_owned())?;
+    if bytes.len() > MAX_OFFLINE_BACKUP_FILE_BYTES {
+        return Err("offline-backup-open-failed".into());
+    }
+    Ok(bytes)
+}
+
+/// Android: Core's own document pickers. The dialog plugin returns its result
+/// to MainActivity only once MainActivity is started again, which never happens
+/// while a Secure Surface or tool window covers it; these return to whatever is
+/// in front, are cancellable and close themselves after a fixed timeout.
+#[cfg(target_os = "android")]
+async fn choose_backup_path(
+    _window: &WebviewWindow,
+    export: bool,
+) -> Result<Option<crate::content_access::Selection>, String> {
+    use crate::content_access::{ContentAccessError, Selection, create_document, pick_document};
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        if export {
+            // No registered type exists for backups; the extension carries it.
+            create_document("application/octet-stream", "NoriShell.norishell-backup")
+        } else {
+            pick_document(&["*/*"])
+        }
+    })
+    .await
+    .map_err(|_| "offline-backup-dialog-unavailable".to_owned())?;
+    match picked {
+        Ok(uri) => Ok(uri.map(Selection::Content)),
+        Err(ContentAccessError::PickBusy) => Err("offline-backup-dialog-busy".into()),
+        Err(ContentAccessError::PickTimeout) => Err("offline-backup-dialog-timeout".into()),
+        Err(_) => Err("offline-backup-dialog-unavailable".into()),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 async fn choose_backup_path(
     window: &WebviewWindow,
     export: bool,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<crate::content_access::Selection>, String> {
     let (sender, receiver) = oneshot::channel();
-    let dialog = window
-        .app_handle()
-        .dialog()
-        .file()
-        .set_parent(window)
-        .add_filter("NoriShell Backup", &["norishell-backup"]);
+    let dialog = window.app_handle().dialog().file();
+    #[cfg(desktop)]
+    let dialog = dialog.set_parent(window);
+    let dialog = dialog.add_filter("NoriShell Backup", &["norishell-backup"]);
     if export {
         dialog
             .set_file_name("NoriShell.norishell-backup")
@@ -1143,7 +1214,7 @@ async fn choose_backup_path(
         .await
         .map_err(|_| "offline-backup-dialog-unavailable".to_owned())?
         .map(|path| {
-            path.into_path()
+            crate::content_access::classify_dialog(path)
                 .map_err(|_| "offline-backup-dialog-unavailable".to_owned())
         })
         .transpose()
@@ -1217,8 +1288,22 @@ pub(crate) async fn offline_backup_export(
     ) {
         return Err("offline-backup-snapshot-stale".into());
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        write_backup_atomically(path, encrypted.as_slice())
+    tauri::async_runtime::spawn_blocking(move || match path {
+        crate::content_access::Selection::Path(path) => {
+            write_backup_atomically(path, encrypted.as_slice())
+        }
+        // Android: the encrypted envelope is complete in memory; it is
+        // streamed into the picked document and synced. A failure after
+        // truncation has its own code so the UI can say the file may be partial.
+        #[cfg(target_os = "android")]
+        crate::content_access::Selection::Content(uri) => uri
+            .write_bytes(encrypted.as_slice())
+            .map_err(|error| match error {
+                crate::content_access::ContentAccessError::WriteIncomplete => {
+                    "offline-backup-write-incomplete".to_owned()
+                }
+                _ => "offline-backup-write-failed".to_owned(),
+            }),
     })
     .await
     .map_err(|_| "offline-backup-export-failed".to_owned())??;
@@ -1247,7 +1332,11 @@ pub(crate) async fn offline_backup_open(
     };
     let password = recovery_password(answer.password.as_bytes())?;
     let (contents, digest) = tauri::async_runtime::spawn_blocking(move || {
-        let bytes = read_backup_bounded(&path)?;
+        let bytes = match path {
+            crate::content_access::Selection::Path(path) => read_backup_bounded(&path)?,
+            #[cfg(target_os = "android")]
+            crate::content_access::Selection::Content(uri) => read_backup_content(&uri)?,
+        };
         let digest = format!("{:x}", Sha256::digest(&bytes));
         let contents = open_contents(&password, &bytes).map_err(str::to_owned)?;
         Ok::<_, String>((contents, digest))

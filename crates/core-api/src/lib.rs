@@ -207,7 +207,6 @@ pub const COMMAND_SERVER_OVERVIEW_SNAPSHOT: &str = "server_overview_snapshot";
 pub const COMMAND_METRICS_RECONCILE: &str = "metrics_reconcile";
 pub const COMMAND_METRICS_RETRY: &str = "metrics_retry";
 pub const COMMAND_METRICS_STOP: &str = "metrics_stop";
-pub const COMMAND_METRICS_HOST_KEY_DECIDE: &str = "metrics_host_key_decide";
 pub const COMMAND_METRICS_KEYBOARD_INTERACTIVE_ANSWER_PREPARE: &str =
     "metrics_keyboard_interactive_answer_prepare";
 pub const COMMAND_METRICS_KEYBOARD_INTERACTIVE_RESPOND: &str =
@@ -285,6 +284,7 @@ pub const COMMAND_SFTP_LOCAL_DIRECTORY_LIST: &str = "sftp_local_directory_list";
 pub const COMMAND_SFTP_LOCAL_DIRECTORY_OPEN_CHILD: &str = "sftp_local_directory_open_child";
 pub const COMMAND_SFTP_LOCAL_DIRECTORY_CREATE_CHILD: &str = "sftp_local_directory_create_child";
 pub const COMMAND_SFTP_LOCAL_DIRECTORY_RELEASE: &str = "sftp_local_directory_release";
+pub const COMMAND_SFTP_LOCAL_FILE_MUTATE: &str = "sftp_local_file_mutate";
 pub const COMMAND_SFTP_DIRECTORY_LIST: &str = "sftp_directory_list";
 pub const COMMAND_SFTP_DIRECTORY_LIST_CANCEL: &str = "sftp_directory_list_cancel";
 pub const COMMAND_SFTP_FILE_PREVIEW: &str = "sftp_file_preview";

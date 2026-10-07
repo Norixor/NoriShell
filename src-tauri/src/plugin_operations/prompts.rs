@@ -10,7 +10,7 @@ use norishell_core_api::{
     WireSequence,
 };
 
-use tauri::{Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{State, WebviewWindow};
 use tokio::sync::{oneshot, watch};
 
 use super::{OperationFence, PluginOperationsService, RemoteInvocation, wait_cancelled};
@@ -70,10 +70,8 @@ impl Drop for PromptGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .prompts
             .remove(self.id.as_str());
-        if let Some(app) = &self.service.app
-            && let Some(window) = app.get_webview_window(&window_label(&self.id))
-        {
-            let _ = window.close();
+        if let Some(app) = &self.service.app {
+            crate::secure_surface::close(app, &window_label(&self.id));
         }
     }
 }
@@ -309,33 +307,26 @@ impl PluginOperationsService {
             service: self.clone(),
             id: id.clone(),
         };
-        let window = crate::secure_window_frame::apply_secure_window_frame(
+        let window = crate::secure_surface::open(
             app,
-            &window_label(&id),
-            WebviewWindowBuilder::new(
-                app,
+            crate::secure_surface::SurfaceSpec::new(
+                crate::secure_surface::SurfaceKind::PluginRemoteApproval,
                 window_label(&id),
-                WebviewUrl::App(
-                    format!("secure-plugin-remote-approval.html?approvalId={id}").into(),
-                ),
-            ),
+            )
+            .query(format!("approvalId={id}"))
+            .resizable(true)
+            .centered(),
         )
-        .title("NoriShell")
-        .resizable(true)
-        .center()
-        .build()
         .map_err(|_| ())?;
         let service = self.clone();
         let closed_id = id.clone();
-        window.on_window_event(move |event| {
-            if matches!(event, WindowEvent::Destroyed) {
-                service
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .prompts
-                    .remove(closed_id.as_str());
-            }
+        window.on_destroyed(move || {
+            service
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .prompts
+                .remove(closed_id.as_str());
         });
         let response = tokio::select! {
             biased;
@@ -473,12 +464,12 @@ pub(super) fn window_label(id: &PluginApprovalId) -> String {
     format!("secure-plugin-remote-{id}")
 }
 
-fn require_window(
-    window: &WebviewWindow,
+fn require_label(
+    surface_label: &str,
     id: &PluginApprovalId,
     request_id: RequestId,
 ) -> CoreResult<()> {
-    if window.label() != window_label(id) {
+    if surface_label != window_label(id) {
         return Err(rejected(request_id));
     }
     Ok(())
@@ -500,8 +491,16 @@ pub(crate) fn plugin_remote_approval_get(
     window: WebviewWindow,
     service: State<'_, PluginOperationsService>,
 ) -> CoreResult<PluginRemoteApprovalPrompt> {
-    require_window(
-        &window,
+    plugin_remote_approval_get_for_label(window.label(), request, &service)
+}
+
+pub(crate) fn plugin_remote_approval_get_for_label(
+    surface_label: &str,
+    request: PluginRemoteApprovalGetRequest,
+    service: &PluginOperationsService,
+) -> CoreResult<PluginRemoteApprovalPrompt> {
+    require_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     )?;
@@ -514,8 +513,16 @@ pub(crate) fn plugin_remote_approval_decide(
     window: WebviewWindow,
     service: State<'_, PluginOperationsService>,
 ) -> CoreResult<()> {
-    require_window(
-        &window,
+    plugin_remote_approval_decide_for_label(window.label(), request, &service)
+}
+
+pub(crate) fn plugin_remote_approval_decide_for_label(
+    surface_label: &str,
+    request: PluginRemoteApprovalDecisionRequest,
+    service: &PluginOperationsService,
+) -> CoreResult<()> {
+    require_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     )?;
@@ -524,12 +531,20 @@ pub(crate) fn plugin_remote_approval_decide(
 
 #[tauri::command]
 pub(crate) fn plugin_credential_input_submit(
-    mut request: norishell_core_api::PluginCredentialInputDecisionRequest,
+    request: norishell_core_api::PluginCredentialInputDecisionRequest,
     window: WebviewWindow,
     service: State<'_, PluginOperationsService>,
 ) -> CoreResult<()> {
-    if let Err(error) = require_window(
-        &window,
+    plugin_credential_input_submit_for_label(window.label(), request, &service)
+}
+
+pub(crate) fn plugin_credential_input_submit_for_label(
+    surface_label: &str,
+    mut request: norishell_core_api::PluginCredentialInputDecisionRequest,
+    service: &PluginOperationsService,
+) -> CoreResult<()> {
+    if let Err(error) = require_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     ) {

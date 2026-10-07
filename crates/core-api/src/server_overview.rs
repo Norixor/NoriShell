@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use ts_rs::TS;
 
 use crate::{
-    CredentialRefId, DiskResourceId, HostCatalogEntry, HostId, MetricsHostKeyChallengeId,
+    CredentialRefId, DiskResourceId, HostCatalogEntry, HostId,
     MetricsKeyboardInteractiveAnswerRefId, MetricsKeyboardInteractiveChallengeId, MetricsSessionId,
     MonitoringPolicySummary, NetworkResourceId, OperationId, RequestMeta, SshSessionId,
     SshSessionRouteStage, WireSequence,
@@ -72,7 +72,10 @@ pub enum MetricsSessionState {
     Idle,
     Connecting,
     VerifyingHostKey,
-    NeedsHostKeyReview,
+    /// The target or a jump hop has no trusted Known Hosts entry. Monitoring
+    /// makes no connection until the user completes a first interactive
+    /// connection (Terminal/SFTP) and accepts the server identity.
+    NeedsHostTrust,
     Authenticating,
     NeedsAuthentication,
     DetectingPlatform,
@@ -179,6 +182,10 @@ pub struct MetricSnapshot {
 #[serde(rename_all = "camelCase")]
 pub enum MetricsSessionFailureCode {
     ConnectionUnavailable,
+    /// The server closed the socket before key exchange (for example sshd
+    /// per-source penalties). Retried with a backoff that never tracks below
+    /// the server's own refusal window.
+    ConnectionClosedByServer,
     HostKeyMismatch,
     AuthenticationRejected,
     ProviderUnsupported,
@@ -202,28 +209,7 @@ pub struct MetricsSessionSummary {
     #[ts(type = "number | null")]
     pub next_retry_at_unix_ms: Option<i64>,
     pub latest_snapshot: Option<MetricSnapshot>,
-    pub host_key_challenge: Option<MetricsHostKeyChallenge>,
     pub keyboard_interactive_challenge: Option<MetricsKeyboardInteractiveChallenge>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct MetricsHostKeyChallenge {
-    pub challenge_id: MetricsHostKeyChallengeId,
-    pub metrics_session_id: MetricsSessionId,
-    pub host_id: HostId,
-    pub generation: WireSequence,
-    pub route_stage: SshSessionRouteStage,
-    pub algorithm: String,
-    pub fingerprint_sha256: String,
-    pub trusted_fingerprint_sha256: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub enum MetricsHostKeyDecision {
-    Accept,
-    Reject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -274,19 +260,6 @@ pub struct MetricsStopRequest {
     pub meta: RequestMeta,
     pub host_id: HostId,
     pub expected_generation: Option<WireSequence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct MetricsHostKeyDecisionRequest {
-    pub meta: RequestMeta,
-    pub operation_id: OperationId,
-    pub idempotency_key: String,
-    pub metrics_session_id: MetricsSessionId,
-    pub host_id: HostId,
-    pub expected_generation: WireSequence,
-    pub challenge_id: MetricsHostKeyChallengeId,
-    pub decision: MetricsHostKeyDecision,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

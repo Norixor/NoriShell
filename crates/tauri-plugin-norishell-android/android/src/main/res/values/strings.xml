@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="norishell_fgs_channel_name">Active connections</string>
+    <string name="norishell_fgs_channel_description">Shown while terminal sessions, transfers or tunnels stay connected.</string>
+    <string name="norishell_fgs_title">NoriShell is keeping connections open</string>
+    <string name="norishell_fgs_text">Sessions %1$d · Tunnels %2$d · SFTP %3$d · Transfers %4$d</string>
+    <string name="norishell_fgs_action_exit">Disconnect all and exit</string>
+</resources>

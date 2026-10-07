@@ -24,6 +24,8 @@ use norishell_core_api as wire;
 
 use super::{MAX_LABEL_BYTES, TransferFailureCode, is_unsafe_display_character};
 
+#[cfg(unix)]
+mod unix_mutation;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -33,6 +35,53 @@ pub(super) use windows::{
 
 #[cfg(unix)]
 use super::{CleanupOutcome, TransferId};
+
+/// Why a local file action did not happen; each maps to a stable public code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LocalMutationFailure {
+    InvalidName,
+    TargetExists,
+    PreconditionChanged,
+    DirectoryNotEmpty,
+    InUseByTransfer,
+    PermissionDenied,
+    /// No atomic no-replace rename for this object on this platform.
+    #[cfg_attr(target_vendor = "apple", allow(dead_code))]
+    Unsupported,
+    LimitExceeded,
+    Io,
+}
+
+/// Local objects that unfinished transfers read or write, keyed by the
+/// identity of their parent directory and their name in it.
+#[derive(Debug, Clone, Default)]
+pub(super) struct LocalBusySet {
+    entries: Vec<(u64, u64, Vec<u8>)>,
+}
+
+impl LocalBusySet {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(super) fn insert(&mut self, device: u64, inode: u64, name: Vec<u8>) {
+        self.entries.push((device, inode, name));
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(super) fn entry_busy(&self, device: u64, inode: u64, name: &[u8]) -> bool {
+        self.entries
+            .iter()
+            .any(|(busy_device, busy_inode, busy_name)| {
+                *busy_device == device && *busy_inode == inode && busy_name.as_slice() == name
+            })
+    }
+
+    /// A directory that holds a busy entry; a recursive delete must not touch it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(super) fn directory_busy(&self, device: u64, inode: u64) -> bool {
+        self.entries
+            .iter()
+            .any(|(busy_device, busy_inode, _)| *busy_device == device && *busy_inode == inode)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct LocalBoundary {
@@ -164,8 +213,180 @@ impl Drop for NativeDirectoryStream {
 pub(super) enum LocalBoundaryCapability {
     #[cfg(any(unix, windows))]
     Native(NativeLocalBoundary),
+    /// An Android Storage Access Framework document (see `ContentBoundary`).
+    #[cfg(target_os = "android")]
+    Content(ContentBoundary),
     #[cfg(not(any(unix, windows)))]
     Unsupported,
+}
+
+/// Android document picked through the system picker.
+///
+/// Upload sources keep the provider's descriptor as the upload handle; the
+/// parent capability is an empty per-boundary private directory so the shared
+/// identity checks stay unchanged. Download targets run the normal temporary
+/// file and commit protocol inside that private directory; after the commit
+/// the file is streamed into the picked document and the private copy is
+/// removed. The directory is removed when the last boundary clone drops.
+#[cfg(target_os = "android")]
+#[derive(Debug)]
+pub(super) struct ContentBoundary {
+    // Declaration order is drop order: close descriptors before removing the
+    // private directory.
+    native: NativeLocalBoundary,
+    publish_target: Option<crate::content_access::ContentUri>,
+    _staging: crate::content_access::PrivateDir,
+}
+
+#[cfg(target_os = "android")]
+impl ContentBoundary {
+    pub(super) fn upload_source(
+        staging: crate::content_access::PrivateDir,
+        name: &str,
+        source: File,
+    ) -> io::Result<Self> {
+        let name = unix_component(OsStr::new(name))?;
+        let parent = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(staging.path())?;
+        let parent_identity = NativeFileIdentity::from_metadata(&parent.metadata()?);
+        let identity = NativeFileIdentity::from_metadata(&source.metadata()?);
+        if !parent_identity.is_directory() || !identity.is_regular() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "content upload source is not a regular file",
+            ));
+        }
+        Ok(Self {
+            native: NativeLocalBoundary {
+                parent,
+                parent_device: parent_identity.device,
+                parent_inode: parent_identity.inode,
+                name,
+                upload_source: Some(source),
+                upload_identity: Some(identity),
+            },
+            publish_target: None,
+            _staging: staging,
+        })
+    }
+
+    pub(super) fn download_target(
+        staging: crate::content_access::PrivateDir,
+        name: &str,
+        target: crate::content_access::ContentUri,
+    ) -> io::Result<Self> {
+        let native = NativeLocalBoundary::register(
+            &staging.path().join(name),
+            wire::SftpLocalBoundaryKind::DownloadTarget,
+        )?;
+        Ok(Self {
+            native,
+            publish_target: Some(target),
+            _staging: staging,
+        })
+    }
+
+    /// Streams the committed private download into the picked document. The
+    /// private copy is removed on every path.
+    ///
+    /// `cancelled` is polled between chunks. A cancel stops the copy and
+    /// resets the picked document to empty (it was created empty by the
+    /// system picker), so no partial content stays visible.
+    ///
+    /// `PermissionDenied`: the document could not be opened and keeps its
+    /// previous content. `CommitOutcomeUncertain`: writing started and failed,
+    /// so the document may be truncated or partial.
+    pub(super) fn publish_download(
+        &self,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<PublishOutcome, TransferFailureCode> {
+        let Some(target) = &self.publish_target else {
+            return Ok(PublishOutcome::NotApplicable);
+        };
+        let outcome = self.publish_into(target, cancelled);
+        self.discard_committed();
+        outcome
+    }
+
+    fn publish_into(
+        &self,
+        target: &crate::content_access::ContentUri,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<PublishOutcome, TransferFailureCode> {
+        if cancelled() {
+            // Nothing was written; the picked document is untouched.
+            return Ok(PublishOutcome::Cancelled {
+                document_reset: true,
+            });
+        }
+        self.native
+            .verify_parent()
+            .map_err(|_| TransferFailureCode::PermissionDenied)?;
+        let committed = openat_file(
+            &self.native.parent,
+            &self.native.name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        )
+        .map_err(|_| TransferFailureCode::PermissionDenied)?;
+        let mut reader = CancellableReader {
+            inner: committed,
+            cancelled,
+        };
+        let written = target.write_from(&mut reader);
+        if cancelled() {
+            let document_reset = target.write_bytes(&[]).is_ok();
+            return Ok(PublishOutcome::Cancelled { document_reset });
+        }
+        written
+            .map(PublishOutcome::Published)
+            .map_err(|error| match error {
+                crate::content_access::ContentAccessError::WriteIncomplete => {
+                    TransferFailureCode::CommitOutcomeUncertain
+                }
+                _ => TransferFailureCode::PermissionDenied,
+            })
+    }
+
+    /// Removes the private committed copy, if any.
+    fn discard_committed(&self) {
+        // SAFETY: unlinkat on the private directory descriptor this boundary owns.
+        let _ =
+            unsafe { libc::unlinkat(self.native.parent.as_raw_fd(), self.native.name.as_ptr(), 0) };
+    }
+}
+
+/// Result of publishing a committed download into a picked document.
+#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishOutcome {
+    /// The boundary is not a picked document; nothing to publish.
+    NotApplicable,
+    /// Every committed byte reached the document.
+    Published(u64),
+    /// The user cancelled. `document_reset` is false when the document could
+    /// not be emptied again and may hold partial content.
+    Cancelled { document_reset: bool },
+}
+
+/// Fails the next read once a cancel was requested so a blocking copy stops
+/// between chunks.
+#[cfg(target_os = "android")]
+struct CancellableReader<'a> {
+    inner: File,
+    cancelled: &'a (dyn Fn() -> bool + Sync),
+}
+
+#[cfg(target_os = "android")]
+impl io::Read for CancellableReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if (self.cancelled)() {
+            return Err(io::Error::other("transfer cancelled"));
+        }
+        self.inner.read(buffer)
+    }
 }
 
 #[cfg(unix)]
@@ -205,14 +426,20 @@ impl NativeFileIdentity {
         }
     }
 
+    // mode_t is u16 on macOS and u32 elsewhere.
+    #[allow(clippy::useless_conversion)]
     pub(super) fn is_regular(&self) -> bool {
         self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFREG)
     }
 
+    // mode_t is u16 on macOS and u32 elsewhere.
+    #[allow(clippy::useless_conversion)]
     pub(super) fn is_directory(&self) -> bool {
         self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR)
     }
 
+    // mode_t is u16 on macOS and u32 elsewhere.
+    #[allow(clippy::useless_conversion)]
     pub(super) fn is_symlink(&self) -> bool {
         self.mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFLNK)
     }
@@ -280,6 +507,8 @@ impl NativeLocalDirectoryCapability {
         Ok(())
     }
 
+    // stat field widths differ between macOS, Linux and Android.
+    #[allow(clippy::useless_conversion)]
     pub(super) fn entry_identity(&self, name: &CStr) -> io::Result<NativeFileIdentity> {
         self.verify()?;
         let mut stat = MaybeUninit::<libc::stat>::zeroed();
@@ -779,20 +1008,31 @@ impl NativeLocalBoundary {
             }
             (false, true)
         } else {
-            let result = unsafe {
-                libc::linkat(
-                    self.parent.as_raw_fd(),
-                    temporary_name.as_ptr(),
-                    self.parent.as_raw_fd(),
-                    self.name.as_ptr(),
-                    0,
-                )
-            };
-            if result != 0 {
-                return Err(TransferFailureCode::TargetExists);
-            }
-            if unsafe { libc::unlinkat(self.parent.as_raw_fd(), temporary_name.as_ptr(), 0) } != 0 {
-                return Err(TransferFailureCode::CleanupIncomplete);
+            match self.rename_no_replace(temporary_name) {
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    return Err(classify_no_replace_commit_error(&error));
+                }
+                None => {
+                    let result = unsafe {
+                        libc::linkat(
+                            self.parent.as_raw_fd(),
+                            temporary_name.as_ptr(),
+                            self.parent.as_raw_fd(),
+                            self.name.as_ptr(),
+                            0,
+                        )
+                    };
+                    if result != 0 {
+                        return Err(classify_no_replace_commit_error(&io::Error::last_os_error()));
+                    }
+                    if unsafe {
+                        libc::unlinkat(self.parent.as_raw_fd(), temporary_name.as_ptr(), 0)
+                    } != 0
+                    {
+                        return Err(TransferFailureCode::CleanupIncomplete);
+                    }
+                }
             }
             (true, false)
         };
@@ -808,6 +1048,59 @@ impl NativeLocalBoundary {
             return Err(TransferFailureCode::PermissionDenied);
         }
         Ok((atomic_no_replace, atomic_replace, final_identity.size))
+    }
+}
+
+#[cfg(unix)]
+impl NativeLocalBoundary {
+    /// Android: SELinux denies `link` on app data files for untrusted apps, so
+    /// the `linkat` commit always fails there. `renameat2(RENAME_NOREPLACE)`
+    /// gives the same atomic no-overwrite guarantee without creating a second
+    /// link. bionic only wraps it from API 30 (minSdk is 29), so the raw
+    /// syscall is used. Kernels or filesystems without it report
+    /// ENOSYS/EINVAL and the caller falls back to `linkat`.
+    ///
+    /// Returns `None` when no atomic no-replace rename is available, so the
+    /// caller falls back to `linkat` + `unlinkat`.
+    #[cfg(target_os = "android")]
+    fn rename_no_replace(&self, temporary_name: &CStr) -> Option<io::Result<()>> {
+        // SAFETY: both names are NUL-terminated and both descriptors are the
+        // owned, verified parent directory.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::c_long::from(self.parent.as_raw_fd()),
+                temporary_name.as_ptr(),
+                libc::c_long::from(self.parent.as_raw_fd()),
+                self.name.as_ptr(),
+                libc::c_long::from(libc::RENAME_NOREPLACE),
+            )
+        };
+        if result == 0 {
+            return Some(Ok(()));
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ENOSYS | libc::EINVAL) => None,
+            _ => Some(Err(error)),
+        }
+    }
+
+    /// Desktop keeps the established `linkat` + `unlinkat` commit.
+    #[cfg(not(target_os = "android"))]
+    fn rename_no_replace(&self, _temporary_name: &CStr) -> Option<io::Result<()>> {
+        None
+    }
+}
+
+/// Only an existing name is a conflict. Permission, policy (SELinux) and
+/// other filesystem failures must never be reported as "target exists".
+#[cfg(unix)]
+fn classify_no_replace_commit_error(error: &io::Error) -> TransferFailureCode {
+    if error.raw_os_error() == Some(libc::EEXIST) {
+        TransferFailureCode::TargetExists
+    } else {
+        TransferFailureCode::PermissionDenied
     }
 }
 
@@ -859,11 +1152,56 @@ pub(super) fn openat_identity(
 }
 
 impl LocalBoundary {
+    /// Adds the local object(s) this transfer boundary reads or writes.
+    #[cfg(unix)]
+    pub(super) fn add_busy_entries(&self, transfer_id: &TransferId, busy: &mut LocalBusySet) {
+        let Ok(native) = self.native() else {
+            return;
+        };
+        busy.insert(
+            native.parent_device,
+            native.parent_inode,
+            native.name.to_bytes().to_vec(),
+        );
+        if let Ok(temporary) = native.temporary_name(transfer_id) {
+            busy.insert(
+                native.parent_device,
+                native.parent_inode,
+                temporary.to_bytes().to_vec(),
+            );
+        }
+    }
+
     #[cfg(any(unix, windows))]
     pub(super) fn native(&self) -> Result<&NativeLocalBoundary, TransferFailureCode> {
         match self.capability.as_ref() {
             LocalBoundaryCapability::Native(capability) => Ok(capability),
+            #[cfg(target_os = "android")]
+            LocalBoundaryCapability::Content(content) => Ok(&content.native),
         }
+    }
+
+    /// Android: finishes a download whose target is a picked document. Other
+    /// boundaries have nothing to publish and return `Ok(None)`.
+    #[cfg(target_os = "android")]
+    pub(super) fn publish_content_download(
+        &self,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<PublishOutcome, TransferFailureCode> {
+        match self.capability.as_ref() {
+            LocalBoundaryCapability::Content(content) => content.publish_download(cancelled),
+            LocalBoundaryCapability::Native(_) => Ok(PublishOutcome::NotApplicable),
+        }
+    }
+
+    /// Android: whether this download target is a picked document whose
+    /// commit-and-publish phase stays cancellable.
+    #[cfg(target_os = "android")]
+    pub(super) fn is_content_download(&self) -> bool {
+        matches!(
+            self.capability.as_ref(),
+            LocalBoundaryCapability::Content(content) if content.publish_target.is_some()
+        )
     }
 
     #[cfg(not(unix))]
@@ -925,6 +1263,63 @@ mod tests {
             Err(TransferFailureCode::TargetExists)
         );
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(matches!(
+            openat_identity(&boundary.parent, &temporary),
+            Ok(Some(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_replace_commit_errors_only_report_conflicts_for_existing_names() {
+        for (errno, expected) in [
+            (libc::EEXIST, TransferFailureCode::TargetExists),
+            (libc::EACCES, TransferFailureCode::PermissionDenied),
+            (libc::EPERM, TransferFailureCode::PermissionDenied),
+            (libc::EROFS, TransferFailureCode::PermissionDenied),
+            (libc::ENOSPC, TransferFailureCode::PermissionDenied),
+        ] {
+            assert_eq!(
+                classify_no_replace_commit_error(&io::Error::from_raw_os_error(errno)),
+                expected,
+                "errno {errno}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_download_no_replace_commit_reports_permission_failures_as_denied() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.bin");
+        let boundary =
+            NativeLocalBoundary::register(&target, wire::SftpLocalBoundaryKind::DownloadTarget)
+                .unwrap();
+        let temporary = boundary
+            .temporary_name(&TransferId::parse("transfer-denied").unwrap())
+            .unwrap();
+        let mut file = boundary.create_temporary(&temporary).unwrap();
+        file.write_all(b"new").unwrap();
+        file.sync_all().unwrap();
+        let temporary_identity = NativeFileIdentity::from_metadata(&file.metadata().unwrap());
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Privileged runners bypass directory permissions; nothing to assert.
+        let probe = directory.path().join("probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            return;
+        }
+
+        let result = boundary.commit_download(&temporary, &temporary_identity, None);
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(result, Err(TransferFailureCode::PermissionDenied));
+        assert!(!target.exists());
         assert!(matches!(
             openat_identity(&boundary.parent, &temporary),
             Ok(Some(_))

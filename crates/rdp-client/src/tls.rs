@@ -26,7 +26,8 @@ pub type CertificateApproval =
 
 #[derive(Debug)]
 struct Verifier {
-    normal: Arc<rustls::client::WebPkiServerVerifier>,
+    /// Desktop: WebPKI over webpki-roots plus native roots. Android: the platform verifier.
+    normal: Arc<dyn ServerCertVerifier>,
     pending: Mutex<Option<Vec<u8>>>,
 }
 impl ServerCertVerifier for Verifier {
@@ -40,6 +41,10 @@ impl ServerCertVerifier for Verifier {
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         match self.normal.verify_server_cert(leaf, chain, name, ocsp, now) {
             Ok(valid) => Ok(valid),
+            // Android note: the platform verifier validates the chain via the system TrustManager first
+            // and only checks the host name once the chain is trusted, so an untrusted self-signed
+            // certificate with a mismatched name still yields UnknownIssuer (same as WebPKI). Its
+            // Expired result for untrusted chains is not guaranteed, hence the validity re-check below.
             Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer)) => {
                 // Temporarily complete the handshake only to verify proof of key possession; send no NLA or login material before approval.
                 // An unknown CA, including Windows' default CN-only certificates, requires explicit approval of this exact
@@ -84,23 +89,39 @@ impl ServerCertVerifier for Verifier {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn base_verifier(
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    for cert in rustls_native_certs::load_native_certs().certs {
+        let _ = roots.add(cert);
+    }
+    rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+        .build()
+        .map(|verifier| verifier as Arc<dyn ServerCertVerifier>)
+        .map_err(|_| EngineError::CertificateRejected)
+}
+
+/// Android has no readable system root store for rustls; delegate chain trust (system and
+/// user-installed CAs) to the platform TrustManager.
+#[cfg(target_os = "android")]
+fn base_verifier(
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) -> Result<Arc<dyn ServerCertVerifier>> {
+    rustls_platform_verifier::Verifier::new(provider)
+        .map(|verifier| Arc::new(verifier) as Arc<dyn ServerCertVerifier>)
+        .map_err(|_| EngineError::CertificateRejected)
+}
+
 pub(crate) async fn upgrade(
     stream: BoxedDesktopIo,
     name: &str,
     approve: Option<&CertificateApproval>,
 ) -> Result<(BoxedDesktopIo, Vec<u8>, Vec<u8>)> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    for cert in rustls_native_certs::load_native_certs().certs {
-        let _ = roots.add(cert);
-    }
-    let normal = rustls::client::WebPkiServerVerifier::builder_with_provider(
-        Arc::new(roots),
-        provider.clone(),
-    )
-    .build()
-    .map_err(|_| EngineError::CertificateRejected)?;
+    let normal = base_verifier(provider.clone())?;
     let verifier = Arc::new(Verifier {
         normal,
         pending: Mutex::new(None),
@@ -229,7 +250,7 @@ mod tests {
         .build()
         .unwrap();
         let verifier = Verifier {
-            normal,
+            normal: normal as Arc<dyn ServerCertVerifier>,
             pending: Mutex::new(None),
         };
         let name = ServerName::try_from("rdp.test").unwrap();
@@ -272,7 +293,7 @@ mod tests {
                 Arc::new(rustls::crypto::ring::default_provider()),
             )
             .build()
-            .unwrap(),
+            .unwrap() as Arc<dyn ServerCertVerifier>,
             pending: Mutex::new(None),
         }
     }

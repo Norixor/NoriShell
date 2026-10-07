@@ -53,9 +53,7 @@ use norishell_ssh_profile_sync::{
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq as _;
-use tauri::{
-    AppHandle, Emitter as _, Manager as _, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Emitter as _, State, WebviewWindow};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
@@ -363,9 +361,7 @@ impl NoriShellSshSyncLocalAdapter {
         };
         if let Some(app) = &self.app {
             for prompt_id in prompt_ids {
-                if let Some(window) = app.get_webview_window(&secure_window_label(&prompt_id)) {
-                    let _ = window.close();
-                }
+                crate::secure_surface::close(app, &secure_window_label(&prompt_id));
             }
         }
     }
@@ -424,28 +420,24 @@ impl NoriShellSshSyncLocalAdapter {
             .insert(prompt_id.clone(), PendingPrompt { prompt, sender });
         let label = secure_window_label(&prompt_id);
         let app = self.app.as_ref().ok_or(SecureSelectionError::Unavailable)?;
-        if let Err(error) = crate::secure_window_frame::apply_secure_window_frame(
+        if let Err(error) = crate::secure_surface::open(
             app,
-            &label,
-            WebviewWindowBuilder::new(
-                app,
-                label.clone(),
-                WebviewUrl::App(format!("secure-ssh-sync.html?promptId={prompt_id}").into()),
-            ),
-        )
-        .title("NoriShell")
-        .resizable(true)
-        .inner_size(
-            if comparison_prompt { 800.0 } else { 600.0 },
-            if comparison_prompt { 640.0 } else { 480.0 },
-        )
-        .min_inner_size(
-            if comparison_prompt { 600.0 } else { 480.0 },
-            if comparison_prompt { 480.0 } else { 360.0 },
-        )
-        .center()
-        .build()
-        {
+            crate::secure_surface::SurfaceSpec::new(
+                crate::secure_surface::SurfaceKind::SshSync,
+                label,
+            )
+            .query(format!("promptId={prompt_id}"))
+            .resizable(true)
+            .size(
+                if comparison_prompt { 800.0 } else { 600.0 },
+                if comparison_prompt { 640.0 } else { 480.0 },
+            )
+            .min_size(
+                if comparison_prompt { 600.0 } else { 480.0 },
+                if comparison_prompt { 480.0 } else { 360.0 },
+            )
+            .centered(),
+        ) {
             eprintln!("protected SSH sync window could not be created: {error}");
             self.remove_prompt(&prompt_id);
             return Err(SecureSelectionError::Unavailable);
@@ -474,10 +466,8 @@ impl NoriShellSshSyncLocalAdapter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pending_prompts
             .remove(prompt_id);
-        if let Some(app) = &self.app
-            && let Some(window) = app.get_webview_window(&secure_window_label(prompt_id))
-        {
-            let _ = window.close();
+        if let Some(app) = &self.app {
+            crate::secure_surface::close(app, &secure_window_label(prompt_id));
         }
     }
 
@@ -1442,9 +1432,9 @@ impl NoriShellSshSyncLocalAdapter {
     pub(crate) fn prompt_snapshot(
         &self,
         request: SshSyncSecurePromptGetRequest,
-        window: &WebviewWindow,
+        surface_label: &str,
     ) -> Result<SshSyncSecurePrompt, String> {
-        require_secure_window(window, &request.prompt_id)?;
+        require_secure_label(surface_label, &request.prompt_id)?;
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1457,10 +1447,10 @@ impl NoriShellSshSyncLocalAdapter {
     pub(crate) fn decide_prompt(
         &self,
         mut request: SshSyncSecureDecisionRequest,
-        window: &WebviewWindow,
+        surface_label: &str,
     ) -> Result<SshSyncSecureDecisionResponse, String> {
         let result = (|| {
-            require_secure_window(window, &request.prompt_id)?;
+            require_secure_label(surface_label, &request.prompt_id)?;
             let pending = self
                 .state
                 .lock()
@@ -5389,7 +5379,7 @@ pub(crate) fn ssh_sync_secure_prompt_get(
     window: WebviewWindow,
     adapter: State<'_, NoriShellSshSyncLocalAdapter>,
 ) -> Result<SshSyncSecurePrompt, String> {
-    adapter.prompt_snapshot(request, &window)
+    adapter.prompt_snapshot(request, window.label())
 }
 
 #[tauri::command]
@@ -5398,7 +5388,7 @@ pub(crate) fn ssh_sync_secure_prompt_decide(
     window: WebviewWindow,
     adapter: State<'_, NoriShellSshSyncLocalAdapter>,
 ) -> Result<SshSyncSecureDecisionResponse, String> {
-    adapter.decide_prompt(request, &window)
+    adapter.decide_prompt(request, window.label())
 }
 
 fn secure_host(snapshot: &HostConnectionSnapshot) -> SshSyncSecureHost {
@@ -6896,8 +6886,8 @@ fn secure_window_label(prompt_id: &str) -> String {
     format!("secure-ssh-sync-{prompt_id}")
 }
 
-fn require_secure_window(window: &WebviewWindow, prompt_id: &str) -> Result<(), String> {
-    if Uuid::parse_str(prompt_id).is_err() || window.label() != secure_window_label(prompt_id) {
+fn require_secure_label(surface_label: &str, prompt_id: &str) -> Result<(), String> {
+    if Uuid::parse_str(prompt_id).is_err() || surface_label != secure_window_label(prompt_id) {
         return Err(Uuid::new_v4().to_string());
     }
     Ok(())

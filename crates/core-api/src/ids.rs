@@ -170,11 +170,6 @@ uuid_id!(
     true
 );
 uuid_id!(
-    MetricsHostKeyChallengeId,
-    "metrics_host_key_challenge_id must be a UUIDv7",
-    true
-);
-uuid_id!(
     MetricsKeyboardInteractiveChallengeId,
     "metrics_keyboard_interactive_challenge_id must be a UUIDv7",
     true
@@ -446,13 +441,12 @@ mod tests {
     use super::{
         CredentialRefId, ForwardRuleId, ForwardSessionId, HostId, IdentityId, KnownHostId,
         LocalAttachAttemptId, LocalAttachmentId, LocalInputLeaseId, LocalOpenAttemptId, LocalPtyId,
-        LocalSessionId, LocalViewId, MetricsHostKeyChallengeId,
-        MetricsKeyboardInteractiveAnswerRefId, MetricsKeyboardInteractiveChallengeId,
-        MetricsSessionId, OperationId, SecretRefId, SftpSessionId, SshAttachAttemptId,
-        SshAttachmentId, SshChannelId, SshHostKeyChallengeId, SshInputLeaseId, SshOpenAttemptId,
-        SshSessionId, SshViewId, TelnetAttachAttemptId, TelnetAttachmentId, TelnetInputLeaseId,
-        TelnetOpenAttemptId, TelnetSessionId, TelnetSocketId, TelnetViewId, TransferId,
-        WireSequence,
+        LocalSessionId, LocalViewId, MetricsKeyboardInteractiveAnswerRefId,
+        MetricsKeyboardInteractiveChallengeId, MetricsSessionId, OperationId, SecretRefId,
+        SftpSessionId, SshAttachAttemptId, SshAttachmentId, SshChannelId, SshHostKeyChallengeId,
+        SshInputLeaseId, SshOpenAttemptId, SshSessionId, SshViewId, TelnetAttachAttemptId,
+        TelnetAttachmentId, TelnetInputLeaseId, TelnetOpenAttemptId, TelnetSessionId,
+        TelnetSocketId, TelnetViewId, TransferId, WireSequence,
     };
 
     #[test]
@@ -475,7 +469,6 @@ mod tests {
         assert!(OperationId::parse(&uuid_v4).is_err());
         assert!(HostId::parse(&uuid_v4).is_err());
         assert!(MetricsSessionId::parse(&uuid_v4).is_err());
-        assert!(MetricsHostKeyChallengeId::parse(&uuid_v4).is_err());
         assert!(MetricsKeyboardInteractiveChallengeId::parse(&uuid_v4).is_err());
         assert!(MetricsKeyboardInteractiveAnswerRefId::parse(&uuid_v4).is_err());
         assert!(IdentityId::parse(&uuid_v4).is_err());

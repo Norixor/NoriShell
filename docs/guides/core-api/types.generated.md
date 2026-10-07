@@ -1,11 +1,17 @@
 # Generated Core API type directory
 
-Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every TypeScript declaration emitted by that exporter: **869 types** across **49 public modules**. This is an internal application contract, never a guest SDK permission surface.
+Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every TypeScript declaration emitted by that exporter: **884 types** across **50 public modules**. This is an internal application contract, never a guest SDK permission surface.
 
 | Type | Source module |
 | --- | --- |
 | `DesktopProtocol` | `desktop` |
 | `VncProtocolVersion` | `desktop` |
+| `RdpTransportMode` | `desktop` |
+| `RdpGraphicsMode` | `desktop` |
+| `RdpResolutionMode` | `desktop` |
+| `VncResolutionMode` | `desktop` |
+| `RdpTransportActual` | `desktop` |
+| `RdpGraphicsActual` | `desktop` |
 | `DesktopAvailability` | `desktop` |
 | `DesktopProfile` | `desktop` |
 | `DesktopPasswordStage` | `desktop` |
@@ -17,6 +23,7 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `DesktopAudioState` | `desktop` |
 | `DesktopAudioMuteRequest` | `desktop` |
 | `DesktopSessionRequest` | `desktop` |
+| `DesktopResolutionRequest` | `desktop` |
 | `DesktopInputEvent` | `desktop` |
 | `DesktopInputRequest` | `desktop` |
 | `DesktopFocusRequest` | `desktop` |
@@ -29,6 +36,10 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `DesktopPreferencesGetRequest` | `desktop_preferences` |
 | `DesktopPreferencesReplaceRequest` | `desktop_preferences` |
 | `DesktopPreferencesSnapshot` | `desktop_preferences` |
+| `ApplicationPreferenceGroupId` | `application_preferences` |
+| `ApplicationPreferencesGetRequest` | `application_preferences` |
+| `ApplicationPreferencesReplaceRequest` | `application_preferences` |
+| `ApplicationPreferencesSnapshot` | `application_preferences` |
 | `NativeTrayLocale` | `tray` |
 | `NativeTrayAction` | `tray` |
 | `NativeTrayActionTakeRequest` | `tray` |
@@ -60,7 +71,6 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `KnownHostId` | `ids` |
 | `SshSessionId` | `ids` |
 | `MetricsSessionId` | `ids` |
-| `MetricsHostKeyChallengeId` | `ids` |
 | `MetricsKeyboardInteractiveChallengeId` | `ids` |
 | `MetricsKeyboardInteractiveAnswerRefId` | `ids` |
 | `SshAttachmentId` | `ids` |
@@ -140,12 +150,14 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `PluginDataSnapshotRequest` | `plugin_data_api` |
 | `PluginDataInspectRequest` | `plugin_data_api` |
 | `PluginDataComposeRequest` | `plugin_data_api` |
+| `PluginDataReviewRequest` | `plugin_data_api` |
 | `PluginDataApplyRequest` | `plugin_data_api` |
 | `PluginDataExportRequest` | `plugin_data_api` |
 | `PluginDataCheckpointRequest` | `plugin_data_api` |
 | `PluginDataReleaseRequest` | `plugin_data_api` |
 | `PluginTerminalHistoryEntry` | `plugin_data_api` |
 | `PluginDataReadResult` | `plugin_data_api` |
+| `PluginPreferenceGroupSnapshot` | `plugin_data_api` |
 | `PluginApiOperation` | `plugin_api` |
 | `PluginApiReply` | `plugin_api` |
 | `PluginApiOutcome` | `plugin_api` |
@@ -377,6 +389,8 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `SshSyncSecureDifferenceKind` | `plugin_ui` |
 | `SshSyncSecureDifferenceChange` | `plugin_ui` |
 | `SshSyncSecureDifference` | `plugin_ui` |
+| `SshSyncSecureDataReviewProjection` | `plugin_ui` |
+| `SshSyncSecureDataReviewChoice` | `plugin_ui` |
 | `SshSyncSecureOAuthSummary` | `plugin_ui` |
 | `SshSyncSecureCredential` | `plugin_ui` |
 | `SshSyncSecureDesktopProfile` | `plugin_ui` |
@@ -592,14 +606,11 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `MetricSnapshot` | `server_overview` |
 | `MetricsSessionFailureCode` | `server_overview` |
 | `MetricsSessionSummary` | `server_overview` |
-| `MetricsHostKeyChallenge` | `server_overview` |
-| `MetricsHostKeyDecision` | `server_overview` |
 | `MetricsKeyboardInteractivePrompt` | `server_overview` |
 | `MetricsKeyboardInteractiveChallenge` | `server_overview` |
 | `MetricsReconcileRequest` | `server_overview` |
 | `MetricsRetryRequest` | `server_overview` |
 | `MetricsStopRequest` | `server_overview` |
-| `MetricsHostKeyDecisionRequest` | `server_overview` |
 | `MetricsKeyboardInteractiveAnswerPrepareRequest` | `server_overview` |
 | `MetricsKeyboardInteractiveAnswerPrepareResponse` | `server_overview` |
 | `MetricsKeyboardInteractiveRespondRequest` | `server_overview` |
@@ -804,6 +815,9 @@ Generated from `crates/core-api/src/bin/export_core_api.rs`. It lists every Type
 | `SftpLocalDirectoryOpenChildRequest` | `sftp_session` |
 | `SftpLocalDirectoryCreateChildRequest` | `sftp_session` |
 | `SftpLocalDirectoryReleaseRequest` | `sftp_session` |
+| `SftpLocalFileMutation` | `sftp_session` |
+| `SftpLocalFileMutationRequest` | `sftp_session` |
+| `SftpLocalFileMutationResult` | `sftp_session` |
 | `SftpSessionSnapshotRequest` | `sftp_session` |
 | `SftpSessionSnapshot` | `sftp_session` |
 | `SftpSessionDisconnectRequest` | `sftp_session` |

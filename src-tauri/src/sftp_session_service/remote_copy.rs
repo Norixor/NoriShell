@@ -195,22 +195,7 @@ pub(super) async fn execute(
             });
         }
         Ok(Err(error)) => {
-            let failure = match error {
-                russh_sftp::client::error::Error::Status(status) => match status.status_code {
-                    russh_sftp::protocol::StatusCode::PermissionDenied => {
-                        TransferFailureCode::PermissionDenied
-                    }
-                    russh_sftp::protocol::StatusCode::NoConnection
-                    | russh_sftp::protocol::StatusCode::ConnectionLost => {
-                        TransferFailureCode::TransportLost
-                    }
-                    russh_sftp::protocol::StatusCode::OpUnsupported => {
-                        TransferFailureCode::UnsafeReplaceUnsupported
-                    }
-                    _ => TransferFailureCode::TargetExists,
-                },
-                _ => TransferFailureCode::Protocol,
-            };
+            let failure = remote_hardlink_failure(&error);
             return Err(cleanup_failure(plan, target_live, &temporary_target, failure).await);
         }
         Ok(Ok(false)) => {
@@ -320,4 +305,29 @@ where
         return Err(TransferFailureCode::LengthMismatch);
     }
     Ok(copied)
+}
+
+/// Classifies a failed `hardlink@openssh.com` no-replace commit. SFTP v3 has
+/// no "already exists" status (OpenSSH reports EEXIST as a generic failure),
+/// so only explicit permission, connection and unsupported statuses are
+/// distinguished; a permission failure is never reported as a conflict.
+pub(super) fn remote_hardlink_failure(
+    error: &russh_sftp::client::error::Error,
+) -> TransferFailureCode {
+    match error {
+        russh_sftp::client::error::Error::Status(status) => match status.status_code {
+            russh_sftp::protocol::StatusCode::PermissionDenied => {
+                TransferFailureCode::PermissionDenied
+            }
+            russh_sftp::protocol::StatusCode::NoConnection
+            | russh_sftp::protocol::StatusCode::ConnectionLost => {
+                TransferFailureCode::TransportLost
+            }
+            russh_sftp::protocol::StatusCode::OpUnsupported => {
+                TransferFailureCode::UnsafeReplaceUnsupported
+            }
+            _ => TransferFailureCode::TargetExists,
+        },
+        _ => TransferFailureCode::Protocol,
+    }
 }

@@ -200,7 +200,9 @@ impl SftpSessionService {
                 .get_mut(&session_key)
                 .ok_or(SftpRuntimeError::InvalidInput)?;
             self.reconcile_record_liveness(&session_key, record).await;
-            let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
+            let live = self
+                .shared_channel_for_write(&session_key, record, &[])
+                .await?;
             // `tail_file_limited` is the existing bounded binary stream primitive. Its
             // own lstat does not carry a listing precondition, so validate the listing
             // fact first and reject any differing total/reset returned by the read.
@@ -335,18 +337,23 @@ impl SftpSessionService {
             .get_mut(&session_key)
             .ok_or(SftpRuntimeError::InvalidInput)?;
         self.reconcile_record_liveness(&session_key, record).await;
-        let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
+        let live = self
+            .shared_channel_for_write(
+                &session_key,
+                record,
+                &[&upload.temporary_path, &upload.target_path],
+            )
+            .await?;
         live.require_generation(generation)?;
         let metadata = live
-            .bounded_protocol(live.transport.client().symlink_metadata(temporary_path))
+            .bounded_protocol(live.client.symlink_metadata(temporary_path))
             .await?;
         if !metadata.is_regular() || metadata.is_symlink() || metadata.len() != offset {
             return Err(SftpRuntimeError::Conflict.into());
         }
         let mut file = live
             .bounded_protocol(
-                live.transport
-                    .client()
+                live.client
                     .open_with_flags(temporary_path, OpenFlags::WRITE),
             )
             .await?;
@@ -396,10 +403,16 @@ impl SftpSessionService {
             .get_mut(&session_key)
             .ok_or(SftpRuntimeError::InvalidInput)?;
         self.reconcile_record_liveness(&session_key, record).await;
-        let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
+        let live = self
+            .shared_channel_for_write(
+                &session_key,
+                record,
+                &[&upload.temporary_path, &upload.target_path],
+            )
+            .await?;
         live.require_generation(generation)?;
         let temporary = live
-            .bounded_protocol(live.transport.client().symlink_metadata(temporary_path))
+            .bounded_protocol(live.client.symlink_metadata(temporary_path))
             .await?;
         if !temporary.is_regular()
             || temporary.is_symlink()
@@ -409,44 +422,36 @@ impl SftpSessionService {
         }
         if let Some(expected) = &upload.target_precondition {
             let target = live
-                .bounded_protocol(live.transport.client().symlink_metadata(target_path))
+                .bounded_protocol(live.client.symlink_metadata(target_path))
                 .await?;
             if !remote_metadata_matches(&target, expected) {
                 return Err(SftpRuntimeError::Conflict.into());
             }
             let replaced = live
-                .bounded_protocol(
-                    live.transport
-                        .client()
-                        .posix_rename(temporary_path, target_path),
-                )
+                .bounded_protocol(live.client.posix_rename(temporary_path, target_path))
                 .await?;
             if !replaced {
                 return Err(SftpRuntimeError::UnsafeReplaceUnsupported.into());
             }
         } else {
             if live
-                .bounded_protocol(live.transport.client().try_exists(target_path))
+                .bounded_protocol(live.client.try_exists(target_path))
                 .await?
             {
                 return Err(SftpRuntimeError::Conflict.into());
             }
             let linked = live
-                .bounded_protocol(
-                    live.transport
-                        .client()
-                        .hardlink(temporary_path, target_path),
-                )
+                .bounded_protocol(live.client.hardlink(temporary_path, target_path))
                 .await?;
             if !linked {
                 return Err(SftpRuntimeError::UnsafeReplaceUnsupported.into());
             }
-            live.bounded_protocol(live.transport.client().remove_file(temporary_path))
+            live.bounded_protocol(live.client.remove_file(temporary_path))
                 .await
                 .map_err(|_| SftpRuntimeError::CleanupIncomplete)?;
         }
         let final_metadata = live
-            .bounded_protocol(live.transport.client().symlink_metadata(target_path))
+            .bounded_protocol(live.client.symlink_metadata(target_path))
             .await?;
         if !final_metadata.is_regular()
             || final_metadata.is_symlink()
@@ -472,7 +477,9 @@ impl SftpSessionService {
             .get_mut(&session_key)
             .ok_or(SftpRuntimeError::InvalidInput)?;
         self.reconcile_record_liveness(&session_key, record).await;
-        let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
+        let live = self
+            .shared_channel_for_write(&session_key, record, &[&upload.temporary_path])
+            .await?;
         live.require_generation(generation)?;
         match live
             .cleanup_temporary_target(generation, &upload.temporary_path)
@@ -762,10 +769,12 @@ impl SftpSessionService {
             .get_mut(&session_key)
             .ok_or(SftpRuntimeError::InvalidInput)?;
         self.reconcile_record_liveness(&session_key, record).await;
-        let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
+        let live = self
+            .shared_channel_for_write(&session_key, record, &[&temporary_path, &target_path])
+            .await?;
         live.require_generation(generation)?;
         if live
-            .bounded_protocol(live.transport.client().try_exists(temporary))
+            .bounded_protocol(live.client.try_exists(temporary))
             .await?
         {
             return Err(SftpRuntimeError::Conflict.into());
@@ -773,7 +782,7 @@ impl SftpSessionService {
         match &target_precondition {
             Some(expected) => {
                 let target_metadata = live
-                    .bounded_protocol(live.transport.client().symlink_metadata(target))
+                    .bounded_protocol(live.client.symlink_metadata(target))
                     .await?;
                 if !remote_metadata_matches(&target_metadata, expected) {
                     return Err(SftpRuntimeError::Conflict.into());
@@ -781,7 +790,7 @@ impl SftpSessionService {
             }
             None => {
                 if live
-                    .bounded_protocol(live.transport.client().try_exists(target))
+                    .bounded_protocol(live.client.try_exists(target))
                     .await?
                 {
                     return Err(SftpRuntimeError::Conflict.into());
@@ -789,7 +798,7 @@ impl SftpSessionService {
             }
         }
         let file = live
-            .bounded_protocol(live.transport.client().open_with_flags(
+            .bounded_protocol(live.client.open_with_flags(
                 temporary,
                 OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
             ))
@@ -881,14 +890,12 @@ impl SftpSessionService {
             .get_mut(&session_key)
             .ok_or(SftpRuntimeError::InvalidInput)?;
         self.reconcile_record_liveness(&session_key, record).await;
-        let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
+        let live = self
+            .shared_channel_for_write(&session_key, record, &[])
+            .await?;
         live.require_generation(generation)?;
         let metadata = live
-            .bounded_protocol(
-                live.transport
-                    .client()
-                    .symlink_metadata(remote_path_utf8(path)?),
-            )
+            .bounded_protocol(live.client.symlink_metadata(remote_path_utf8(path)?))
             .await?;
         if !metadata.is_dir() || metadata.is_symlink() {
             return Err(SftpRuntimeError::Conflict.into());
@@ -1123,12 +1130,12 @@ mod tests {
             session_id.to_string(),
             SftpServiceRecord {
                 actor,
-                live: Some(SftpProductionSession {
+                live: Some(SftpProductionSession::new(
                     generation,
-                    transport: SftpLiveTransport::Dedicated(subsystem),
-                    transport_heartbeats: Vec::new(),
-                    transport_keepalive: None,
-                }),
+                    SftpLiveTransport::Dedicated(subsystem),
+                    Vec::new(),
+                    None,
+                )),
                 shared_cleanup_incomplete: false,
                 shared_parent_channels: None,
                 heartbeat_tasks: None,

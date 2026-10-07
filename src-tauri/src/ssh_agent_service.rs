@@ -33,6 +33,8 @@ type CoreResult<T> = Result<T, Box<CoreApiError>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SshAgentServiceError {
     Unavailable,
+    // Android has no system agent socket, so endpoint validation never runs there.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     InvalidEndpoint,
     Protocol,
     Timeout,

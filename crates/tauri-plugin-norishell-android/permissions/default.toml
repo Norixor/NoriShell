@@ -1,0 +1,5 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Grants nothing. The Android bridge is driven from Rust only; the WebView must never reach its Kotlin commands."
+permissions = []

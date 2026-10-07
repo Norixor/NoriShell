@@ -30,6 +30,9 @@ pub enum SftpFailureCode {
     AuthenticationRejected,
     SubsystemRejected,
     TransportLost,
+    /// The server closed the connection before the SSH handshake (for
+    /// example while it rate-limits unfinished or failed logins).
+    ConnectionClosedByServer,
     UnsupportedPathEncoding,
     PermissionDenied,
     Protocol,
@@ -383,6 +386,53 @@ pub struct SftpArchiveSource {
     pub archive_name: String,
 }
 
+/// A file action inside one registered local directory capability. Existing
+/// entries are named by a listing `entryRef` (identity-fenced); new names are
+/// single path components. Nothing is ever replaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SftpLocalFileMutation {
+    CreateDirectory {
+        name: String,
+    },
+    CreateEmptyFile {
+        name: String,
+    },
+    Rename {
+        entry_ref: String,
+        new_name: String,
+    },
+    /// `recursive` must be set to remove a non-empty directory; symbolic
+    /// links inside are removed, never followed.
+    Delete {
+        entry_ref: String,
+        recursive: bool,
+        irreversible_confirmed: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpLocalFileMutationRequest {
+    pub meta: RequestMeta,
+    pub operation_id: OperationId,
+    pub idempotency_key: String,
+    pub directory_ref: String,
+    pub expected_revision: WireSequence,
+    pub mutation: SftpLocalFileMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpLocalFileMutationResult {
+    pub directory_ref: String,
+    pub revision: WireSequence,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
     tag = "kind",
@@ -637,6 +687,9 @@ pub struct SftpTransferIntentSummary {
     pub commit_outcome: SftpTransferCommitOutcome,
     pub failure_code: Option<SftpTransferFailureCode>,
     pub cleanup_residual: Option<SftpTransferIntentCleanupResidual>,
+    /// Core accepts a cancel for this transfer in its current state. Clients
+    /// offer cancel from this fact instead of inferring it from `state`.
+    pub cancellable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -760,6 +813,9 @@ pub struct SftpTransferSummary {
     pub commit_outcome: SftpTransferCommitOutcome,
     pub failure_code: Option<SftpTransferFailureCode>,
     pub cleanup_residual: Option<SftpCleanupResidual>,
+    /// Core accepts a cancel for this transfer in its current state (for
+    /// example an Android picked-document download while it is committing).
+    pub cancellable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

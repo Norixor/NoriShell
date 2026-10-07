@@ -9,7 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, WebviewWindow};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -37,7 +37,11 @@ impl Prompts {
         InteractionGuard(self.1.clone())
     }
     pub fn get(&self, window: &WebviewWindow, id: &str) -> Result<DesktopPrompt> {
-        if window.label() != label(id) {
+        self.get_for_label(window.label(), id)
+    }
+
+    fn get_for_label(&self, surface_label: &str, id: &str) -> Result<DesktopPrompt> {
+        if surface_label != label(id) {
             return Err(EngineError::InvalidConfiguration);
         }
         self.0
@@ -48,13 +52,17 @@ impl Prompts {
             .ok_or(EngineError::Cancelled)
     }
 
-    pub fn decide(
+    pub fn decide(&self, window: &WebviewWindow, decision: DesktopPromptDecision) -> Result<()> {
+        self.decide_for_label(window.label(), decision)
+    }
+
+    fn decide_for_label(
         &self,
-        window: &WebviewWindow,
+        surface_label: &str,
         mut decision: DesktopPromptDecision,
     ) -> Result<()> {
         let result = (|| {
-            if window.label() != label(&decision.id)
+            if surface_label != label(&decision.id)
                 || decision
                     .password
                     .as_ref()
@@ -128,23 +136,23 @@ impl Prompts {
             app: app.clone(),
             id: id.clone(),
         };
-        let url = format!("secure-desktop.html?prompt={id}");
-        let builder = WebviewWindowBuilder::new(app, label(&id), WebviewUrl::App(url.into()))
-            .title("NoriShell");
-        let window =
-            crate::secure_window_frame::apply_secure_window_frame(app, &label(&id), builder)
-                .build()
-                .map_err(|_| EngineError::Protocol)?;
+        let window = crate::secure_surface::open(
+            app,
+            crate::secure_surface::SurfaceSpec::new(
+                crate::secure_surface::SurfaceKind::DesktopAuth,
+                label(&id),
+            )
+            .query(format!("prompt={id}")),
+        )
+        .map_err(|_| EngineError::Protocol)?;
         let pending = self.clone();
         let pending_id = id.clone();
-        window.on_window_event(move |event| {
-            if matches!(event, tauri::WindowEvent::Destroyed)
-                && let Ok(mut prompts) = pending.0.lock()
-            {
+        window.on_destroyed(move || {
+            if let Ok(mut prompts) = pending.0.lock() {
                 prompts.remove(&pending_id);
             }
         });
-        let _ = crate::window_first_show::focus_if_revealed(&window);
+        let _ = window.focus();
         let mut decision = tokio::time::timeout(Duration::from_secs(180), receiver)
             .await
             .map_err(|_| EngineError::Timeout)?
@@ -207,6 +215,31 @@ fn validate_vault_decision(
 fn label(id: &str) -> String {
     format!("desktop-auth-{id}")
 }
+
+/// Label-bound entry points for the Android Secure Surface dispatcher. They are
+/// inherent methods so the `prompts` field stays private to this module tree.
+#[cfg(target_os = "android")]
+impl super::DesktopService {
+    pub(crate) fn secure_prompt_get(
+        &self,
+        surface_label: &str,
+        id: &str,
+    ) -> std::result::Result<DesktopPrompt, String> {
+        self.prompts
+            .get_for_label(surface_label, id)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn secure_prompt_decide(
+        &self,
+        surface_label: &str,
+        decision: DesktopPromptDecision,
+    ) -> std::result::Result<(), String> {
+        self.prompts
+            .decide_for_label(surface_label, decision)
+            .map_err(|error| error.to_string())
+    }
+}
 struct PromptGuard {
     prompts: Prompts,
     app: AppHandle,
@@ -217,9 +250,7 @@ impl Drop for PromptGuard {
         if let Ok(mut prompts) = self.prompts.0.lock() {
             prompts.remove(&self.id);
         }
-        if let Some(window) = self.app.get_webview_window(&label(&self.id)) {
-            let _ = window.destroy();
-        }
+        crate::secure_surface::destroy(&self.app, &label(&self.id));
     }
 }
 
