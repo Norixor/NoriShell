@@ -152,9 +152,10 @@ fn validate_application(value: &Value) -> bool {
         && value["uiZoom"]
             .as_i64()
             .is_some_and(|zoom| [80, 90, 100, 110, 125, 150].contains(&zoom))
+        // "overview" is a compatible extension: older values stay valid and are never rewritten.
         && choice(
             &value["terminalStartupBehavior"],
-            &["welcome", "restoreHistory"],
+            &["overview", "welcome", "restoreHistory"],
         )
         && choice(
             &value["newTerminalBehavior"],
@@ -621,6 +622,28 @@ mod tests {
                     &option
                 )
                 .is_ok()
+            );
+        }
+        for behavior in ["overview", "welcome", "restoreHistory"] {
+            let mut option = application.clone();
+            option["terminalStartupBehavior"] = json!(behavior);
+            assert!(
+                validate_application_preference_value(
+                    ApplicationPreferenceGroupId::Application,
+                    &option
+                )
+                .is_ok()
+            );
+        }
+        for behavior in [json!("dashboard"), json!("Overview"), json!(null), json!(1)] {
+            let mut option = application.clone();
+            option["terminalStartupBehavior"] = behavior;
+            assert!(
+                validate_application_preference_value(
+                    ApplicationPreferenceGroupId::Application,
+                    &option
+                )
+                .is_err()
             );
         }
         let mut invalid = application.clone();

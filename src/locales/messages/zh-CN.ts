@@ -1470,6 +1470,7 @@ export const zhCN = {
         startupBehavior: "启动后",
         startupBehaviorDescription: "选择应用启动完成后的默认行为。",
         startupBehaviors: {
+          overview: "显示概览页面",
           welcome: "显示欢迎页面",
           restoreHistory: "加载历史记录",
         },

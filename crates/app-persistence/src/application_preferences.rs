@@ -170,6 +170,37 @@ mod tests {
     }
 
     #[test]
+    fn overview_startup_extends_existing_application_rows_without_rewriting_them() {
+        let (_directory, mut repository) = repository();
+        let group = ApplicationPreferenceGroupId::Application;
+        let existing = json!({
+            "themePreference":"light", "locale":"en", "uiZoom":100,
+            "terminalStartupBehavior":"restoreHistory", "newTerminalBehavior":"welcome",
+            "singlePaneTabCloseBehavior":"confirm"
+        });
+        let initial = repository
+            .replace_application_preferences(group, None, &existing)
+            .unwrap();
+        // A stored older choice is read back unchanged; nothing migrates it to the new default.
+        assert_eq!(
+            repository.get_application_preferences(group).unwrap().value,
+            Some(existing.clone())
+        );
+        let mut overview = existing.clone();
+        overview["terminalStartupBehavior"] = json!("overview");
+        let next = repository
+            .replace_application_preferences(group, initial.revision, &overview)
+            .unwrap();
+        assert_eq!(next.value, Some(overview.clone()));
+        let mut unknown = overview;
+        unknown["terminalStartupBehavior"] = json!("dashboard");
+        assert!(matches!(
+            repository.replace_application_preferences(group, next.revision, &unknown),
+            Err(AppPersistenceError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
     fn application_row_is_readable_after_v50_migration_cleanup() {
         let (_directory, repository) = repository();
         let value = json!({

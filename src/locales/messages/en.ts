@@ -1470,6 +1470,7 @@ export const en = {
         startupBehavior: "After startup",
         startupBehaviorDescription: "Choose the default action after the app finishes starting.",
         startupBehaviors: {
+          overview: "Show overview page",
           welcome: "Show welcome page",
           restoreHistory: "Load terminal history",
         },

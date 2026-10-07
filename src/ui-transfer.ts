@@ -19,7 +19,7 @@ export interface ApplicationPreferences {
   themePreference: ThemePreference;
   locale: LocalePreference;
   uiZoom: UiZoom;
-  terminalStartupBehavior: "welcome" | "restoreHistory";
+  terminalStartupBehavior: TerminalStartupBehavior;
   newTerminalBehavior: "welcome" | "terminalWelcome" | "sftpWelcome" | "localTerminal";
   singlePaneTabCloseBehavior: "confirm" | "closeDirectly";
 }
@@ -39,9 +39,17 @@ export interface AppearancePreferences {
   appTheme?: AppThemeProfile;
 }
 
+/** "overview" was added later; it is only the default for never-set preferences, never a migration target. */
+export const TERMINAL_STARTUP_BEHAVIORS = ["overview", "welcome", "restoreHistory"] as const;
+export type TerminalStartupBehavior = typeof TERMINAL_STARTUP_BEHAVIORS[number];
+export const DEFAULT_TERMINAL_STARTUP_BEHAVIOR: TerminalStartupBehavior = "overview";
+export function isTerminalStartupBehavior(value: unknown): value is TerminalStartupBehavior {
+  return (TERMINAL_STARTUP_BEHAVIORS as readonly unknown[]).includes(value);
+}
+
 export const DEFAULT_APPLICATION_PREFERENCES: ApplicationPreferences = {
   themePreference: "light", locale: "system", uiZoom: 100,
-  terminalStartupBehavior: "restoreHistory", newTerminalBehavior: "welcome", singlePaneTabCloseBehavior: "confirm",
+  terminalStartupBehavior: DEFAULT_TERMINAL_STARTUP_BEHAVIOR, newTerminalBehavior: "welcome", singlePaneTabCloseBehavior: "confirm",
 };
 export function defaultAppearancePreferences(): AppearancePreferences {
   return {
@@ -61,7 +69,7 @@ export function validateApplicationPreferences(value: unknown): value is Applica
   if (!exactPreferenceKeys(value, Object.keys(DEFAULT_APPLICATION_PREFERENCES))) return false;
   return ["light", "dark", "system"].includes(value.themePreference as string)
     && ["system", "zh-CN", "en"].includes(value.locale as string) && isUiZoom(value.uiZoom)
-    && ["welcome", "restoreHistory"].includes(value.terminalStartupBehavior as string)
+    && isTerminalStartupBehavior(value.terminalStartupBehavior)
     && ["welcome", "terminalWelcome", "sftpWelcome", "localTerminal"].includes(value.newTerminalBehavior as string)
     && ["confirm", "closeDirectly"].includes(value.singlePaneTabCloseBehavior as string);
 }

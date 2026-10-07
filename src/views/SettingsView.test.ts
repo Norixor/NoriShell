@@ -359,8 +359,10 @@ describe("Settings", () => {
     const wrapper = await mountSettings();
 
     const startup = wrapper.get('[aria-label="After startup"]');
-    expect(startup.text()).toContain("Load terminal history");
+    expect(startup.text()).toContain("Show overview page");
     await startup.trigger("click");
+    expect(Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).map((option) => option.textContent?.trim()))
+      .toEqual(["Show overview page", "Show welcome page", "Load terminal history"]);
     const welcomeStartup = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
       .find((option) => option.textContent?.includes("Show welcome page"));
     welcomeStartup?.click();
