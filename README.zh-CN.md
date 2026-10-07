@@ -4,12 +4,12 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">
   <strong>终端、文件传输与远程桌面，一个工作区。</strong><br />
-  在 macOS 和 Windows 上统一使用 SSH、本地终端、SFTP、隧道、RDP/VNC 与服务器概览。主机信息保存在本机，已保存凭据由加密 Vault 保护。
+  在 macOS 和 Windows（另有 Linux 与 Android 预览版）上统一使用 SSH、本地终端、SFTP、隧道、RDP/VNC 与服务器概览。主机信息保存在本机，已保存凭据由加密 Vault 保护。
 </p>
 <p align="center">
   <a href="https://github.com/Norixor/NoriShell/releases/latest"><img src="https://img.shields.io/github/v/release/Norixor/NoriShell?label=release&color=blue" alt="最新版本" /></a>
   <a href="https://github.com/Norixor/NoriShell/releases"><img src="https://img.shields.io/github/downloads/Norixor/NoriShell/total?label=downloads&color=brightgreen" alt="总下载量" /></a>
-  <a href="#安装与快速开始"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-8250df" alt="macOS 与 Windows" /></a>
+  <a href="#安装与快速开始"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20(preview)%20%7C%20Android%20(preview)-8250df" alt="macOS、Windows、Linux（预览版）与 Android（预览版）" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-orange" alt="GPL-3.0-only 许可证" /></a>
   <a href="https://github.com/Norixor/NoriShell/stargazers"><img src="https://img.shields.io/github/stars/Norixor/NoriShell?color=yellow" alt="GitHub Star" /></a>
 </p>
@@ -38,18 +38,18 @@
 
 ## 关于 NoriShell
 
-管理服务器时，终端、文件传输、端口转发和远程桌面往往分散在不同工具中。NoriShell 将这些操作放进同一个桌面工作区，主机信息与已保存的凭据由你的设备管理。无论是一台还是多台服务器，都可以在 macOS 和 Windows 上使用。
+管理服务器时，终端、文件传输、端口转发和远程桌面往往分散在不同工具中。NoriShell 将这些操作放进同一个桌面工作区，主机信息与已保存的凭据由你的设备管理。无论是一台还是多台服务器，都可以在 macOS 和 Windows 上使用，Linux 提供预览版。
 
 ## 安装与快速开始
 
-当前版本：**[v0.1.7](https://github.com/Norixor/NoriShell/releases/tag/v0.1.7)**。按设备选择安装包或免安装 ZIP；Linux 预览版安装包见下方。
+当前版本：**[v0.1.8](https://github.com/Norixor/NoriShell/releases/tag/v0.1.8)**。按设备选择安装包或免安装 ZIP；Linux 预览版安装包与 Android 预览版 APK 见下方。
 
 | 平台 | 架构 | 安装包 | 免安装 ZIP |
 | --- | --- | --- | --- |
-| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_arm64.zip) |
-| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_x64.zip) |
-| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_x64.zip) |
-| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_arm64.zip) |
+| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_arm64.zip) |
+| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_x64.zip) |
+| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_x64.zip) |
+| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_arm64.zip) |
 
 使用 macOS 安装包时，将 NoriShell 拖入“应用程序”；Windows 安装包按向导安装。ZIP 版使用同样的本机配置与数据目录，运行前请完整解压。Windows ZIP 版需要系统已安装 WebView2 Runtime。
 
@@ -57,10 +57,20 @@
 
 | 平台 | 架构 | AppImage | deb |
 | --- | --- | --- | --- |
-| Linux（预览版） | x64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_x64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_x64.deb) |
-| Linux（预览版） | ARM64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_arm64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_arm64.deb) |
+| Linux（预览版） | x64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_x64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_x64.deb) |
+| Linux（预览版） | ARM64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_arm64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_arm64.deb) |
 
 Linux 版为预览版，目前仅在 Ubuntu 22.04（GNOME、Wayland）上验证。Linux 上尚未实现托盘、原生通知和系统钥匙串自动解锁。只有 AppImage 支持应用内更新，deb 为手动下载。
+
+**Android（预览版）**
+
+| 平台 | 架构 | APK |
+| --- | --- | --- |
+| Android 10 或更高版本（预览版） | ARM64 | [下载 NoriShell_0.1.8_android_arm64.apk](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_android_arm64.apk) |
+
+Android 版为预览版，目前仅在 Android 模拟器（API 36、arm64）上验证，尚未经真机验收。NoriShell 不在应用商店上架：在手机上打开 APK，系统提示时允许该来源（例如浏览器或文件管理器）安装应用即可。APK 为正式签名的 release 构建；后续版本可按提示在应用内更新，由于每个版本使用同一签名，覆盖安装会保留已有数据。
+
+![NoriShell Android 版：带标签胶囊与额外按键行的终端、紧凑的服务器概览、设置列表到详情](.github/assets/illustrations/android.zh-CN.svg)
 
 ### 首次连接
 
@@ -72,7 +82,7 @@ Linux 版为预览版，目前仅在 Ubuntu 22.04（GNOME、Wayland）上验证�
 
 ### 检查新版本
 
-在 **设置 → 关于** 中点击“检查更新”。macOS 和 Windows 安装版可按提示在应用内安装正式版更新；ZIP 版和 Beta 更新请到 [GitHub Releases](https://github.com/Norixor/NoriShell/releases) 下载对应平台的文件。
+在 **设置 → 关于** 中点击“检查更新”。macOS 和 Windows 安装版、Linux AppImage 以及 Android APK 可按提示在应用内安装正式版更新；ZIP 版、Linux deb 包和 Beta 更新请到 [GitHub Releases](https://github.com/Norixor/NoriShell/releases) 下载对应平台的文件。
 
 ## 特性
 
@@ -136,7 +146,7 @@ Rust Core 管理连接，在 SSH 认证前核验服务器身份；已信任的�
 - Node.js **22 或更新版本**。
 - pnpm **10.32.1**，与 `package.json` 中的 `packageManager` 一致。
 - Rust **1.97.1**，由 `rust-toolchain.toml` 固定，并包含 `rustfmt` 与 `clippy`。
-- [Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)：macOS 需要 Xcode Command Line Tools；Windows 需要 MSVC C++ 构建工具和 WebView2。
+- [Tauri 2 平台依赖](https://v2.tauri.app/start/prerequisites/)：macOS 需要 Xcode Command Line Tools；Windows 需要 MSVC C++ 构建工具和 WebView2；Debian/Ubuntu 需要 `libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`libayatana-appindicator3-dev`、`librsvg2-dev`、`libssl-dev`、`libxdo-dev`、`libasound2-dev` 与 `libudev-dev`。
 
 ### 本地启动
 
@@ -162,6 +172,16 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 pnpm tauri build
 ```
 
+### Android（预览版）
+
+每次 Release 都附带正式签名的 APK（见[安装与快速开始](#安装与快速开始)），只有开发时才需要从源码构建。Android 预览版目前只在 Android 模拟器（API 36、arm64）上验证过。构建需要 Android SDK 36、NDK 28、JDK 17 和 Rust 的 `aarch64-linux-android` target：
+
+```sh
+pnpm tauri android build --debug --apk --target aarch64
+```
+
+调试 APK 位于 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/`。需要 Android 10（API 29）或更高版本。
+
 ## 故障排查
 
 ### macOS 提示“应用已损坏”
@@ -183,8 +203,8 @@ sudo xattr -r -d com.apple.quarantine "/Applications/NoriShell.app"
 
 ```text
 src/                    Vue 界面与共享组件
-src-tauri/              Tauri 桌面入口与原生窗口
-crates/                 Rust Core、协议、Vault、持久化和插件能力
+src-tauri/              Tauri 桌面入口与原生窗口；Android 工程位于 src-tauri/gen/android
+crates/                 Rust Core、协议、Vault、持久化、插件能力和 Android 桥接
 docs/guides/            用户、插件开发、Plugin API 与 Core API 文档
 examples/plugins/       Wasm 插件与 SDK 示例
 example/self-host-sync/ 自建同步插件与 Go 服务端
