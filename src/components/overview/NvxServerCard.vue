@@ -130,11 +130,16 @@ const percentMetrics = computed(() => ([
   const status = statusForField(metric.fieldState);
   const history = props.history?.[metric.key] ?? [];
   const exposesTrend = status.state === "available" || status.state === "stale";
+  const exposesValue = exposesTrend && value !== null;
   return {
     ...metric,
     status,
     text: formatPercent(value, status),
     trend: exposesTrend ? (history.length ? history : value === null ? [] : [value]) : [],
+    // Compact Card bar (phone): fill width and a load level; stale readings stay muted so a
+    // yesterday's 95% never looks like a live alarm.
+    fill: exposesValue ? Math.min(100, Math.max(0, value)) : 0,
+    level: !exposesValue ? "empty" : status.state === "stale" ? "stale" : value < 70 ? "low" : value < 90 ? "mid" : "high",
     // A card-wide reason is shown once in the footer; only field-specific reasons stay in the cell.
     caption: metricStatus.value.state === "available" && !exposesTrend && status.state !== "loading"
       ? status.label
@@ -488,8 +493,20 @@ function formatBytes(value: string) {
       >
         <span class="nvx-server-card__metric-label">{{ metric.label }}</span>
         <strong>{{ metric.text }}</strong>
+        <span
+          v-if="compact && metric.status.state !== 'loading'"
+          class="nvx-server-card__metric-bar"
+          :class="`nvx-server-card__metric-bar--${metric.level}`"
+          aria-hidden="true"
+        >
+          <span
+            v-if="metric.level !== 'empty'"
+            class="nvx-server-card__metric-fill"
+            :style="{ width: `${metric.fill}%` }"
+          />
+        </span>
         <NvxSparkline
-          v-if="metric.trend.length"
+          v-else-if="metric.trend.length"
           :values="metric.trend"
           :tone="metric.status.state === 'stale' ? 'muted' : 'accent'"
         />

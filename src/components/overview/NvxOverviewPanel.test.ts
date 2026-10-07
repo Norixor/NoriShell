@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ServerOverviewCard } from "../../core-api/generated/core-api";
@@ -89,9 +89,10 @@ describe("NvxOverviewPanel", () => {
     vi.unstubAllGlobals();
   });
 
-  it("puts the summary counts on the status chips and drops the KPI tiles on the phone", async () => {
+  it("keeps the phone toolbar to one row and puts the counted status chips in the filter sheet", async () => {
     host.mobile = true;
     const wrapper = mount(NvxOverviewPanel, {
+      attachTo: document.body,
       props: {
         snapshot: {
           snapshotRevision: "1",
@@ -100,17 +101,47 @@ describe("NvxOverviewPanel", () => {
       },
       global: { plugins: [i18n] },
     });
-    expect(wrapper.find(".nvx-overview-panel__summary").exists()).toBe(false);
-    expect(wrapper.find(".nvx-overview-panel__averages").exists()).toBe(false);
-    // All / Online / Issues / Offline – Online follows the filter (connecting counts as online).
-    expect(wrapper.findAll(".nvx-overview-panel__status-count").map((count) => count.text()))
-      .toEqual(["3", "2", "0", "1"]);
-    expect(wrapper.findAll(".nvx-server-card--compact")).toHaveLength(3);
+    try {
+      expect(wrapper.find(".nvx-overview-panel__summary").exists()).toBe(false);
+      expect(wrapper.find(".nvx-overview-panel__averages").exists()).toBe(false);
+      // Collapsed search and the filter button are the only toolbar controls; no chips inline.
+      expect(wrapper.find("#overview-search").exists()).toBe(false);
+      expect(wrapper.find(".nvx-overview-panel__status-filters").exists()).toBe(false);
+      expect(wrapper.findAll(".nvx-server-card--compact")).toHaveLength(3);
+      const filters = wrapper.get('button[aria-label="筛选"]');
+      expect(wrapper.find(".nvx-overview-panel__filters-badge").exists()).toBe(false);
 
-    const chips = wrapper.findAll('[role="group"] button[aria-pressed]');
-    await chips[3]!.trigger("click");
-    expect(wrapper.findAll(".nvx-overview-panel__card")).toHaveLength(1);
-    expect(wrapper.text()).toContain("Beta");
+      await filters.trigger("click");
+      await flushPromises();
+      const sheet = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+      expect(sheet).not.toBeNull();
+      // Monitoring is off everywhere, so the sheet shows no averages line either.
+      expect(sheet.querySelector(".nvx-overview-panel__averages")).toBeNull();
+      // All / Online / Issues / Offline – Online follows the filter (connecting counts as online).
+      expect(Array.from(sheet.querySelectorAll(".nvx-overview-panel__status-count")).map((count) => count.textContent))
+        .toEqual(["3", "2", "0", "1"]);
+      const chips = sheet.querySelectorAll<HTMLButtonElement>('[role="group"] button[aria-pressed]');
+      chips[3]!.click();
+      await flushPromises();
+      expect(wrapper.findAll(".nvx-overview-panel__card")).toHaveLength(1);
+      expect(wrapper.text()).toContain("Beta");
+      // The badge counts the non-default filters once the sheet is closed.
+      sheet.querySelector<HTMLButtonElement>('button[aria-label="关闭"]')!.click();
+      await flushPromises();
+      expect(wrapper.get(".nvx-overview-panel__filters-badge").text()).toBe("1");
+      expect(wrapper.find('button[aria-label="筛选，1 项生效"]').exists()).toBe(true);
+
+      // The search expands in place, filters the same catalog, and closing it clears the query.
+      await wrapper.get('button[aria-label="搜索主机"]').trigger("click");
+      await flushPromises();
+      await wrapper.get("#overview-search").setValue("gamma");
+      expect(wrapper.findAll(".nvx-overview-panel__card")).toHaveLength(0);
+      await wrapper.get('button[aria-label="关闭搜索"]').trigger("click");
+      expect(wrapper.find("#overview-search").exists()).toBe(false);
+      expect(wrapper.findAll(".nvx-overview-panel__card")).toHaveLength(1);
+    } finally {
+      wrapper.unmount();
+    }
   });
 
   it("windows the phone catalog with the compact Card pitch", async () => {
