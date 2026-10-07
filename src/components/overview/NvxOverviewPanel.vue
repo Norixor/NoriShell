@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { Activity, CircleCheck, Power, Search, Server, TriangleAlert } from "lucide-vue-next";
+import { Activity, CircleCheck, Power, Search, Server, SlidersHorizontal, TriangleAlert, X } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import type { ServerOverviewSnapshot } from "../../core-api/generated/core-api";
 import { isMobileLayout } from "../../platform-host";
 import { NvxPluginExtensionTarget } from "../plugins";
-import { NvxButton, NvxIcon, NvxInput, NvxInlineNotice, NvxProgress, NvxSelect } from "../ui";
+import { NvxButton, NvxDialog, NvxIcon, NvxIconButton, NvxInput, NvxInlineNotice, NvxProgress, NvxSelect } from "../ui";
 import NvxServerCard from "./NvxServerCard.vue";
 import { createVirtualRowIndex, uniformRowPitches } from "./overviewVirtualRows";
 import {
@@ -29,6 +29,21 @@ const mobileLayout = isMobileLayout();
 const query = ref("");
 const groupFilter = ref("all");
 const statusFilter = ref<"all" | "online" | "issues" | "offline">("all");
+// Phone toolbar: one row with a search field that expands in place and a filter button whose
+// badge counts the non-default filters; group and status live in a bottom sheet so the Cards
+// start right under the shell. The filters themselves are the same refs the desktop toolbar binds.
+const searchOpen = ref(false);
+const filtersOpen = ref(false);
+const activeFilterCount = computed(() => Number(groupFilter.value !== "all") + Number(statusFilter.value !== "all"));
+async function openSearch() {
+  searchOpen.value = true;
+  await nextTick();
+  document.getElementById("overview-search")?.focus();
+}
+function closeSearch() {
+  query.value = "";
+  searchOpen.value = false;
+}
 const panelElement = ref<HTMLElement | null>(null);
 const gridViewportElement = ref<HTMLElement | null>(null);
 const cardElements = new Map<string, HTMLElement>();
@@ -347,7 +362,75 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
       <div class="nvx-overview-panel__heading">
         <h1>{{ t('overview.title') }}</h1>
       </div>
-      <div class="nvx-overview-panel__toolbar">
+      <div
+        v-if="mobileLayout"
+        class="nvx-overview-panel__toolbar nvx-overview-panel__toolbar--phone"
+      >
+        <NvxPluginExtensionTarget
+          target-id="overview.toolbar"
+          instance-key="global"
+        />
+        <span
+          v-if="searchOpen"
+          class="nvx-overview-panel__search-field"
+        >
+          <NvxIcon
+            :icon="Search"
+            :size="16"
+          />
+          <NvxInput
+            id="overview-search"
+            v-model="query"
+            class="nvx-overview-panel__search"
+            :aria-label="t('overview.search')"
+            :placeholder="t('mobile.overviewSearchPlaceholder')"
+          />
+          <NvxIconButton
+            class="nvx-overview-panel__search-close"
+            :label="t('mobile.overviewSearchClose')"
+            size="sm"
+            @click="closeSearch"
+          >
+            <NvxIcon
+              :icon="X"
+              :size="16"
+            />
+          </NvxIconButton>
+        </span>
+        <NvxIconButton
+          v-else
+          class="nvx-overview-panel__search-open"
+          :label="t('overview.search')"
+          @click="openSearch"
+        >
+          <NvxIcon
+            :icon="Search"
+            :size="20"
+          />
+        </NvxIconButton>
+        <NvxIconButton
+          class="nvx-overview-panel__filters-open"
+          :class="{ 'nvx-overview-panel__filters-open--active': activeFilterCount > 0 }"
+          :label="activeFilterCount ? t('mobile.overviewFiltersActive', { count: activeFilterCount }) : t('mobile.overviewFilters')"
+          aria-haspopup="dialog"
+          :aria-expanded="filtersOpen"
+          @click="filtersOpen = true"
+        >
+          <NvxIcon
+            :icon="SlidersHorizontal"
+            :size="20"
+          />
+          <span
+            v-if="activeFilterCount"
+            class="nvx-overview-panel__filters-badge"
+            aria-hidden="true"
+          >{{ activeFilterCount }}</span>
+        </NvxIconButton>
+      </div>
+      <div
+        v-else
+        class="nvx-overview-panel__toolbar"
+      >
         <NvxPluginExtensionTarget
           target-id="overview.toolbar"
           instance-key="global"
@@ -369,7 +452,7 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
             v-model="query"
             class="nvx-overview-panel__search"
             :aria-label="t('overview.search')"
-            :placeholder="t(mobileLayout ? 'mobile.overviewSearchPlaceholder' : 'overview.searchPlaceholder')"
+            :placeholder="t('overview.searchPlaceholder')"
           />
         </span>
         <div
@@ -386,32 +469,64 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
             @click="statusFilter = option.value"
           >
             {{ option.label }}
-            <span
-              v-if="mobileLayout"
-              class="nvx-overview-panel__status-count"
-            >{{ statusCounts[option.value] }}</span>
           </NvxButton>
         </div>
       </div>
     </header>
 
-    <div
-      v-if="mobileLayout && compactAverages.length"
-      class="nvx-overview-panel__averages"
-      role="group"
-      :aria-label="t('overview.kpi.averageLoad')"
+    <NvxDialog
+      v-if="mobileLayout"
+      v-model="filtersOpen"
+      :title="t('mobile.overviewFilters')"
+      :close-label="t('mobile.closeSheet')"
     >
-      <span
-        v-for="load in compactAverages"
-        :key="load.key"
-        class="nvx-overview-panel__average"
-        role="status"
-        :aria-label="`${load.label}: ${load.text}`"
-      >
-        <span>{{ load.label }}</span>
-        <strong>{{ load.text }}</strong>
-      </span>
-    </div>
+      <div class="nvx-overview-panel__filter-sheet">
+        <div
+          v-if="compactAverages.length"
+          class="nvx-overview-panel__averages"
+          role="group"
+          :aria-label="t('overview.kpi.averageLoad')"
+        >
+          <span
+            v-for="load in compactAverages"
+            :key="load.key"
+            class="nvx-overview-panel__average"
+            role="status"
+            :aria-label="`${load.label}: ${load.text}`"
+          >
+            <span>{{ load.label }}</span>
+            <strong>{{ load.text }}</strong>
+          </span>
+        </div>
+        <div
+          class="nvx-overview-panel__status-filters"
+          role="group"
+          :aria-label="t('overview.statusFilterLabel')"
+        >
+          <NvxButton
+            v-for="option in statusOptions"
+            :key="option.value"
+            size="sm"
+            :variant="statusFilter === option.value ? 'secondary' : 'ghost'"
+            :aria-pressed="statusFilter === option.value"
+            @click="statusFilter = option.value"
+          >
+            {{ option.label }}
+            <span class="nvx-overview-panel__status-count">{{ statusCounts[option.value] }}</span>
+          </NvxButton>
+        </div>
+        <div class="nvx-overview-panel__filter-field">
+          <span aria-hidden="true">{{ t('overview.groupFilter') }}</span>
+          <NvxSelect
+            id="overview-group-filter"
+            v-model="groupFilter"
+            class="nvx-overview-panel__group-filter"
+            :options="groupOptions"
+            :aria-label="t('overview.groupFilter')"
+          />
+        </div>
+      </div>
+    </NvxDialog>
 
     <section
       v-if="!mobileLayout"

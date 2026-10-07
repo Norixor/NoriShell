@@ -129,7 +129,7 @@ async function send(key: ExtraKey) {
 .nvx-terminal-extra-keys__scroller {
   display: flex;
   flex: 1 1 auto;
-  gap: var(--nvx-space-1);
+  gap: 6px;
   min-width: 0;
   height: 100%;
   padding: var(--nvx-space-1) var(--nvx-space-2);
@@ -160,14 +160,18 @@ async function send(key: ExtraKey) {
   height: 40px;
   padding: 0 var(--nvx-space-2);
   border: var(--nvx-border-width) solid var(--nvx-color-border);
-  border-radius: var(--nvx-radius-md);
+  border-radius: 10px;
   background: var(--nvx-color-bg-surface);
   color: var(--nvx-color-text-primary);
-  font-family: var(--nvx-font-mono);
   font-size: var(--nvx-font-size-sm);
+  font-weight: var(--nvx-font-weight-semibold);
   cursor: pointer;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
+}
+
+.nvx-terminal-extra-keys__key:active:not(:disabled) {
+  background: var(--nvx-color-bg-hover);
 }
 
 .nvx-terminal-extra-keys__key:disabled {
@@ -175,10 +179,11 @@ async function send(key: ExtraKey) {
   cursor: default;
 }
 
+/* Armed modifier: accent-tinted key (soft fill, accent border and text), not a solid button. */
 .nvx-terminal-extra-keys__key--modifier[aria-pressed="true"] {
   border-color: var(--nvx-color-accent);
-  background: var(--nvx-color-accent);
-  color: var(--nvx-color-on-accent);
+  background: var(--nvx-color-accent-soft);
+  color: var(--nvx-color-accent);
 }
 
 .nvx-terminal-extra-keys__key:focus-visible {

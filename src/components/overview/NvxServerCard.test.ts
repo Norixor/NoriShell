@@ -156,7 +156,9 @@ describe("NvxServerCard", () => {
     expect(meta.get(".nvx-server-card__sample").classes()).toContain("nvx-server-card__sample--stale");
     expect(wrapper.findAll(".nvx-server-card__metric")).toHaveLength(4);
     expect(wrapper.get('.nvx-server-card__metric[data-status="stale"]').text()).toContain("0%");
-    expect(wrapper.find(".nvx-sparkline--muted").exists()).toBe(true);
+    // The phone cell draws a load bar instead of the sparkline; a stale reading keeps a muted bar.
+    expect(wrapper.find(".nvx-sparkline").exists()).toBe(false);
+    expect(wrapper.find(".nvx-server-card__metric-bar--stale").exists()).toBe(true);
 
     await wrapper.get(".nvx-server-card__new-terminal").trigger("click");
     expect(wrapper.emitted("connect")).toEqual([[card.catalogEntry.host.hostId]]);

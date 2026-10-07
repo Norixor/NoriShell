@@ -161,9 +161,10 @@ html[data-nvx-host="mobile"] .app-plugin-region--after { grid-row: 4; }
 html[data-nvx-host="mobile"] .app-plugin-region--footer { grid-row: 5; }
 
 /* ---- Overview ----
-   The shell pill already names the page, so the title is only spoken. One search + group row,
-   status chips that carry the counts (the desktop KPI tiles are not rendered), an optional
-   one-line averages strip, then compact Cards in one column with an 8px gap. A Card is at
+   The shell pill already names the page, so the title is only spoken. One 40px row (a search
+   field that expands in place, a filter button with an active-count badge); group, status
+   chips with counts (the desktop KPI tiles are not rendered) and the one-line averages live
+   in the filter sheet, so the compact Cards (one column, 8px gap) start 56px below the shell. A Card is at
    least 108px and grows with its content (open-session row, wrapped text, the system font
    scale, which the WebView applies as text zoom): text rows use relative line heights and
    nothing fixes the height, so no state can clip the metrics row. NvxOverviewPanel assumes
@@ -193,32 +194,85 @@ html[data-nvx-host="mobile"] .nvx-overview-panel__heading {
   border: 0;
 }
 
-html[data-nvx-host="mobile"] .nvx-overview-panel__toolbar {
+html[data-nvx-host="mobile"] .nvx-overview-panel__toolbar--phone {
   display: flex;
-  flex-wrap: wrap;
   gap: var(--nvx-space-2);
+  align-items: center;
+  justify-content: flex-end;
   width: 100%;
+  min-height: 40px;
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__toolbar--phone > .plugin-extension-target {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 html[data-nvx-host="mobile"] .nvx-overview-panel__search-field {
-  order: 1;
-  flex: 1 1 160px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-html[data-nvx-host="mobile"] .nvx-overview-panel__group-filter {
-  order: 2;
-  flex: 0 1 150px;
-  min-width: 112px;
+html[data-nvx-host="mobile"] .nvx-overview-panel__search-close {
+  position: absolute;
+  right: 2px;
 }
 
-html[data-nvx-host="mobile"] .nvx-overview-panel__toolbar > .plugin-extension-target {
-  order: 4;
-  flex: 1 1 100%;
+html[data-nvx-host="mobile"] .nvx-overview-panel__search-field .nvx-overview-panel__search {
+  padding-inline-end: 36px;
 }
 
-html[data-nvx-host="mobile"] .nvx-overview-panel__status-filters {
-  order: 3;
-  flex: 1 1 100%;
+html[data-nvx-host="mobile"] .nvx-overview-panel__search-open,
+html[data-nvx-host="mobile"] .nvx-overview-panel__filters-open {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: var(--nvx-border-width) solid var(--nvx-color-border);
+  border-radius: 10px;
+  background: var(--nvx-color-bg-surface);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__filters-open--active,
+html[data-nvx-host="mobile"] .nvx-overview-panel__filters-open--active:hover:not(:disabled) {
+  border-color: var(--nvx-color-accent);
+  color: var(--nvx-color-accent);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__filters-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--nvx-color-accent);
+  color: var(--nvx-color-on-accent);
+  font-size: 11px;
+  font-weight: var(--nvx-font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* Filter sheet: averages line, status chips with counts, then the group select. */
+html[data-nvx-host="mobile"] .nvx-overview-panel__filter-sheet {
+  display: grid;
+  gap: var(--nvx-space-3);
+  padding-bottom: var(--nvx-space-2);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__filter-field {
+  display: grid;
+  gap: var(--nvx-space-1);
+  color: var(--nvx-color-text-secondary);
+  font-size: var(--nvx-font-size-xs);
+  line-height: var(--nvx-line-height-xs);
+}
+
+html[data-nvx-host="mobile"] .nvx-overview-panel__filter-sheet .nvx-overview-panel__status-filters {
+  display: flex;
   gap: var(--nvx-space-1);
   overflow-x: auto;
   scrollbar-width: none;
@@ -231,7 +285,7 @@ html[data-nvx-host="mobile"] .nvx-overview-panel__status-filters::-webkit-scroll
 html[data-nvx-host="mobile"] .nvx-overview-panel__status-filters .nvx-button {
   flex: 1 0 auto;
   gap: var(--nvx-space-1);
-  min-height: 32px;
+  min-height: 36px;
   padding-inline: var(--nvx-space-2);
 }
 
@@ -255,7 +309,7 @@ html[data-nvx-host="mobile"] .nvx-overview-panel__status-filters .nvx-button[ari
 html[data-nvx-host="mobile"] .nvx-overview-panel__averages {
   display: flex;
   gap: var(--nvx-space-3);
-  margin: 0 0 var(--nvx-space-2);
+  margin: 0;
   padding: 0 var(--nvx-space-1);
   overflow: hidden;
   color: var(--nvx-color-text-secondary);
@@ -388,33 +442,72 @@ html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metrics
   padding: 4px var(--nvx-space-2);
 }
 
+/* Metric cell: label and bold value on one line, a 4px load bar underneath (dashed outline
+   while the Host reports nothing: monitoring off, unsupported, denied, error). */
 html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric {
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   grid-template-rows: auto auto;
   column-gap: var(--nvx-space-1);
-  row-gap: 0;
+  row-gap: 3px;
 }
 
 html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-label {
-  grid-column: 1 / -1;
-  line-height: 1.2;
-}
-
-html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric strong {
   line-height: 1.4;
 }
 
-html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric .nvx-sparkline {
-  align-self: center;
-  height: 12px;
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric strong {
+  justify-self: end;
+  line-height: 1.4;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-bar {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--nvx-color-bg-hover);
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-bar--empty {
+  height: 0;
+  border-top: 2px dashed var(--nvx-color-border-strong);
+  border-radius: 0;
+  background: transparent;
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric[data-status="error"] .nvx-server-card__metric-bar--empty,
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric[data-status="permissionDenied"] .nvx-server-card__metric-bar--empty {
+  border-top-color: var(--nvx-color-danger);
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-fill {
+  display: block;
+  max-width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--nvx-color-success);
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-bar--mid .nvx-server-card__metric-fill {
+  background: var(--nvx-color-warning);
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-bar--high .nvx-server-card__metric-fill {
+  background: var(--nvx-color-danger);
+}
+
+html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-bar--stale .nvx-server-card__metric-fill {
+  background: var(--nvx-color-border-strong);
 }
 
 html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-skeleton {
-  height: 12px;
+  grid-column: 1 / -1;
+  height: 4px;
 }
 
 html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__metric-caption {
-  line-height: 1.8;
+  grid-column: 1 / -1;
+  line-height: 1.4;
 }
 
 html[data-nvx-host="mobile"] .nvx-server-card--compact .nvx-server-card__network-values {

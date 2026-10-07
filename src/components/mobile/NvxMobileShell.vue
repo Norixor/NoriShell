@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, Plus, Puzzle } from "lucide-vue-next";
+import { ChevronRight, Plus, Puzzle } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
@@ -18,8 +18,9 @@ import NvxMobileTabSwitcher from "./NvxMobileTabSwitcher.vue";
 import { useMobileTerminalFocusMode, useMobileTerminalImmersive } from "./useMobileLandscape";
 
 /**
- * The phone top bar: a leading, left-aligned "current Tab" pill (status dot, title, connection
- * state), the Tab-count button and "+". Tapping the pill or the count opens the Tab
+ * The phone top bar: a leading, left-aligned single-line "current Tab" pill (status dot, bold
+ * title, lighter connection state, trailing chevron), the Tab-count badge and a filled "+".
+ * Tapping the pill or the count opens the Tab
  * switcher; a horizontal swipe on the pill moves to the previous/next Tab. Without a
  * Tab the pill names the current page. When a plugin contributes to the
  * `app.header.actions` slot, a puzzle button opens the plugin-actions sheet; the
@@ -203,11 +204,15 @@ onBeforeUnmount(() => {
         />
         <span class="nvx-mobile-shell__text">
           <strong class="nvx-mobile-shell__title">{{ title }}</strong>
+          <span
+            class="nvx-mobile-shell__separator"
+            aria-hidden="true"
+          >·</span>
           <span class="nvx-mobile-shell__subtitle">{{ subtitle }}</span>
         </span>
         <NvxIcon
           class="nvx-mobile-shell__chevron"
-          :icon="ChevronDown"
+          :icon="ChevronRight"
           :size="16"
         />
       </button>
@@ -275,7 +280,7 @@ onBeforeUnmount(() => {
   box-shadow: var(--nvx-shadow-bar);
 }
 
-/* Landscape with a Terminal Tab: a 40px bar with a single-line pill. */
+/* Landscape with a Terminal Tab: a 40px bar; the pill drops its state text to keep width. */
 .nvx-mobile-shell--compact {
   height: calc(40px + env(safe-area-inset-top, 0px));
 }
@@ -285,7 +290,8 @@ onBeforeUnmount(() => {
   border-radius: 16px;
 }
 
-.nvx-mobile-shell--compact .nvx-mobile-shell__subtitle {
+.nvx-mobile-shell--compact .nvx-mobile-shell__subtitle,
+.nvx-mobile-shell--compact .nvx-mobile-shell__separator {
   display: none;
 }
 
@@ -295,22 +301,27 @@ onBeforeUnmount(() => {
   height: 40px;
 }
 
+.nvx-mobile-shell--compact .nvx-mobile-shell__actions :deep(.nvx-mobile-shell__new) {
+  border-radius: 10px;
+}
+
 .nvx-mobile-shell__center {
   display: flex;
   justify-content: flex-start;
   min-width: 0;
 }
 
+/* Outlined pill with an accent-tinted border (tokens only; the tint follows the theme). */
 .nvx-mobile-shell__pill {
   display: inline-flex;
   gap: var(--nvx-space-2);
   align-items: center;
   max-width: 100%;
-  min-height: 40px;
+  min-height: 36px;
   padding: 0 var(--nvx-space-2) 0 var(--nvx-space-3);
-  border: 0;
-  border-radius: 20px;
-  background: var(--nvx-color-bg-subtle);
+  border: var(--nvx-border-width) solid color-mix(in srgb, var(--nvx-color-accent) 45%, var(--nvx-color-border));
+  border-radius: 18px;
+  background: transparent;
   color: var(--nvx-color-text-primary);
   font: inherit;
   text-align: left;
@@ -339,10 +350,14 @@ onBeforeUnmount(() => {
 .nvx-mobile-shell__dot--warning { background: var(--nvx-color-warning); }
 .nvx-mobile-shell__dot--danger { background: var(--nvx-color-danger); }
 
+/* One line: the title truncates first, the state keeps at least part of its text. */
 .nvx-mobile-shell__text {
-  display: grid;
+  display: flex;
+  gap: var(--nvx-space-1);
+  align-items: baseline;
   min-width: 0;
-  line-height: 1.2;
+  font-size: var(--nvx-font-size-body);
+  line-height: 1.3;
 }
 
 .nvx-mobile-shell__title,
@@ -353,13 +368,23 @@ onBeforeUnmount(() => {
 }
 
 .nvx-mobile-shell__title {
-  font-size: var(--nvx-font-size-body);
+  /* Shrinks well before the state text, so a long name truncates first. */
+  flex: 0 10 auto;
+  min-width: 3ch;
   font-weight: var(--nvx-font-weight-semibold);
 }
 
+.nvx-mobile-shell__separator,
 .nvx-mobile-shell__subtitle {
+  flex: none;
   color: var(--nvx-color-text-secondary);
-  font-size: var(--nvx-font-size-xs);
+}
+
+.nvx-mobile-shell__subtitle {
+  /* No percentage cap: the pill is shrink-to-fit, so a % would truncate even with room to spare. */
+  flex: 0 1 auto;
+  min-width: 4ch;
+  font-size: var(--nvx-font-size-sm);
 }
 
 .nvx-mobile-shell__chevron {
@@ -398,18 +423,54 @@ onBeforeUnmount(() => {
   outline-offset: -4px;
 }
 
+/* Rounded-square outlined count badge, matching the pill's corner language. */
 .nvx-mobile-shell__count-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 24px;
-  height: 24px;
+  min-width: 36px;
+  height: 36px;
   padding: 0 6px;
-  border: 2px solid currentcolor;
-  border-radius: 7px;
-  font-size: var(--nvx-font-size-xs);
+  border: 2px solid var(--nvx-color-border-strong);
+  border-radius: 10px;
+  color: var(--nvx-color-text-primary);
+  font-size: var(--nvx-font-size-sm);
   font-weight: var(--nvx-font-weight-semibold);
   font-variant-numeric: tabular-nums;
   line-height: 1;
+}
+
+/* Filled accent "+": a rounded square instead of the ghost circle. */
+.nvx-mobile-shell__actions :deep(.nvx-mobile-shell__new) {
+  /* 36px visual (same as the pill and the count badge); the ::after keeps a 48px touch target. */
+  position: relative;
+  width: 36px;
+  height: 36px;
+  margin-inline: var(--nvx-space-2) var(--nvx-space-1);
+  border-radius: 10px;
+  background: var(--nvx-color-accent);
+  color: var(--nvx-color-on-accent);
+}
+
+.nvx-mobile-shell__actions :deep(.nvx-mobile-shell__new)::after {
+  position: absolute;
+  inset: -6px;
+  content: "";
+}
+
+/* Outranks the shared ghost hover (a tap leaves :hover sticky on Android). */
+.nvx-mobile-shell__actions :deep(.nvx-mobile-shell__new:hover:not(:disabled)),
+.nvx-mobile-shell__actions :deep(.nvx-mobile-shell__new:active:not(:disabled)) {
+  background: var(--nvx-color-accent);
+  color: var(--nvx-color-on-accent);
+}
+
+.nvx-mobile-shell__actions :deep(.nvx-mobile-shell__new:active:not(:disabled)) {
+  filter: brightness(0.9);
+}
+
+.nvx-mobile-shell__actions :deep(.nvx-mobile-shell__new:disabled) {
+  background: var(--nvx-color-accent-soft);
+  color: var(--nvx-color-accent);
 }
 </style>
