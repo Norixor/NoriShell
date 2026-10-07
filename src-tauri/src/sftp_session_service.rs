@@ -6,6 +6,7 @@
 
 mod file_utilities;
 mod local_capability;
+pub(crate) mod local_mutation;
 mod plugin_access;
 mod remote_copy;
 mod transfer_intent_cleanup;
@@ -25,6 +26,8 @@ use local_capability::{
     rememberable_local_directory_path, safe_local_name_display,
 };
 
+#[cfg(target_os = "android")]
+use local_capability::{ContentBoundary, PublishOutcome};
 #[cfg(any(unix, windows))]
 use local_capability::{
     LocalBoundaryCapability, LocalDirectoryCapabilityHandle, NativeLocalBoundary,
@@ -97,11 +100,19 @@ const MAX_DIRECTORY_PAGE_SIZE: u16 = 512;
 const MAX_KEYBOARD_PROMPTS: usize = 32;
 const MAX_LABEL_BYTES: usize = 4096;
 const MAX_RESUME_PREFIX_BYTES: usize = 8 * 1024 * 1024;
+/// Android upload documents are read through the provider descriptor; this
+/// bound only matters when a provider hands out a pipe that must be spooled
+/// into private storage first.
+#[cfg(target_os = "android")]
+const MAX_ANDROID_CONTENT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
 const SFTP_PROTOCOL_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const LOCAL_DIRECTORY_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_IN_FLIGHT_LOCAL_DIRECTORY_IO: usize = 4;
 const SFTP_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// After a user cancel abandons in-flight requests, one bounded round trip
+/// proves the SFTP channel still answers before the session is kept.
+const SFTP_CANCEL_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SFTP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const MUTATION_LEDGER_CAPACITY: usize = 1_024;
 const SFTP_V3_HANDLE_STABLE_RESUME_COMMIT: bool = false;
@@ -252,6 +263,7 @@ pub(crate) enum SftpFailureCode {
     AuthenticationRejected,
     SubsystemRejected,
     TransportLost,
+    ConnectionClosedByServer,
     Protocol,
 }
 
@@ -596,6 +608,33 @@ pub(crate) struct VerifiedRemoteResume {
     file: RemoteSftpFile,
 }
 
+impl FileMutationPlan {
+    /// Remote paths this mutation reads, writes, renames or removes.
+    fn touched_paths(&self) -> Vec<&RemotePath> {
+        match self {
+            Self::CreateDirectory { path, .. }
+            | Self::CreateEmptyFile { path, .. }
+            | Self::WriteText { path, .. }
+            | Self::DeleteConfirmed { path, .. }
+            | Self::SetPermissions { path, .. } => vec![path],
+            Self::RenameNoReplace { source, target, .. } => vec![source, target],
+            Self::CreateZip {
+                sources, target, ..
+            } => sources
+                .iter()
+                .map(|source| &source.path)
+                .chain(std::iter::once(target))
+                .collect(),
+            Self::ExtractZip {
+                source,
+                target_directory,
+                ..
+            } => vec![source, target_directory],
+            Self::DownloadUrl { target, .. } => vec![target],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitFacts {
     pub(crate) final_length: u64,
@@ -622,6 +661,65 @@ pub(crate) struct TransferRecord {
     pub(crate) safe_commit_supported: bool,
     pub(crate) failure_code: Option<TransferFailureCode>,
     pub(crate) cleanup_residual: Option<String>,
+    /// Inclusive revision range produced only by progress updates. A client
+    /// action fenced on any revision in this range saw the current lifecycle
+    /// state; progress alone must not turn a user's cancel into a conflict.
+    progress_window: Option<(u64, u64)>,
+    /// Android picked-document downloads: the private commit is not visible to
+    /// the user, so the whole commit-and-publish phase stays cancellable.
+    publish_cancellable: bool,
+}
+
+impl TransferRecord {
+    /// Whether an action fenced on `expected` still targets the current
+    /// lifecycle state of this transfer.
+    pub(crate) fn accepts_revision(&self, expected: u64) -> bool {
+        revision_within_progress(expected, self.state_revision, self.progress_window)
+    }
+
+    /// The public cancel fact: mirrors what `begin_cancel` accepts, except a
+    /// failed transfer, whose residual is resolved by its own cleanup action.
+    pub(crate) fn cancellable(&self) -> bool {
+        match self.state {
+            TransferState::Committing => self.publish_cancellable,
+            TransferState::Completed
+            | TransferState::Cancelling
+            | TransferState::Cancelled
+            | TransferState::Failed => false,
+            TransferState::Queued
+            | TransferState::Preparing
+            | TransferState::Transferring
+            | TransferState::Verifying
+            | TransferState::PausedByDisconnect => true,
+        }
+    }
+}
+
+/// Cancel fact of a server-to-server copy intent: its commit is not cancellable.
+fn remote_copy_intent_cancellable(state: wire::SftpTransferState) -> bool {
+    !matches!(
+        state,
+        wire::SftpTransferState::Committing
+            | wire::SftpTransferState::Completed
+            | wire::SftpTransferState::Cancelling
+            | wire::SftpTransferState::Cancelled
+            | wire::SftpTransferState::Failed
+    )
+}
+
+/// `expected` equals `current`, or both lie inside one uninterrupted run of
+/// progress-only revisions.
+fn revision_within_progress(expected: u64, current: u64, window: Option<(u64, u64)>) -> bool {
+    expected == current
+        || window.is_some_and(|(start, end)| end == current && (start..=end).contains(&expected))
+}
+
+/// Extends the progress-only window when the previous revision ended one.
+fn extend_progress_window(window: &mut Option<(u64, u64)>, before: u64, after: u64) {
+    *window = match *window {
+        Some((start, end)) if end == before => Some((start, after)),
+        _ => Some((before, after)),
+    };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -854,12 +952,12 @@ where
             let _ = subsystem.disconnect().await;
             return Err(SftpProductionError::Runtime(error));
         }
-        Ok(SftpProductionSession {
+        Ok(SftpProductionSession::new(
             generation,
-            transport: SftpLiveTransport::Dedicated(subsystem),
-            transport_heartbeats: self.transport_heartbeats,
-            transport_keepalive: self.transport_keepalive,
-        })
+            SftpLiveTransport::Dedicated(subsystem),
+            self.transport_heartbeats,
+            self.transport_keepalive,
+        ))
     }
 }
 
@@ -886,6 +984,8 @@ where
 {
     generation: SftpGeneration,
     transport: SftpLiveTransport<V>,
+    /// Generation-fenced protocol handle on `transport`'s SFTP channel.
+    channel: SftpDirectoryClient,
     pub(crate) transport_heartbeats: Vec<RoutedTransportHeartbeat>,
     pub(crate) transport_keepalive: Option<ResolvedTransportKeepalivePolicy>,
 }
@@ -926,7 +1026,7 @@ where
 }
 
 #[derive(Clone)]
-struct SftpDirectoryClient {
+pub(crate) struct SftpDirectoryClient {
     generation: SftpGeneration,
     client: RemoteSftpClient,
 }
@@ -978,13 +1078,59 @@ impl<V> SftpProductionSession<V>
 where
     V: HostKeyVerifier,
 {
-    fn directory_client(&self) -> SftpDirectoryClient {
-        SftpDirectoryClient {
-            generation: self.generation,
-            client: self.transport.client().clone(),
+    fn new(
+        generation: SftpGeneration,
+        transport: SftpLiveTransport<V>,
+        transport_heartbeats: Vec<RoutedTransportHeartbeat>,
+        transport_keepalive: Option<ResolvedTransportKeepalivePolicy>,
+    ) -> Self {
+        let channel = SftpDirectoryClient {
+            generation,
+            client: transport.client().clone(),
+        };
+        Self {
+            generation,
+            transport,
+            channel,
+            transport_heartbeats,
+            transport_keepalive,
         }
     }
 
+    fn directory_client(&self) -> SftpDirectoryClient {
+        self.channel.clone()
+    }
+
+    fn uses_shared_transport(&self) -> bool {
+        matches!(&self.transport, SftpLiveTransport::Shared(_))
+    }
+
+    pub(crate) async fn disconnect(self) -> Result<(), SftpProductionError> {
+        self.transport
+            .disconnect()
+            .await
+            .map_err(|error| SftpProductionError::Transport(Box::new(error)))
+    }
+}
+
+/// Every protocol operation only needs the generation fence and the SFTP
+/// client; the owning session adds transport lifecycle on top.
+impl<V> std::ops::Deref for SftpProductionSession<V>
+where
+    V: HostKeyVerifier,
+{
+    type Target = SftpDirectoryClient;
+
+    fn deref(&self) -> &SftpDirectoryClient {
+        &self.channel
+    }
+}
+
+/// Protocol operations on one SFTP channel. A running transfer owns the
+/// session's transport, but SFTP multiplexes requests by id, so this handle
+/// (also lent through `lent_sftp_clients`) serves browsing and file actions
+/// concurrently on the same channel.
+impl SftpDirectoryClient {
     pub(crate) async fn execute_mutation(
         &self,
         plan: &FileMutationPlan,
@@ -1003,13 +1149,13 @@ where
         self.require_generation(generation)?;
         match plan {
             FileMutationPlan::CreateDirectory { path, .. } => {
-                self.bounded_protocol(self.transport.client().create_dir(remote_path_utf8(path)?))
+                self.bounded_protocol(self.client.create_dir(remote_path_utf8(path)?))
                     .await
             }
             FileMutationPlan::CreateEmptyFile { path, .. } => {
                 let path = remote_path_utf8(path)?;
                 let file = self
-                    .bounded_protocol(self.transport.client().open_with_flags(
+                    .bounded_protocol(self.client.open_with_flags(
                         path,
                         OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
                     ))
@@ -1027,14 +1173,14 @@ where
                 let temporary_target = remote_edit_temporary_path(path, &operation.operation_id)?;
                 let temporary_path = remote_path_utf8(&temporary_target)?;
                 let metadata = self
-                    .bounded_protocol(self.transport.client().symlink_metadata(target_path))
+                    .bounded_protocol(self.client.symlink_metadata(target_path))
                     .await?;
                 let observed = remote_precondition_from_metadata(&metadata);
                 if &observed != precondition || observed.kind != RemoteEntryKind::File {
                     return Err(SftpRuntimeError::Conflict.into());
                 }
                 if self
-                    .bounded_protocol(self.transport.client().try_exists(temporary_path))
+                    .bounded_protocol(self.client.try_exists(temporary_path))
                     .await?
                 {
                     return Err(SftpRuntimeError::Conflict.into());
@@ -1043,7 +1189,7 @@ where
                     u64::try_from(bytes.len()).map_err(|_| SftpRuntimeError::InvalidInput)?;
                 let write_result = async {
                     let mut file = self
-                        .bounded_protocol(self.transport.client().open_with_flags(
+                        .bounded_protocol(self.client.open_with_flags(
                             temporary_path,
                             OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
                         ))
@@ -1066,23 +1212,19 @@ where
                 }
                 let commit_result = async {
                     let current = self
-                        .bounded_protocol(self.transport.client().symlink_metadata(target_path))
+                        .bounded_protocol(self.client.symlink_metadata(target_path))
                         .await?;
                     if remote_precondition_from_metadata(&current) != *precondition {
                         return Err(SftpRuntimeError::Conflict.into());
                     }
                     let replaced = self
-                        .bounded_protocol(
-                            self.transport
-                                .client()
-                                .posix_rename(temporary_path, target_path),
-                        )
+                        .bounded_protocol(self.client.posix_rename(temporary_path, target_path))
                         .await?;
                     if !replaced {
                         return Err(SftpRuntimeError::UnsafeReplaceUnsupported.into());
                     }
                     let final_length = self
-                        .bounded_protocol(self.transport.client().symlink_metadata(target_path))
+                        .bounded_protocol(self.client.symlink_metadata(target_path))
                         .await?
                         .len();
                     if final_length != expected_length {
@@ -1108,7 +1250,7 @@ where
                 let source = remote_path_utf8(source)?;
                 let target = remote_path_utf8(target)?;
                 let metadata = self
-                    .bounded_protocol(self.transport.client().symlink_metadata(source))
+                    .bounded_protocol(self.client.symlink_metadata(source))
                     .await?;
                 let observed = RemoteObjectPrecondition {
                     kind: remote_entry_kind_from_flags(
@@ -1126,19 +1268,19 @@ where
                     return Err(SftpRuntimeError::UnsafeReplaceUnsupported.into());
                 }
                 if self
-                    .bounded_protocol(self.transport.client().try_exists(target))
+                    .bounded_protocol(self.client.try_exists(target))
                     .await?
                 {
                     return Err(SftpRuntimeError::Conflict.into());
                 }
                 let linked = self
-                    .bounded_protocol(self.transport.client().hardlink(source, target))
+                    .bounded_protocol(self.client.hardlink(source, target))
                     .await
                     .map_err(|_| SftpProductionError::Runtime(SftpRuntimeError::Conflict))?;
                 if !linked {
                     return Err(SftpRuntimeError::UnsafeReplaceUnsupported.into());
                 }
-                self.bounded_protocol(self.transport.client().remove_file(source))
+                self.bounded_protocol(self.client.remove_file(source))
                     .await
                     .map_err(|_| SftpRuntimeError::CleanupIncomplete.into())
             }
@@ -1150,7 +1292,7 @@ where
             } => {
                 let path = remote_path_utf8(path)?;
                 let metadata = self
-                    .bounded_protocol(self.transport.client().symlink_metadata(path))
+                    .bounded_protocol(self.client.symlink_metadata(path))
                     .await?;
                 let observed = RemoteObjectPrecondition {
                     kind: remote_entry_kind_from_flags(
@@ -1173,13 +1315,9 @@ where
                     return Err(SftpRuntimeError::Conflict.into());
                 }
                 match kind {
-                    DeleteKind::File => {
-                        self.bounded_protocol(self.transport.client().remove_file(path))
-                            .await
-                    }
+                    DeleteKind::File => self.bounded_protocol(self.client.remove_file(path)).await,
                     DeleteKind::EmptyDirectory => {
-                        self.bounded_protocol(self.transport.client().remove_dir(path))
-                            .await
+                        self.bounded_protocol(self.client.remove_dir(path)).await
                     }
                 }
             }
@@ -1192,13 +1330,13 @@ where
             } => {
                 let path = remote_path_utf8(path)?;
                 let metadata = self
-                    .bounded_protocol(self.transport.client().symlink_metadata(path))
+                    .bounded_protocol(self.client.symlink_metadata(path))
                     .await?;
                 if !remote_permissions_match(&metadata, precondition, *expected_permission_bits) {
                     return Err(SftpRuntimeError::Conflict.into());
                 }
                 let updated_bits = replace_rwx_permission_bits(*expected_permission_bits, *mode);
-                self.bounded_protocol(self.transport.client().set_metadata(
+                self.bounded_protocol(self.client.set_metadata(
                     path,
                     RemoteFileAttributes {
                         permissions: Some(updated_bits),
@@ -1207,7 +1345,7 @@ where
                 ))
                 .await?;
                 let updated = self
-                    .bounded_protocol(self.transport.client().symlink_metadata(path))
+                    .bounded_protocol(self.client.symlink_metadata(path))
                     .await?;
                 if remote_precondition_from_metadata(&updated) != *precondition
                     || updated.permissions != Some(updated_bits)
@@ -1286,11 +1424,7 @@ where
             }
             validate_archive_name(&archive_name)?;
             let metadata = self
-                .bounded_protocol(
-                    self.transport
-                        .client()
-                        .symlink_metadata(remote_path_utf8(&path)?),
-                )
+                .bounded_protocol(self.client.symlink_metadata(remote_path_utf8(&path)?))
                 .await?;
             let observed = remote_precondition_from_metadata(&metadata);
             if is_root && observed != expected {
@@ -1330,11 +1464,7 @@ where
                         bytes: Vec::new(),
                     });
                     let mut stream = self
-                        .bounded_protocol(
-                            self.transport
-                                .client()
-                                .open_dir_stream(remote_path_utf8(&path)?),
-                        )
+                        .bounded_protocol(self.client.open_dir_stream(remote_path_utf8(&path)?))
                         .await?;
                     loop {
                         let page = self.bounded_protocol(stream.next_page(256)).await?;
@@ -1393,10 +1523,10 @@ where
         let temporary_target = remote_edit_temporary_path(target, &operation.operation_id)?;
         let temporary_path = remote_path_utf8(&temporary_target)?;
         if self
-            .bounded_protocol(self.transport.client().try_exists(target_path))
+            .bounded_protocol(self.client.try_exists(target_path))
             .await?
             || self
-                .bounded_protocol(self.transport.client().try_exists(temporary_path))
+                .bounded_protocol(self.client.try_exists(temporary_path))
                 .await?
         {
             return Err(SftpRuntimeError::Conflict.into());
@@ -1405,7 +1535,7 @@ where
             u64::try_from(bytes.len()).map_err(|_| SftpRuntimeError::InvalidInput)?;
         let write_result = async {
             let mut file = self
-                .bounded_protocol(self.transport.client().open_with_flags(
+                .bounded_protocol(self.client.open_with_flags(
                     temporary_path,
                     OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
                 ))
@@ -1435,11 +1565,7 @@ where
             return Err(error);
         }
         let linked = self
-            .bounded_protocol(
-                self.transport
-                    .client()
-                    .hardlink(temporary_path, target_path),
-            )
+            .bounded_protocol(self.client.hardlink(temporary_path, target_path))
             .await;
         let linked = match linked {
             Ok(linked) => linked,
@@ -1464,11 +1590,11 @@ where
             }
             return Err(SftpRuntimeError::UnsafeReplaceUnsupported.into());
         }
-        self.bounded_protocol(self.transport.client().remove_file(temporary_path))
+        self.bounded_protocol(self.client.remove_file(temporary_path))
             .await
             .map_err(|_| SftpRuntimeError::CleanupIncomplete)?;
         let final_length = self
-            .bounded_protocol(self.transport.client().symlink_metadata(target_path))
+            .bounded_protocol(self.client.symlink_metadata(target_path))
             .await?
             .len();
         if final_length != expected_length {
@@ -1485,14 +1611,10 @@ where
     ) -> Result<(), SftpProductionError> {
         self.require_generation(generation)?;
         let root = remote_path_utf8(target_directory)?;
-        if self
-            .bounded_protocol(self.transport.client().try_exists(root))
-            .await?
-        {
+        if self.bounded_protocol(self.client.try_exists(root)).await? {
             return Err(SftpRuntimeError::Conflict.into());
         }
-        self.bounded_protocol(self.transport.client().create_dir(root))
-            .await?;
+        self.bounded_protocol(self.client.create_dir(root)).await?;
         let mut created_directories = BTreeSet::from([String::new()]);
         for entry in entries {
             let components = entry.name.split('/').collect::<Vec<_>>();
@@ -1505,18 +1627,16 @@ where
                 let relative = components[..index].join("/");
                 if created_directories.insert(relative.clone()) {
                     let path = remote_archive_child_path(target_directory, &relative)?;
-                    self.bounded_protocol(
-                        self.transport.client().create_dir(remote_path_utf8(&path)?),
-                    )
-                    .await
-                    .map_err(|_| SftpRuntimeError::CleanupIncomplete)?;
+                    self.bounded_protocol(self.client.create_dir(remote_path_utf8(&path)?))
+                        .await
+                        .map_err(|_| SftpRuntimeError::CleanupIncomplete)?;
                 }
             }
             if !entry.is_directory {
                 let target = remote_archive_child_path(target_directory, &entry.name)?;
                 let target_path = remote_path_utf8(&target)?;
                 let mut file = self
-                    .bounded_protocol(self.transport.client().open_with_flags(
+                    .bounded_protocol(self.client.open_with_flags(
                         target_path,
                         OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
                     ))
@@ -1580,16 +1700,16 @@ where
         let temporary_target = remote_edit_temporary_path(target, &operation.operation_id)?;
         let temporary_path = remote_path_utf8(&temporary_target)?;
         if self
-            .bounded_protocol(self.transport.client().try_exists(target_path))
+            .bounded_protocol(self.client.try_exists(target_path))
             .await?
             || self
-                .bounded_protocol(self.transport.client().try_exists(temporary_path))
+                .bounded_protocol(self.client.try_exists(temporary_path))
                 .await?
         {
             return Err(SftpRuntimeError::Conflict.into());
         }
         let mut file = self
-            .bounded_protocol(self.transport.client().open_with_flags(
+            .bounded_protocol(self.client.open_with_flags(
                 temporary_path,
                 OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
             ))
@@ -1627,11 +1747,7 @@ where
             return Err(error);
         }
         let linked = self
-            .bounded_protocol(
-                self.transport
-                    .client()
-                    .hardlink(temporary_path, target_path),
-            )
+            .bounded_protocol(self.client.hardlink(temporary_path, target_path))
             .await
             .map_err(|_| SftpRuntimeError::Conflict)?;
         if !linked {
@@ -1641,7 +1757,7 @@ where
             return Err(SftpRuntimeError::UnsafeReplaceUnsupported.into());
         }
         Ok(self
-            .bounded_protocol(self.transport.client().remove_file(temporary_path))
+            .bounded_protocol(self.client.remove_file(temporary_path))
             .await
             .map_err(|_| SftpRuntimeError::CleanupIncomplete)?)
     }
@@ -1660,22 +1776,22 @@ where
         let target = remote_path_utf8(target)?;
         let temporary_target = remote_path_utf8(temporary_target)?;
         let target_existed = self
-            .bounded_protocol(self.transport.client().try_exists(target))
+            .bounded_protocol(self.client.try_exists(target))
             .await?;
         let target_precondition = if target_existed {
             let metadata = self
-                .bounded_protocol(self.transport.client().symlink_metadata(target))
+                .bounded_protocol(self.client.symlink_metadata(target))
                 .await?;
             Some(remote_precondition_from_metadata(&metadata))
         } else {
             None
         };
         let temporary_target_existed = self
-            .bounded_protocol(self.transport.client().try_exists(temporary_target))
+            .bounded_protocol(self.client.try_exists(temporary_target))
             .await?;
         let temporary_target_length = if temporary_target_existed {
             let metadata = self
-                .bounded_protocol(self.transport.client().symlink_metadata(temporary_target))
+                .bounded_protocol(self.client.symlink_metadata(temporary_target))
                 .await?;
             if !metadata.is_regular() {
                 return Err(SftpRuntimeError::InvalidInput.into());
@@ -1687,8 +1803,7 @@ where
         Ok(RemoteTransferPreparationFacts {
             target_existed,
             safe_commit_supported: target_precondition.as_ref().is_some_and(|precondition| {
-                precondition.kind == RemoteEntryKind::File
-                    && self.transport.client().supports_posix_rename()
+                precondition.kind == RemoteEntryKind::File && self.client.supports_posix_rename()
             }),
             target_precondition,
             temporary_target_existed,
@@ -1704,11 +1819,7 @@ where
     ) -> Result<(), SftpProductionError> {
         self.require_generation(generation)?;
         let metadata = self
-            .bounded_protocol(
-                self.transport
-                    .client()
-                    .symlink_metadata(remote_path_utf8(path)?),
-            )
+            .bounded_protocol(self.client.symlink_metadata(remote_path_utf8(path)?))
             .await?;
         let observed = RemoteObjectPrecondition {
             kind: remote_entry_kind_from_flags(
@@ -1739,7 +1850,7 @@ where
             return Err(SftpRuntimeError::InvalidInput.into());
         }
         let mut source = self
-            .bounded_protocol(self.transport.client().open(remote_path_utf8(path)?))
+            .bounded_protocol(self.client.open(remote_path_utf8(path)?))
             .await?;
         self.bounded_protocol(source.seek(io::SeekFrom::Start(start_offset)))
             .await?;
@@ -1775,7 +1886,7 @@ where
         self.require_generation(generation)?;
         let path = remote_path_utf8(path)?;
         let metadata = self
-            .bounded_protocol(self.transport.client().symlink_metadata(path))
+            .bounded_protocol(self.client.symlink_metadata(path))
             .await?;
         if !metadata.is_regular() {
             return Err(SftpRuntimeError::Conflict.into());
@@ -1787,9 +1898,7 @@ where
         if start_offset == total_size {
             return Ok((start_offset, start_offset, total_size, reset, Vec::new()));
         }
-        let mut source = self
-            .bounded_protocol(self.transport.client().open(path))
-            .await?;
+        let mut source = self.bounded_protocol(self.client.open(path)).await?;
         self.bounded_protocol(source.seek(io::SeekFrom::Start(start_offset)))
             .await?;
         let capacity = usize::try_from(length).map_err(|_| SftpRuntimeError::InvalidInput)?;
@@ -1812,14 +1921,12 @@ where
     ) -> Result<CleanupOutcome, SftpProductionError> {
         self.require_generation(generation)?;
         let path = remote_path_utf8(temporary_target)?;
-        let existed = self
-            .bounded_protocol(self.transport.client().try_exists(path))
-            .await?;
+        let existed = self.bounded_protocol(self.client.try_exists(path)).await?;
         if !existed {
             return Ok(CleanupOutcome::Cleaned);
         }
         if self
-            .bounded_protocol(self.transport.client().remove_file(path))
+            .bounded_protocol(self.client.remove_file(path))
             .await
             .is_err()
         {
@@ -1827,10 +1934,7 @@ where
                 opaque_location: path.to_owned(),
             });
         }
-        match self
-            .bounded_protocol(self.transport.client().try_exists(path))
-            .await
-        {
+        match self.bounded_protocol(self.client.try_exists(path)).await {
             Ok(false) => Ok(CleanupOutcome::Cleaned),
             Ok(true) | Err(_) => Ok(CleanupOutcome::Residual {
                 opaque_location: path.to_owned(),
@@ -1854,8 +1958,7 @@ where
         let path = remote_path_utf8(&temporary_target)?;
         let mut file = self
             .bounded_protocol(
-                self.transport
-                    .client()
+                self.client
                     .open_with_flags(path, OpenFlags::READ | OpenFlags::WRITE),
             )
             .await?;
@@ -1904,17 +2007,6 @@ where
     /// remains fail-closed until the adapter gains a handle-stable commit.
     fn supports_handle_stable_resume_commit(&self) -> bool {
         sftp_v3_handle_stable_resume_commit_supported()
-    }
-
-    fn uses_shared_transport(&self) -> bool {
-        matches!(&self.transport, SftpLiveTransport::Shared(_))
-    }
-
-    pub(crate) async fn disconnect(self) -> Result<(), SftpProductionError> {
-        self.transport
-            .disconnect()
-            .await
-            .map_err(|error| SftpProductionError::Transport(Box::new(error)))
     }
 
     fn require_generation(&self, generation: SftpGeneration) -> Result<(), SftpProductionError> {
@@ -2546,6 +2638,8 @@ impl SftpSessionActor {
             safe_commit_supported: false,
             failure_code: None,
             cleanup_residual: None,
+            progress_window: None,
+            publish_cancellable: false,
         };
         self.transfers.insert(transfer_id, record.clone());
         Ok(record)
@@ -2649,7 +2743,24 @@ impl SftpSessionActor {
             return Err(SftpRuntimeError::ProgressRegression);
         }
         record.transferred_bytes = transferred_bytes;
+        let before = record.state_revision;
         record.state_revision = record.state_revision.saturating_add(1);
+        extend_progress_window(&mut record.progress_window, before, record.state_revision);
+        Ok(())
+    }
+
+    /// Android picked-document download entering commit: cancel stays
+    /// available until the published document is complete.
+    pub(crate) fn mark_publish_cancellable(
+        &mut self,
+        transfer_id: &TransferId,
+        generation: SftpGeneration,
+    ) -> SftpRuntimeResult<()> {
+        let record = self.transfer_mut(transfer_id, generation)?;
+        if record.state != TransferState::Committing {
+            return Err(SftpRuntimeError::InvalidState);
+        }
+        record.publish_cancellable = true;
         Ok(())
     }
 
@@ -2733,13 +2844,14 @@ impl SftpSessionActor {
         generation: SftpGeneration,
     ) -> SftpRuntimeResult<()> {
         let record = self.transfer_mut(transfer_id, generation)?;
-        if matches!(
-            record.state,
-            TransferState::Committing
-                | TransferState::Completed
-                | TransferState::Cancelled
-                | TransferState::Cancelling
-        ) {
+        let committing_locked =
+            record.state == TransferState::Committing && !record.publish_cancellable;
+        if committing_locked
+            || matches!(
+                record.state,
+                TransferState::Completed | TransferState::Cancelled | TransferState::Cancelling
+            )
+        {
             return Err(SftpRuntimeError::InvalidState);
         }
         transfer_transition(record, TransferState::Cancelling, None);
@@ -3544,6 +3656,7 @@ fn map_transport_failure(error: &TransportError) -> SftpFailureCode {
             SftpFailureCode::SubsystemRejected
         }
         TransportError::ConnectionLost => SftpFailureCode::TransportLost,
+        TransportError::ServerClosedBeforeHandshake => SftpFailureCode::ConnectionClosedByServer,
         _ => SftpFailureCode::Protocol,
     }
 }
@@ -4145,6 +4258,8 @@ struct TransferIntentRecord {
     legacy_session_id: Option<String>,
     started_at: Option<std::time::Instant>,
     cancel_operation: Option<(String, String, Vec<u8>)>,
+    /// Progress-only revision run of a remote copy (see `TransferRecord`).
+    progress_window: Option<(u64, u64)>,
 }
 
 #[derive(Clone)]
@@ -4203,6 +4318,74 @@ struct PreparedTransferIntentToken {
     prepared: PreparedTransferIntent,
     expires_at_unix_ms: i64,
     consumed: bool,
+}
+
+/// A session channel lent to a running transfer, with the remote paths that
+/// transfer owns. Concurrent mutations must not touch those paths.
+#[derive(Clone)]
+struct LentSftpChannel {
+    channel: SftpDirectoryClient,
+    busy_paths: Vec<RemotePath>,
+}
+
+impl LentSftpChannel {
+    fn new(channel: SftpDirectoryClient, transfer_id: &TransferId, paths: &[&RemotePath]) -> Self {
+        Self {
+            channel,
+            busy_paths: transfer_busy_paths(transfer_id, paths),
+        }
+    }
+
+    fn for_transfer(channel: SftpDirectoryClient, plan: &TransferPlan) -> Self {
+        let remote_paths = [&plan.source, &plan.target]
+            .into_iter()
+            .filter_map(|endpoint| match endpoint {
+                TransferEndpoint::Remote(path) => Some(path),
+                TransferEndpoint::LocalBoundaryToken(_) => None,
+            })
+            .collect::<Vec<_>>();
+        Self::new(channel, &plan.transfer_id, &remote_paths)
+    }
+
+    fn conflicts_with(&self, plan: &FileMutationPlan) -> bool {
+        mutation_touches_busy_paths(plan, &self.busy_paths)
+    }
+}
+
+/// Remote paths a running transfer owns: each remote endpoint and the hidden
+/// temporary sibling it writes before commit.
+fn transfer_busy_paths(transfer_id: &TransferId, paths: &[&RemotePath]) -> Vec<RemotePath> {
+    let mut busy_paths = Vec::new();
+    for path in paths {
+        busy_paths.push((*path).clone());
+        if let Ok(temporary) = remote_temporary_target(path, transfer_id) {
+            busy_paths.push(temporary);
+        }
+    }
+    busy_paths
+}
+
+fn mutation_touches_busy_paths(plan: &FileMutationPlan, busy_paths: &[RemotePath]) -> bool {
+    plan.touched_paths().iter().any(|touched| {
+        busy_paths
+            .iter()
+            .any(|busy| remote_paths_overlap(touched.as_bytes(), busy.as_bytes()))
+    })
+}
+
+/// Equal paths, or one is an ancestor directory of the other.
+fn remote_paths_overlap(left: &[u8], right: &[u8]) -> bool {
+    fn contains(ancestor: &[u8], path: &[u8]) -> bool {
+        let ancestor = if ancestor.len() > 1 {
+            ancestor.strip_suffix(b"/").unwrap_or(ancestor)
+        } else {
+            ancestor
+        };
+        path == ancestor
+            || (path.starts_with(ancestor)
+                && (ancestor == b"/" || path.get(ancestor.len()) == Some(&b'/')))
+    }
+    contains(left, right) || contains(right, left)
 }
 
 #[derive(Clone)]
@@ -4293,6 +4476,7 @@ pub(crate) struct SftpSessionService {
     remote_entry_refs: Arc<Mutex<BTreeMap<String, RemoteEntryReference>>>,
     local_directory_list_ledger: Arc<Mutex<BTreeMap<String, LocalDirectoryListLedgerRecord>>>,
     local_directory_open_ledger: Arc<Mutex<BTreeMap<String, LocalDirectoryOpenLedgerRecord>>>,
+    local_mutation_ledger: Arc<Mutex<local_mutation::LocalMutationLedger>>,
     remote_directory_cancel_ledger: Arc<Mutex<BTreeMap<String, RemoteDirectoryCancelLedgerRecord>>>,
     remote_directory_list_ledger: Arc<Mutex<BTreeMap<String, RemoteDirectoryListLedgerRecord>>>,
     remote_directory_list_operations: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
@@ -4311,6 +4495,11 @@ pub(crate) struct SftpSessionService {
         Arc<Mutex<BTreeMap<String, IntentCleanupExitAuthorization>>>,
     intent_cleanup_replays: Arc<Mutex<BTreeMap<String, IntentCleanupReplay>>>,
     transfer_scheduling_paused: Arc<AtomicBool>,
+    /// SFTP client handles of sessions whose live transport is lent to a
+    /// running transfer. SFTP multiplexes requests, so a copy queued behind
+    /// that transfer can still verify its source on the same channel instead
+    /// of failing as if the session were gone.
+    lent_sftp_clients: Arc<Mutex<BTreeMap<String, LentSftpChannel>>>,
 }
 
 impl SftpSessionService {
@@ -4338,10 +4527,12 @@ impl SftpSessionService {
             remote_entry_refs: Arc::new(Mutex::new(BTreeMap::new())),
             local_directory_list_ledger: Arc::new(Mutex::new(BTreeMap::new())),
             local_directory_open_ledger: Arc::new(Mutex::new(BTreeMap::new())),
+            local_mutation_ledger: Arc::new(Mutex::new(BTreeMap::new())),
             remote_directory_cancel_ledger: Arc::new(Mutex::new(BTreeMap::new())),
             remote_directory_list_ledger: Arc::new(Mutex::new(BTreeMap::new())),
             remote_directory_list_operations: Arc::new(Mutex::new(BTreeMap::new())),
             active_transfers: Arc::new(Mutex::new(BTreeMap::new())),
+            lent_sftp_clients: Arc::new(Mutex::new(BTreeMap::new())),
             transfer_intents: Arc::new(Mutex::new(BTreeMap::new())),
             prepared_transfer_intents: Arc::new(Mutex::new(BTreeMap::new())),
             public_intent_transfer_ids: Arc::new(Mutex::new(BTreeSet::new())),
@@ -4602,12 +4793,12 @@ impl SftpSessionService {
         };
         let subsystem_id = uuid::Uuid::now_v7().to_string();
         actor.subsystem_opened(generation, subsystem_id.clone())?;
-        let live = SftpProductionSession {
+        let live = SftpProductionSession::new(
             generation,
-            transport: SftpLiveTransport::Shared(channel),
-            transport_heartbeats: Vec::new(),
-            transport_keepalive: None,
-        };
+            SftpLiveTransport::Shared(channel),
+            Vec::new(),
+            None,
+        );
         let parent_channels = lease.channels.clone();
         let record = shared_sftp_record(actor, Some(live), lease, false);
         let summary = map_sftp_summary(&record)?;
@@ -5271,7 +5462,10 @@ impl SftpSessionService {
                 .get_mut(&session_key)
                 .ok_or(SftpRuntimeError::InvalidInput)?;
             self.reconcile_record_liveness(&session_key, record).await;
-            let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
+            let channel = self
+                .session_channel(&session_key, record)
+                .await
+                .ok_or(SftpRuntimeError::InvalidState)?;
             let plan = record.actor.directory_listing(
                 OperationFence::parse(request.operation_id.to_string(), request.idempotency_key)?,
                 generation,
@@ -5279,7 +5473,7 @@ impl SftpSessionService {
                 requested_cursor.clone(),
                 request.page_size,
             )?;
-            let directory_client = requested_cursor.is_none().then(|| live.directory_client());
+            let directory_client = requested_cursor.is_none().then_some(channel);
             (plan, directory_client)
         };
         let (directory_ref, page_entries, continuation) = if requested_cursor.is_none() {
@@ -5649,15 +5843,19 @@ impl SftpSessionService {
                 .get_mut(&session_key)
                 .ok_or(SftpRuntimeError::InvalidInput)?;
             self.reconcile_record_liveness(&session_key, record).await;
-            let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
-            live.read_remote_file_preview(
-                generation,
-                &entry.path,
-                &entry.precondition,
-                start_offset,
-                maximum_bytes,
-            )
-            .await?
+            let channel = self
+                .session_channel(&session_key, record)
+                .await
+                .ok_or(SftpRuntimeError::InvalidState)?;
+            channel
+                .read_remote_file_preview(
+                    generation,
+                    &entry.path,
+                    &entry.precondition,
+                    start_offset,
+                    maximum_bytes,
+                )
+                .await?
         };
         let content = match preview_kind {
             PreviewKind::Text => {
@@ -5741,14 +5939,18 @@ impl SftpSessionService {
                 .get_mut(&session_key)
                 .ok_or(SftpRuntimeError::InvalidInput)?;
             self.reconcile_record_liveness(&session_key, record).await;
-            let live = record.live.as_ref().ok_or(SftpRuntimeError::InvalidState)?;
-            live.read_remote_file_tail_limited(
-                generation,
-                &entry.path,
-                request.offset.get(),
-                maximum_bytes,
-            )
-            .await?
+            let channel = self
+                .session_channel(&session_key, record)
+                .await
+                .ok_or(SftpRuntimeError::InvalidState)?;
+            channel
+                .read_remote_file_tail_limited(
+                    generation,
+                    &entry.path,
+                    request.offset.get(),
+                    maximum_bytes,
+                )
+                .await?
         };
         Ok(wire::SftpFileTailResult {
             session_id: request.session_id,
@@ -5999,7 +6201,7 @@ impl SftpSessionService {
         let generation = SftpGeneration::new(request.expected_generation.get())?;
         let operation =
             OperationFence::parse(request.operation_id.to_string(), request.idempotency_key)?;
-        let (plan, live) = {
+        let (plan, live, lent) = {
             let mut records = self.records.lock().await;
             let record = records
                 .get_mut(&session_key)
@@ -6105,11 +6307,34 @@ impl SftpSessionService {
                     RemotePath::parse(target.bytes)?,
                 )?,
             };
-            let live = record.live.take().ok_or(SftpRuntimeError::InvalidState)?;
-            (plan, live)
+            // An idle session lends its whole transport to the mutation. While
+            // a transfer owns it, the mutation shares that transfer's channel
+            // and must not touch the paths the transfer writes or reads.
+            let live = record.live.take();
+            let lent = match live {
+                Some(_) => None,
+                None => {
+                    let lent = self
+                        .lent_sftp_clients
+                        .lock()
+                        .await
+                        .get(&session_key)
+                        .cloned()
+                        .ok_or(SftpRuntimeError::InvalidState)?;
+                    if lent.conflicts_with(&plan) {
+                        return Err(SftpRuntimeError::Conflict.into());
+                    }
+                    Some(lent.channel)
+                }
+            };
+            (plan, live, lent)
         };
-        let result = live.execute_mutation(&plan).await;
-        let mut live = Some(live);
+        let result = match (&live, &lent) {
+            (Some(live), _) => live.execute_mutation(&plan).await,
+            (None, Some(channel)) => channel.execute_mutation(&plan).await,
+            (None, None) => Err(SftpRuntimeError::InvalidState.into()),
+        };
+        let mut live = live;
         {
             let mut records = self.records.lock().await;
             if let Some(record) = records.get_mut(&session_key) {
@@ -6268,6 +6493,11 @@ impl SftpSessionService {
                 let Some((plan, boundary, live, liveness)) = start else {
                     continue;
                 };
+                let lent = LentSftpChannel::for_transfer(live.directory_client(), &plan);
+                self.lent_sftp_clients
+                    .lock()
+                    .await
+                    .insert(session_key.to_owned(), lent);
                 let transfer_key = transfer_id.as_str().to_owned();
                 let (cancel_requested, _) = watch::channel(false);
                 let (finished, _) = watch::channel(false);
@@ -6580,6 +6810,7 @@ impl SftpSessionService {
             commit_outcome: wire::SftpTransferCommitOutcome::NotCommitted,
             failure_code: None,
             cleanup_residual: None,
+            cancellable: true,
         };
         let legacy = match (&prepared.source, &prepared.target) {
             (
@@ -6717,6 +6948,7 @@ impl SftpSessionService {
                     legacy_session_id: Some(session_id),
                     started_at: None,
                     cancel_operation: None,
+                    progress_window: None,
                 },
             );
             return Ok(summary);
@@ -6738,6 +6970,7 @@ impl SftpSessionService {
                 legacy_session_id: None,
                 started_at: None,
                 cancel_operation: None,
+                progress_window: None,
             },
         );
         let mut queue = self.pending_remote_copies.lock().await;
@@ -6769,10 +7002,12 @@ impl SftpSessionService {
         };
         let mut intents = self.transfer_intents.lock().await;
         for (transfer_key, intent) in intents.iter_mut() {
-            if intent.legacy_session_id.is_some()
-                && let Some(summary) = legacy.get(transfer_key)
-            {
-                intent.summary = merge_legacy_intent_summary(intent.summary.clone(), summary);
+            if intent.legacy_session_id.is_some() {
+                if let Some(summary) = legacy.get(transfer_key) {
+                    intent.summary = merge_legacy_intent_summary(intent.summary.clone(), summary);
+                }
+            } else {
+                intent.summary.cancellable = remote_copy_intent_cancellable(intent.summary.state);
             }
         }
         let transfers = intents
@@ -6867,7 +7102,16 @@ impl SftpSessionService {
                 }
                 return Ok(intent.summary.clone());
             }
-            if intent.summary.state_revision != request.expected_state_revision
+            // A legacy-backed intent projects the actor's revision, which the
+            // actor itself fences below; its cached projection may be older or
+            // newer than the caller's snapshot by progress alone.
+            let revision_current = intent.legacy_session_id.is_some()
+                || revision_within_progress(
+                    request.expected_state_revision.get(),
+                    intent.summary.state_revision.get(),
+                    intent.progress_window,
+                );
+            if !revision_current
                 || matches!(
                     intent.summary.state,
                     wire::SftpTransferState::Completed
@@ -6902,7 +7146,7 @@ impl SftpSessionService {
                     idempotency_key: request.idempotency_key,
                     transfer_id: request.transfer_id,
                     expected_generation: legacy.generation,
-                    expected_state_revision: legacy.state_revision,
+                    expected_state_revision: request.expected_state_revision,
                 })
                 .await?;
             let mut intents = self.transfer_intents.lock().await;
@@ -6933,6 +7177,7 @@ impl SftpSessionService {
                 intent.summary.state_revision =
                     WireSequence::new(intent.summary.state_revision.get().saturating_add(1));
             }
+            intent.summary.cancellable = false;
             let summary = intent.summary.clone();
             drop(intents);
             control.cancel_requested.send_replace(true);
@@ -6945,6 +7190,7 @@ impl SftpSessionService {
         intent.summary.state = wire::SftpTransferState::Cancelled;
         intent.summary.state_revision =
             WireSequence::new(intent.summary.state_revision.get().saturating_add(1));
+        intent.summary.cancellable = false;
         Ok(intent.summary.clone())
     }
 
@@ -7199,13 +7445,10 @@ impl SftpSessionService {
             {
                 return Err(SftpRuntimeError::StaleGeneration.into());
             }
-            record
-                .live
-                .as_ref()
+            self.session_channel(session_id, record)
+                .await
                 .ok_or(SftpRuntimeError::InvalidState)?
-                .transport
-                .client()
-                .clone()
+                .client
         };
         let metadata = tokio::time::timeout(
             SFTP_PROTOCOL_OPERATION_TIMEOUT,
@@ -7290,6 +7533,53 @@ impl SftpSessionService {
         Ok(())
     }
 
+    /// The session's protocol channel: its own transport, or the handle lent
+    /// with that transport to a running transfer.
+    async fn session_channel(
+        &self,
+        session_key: &str,
+        record: &SftpServiceRecord,
+    ) -> Option<SftpDirectoryClient> {
+        match record.live.as_ref() {
+            Some(live) => Some(live.directory_client()),
+            None => self
+                .lent_sftp_clients
+                .lock()
+                .await
+                .get(session_key)
+                .map(|lent| lent.channel.clone()),
+        }
+    }
+
+    /// Channel for a direct protocol action. While a transfer owns the
+    /// transport the action shares its channel and must not write any path
+    /// that transfer owns (`sftp.conflict`), exactly like file mutations.
+    async fn shared_channel_for_write(
+        &self,
+        session_key: &str,
+        record: &SftpServiceRecord,
+        written: &[&RemotePath],
+    ) -> Result<SftpDirectoryClient, SftpProductionError> {
+        if let Some(live) = record.live.as_ref() {
+            return Ok(live.directory_client());
+        }
+        let lent = self
+            .lent_sftp_clients
+            .lock()
+            .await
+            .get(session_key)
+            .cloned()
+            .ok_or(SftpRuntimeError::InvalidState)?;
+        if written.iter().any(|path| {
+            lent.busy_paths
+                .iter()
+                .any(|busy| remote_paths_overlap(path.as_bytes(), busy.as_bytes()))
+        }) {
+            return Err(SftpRuntimeError::Conflict.into());
+        }
+        Ok(lent.channel)
+    }
+
     async fn require_remote_intent_endpoint(
         &self,
         session_id: &wire::SftpSessionId,
@@ -7304,7 +7594,17 @@ impl SftpSessionService {
         if record.actor.summary().state != SftpSessionState::Ready
             || record.actor.summary().generation.map(SftpGeneration::get)
                 != Some(expected_generation.get())
-            || record.live.is_none()
+        {
+            return Err(SftpRuntimeError::StaleGeneration.into());
+        }
+        // A transport lent to a running transfer still serves this session;
+        // the queued transfer starts once that transfer returns it.
+        if record.live.is_none()
+            && !self
+                .lent_sftp_clients
+                .lock()
+                .await
+                .contains_key(session_id.as_str())
         {
             return Err(SftpRuntimeError::StaleGeneration.into());
         }
@@ -7511,6 +7811,25 @@ impl SftpSessionService {
                     return;
                 }
             };
+            {
+                let mut lent = self.lent_sftp_clients.lock().await;
+                lent.insert(
+                    plan.source_session_key.clone(),
+                    LentSftpChannel::new(
+                        leases.0.directory_client(),
+                        &plan.transfer_id,
+                        &[&plan.source_path],
+                    ),
+                );
+                lent.insert(
+                    plan.target_session_key.clone(),
+                    LentSftpChannel::new(
+                        leases.1.directory_client(),
+                        &plan.transfer_id,
+                        &[&plan.target_path],
+                    ),
+                );
+            }
             self.pending_remote_copies
                 .lock()
                 .await
@@ -7624,48 +7943,54 @@ impl SftpSessionService {
             }
             RemoteCopyTaskOutcome::Finished(_) => None,
         };
-        let (failure, commit_outcome, residual, source_failed, target_failed) = match outcome {
-            RemoteCopyTaskOutcome::Finished(Ok(success)) => {
-                let cleanup_failed = success.cleanup_residual.is_some();
-                (
-                    cleanup_failed.then_some(wire::SftpTransferFailureCode::CleanupIncomplete),
-                    wire::SftpTransferCommitOutcome::Committed,
-                    success.cleanup_residual,
+        let (failure, commit_outcome, residual, mut source_failed, mut target_failed) =
+            match outcome {
+                RemoteCopyTaskOutcome::Finished(Ok(success)) => {
+                    let cleanup_failed = success.cleanup_residual.is_some();
+                    (
+                        cleanup_failed.then_some(wire::SftpTransferFailureCode::CleanupIncomplete),
+                        wire::SftpTransferCommitOutcome::Committed,
+                        success.cleanup_residual,
+                        false,
+                        false,
+                    )
+                }
+                RemoteCopyTaskOutcome::Finished(Err(failure)) => (
+                    Some(failure.failure_code),
+                    failure.commit_outcome,
+                    failure.cleanup_residual,
                     false,
                     false,
-                )
-            }
-            RemoteCopyTaskOutcome::Finished(Err(failure)) => (
-                Some(failure.failure_code),
-                failure.commit_outcome,
-                failure.cleanup_residual,
-                false,
-                false,
-            ),
-            RemoteCopyTaskOutcome::Cancelled | RemoteCopyTaskOutcome::SourceLost => {
-                let (commit_outcome, residual) =
-                    interrupted_resolution.expect("interrupted remote copy has a resolution");
-                let interruption_failure = if source_was_lost {
-                    Some(wire::SftpTransferFailureCode::TransportLost)
-                } else if residual.is_some() {
-                    Some(wire::SftpTransferFailureCode::CleanupIncomplete)
-                } else {
-                    None
-                };
-                (interruption_failure, commit_outcome, residual, true, true)
-            }
-            RemoteCopyTaskOutcome::TargetLost => {
-                let (commit_outcome, residual) =
-                    interrupted_resolution.expect("interrupted remote copy has a resolution");
-                (
-                    Some(wire::SftpTransferFailureCode::TransportLost),
-                    commit_outcome,
-                    residual,
-                    true,
-                    true,
-                )
-            }
-        };
+                ),
+                RemoteCopyTaskOutcome::Cancelled | RemoteCopyTaskOutcome::SourceLost => {
+                    let (commit_outcome, residual) =
+                        interrupted_resolution.expect("interrupted remote copy has a resolution");
+                    let interruption_failure = if source_was_lost {
+                        Some(wire::SftpTransferFailureCode::TransportLost)
+                    } else if residual.is_some() {
+                        Some(wire::SftpTransferFailureCode::CleanupIncomplete)
+                    } else {
+                        None
+                    };
+                    (interruption_failure, commit_outcome, residual, true, true)
+                }
+                RemoteCopyTaskOutcome::TargetLost => {
+                    let (commit_outcome, residual) =
+                        interrupted_resolution.expect("interrupted remote copy has a resolution");
+                    (
+                        Some(wire::SftpTransferFailureCode::TransportLost),
+                        commit_outcome,
+                        residual,
+                        true,
+                        true,
+                    )
+                }
+            };
+        if was_cancelled {
+            // A user cancel keeps both sessions unless a channel stopped answering.
+            source_failed = !sftp_channel_responsive(&source_live).await;
+            target_failed = !sftp_channel_responsive(&target_live).await;
+        }
         {
             let mut intents = self.transfer_intents.lock().await;
             if let Some(intent) = intents.get_mut(plan.transfer_id.as_str())
@@ -7782,8 +8107,13 @@ impl SftpSessionService {
             && copied <= intent.summary.expected_bytes
         {
             intent.summary.transferred_bytes = copied;
-            intent.summary.state_revision =
-                WireSequence::new(intent.summary.state_revision.get().saturating_add(1));
+            let before = intent.summary.state_revision.get();
+            intent.summary.state_revision = WireSequence::new(before.saturating_add(1));
+            extend_progress_window(
+                &mut intent.progress_window,
+                before,
+                intent.summary.state_revision.get(),
+            );
             if let Some(started_at) = intent.started_at {
                 let elapsed = started_at.elapsed().as_secs_f64();
                 if elapsed > 0.0 {
@@ -7809,6 +8139,11 @@ impl SftpSessionService {
         source_failed: bool,
         target_failed: bool,
     ) {
+        {
+            let mut lent = self.lent_sftp_clients.lock().await;
+            lent.remove(&plan.source_session_key);
+            lent.remove(&plan.target_session_key);
+        }
         let mut source_live = Some(source_live);
         let mut target_live = Some(target_live);
         {
@@ -7870,9 +8205,9 @@ impl SftpSessionService {
             .actor
             .transfers()
             .find(|transfer| transfer.transfer_id == transfer_id)
-            .map(|transfer| transfer.state_revision)
+            .cloned()
             .ok_or(SftpRuntimeError::InvalidInput)?;
-        if current_revision != request.expected_state_revision.get() {
+        if !current_revision.accepts_revision(request.expected_state_revision.get()) {
             return Err(SftpRuntimeError::Conflict.into());
         }
         let unattended_transfer = record
@@ -8169,6 +8504,11 @@ impl SftpSessionService {
             }
         };
         if let Some((plan, live, liveness, verified_resume_file)) = verified_start {
+            let lent = LentSftpChannel::for_transfer(live.directory_client(), &plan);
+            self.lent_sftp_clients
+                .lock()
+                .await
+                .insert(session_key.clone(), lent);
             let (cancel_requested, _) = watch::channel(false);
             let (finished, _) = watch::channel(false);
             let control = ActiveTransferControl {
@@ -8495,8 +8835,11 @@ impl SftpSessionService {
         let mut close_transport = false;
         match outcome {
             TransferTaskOutcome::Cancelled => {
-                close_transport = true;
                 let cleanup = self.bounded_transfer_cleanup(&plan, &boundary, &live).await;
+                // Cancelling one transfer must not end the session: abandoned
+                // requests are dropped by request id and the remote handle is
+                // closed on drop. Only an unresponsive channel is closed.
+                close_transport = !sftp_channel_responsive(&live).await;
                 let mut records = self.records.lock().await;
                 if let Some(record) = records.get_mut(&session_key) {
                     let _ = record
@@ -8536,7 +8879,22 @@ impl SftpSessionService {
                         .transfers()
                         .find(|transfer| transfer.transfer_id == transfer_id)
                         .map(|transfer| transfer.state);
-                    if !matches!(
+                    if current_state == Some(TransferState::Cancelling) {
+                        // A cooperative cancel (Android picked-document
+                        // publish) stopped the execution. CleanupIncomplete
+                        // means the picked document could not be reset.
+                        let cleanup = match cleanup {
+                            Some(cleanup) if failure != TransferFailureCode::CleanupIncomplete => {
+                                cleanup
+                            }
+                            _ => CleanupOutcome::Residual {
+                                opaque_location: "selected document may be partial".to_owned(),
+                            },
+                        };
+                        let _ = record
+                            .actor
+                            .finish_cancel(&transfer_id, plan.generation, cleanup);
+                    } else if !matches!(
                         current_state,
                         Some(TransferState::Cancelled | TransferState::Failed)
                     ) {
@@ -8557,6 +8915,7 @@ impl SftpSessionService {
                 }
             }
         }
+        self.lent_sftp_clients.lock().await.remove(&session_key);
         if close_transport {
             let _ = tokio::time::timeout(SFTP_DISCONNECT_TIMEOUT, live.disconnect()).await;
             let mut records = self.records.lock().await;
@@ -8618,10 +8977,11 @@ impl SftpSessionService {
         records.get(session_key).is_some_and(|record| {
             record.actor.transfers().any(|transfer| {
                 &transfer.transfer_id == transfer_id
-                    && matches!(
+                    && (matches!(
                         transfer.state,
                         TransferState::Committing | TransferState::Completed
-                    )
+                    ) || (transfer.state == TransferState::Cancelling
+                        && transfer.publish_cancellable))
             })
         })
     }
@@ -8828,8 +9188,14 @@ impl SftpSessionService {
                 // substituted path as the verified temporary object.
                 return Err(TransferFailureCode::UnsafeReplaceUnsupported);
             }
-            self.begin_transfer_commit(session_key, transfer_id, plan.generation, observed_length)
-                .await?;
+            self.begin_transfer_commit(
+                session_key,
+                transfer_id,
+                plan.generation,
+                observed_length,
+                false,
+            )
+            .await?;
             let final_path = remote_path_utf8(target)
                 .map_err(|_| TransferFailureCode::UnsupportedPathEncoding)?;
             let atomic_replace = if let Some(expected) = target_precondition {
@@ -8857,11 +9223,14 @@ impl SftpSessionService {
                 }
                 true
             } else {
-                let hardlinked = bounded_transfer_io(
+                let hardlinked = tokio::time::timeout(
+                    SFTP_PROTOCOL_OPERATION_TIMEOUT,
                     live.transport.client().hardlink(temporary_path, final_path),
-                    TransferFailureCode::TargetExists,
                 )
-                .await?;
+                .await
+                // The server may have created the link before the reply was lost.
+                .map_err(|_| TransferFailureCode::CommitOutcomeUncertain)?
+                .map_err(|error| remote_copy::remote_hardlink_failure(&error))?;
                 if !hardlinked {
                     return Err(TransferFailureCode::UnsafeReplaceUnsupported);
                 }
@@ -8908,11 +9277,14 @@ impl SftpSessionService {
         plan: &TransferPlan,
         boundary: &LocalBoundary,
         live: &SftpProductionSession<TrustedSftpHostKeyVerifier>,
-        _control: &ActiveTransferControl,
+        control: &ActiveTransferControl,
     ) -> Result<(), TransferFailureCode> {
+        // Only the Android picked-document publish observes the cancel flag.
+        #[cfg(not(target_os = "android"))]
+        let _ = control;
         #[cfg(not(unix))]
         {
-            let _ = (session_key, transfer_id, plan, boundary, live, _control);
+            let _ = (session_key, transfer_id, plan, boundary, live);
             return Err(TransferFailureCode::PermissionDenied);
         }
         #[cfg(unix)]
@@ -9019,14 +9391,54 @@ impl SftpSessionService {
             );
             #[cfg(unix)]
             let observed_length = temporary_identity.size;
-            self.begin_transfer_commit(session_key, transfer_id, plan.generation, observed_length)
-                .await?;
+            #[cfg(target_os = "android")]
+            let publish_cancellable = boundary.is_content_download();
+            #[cfg(not(target_os = "android"))]
+            let publish_cancellable = false;
+            self.begin_transfer_commit(
+                session_key,
+                transfer_id,
+                plan.generation,
+                observed_length,
+                publish_cancellable,
+            )
+            .await?;
             #[cfg(unix)]
             let (atomic_no_replace, atomic_replace, final_length) = capability.commit_download(
                 &temporary_name,
                 &temporary_identity,
                 target_identity.as_ref(),
             )?;
+            // Android: a picked document target receives the committed private
+            // file now; the transfer completes only after every byte reached it.
+            // A cancel in this phase is cooperative: the blocking copy stops
+            // between chunks, the private copy is removed and the document is
+            // reset to empty before the task reports back.
+            #[cfg(target_os = "android")]
+            {
+                let publishing = boundary.clone();
+                let cancel = control.cancel_requested.subscribe();
+                let published = tokio::task::spawn_blocking(move || {
+                    publishing.publish_content_download(&move || *cancel.borrow())
+                })
+                .await
+                .map_err(|_| TransferFailureCode::CommitOutcomeUncertain)??;
+                match published {
+                    PublishOutcome::NotApplicable => {}
+                    PublishOutcome::Published(written) if written == final_length => {}
+                    PublishOutcome::Published(_) => {
+                        return Err(TransferFailureCode::CommitOutcomeUncertain);
+                    }
+                    // Handled by `run_transfer` as a finished cancel; the code
+                    // only says whether the document could be reset.
+                    PublishOutcome::Cancelled {
+                        document_reset: true,
+                    } => return Err(TransferFailureCode::PermissionDenied),
+                    PublishOutcome::Cancelled {
+                        document_reset: false,
+                    } => return Err(TransferFailureCode::CleanupIncomplete),
+                }
+            }
             self.complete_transfer(
                 session_key,
                 transfer_id,
@@ -9063,6 +9475,7 @@ impl SftpSessionService {
         transfer_id: &TransferId,
         generation: SftpGeneration,
         observed_length: u64,
+        publish_cancellable: bool,
     ) -> Result<(), TransferFailureCode> {
         let mut records = self.records.lock().await;
         let actor = &mut records
@@ -9074,7 +9487,15 @@ impl SftpSessionService {
             .map_err(map_transfer_runtime_failure)?;
         actor
             .begin_commit(transfer_id, generation)
-            .map_err(map_transfer_runtime_failure)
+            .map_err(map_transfer_runtime_failure)?;
+        // Same lock as begin_commit: a cancel can never observe a committing
+        // picked-document download as uncancellable.
+        if publish_cancellable {
+            actor
+                .mark_publish_cancellable(transfer_id, generation)
+                .map_err(map_transfer_runtime_failure)?;
+        }
+        Ok(())
     }
 
     async fn complete_transfer(
@@ -9177,6 +9598,66 @@ impl SftpSessionService {
             self.local_boundaries.lock().await.insert(token, boundary);
             Ok(response)
         }
+    }
+
+    /// Android: registers a picked document as an upload source or download
+    /// target. Bytes are read from / written to the provider descriptor by
+    /// Core; see `ContentBoundary` for the private staging contract.
+    #[cfg(target_os = "android")]
+    async fn register_content_boundary<R: tauri::Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        kind: wire::SftpLocalBoundaryKind,
+        uri: crate::content_access::ContentUri,
+    ) -> Result<wire::SftpLocalBoundary, SftpRuntimeError> {
+        let app = app.clone();
+        let (capability, display_name, size) = tokio::task::spawn_blocking(move || {
+            let staging = crate::content_access::PrivateDir::create(&app, "sftp")
+                .map_err(|_| SftpRuntimeError::InvalidState)?;
+            match kind {
+                wire::SftpLocalBoundaryKind::UploadSource => {
+                    let opened = uri
+                        .open_regular(&app, MAX_ANDROID_CONTENT_UPLOAD_BYTES)
+                        .map_err(|_| SftpRuntimeError::InvalidInput)?;
+                    let name = crate::content_access::safe_file_name(
+                        opened.display_name.as_deref(),
+                        "upload",
+                    );
+                    let size = opened.len;
+                    let boundary = ContentBoundary::upload_source(staging, &name, opened.file)
+                        .map_err(|_| SftpRuntimeError::InvalidInput)?;
+                    Ok::<_, SftpRuntimeError>((boundary, name, size))
+                }
+                wire::SftpLocalBoundaryKind::DownloadTarget => {
+                    // Opening for write here would truncate the user's document
+                    // before any byte arrived; only the name is read now.
+                    let name = crate::content_access::safe_file_name(
+                        uri.display_name().as_deref(),
+                        "download",
+                    );
+                    let boundary = ContentBoundary::download_target(staging, &name, uri)
+                        .map_err(|_| SftpRuntimeError::InvalidInput)?;
+                    Ok((boundary, name, None))
+                }
+            }
+        })
+        .await
+        .map_err(|_| SftpRuntimeError::InvalidState)??;
+        let boundary = LocalBoundary {
+            kind,
+            display_name: local_display_name(Path::new(&display_name)),
+            size,
+            capability: Arc::new(LocalBoundaryCapability::Content(capability)),
+        };
+        let token = uuid::Uuid::new_v4().to_string();
+        let response = wire::SftpLocalBoundary {
+            token: token.clone(),
+            kind,
+            display_name: boundary.display_name.clone(),
+            size: boundary.size,
+        };
+        self.local_boundaries.lock().await.insert(token, boundary);
+        Ok(response)
     }
 
     pub(crate) fn exit_blockers(&self) -> (Vec<wire::SftpSessionId>, Vec<wire::TransferId>) {
@@ -9695,12 +10176,26 @@ pub(crate) async fn sftp_session_disconnect(
 }
 
 #[tauri::command]
-pub(crate) async fn sftp_local_boundary_register(
+pub(crate) async fn sftp_local_boundary_register<R: tauri::Runtime>(
     request: wire::SftpLocalBoundaryRegisterRequest,
     service: State<'_, SftpSessionService>,
     lifecycle: State<'_, LifecycleState>,
+    app: AppHandle<R>,
 ) -> CoreResult<wire::SftpLocalBoundary> {
     let _creation_permit = lifecycle.acquire_resource_creation(request.meta.request_id.clone())?;
+    #[cfg(target_os = "android")]
+    if let Ok(crate::content_access::Selection::Content(uri)) =
+        crate::content_access::classify_text(request.selected_path.clone())
+    {
+        return service
+            .register_content_boundary(&app, request.kind, uri)
+            .await
+            .map_err(|error| {
+                map_sftp_core_error(request.meta.request_id, SftpProductionError::Runtime(error))
+            });
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = &app;
     service
         .register_local_boundary(request.kind, request.selected_path)
         .await
@@ -9816,6 +10311,31 @@ fn new_local_directory_owner(
     local_directory_owner(webview, request_id)
 }
 
+/// Android: the phone's default local pane is the app-private `<app_data>/home`,
+/// which the local terminal otherwise creates only on its first launch. Create
+/// exactly that directory (owner-only) so a fresh install can browse and receive
+/// files; any other selected path is registered unchanged and may still fail.
+#[cfg(target_os = "android")]
+fn ensure_android_local_home(app: &AppHandle, selected_path: &str) {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+    let Ok(app_data) = app.path().app_data_dir() else {
+        return;
+    };
+    let home = app_data.join("home");
+    if std::path::Path::new(selected_path) != home || home.is_dir() {
+        return;
+    }
+    if std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&home)
+        .is_ok()
+    {
+        let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
 #[tauri::command]
 pub(crate) async fn sftp_local_directory_register(
     webview: Webview,
@@ -9826,6 +10346,8 @@ pub(crate) async fn sftp_local_directory_register(
     let request_id = request.meta.request_id.clone();
     let _creation_permit = lifecycle.acquire_resource_creation(request_id.clone())?;
     let owner = new_local_directory_owner(&webview, &request_id)?;
+    #[cfg(target_os = "android")]
+    ensure_android_local_home(webview.app_handle(), &request.selected_path);
     service
         .register_local_directory(request, &owner)
         .await
@@ -10194,6 +10716,9 @@ fn map_session_failure(code: SftpFailureCode) -> wire::SftpFailureCode {
         SftpFailureCode::AuthenticationRejected => wire::SftpFailureCode::AuthenticationRejected,
         SftpFailureCode::SubsystemRejected => wire::SftpFailureCode::SubsystemRejected,
         SftpFailureCode::TransportLost => wire::SftpFailureCode::TransportLost,
+        SftpFailureCode::ConnectionClosedByServer => {
+            wire::SftpFailureCode::ConnectionClosedByServer
+        }
         SftpFailureCode::Protocol => wire::SftpFailureCode::Protocol,
     }
 }
@@ -10473,6 +10998,7 @@ fn map_transfer_summary(
             TransferFailureCode::Protocol => wire::SftpTransferFailureCode::Protocol,
         }),
         cleanup_residual: map_cleanup_residual(transfer),
+        cancellable: transfer.cancellable(),
     })
 }
 
@@ -10487,6 +11013,7 @@ fn merge_legacy_intent_summary(
     summary.state = legacy.state;
     summary.failure_code = legacy.failure_code;
     summary.commit_outcome = legacy.commit_outcome;
+    summary.cancellable = legacy.cancellable;
     summary.cleanup_residual = legacy
         .cleanup_residual
         .as_ref()
@@ -11001,6 +11528,18 @@ fn local_display_name(path: &Path) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("selected-file")
         .to_owned()
+}
+
+/// One bounded SFTP round trip on the session's own channel.
+async fn sftp_channel_responsive(live: &SftpProductionSession<TrustedSftpHostKeyVerifier>) -> bool {
+    matches!(
+        tokio::time::timeout(
+            SFTP_CANCEL_LIVENESS_PROBE_TIMEOUT,
+            live.transport.client().canonicalize("."),
+        )
+        .await,
+        Ok(Ok(_))
+    )
 }
 
 async fn bounded_transfer_io<T, E, F>(
@@ -11981,6 +12520,171 @@ mod tests {
     }
 
     #[test]
+    fn progress_revisions_never_turn_a_cancel_into_a_conflict() {
+        let (mut actor, generation) = actor();
+        let id = upload(&mut actor, generation, ConflictPolicy::FailIfExists);
+        actor.begin_transfer(&id, generation).unwrap();
+        actor
+            .transfer_prepared(&id, generation, remote_temp(), false, true)
+            .unwrap();
+        let seen_by_client = actor.transfers[&id].state_revision;
+        for copied in 1..=6 {
+            actor.record_progress(&id, generation, copied).unwrap();
+        }
+        let transfer = &actor.transfers[&id];
+        assert!(transfer.state_revision > seen_by_client);
+        assert!(transfer.accepts_revision(seen_by_client));
+        assert!(transfer.accepts_revision(transfer.state_revision));
+        assert!(!transfer.accepts_revision(seen_by_client - 1));
+        assert!(!transfer.accepts_revision(transfer.state_revision + 1));
+
+        // A lifecycle change ends the window: the old snapshot is stale now.
+        actor.begin_verification(&id, generation, 6).unwrap_err();
+        let transfer = &actor.transfers[&id];
+        assert!(!transfer.accepts_revision(seen_by_client));
+        assert!(transfer.accepts_revision(transfer.state_revision));
+    }
+
+    #[test]
+    fn server_to_server_copy_is_not_cancellable_while_committing() {
+        assert!(remote_copy_intent_cancellable(
+            wire::SftpTransferState::Transferring
+        ));
+        assert!(remote_copy_intent_cancellable(
+            wire::SftpTransferState::Queued
+        ));
+        for state in [
+            wire::SftpTransferState::Committing,
+            wire::SftpTransferState::Cancelling,
+            wire::SftpTransferState::Completed,
+            wire::SftpTransferState::Cancelled,
+            wire::SftpTransferState::Failed,
+        ] {
+            assert!(!remote_copy_intent_cancellable(state), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_server_closing_before_the_handshake_has_its_own_sftp_code() {
+        let code = map_transport_failure(&TransportError::ServerClosedBeforeHandshake);
+        assert_eq!(code, SftpFailureCode::ConnectionClosedByServer);
+        assert_eq!(
+            map_session_failure(code),
+            wire::SftpFailureCode::ConnectionClosedByServer
+        );
+    }
+
+    #[test]
+    fn remote_path_overlap_covers_equal_paths_and_ancestor_directories() {
+        assert!(remote_paths_overlap(b"/srv/app.bin", b"/srv/app.bin"));
+        assert!(remote_paths_overlap(b"/srv", b"/srv/app.bin"));
+        assert!(remote_paths_overlap(b"/srv/", b"/srv/app.bin"));
+        assert!(remote_paths_overlap(b"/srv/app.bin", b"/srv"));
+        assert!(remote_paths_overlap(b"/", b"/srv/app.bin"));
+        assert!(!remote_paths_overlap(b"/srv/app", b"/srv/app.bin"));
+        assert!(!remote_paths_overlap(b"/srv/other.bin", b"/srv/app.bin"));
+        assert!(!remote_paths_overlap(b"/srv/sub", b"/srv/app.bin"));
+    }
+
+    #[test]
+    fn mutations_sharing_a_transfer_channel_never_touch_its_paths() {
+        let transfer_id = TransferId::parse("transfer-busy").unwrap();
+        let target = RemotePath::parse(b"/srv/app.bin".to_vec()).unwrap();
+        let busy = transfer_busy_paths(&transfer_id, &[&target]);
+        let temporary = remote_temporary_target(&target, &transfer_id).unwrap();
+        assert!(busy.contains(&target) && busy.contains(&temporary));
+        let operation = || OperationFence::parse("op".to_owned(), "key".to_owned()).unwrap();
+        let generation = SftpGeneration::new(1).unwrap();
+        let path = |value: &[u8]| RemotePath::parse(value.to_vec()).unwrap();
+        let precondition = RemoteObjectPrecondition {
+            kind: RemoteEntryKind::File,
+            size: Some(1),
+            modified_at_unix_ms: None,
+        };
+
+        let unrelated = FileMutationPlan::CreateDirectory {
+            operation: operation(),
+            generation,
+            path: path(b"/srv/new-folder"),
+        };
+        assert!(!mutation_touches_busy_paths(&unrelated, &busy));
+        let rename_target = FileMutationPlan::RenameNoReplace {
+            operation: operation(),
+            generation,
+            source: path(b"/srv/other.bin"),
+            target: path(b"/srv/app.bin"),
+            source_precondition: precondition.clone(),
+        };
+        assert!(mutation_touches_busy_paths(&rename_target, &busy));
+        let delete_parent = FileMutationPlan::DeleteConfirmed {
+            operation: operation(),
+            generation,
+            path: path(b"/srv"),
+            kind: DeleteKind::EmptyDirectory,
+            precondition: precondition.clone(),
+        };
+        assert!(mutation_touches_busy_paths(&delete_parent, &busy));
+        let delete_temporary = FileMutationPlan::DeleteConfirmed {
+            operation: operation(),
+            generation,
+            path: temporary.clone(),
+            kind: DeleteKind::File,
+            precondition,
+        };
+        assert!(mutation_touches_busy_paths(&delete_temporary, &busy));
+    }
+
+    #[test]
+    fn progress_window_restarts_after_a_lifecycle_change() {
+        let mut window = None;
+        extend_progress_window(&mut window, 3, 4);
+        extend_progress_window(&mut window, 4, 5);
+        assert_eq!(window, Some((3, 5)));
+        assert!(revision_within_progress(3, 5, window));
+        // Revision 6 came from a state change; the next progress run starts at 6.
+        extend_progress_window(&mut window, 6, 7);
+        assert_eq!(window, Some((6, 7)));
+        assert!(!revision_within_progress(5, 7, window));
+        assert!(!revision_within_progress(5, 6, Some((3, 5))));
+    }
+
+    #[test]
+    fn committing_transfer_is_cancellable_only_in_the_publish_phase() {
+        let (mut actor, generation) = actor();
+        let ordinary = upload(&mut actor, generation, ConflictPolicy::FailIfExists);
+        actor.begin_transfer(&ordinary, generation).unwrap();
+        actor
+            .transfer_prepared(&ordinary, generation, remote_temp(), false, true)
+            .unwrap();
+        actor.record_progress(&ordinary, generation, 8).unwrap();
+        actor.begin_verification(&ordinary, generation, 8).unwrap();
+        assert_eq!(
+            actor.mark_publish_cancellable(&ordinary, generation),
+            Err(SftpRuntimeError::InvalidState),
+            "only a committing transfer can enter the publish phase"
+        );
+        assert!(actor.transfers[&ordinary].cancellable());
+        actor.begin_commit(&ordinary, generation).unwrap();
+        assert!(!actor.transfers[&ordinary].cancellable());
+        assert_eq!(
+            actor.begin_cancel(&ordinary, generation),
+            Err(SftpRuntimeError::InvalidState)
+        );
+
+        actor
+            .mark_publish_cancellable(&ordinary, generation)
+            .unwrap();
+        assert!(actor.transfers[&ordinary].cancellable());
+        actor.begin_cancel(&ordinary, generation).unwrap();
+        assert!(!actor.transfers[&ordinary].cancellable());
+        assert_eq!(actor.transfers[&ordinary].state, TransferState::Cancelling);
+        actor
+            .finish_cancel(&ordinary, generation, CleanupOutcome::Cleaned)
+            .unwrap();
+        assert_eq!(actor.transfers[&ordinary].state, TransferState::Cancelled);
+    }
+
+    #[test]
     fn uncertain_commit_remains_uncertain_if_temporary_cleanup_fails() {
         let (mut actor, generation) = actor();
         let id = upload(&mut actor, generation, ConflictPolicy::ReplaceSafely);
@@ -12527,6 +13231,113 @@ mod tests {
                 .await
                 .contains_key(transfer_id_internal.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_transfer_accepts_a_snapshot_older_only_by_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = SftpSessionService::production(
+            HostService::start(directory.path()).unwrap(),
+            VaultService::start(directory.path()),
+            TransientCredentialService::default(),
+            SshAgentService::default(),
+        );
+        let session_id = wire::SftpSessionId::new();
+        let transfer_id = wire::TransferId::new();
+        let transfer_id_internal = TransferId::parse(transfer_id.to_string()).unwrap();
+        let mut actor = SftpSessionActor::new(
+            SftpSessionId::parse(session_id.to_string()).unwrap(),
+            "host-1",
+        )
+        .unwrap();
+        let generation = actor.start("base-revision-1").unwrap();
+        actor
+            .authenticated_transport_ready(generation, "transport-1")
+            .unwrap();
+        actor.subsystem_opened(generation, "subsystem-1").unwrap();
+        actor
+            .enqueue_transfer(
+                transfer_id_internal.clone(),
+                generation,
+                TransferDirection::Download,
+                TransferEndpoint::Remote(RemotePath::parse(b"/srv/app.bin".to_vec()).unwrap()),
+                TransferEndpoint::LocalBoundaryToken("picker-target".to_owned()),
+                8,
+                ConflictPolicy::FailIfExists,
+            )
+            .unwrap();
+        actor
+            .begin_transfer(&transfer_id_internal, generation)
+            .unwrap();
+        actor
+            .transfer_prepared(
+                &transfer_id_internal,
+                generation,
+                TemporaryTarget::LocalBoundaryToken(format!(
+                    "local-temp:{}",
+                    transfer_id_internal.as_str()
+                )),
+                false,
+                true,
+            )
+            .unwrap();
+        let snapshot_revision = actor.transfers[&transfer_id_internal].state_revision;
+        for copied in 1..=5 {
+            actor
+                .record_progress(&transfer_id_internal, generation, copied)
+                .unwrap();
+        }
+        service.records.lock().await.insert(
+            session_id.to_string(),
+            SftpServiceRecord {
+                actor,
+                live: None,
+                shared_cleanup_incomplete: false,
+                shared_parent_channels: None,
+                heartbeat_tasks: None,
+                pending_transfers: VecDeque::new(),
+                active_transfer_id: Some(transfer_id_internal.clone()),
+                open_operation_id: "test-open".to_owned(),
+                open_idempotency_key: "test-open-key".to_owned(),
+                open_fingerprint: b"test-open".to_vec(),
+            },
+        );
+        let (cancel_requested, cancel_receiver) = watch::channel(false);
+        let (finished, _) = watch::channel(false);
+        service.active_transfers.lock().await.insert(
+            transfer_id_internal.as_str().to_owned(),
+            ActiveTransferControl {
+                cancel_requested,
+                finished,
+                task: Arc::new(std::sync::Mutex::new(None)),
+            },
+        );
+        let request = |revision: u64, key: &str| wire::SftpTransferActionRequest {
+            meta: wire::RequestMeta {
+                request_id: wire::RequestId::new(),
+            },
+            operation_id: wire::OperationId::new(),
+            idempotency_key: key.to_owned(),
+            transfer_id: transfer_id.clone(),
+            expected_generation: WireSequence::new(generation.get()),
+            expected_state_revision: WireSequence::new(revision),
+        };
+
+        let stale_lifecycle = service
+            .cancel_transfer(request(snapshot_revision - 1, "cancel-stale"))
+            .await;
+        assert!(matches!(
+            stale_lifecycle,
+            Err(SftpProductionError::Runtime(SftpRuntimeError::Conflict))
+        ));
+        assert!(!*cancel_receiver.borrow());
+
+        let summary = service
+            .cancel_transfer(request(snapshot_revision, "cancel-progress"))
+            .await
+            .unwrap();
+        assert_eq!(summary.state, wire::SftpTransferState::Cancelling);
+        assert!(*cancel_receiver.borrow());
     }
 
     #[tokio::test]

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="norishell_fgs_channel_name">活动连接</string>
+    <string name="norishell_fgs_channel_description">在终端会话、传输或隧道保持连接时显示。</string>
+    <string name="norishell_fgs_title">NoriShell 正在保持连接</string>
+    <string name="norishell_fgs_text">会话 %1$d · 隧道 %2$d · SFTP %3$d · 传输 %4$d</string>
+    <string name="norishell_fgs_action_exit">断开全部并退出</string>
+</resources>

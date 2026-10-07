@@ -126,6 +126,8 @@ pub enum ForwardFailureCode {
     CredentialUnavailable,
     AuthenticationRejected,
     TransportConnect,
+    /// The server closed the connection before the SSH handshake.
+    ConnectionClosedByServer,
     Bind,
     RemoteRegistrationRejected,
     RemoteRegistrationUncertain,

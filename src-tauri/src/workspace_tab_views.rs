@@ -18,6 +18,73 @@ use tauri::{
 
 use crate::workspace_windows::WorkspaceWindows;
 
+/// Native child WebView operations. Android hosts a single WebView and has no child views,
+/// so every operation fails there with the same stable `workspace_tab.*` codes as a desktop
+/// native failure; the Android shell renders Tab content inside its own WebView instead.
+#[cfg(desktop)]
+mod native {
+    use tauri::{LogicalPosition, LogicalSize, Rect, Webview, WebviewBuilder, Window};
+
+    pub(super) fn add_child(
+        parent: &Window,
+        builder: WebviewBuilder<tauri::Wry>,
+    ) -> tauri::Result<Webview> {
+        parent.add_child(
+            builder,
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(1.0, 1.0),
+        )
+    }
+    pub(super) fn set_bounds(webview: &Webview, bounds: Rect) -> tauri::Result<()> {
+        webview.set_bounds(bounds)
+    }
+    pub(super) fn set_visible(webview: &Webview, visible: bool) -> tauri::Result<()> {
+        if visible {
+            webview.show()
+        } else {
+            webview.hide()
+        }
+    }
+    pub(super) fn focus(webview: &Webview) -> tauri::Result<()> {
+        webview.set_focus()
+    }
+    pub(super) fn reparent(webview: &Webview, target: &Window) -> tauri::Result<()> {
+        webview.reparent(target)
+    }
+    pub(super) fn close(webview: &Webview) -> tauri::Result<()> {
+        webview.close()
+    }
+}
+
+#[cfg(mobile)]
+mod native {
+    use tauri::{Rect, Webview, WebviewBuilder, Window};
+
+    const UNSUPPORTED: &str = "child WebViews are not available on this platform";
+
+    pub(super) fn add_child(
+        _parent: &Window,
+        _builder: WebviewBuilder<tauri::Wry>,
+    ) -> Result<Webview, &'static str> {
+        Err(UNSUPPORTED)
+    }
+    pub(super) fn set_bounds(_webview: &Webview, _bounds: Rect) -> Result<(), &'static str> {
+        Err(UNSUPPORTED)
+    }
+    pub(super) fn set_visible(_webview: &Webview, _visible: bool) -> Result<(), &'static str> {
+        Err(UNSUPPORTED)
+    }
+    pub(super) fn focus(_webview: &Webview) -> Result<(), &'static str> {
+        Err(UNSUPPORTED)
+    }
+    pub(super) fn reparent(_webview: &Webview, _target: &Window) -> Result<(), &'static str> {
+        Err(UNSUPPORTED)
+    }
+    pub(super) fn close(_webview: &Webview) -> Result<(), &'static str> {
+        Err(UNSUPPORTED)
+    }
+}
+
 const PAGE: &str = "workspace-tab.html";
 const CONTEXT_CHANGED: &str = "workspace-tab-context-changed";
 const TAB_CHANGED: &str = "workspace-tab-state-changed";
@@ -353,11 +420,7 @@ pub(crate) async fn create_tab_view(
     };
     // The shell supplies the final content rectangle after its first layout.
     // A hidden 1x1 child avoids drawing over the Header in the meantime.
-    let webview = match parent.add_child(
-        builder,
-        LogicalPosition::new(0.0, 0.0),
-        LogicalSize::new(1.0, 1.0),
-    ) {
+    let webview = match native::add_child(&parent, builder) {
         Ok(webview) => webview,
         Err(error) => {
             eprintln!("workspace tab native view creation failed: {error}");
@@ -365,23 +428,23 @@ pub(crate) async fn create_tab_view(
             return Err("workspace_tab.view_create_failed".into());
         }
     };
-    if let Err(error) = webview.hide() {
+    if let Err(error) = native::set_visible(&webview, false) {
         eprintln!("workspace tab native view hide failed: {error}");
-        let _ = webview.close();
+        let _ = native::close(&webview);
         tabs.abort_native_create(&id);
         return Err("workspace_tab.view_create_failed".into());
     }
     let mut map = match views.0.lock() {
         Ok(map) => map,
         Err(_) => {
-            let _ = webview.close();
+            let _ = native::close(&webview);
             tabs.abort_native_create(&id);
             return Err("workspace_tab.unavailable".into());
         }
     };
     if let Err(error) = tabs.finish_native_create(&owner, &id, &kind, payload) {
         drop(map);
-        let _ = webview.close();
+        let _ = native::close(&webview);
         return Err(error);
     }
     let view = TabView {
@@ -488,12 +551,14 @@ pub(crate) async fn set_tab_view_bounds(
         .lock()
         .map_err(|_| "workspace_tab.unavailable")?;
     tabs.check_native_view(window.label(), &id, &view.kind)?;
-    view.webview
-        .set_bounds(Rect {
+    native::set_bounds(
+        &view.webview,
+        Rect {
             position: Position::Logical(LogicalPosition::new(bounds.x, bounds.y)),
             size: Size::Logical(LogicalSize::new(bounds.width, bounds.height)),
-        })
-        .map_err(|_| "workspace_tab.bounds_failed".into())
+        },
+    )
+    .map_err(|_| "workspace_tab.bounds_failed".into())
 }
 
 #[tauri::command]
@@ -514,12 +579,7 @@ pub(crate) async fn set_tab_view_visible(
     if !visible {
         view.shown.store(false, Ordering::Release);
     }
-    let result = if visible {
-        view.webview.show()
-    } else {
-        view.webview.hide()
-    };
-    result.map_err(|_| "workspace_tab.visibility_failed")?;
+    native::set_visible(&view.webview, visible).map_err(|_| "workspace_tab.visibility_failed")?;
     if visible {
         view.shown.store(true, Ordering::Release);
     }
@@ -539,9 +599,7 @@ pub(crate) async fn focus_tab_view(
         .lock()
         .map_err(|_| "workspace_tab.unavailable")?;
     tabs.check_native_view(window.label(), &id, &view.kind)?;
-    view.webview
-        .set_focus()
-        .map_err(|_| "workspace_tab.focus_failed".into())
+    native::focus(&view.webview).map_err(|_| "workspace_tab.focus_failed".into())
 }
 
 #[tauri::command]
@@ -563,8 +621,7 @@ pub(crate) async fn move_tab_view(
         .get_window(&target)
         .ok_or("workspace_tab.target_missing")?;
     if let Err(error) = tabs.move_native_view(source, &target, &id, || {
-        view.webview
-            .reparent(&target_window)
+        native::reparent(&view.webview, &target_window)
             .map_err(|_| "workspace_tab.reparent_failed".into())
     }) {
         // When the target or source window disappeared mid-move, Core already
@@ -573,7 +630,7 @@ pub(crate) async fn move_tab_view(
         let recovered = error == "workspace_tab.target_lost"
             || (tabs.owns_tab("main", &id).is_ok() && view.webview.window().label() != "main");
         if recovered {
-            let _ = view.webview.close();
+            let _ = native::close(&view.webview);
             release_view(&app, &views, &id, &view);
             let _ = app.emit_to("main", TAB_CHANGED, &id);
         }
@@ -650,9 +707,7 @@ fn close_locked_view(
         return Err("workspace_tab.desktop_session_active".into());
     }
     tabs.close_native_view(owner, id, || {
-        view.webview
-            .close()
-            .map_err(|_| "workspace_tab.view_close_failed".into())
+        native::close(&view.webview).map_err(|_| "workspace_tab.view_close_failed".into())
     })?;
     release_view(app, views, id, view);
     let _ = app.emit_to(owner, TAB_CHANGED, id);

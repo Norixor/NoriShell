@@ -26,6 +26,8 @@ On success, `outcome.kind="completed"`; the table describes `outcome.value`.
 
 Capability hint: `localFiles`. A declaration still requires an effective grant and any applicable protected-operation approval.
 
+Platform note: on Android (preview) a selection is a system document and the plugin receives only a private read-only snapshot of at most 64 MiB; write, rename, remove, and watchStart return Unsupported.
+
 rootHandle comes from filePick. Read/write chunks are at most 16 KiB, materialized files 64 MiB, and listing pages 100 entries. Existing writes require the current fingerprint; omitting expectedFingerprint is create-only. Rename never overwrites. watchStart returns a separate event handle.
 
 ## Example call

@@ -20,9 +20,7 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
-use tauri::{
-    AppHandle, Emitter, Manager, State, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Emitter, Manager, State, Webview, WebviewWindow};
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -49,7 +47,7 @@ pub struct SecureVaultPrompt {
     kind: SecureVaultKind,
     can_reset: bool,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
 pub struct SecureVaultCommandError(Box<CoreApiError>);
 
@@ -86,11 +84,6 @@ impl From<&str> for SecureVaultCommandError {
                 RetryStrategy::Never,
                 "sshHosts.vault.reset.uncertain",
             ),
-            "secureVaultFailed" => (
-                ErrorCategory::Internal,
-                RetryStrategy::Never,
-                "sshHosts.vault.failed",
-            ),
             "secureVaultResetFailed" => (
                 ErrorCategory::Internal,
                 RetryStrategy::Never,
@@ -112,13 +105,58 @@ impl From<&str> for SecureVaultCommandError {
             retry,
             message_key,
         );
-        if matches!(value, "secureVaultFailed" | "secureVaultResetFailed") {
+        if value == "secureVaultResetFailed" {
             let diagnostic_id = uuid::Uuid::new_v4().to_string();
             eprintln!("secure Vault operation failed: diagnostic_id={diagnostic_id} code={value}");
             error.diagnostic_id = Some(diagnostic_id);
         }
         Self(error)
     }
+}
+
+/// How the protected prompt reacts to a Vault mutation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptOutcome {
+    /// The user can correct the input in the same prompt (wrong password,
+    /// weak/mismatched new password, transient cross-process lock).
+    Retry,
+    /// The prompt closes and the caller receives the same stable error.
+    Close,
+}
+
+/// Keeps the stable machine code produced by `vault_service::map_service_error`
+/// and only swaps message keys that have no translated text for the protected
+/// window, so distinct causes never collapse into one generic failure.
+fn classify_vault_failure(
+    mut error: Box<CoreApiError>,
+) -> (SecureVaultCommandError, PromptOutcome) {
+    let (message_key, outcome) = match error.code.as_str() {
+        "vault.authentication_failed" => {
+            ("secureWindow.vault.incorrectPassword", PromptOutcome::Retry)
+        }
+        "vault.password_confirmation_mismatch" => (
+            "secureWindow.vault.confirmationMismatch",
+            PromptOutcome::Retry,
+        ),
+        "vault.weak_password" => ("secureWindow.vault.weakPassword", PromptOutcome::Retry),
+        "vault.in_use" => ("secureWindow.vault.inUse", PromptOutcome::Retry),
+        "vault.already_exists" | "vault.already_unlocked" | "vault.availability_changed" => {
+            ("secureWindow.vault.changed", PromptOutcome::Close)
+        }
+        "vault.requires_reload" => ("secureWindow.vault.requiresReload", PromptOutcome::Close),
+        "vault.insecure_permissions" => (
+            "secureWindow.vault.insecurePermissions",
+            PromptOutcome::Close,
+        ),
+        "vault.invalid_auto_unlock_policy" => {
+            ("secureWindow.vault.policyInvalid", PromptOutcome::Close)
+        }
+        // Secure-storage codes already carry translated keys; internal failures
+        // keep their diagnostic identifier and generic text.
+        _ => (error.message_key.as_str(), PromptOutcome::Close),
+    };
+    error.message_key = message_key.to_owned();
+    (SecureVaultCommandError(error), outcome)
 }
 
 impl From<String> for SecureVaultCommandError {
@@ -130,6 +168,9 @@ struct PasswordAnswer {
     password: Zeroizing<String>,
     confirmation: Zeroizing<String>,
     confirmed: bool,
+    /// The protected window waits on this verdict. A retryable rejection keeps
+    /// the prompt open for another attempt; any other outcome ends it.
+    verdict: oneshot::Sender<Result<(), SecureVaultCommandError>>,
 }
 enum Answer {
     Password(PasswordAnswer),
@@ -149,8 +190,8 @@ pub struct SecureVaultService {
 fn label(id: &str) -> String {
     format!("secure-vault-{id}")
 }
-fn require_window(window: &WebviewWindow, id: &str) -> Result<(), String> {
-    if window.label() != label(id) {
+fn require_label(surface_label: &str, id: &str) -> Result<(), String> {
+    if surface_label != label(id) {
         return Err("secureVaultDenied".into());
     }
     Ok(())
@@ -197,9 +238,7 @@ impl Drop for PromptGuard {
         if let Ok(mut pending) = self.app.state::<SecureVaultService>().pending.lock() {
             pending.remove(&self.id);
         }
-        if let Some(window) = self.app.get_webview_window(&label(&self.id)) {
-            let _ = window.destroy();
-        }
+        crate::secure_surface::destroy(&self.app, &label(&self.id));
     }
 }
 fn kind_for(
@@ -288,6 +327,44 @@ pub async fn secure_vault_open(
     ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
 ) -> Result<bool, SecureVaultCommandError> {
     let owner = vault_caller_owner(&app, &webview).ok_or("secureVaultDenied")?;
+    let owner_valid = || vault_caller_owner(&app, &webview).as_deref() == Some(owner.as_str());
+    open_for_owner(mode, &app, &owner, owner_valid, &service, vault, ssh_sync).await
+}
+
+/// Android: a Core-owned surface (credential prompt or editor) asks for the
+/// nested Vault prompt. The surface label is bound by Kotlin, never the page.
+#[cfg(target_os = "android")]
+pub(crate) async fn secure_vault_open_for_surface(
+    mode: SecureVaultMode,
+    surface_label: &str,
+    app: &AppHandle,
+) -> Result<bool, SecureVaultCommandError> {
+    let owner_valid =
+        || crate::secure_surface::exists(app, surface_label) && allowed_caller(app, surface_label);
+    if !owner_valid() {
+        return Err("secureVaultDenied".into());
+    }
+    open_for_owner(
+        mode,
+        app,
+        surface_label,
+        owner_valid,
+        &app.state::<SecureVaultService>(),
+        app.state(),
+        app.state(),
+    )
+    .await
+}
+
+async fn open_for_owner(
+    mode: SecureVaultMode,
+    app: &AppHandle,
+    owner: &str,
+    owner_valid: impl Fn() -> bool,
+    service: &SecureVaultService,
+    vault: State<'_, VaultService>,
+    ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
+) -> Result<bool, SecureVaultCommandError> {
     let mode = if matches!(mode, SecureVaultMode::UnlockSavedLocal) {
         if owner != "main" {
             return Err("secureVaultDenied".into());
@@ -321,6 +398,7 @@ pub async fn secure_vault_open(
             None
         };
     let id = uuid::Uuid::now_v7().to_string();
+    let expires_at = Instant::now() + Duration::from_secs(180);
     let (sender, receiver) = oneshot::channel();
     service
         .pending
@@ -335,118 +413,247 @@ pub async fn secure_vault_open(
                     can_reset: reset_fingerprint.is_some(),
                 },
                 sender,
-                owner_label: owner.clone(),
+                owner_label: owner.to_owned(),
                 reset_fingerprint,
-                expires_at: Instant::now() + Duration::from_secs(180),
+                expires_at,
             },
         );
     let _guard = PromptGuard {
         app: app.clone(),
         id: id.clone(),
     };
-    let prompt_path = format!("secure-vault.html?prompt={id}");
-    let expected = app
-        .config()
-        .build
-        .dev_url
-        .as_ref()
-        .and_then(|url| url.join(&prompt_path).ok());
-    let expected_query = format!("prompt={id}");
     let window_height = match kind {
         SecureVaultKind::Unlock => 380.0,
         SecureVaultKind::Create => 460.0,
         SecureVaultKind::EnableAutoUnlock => 500.0,
         SecureVaultKind::EnableLocalAutoUnlock => 540.0,
     };
-    let child = crate::secure_window_frame::apply_secure_window_frame(
-        &app,
-        &label(&id),
-        WebviewWindowBuilder::new(
-            &app,
+    let child = crate::secure_surface::open(
+        app,
+        crate::secure_surface::SurfaceSpec::new(
+            crate::secure_surface::SurfaceKind::Vault,
             label(&id),
-            WebviewUrl::App(format!("secure-vault.html?prompt={id}").into()),
         )
-        .title("NoriShell"),
+        .query(format!("prompt={id}"))
+        .size(600.0, window_height)
+        .min_size(480.0, 300.0)
+        .navigation_guard(),
     )
-    .inner_size(600.0, window_height)
-    .min_inner_size(480.0, 300.0)
-    .on_navigation(move |url| {
-        (cfg!(debug_assertions) && expected.as_ref().is_some_and(|expected| expected == url))
-            || (((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
-                || (matches!(url.scheme(), "http" | "https")
-                    && url.host_str() == Some("tauri.localhost")
-                    && url.port().is_none()))
-                && url.path() == "/secure-vault.html"
-                && url.query() == Some(expected_query.as_str()))
-    })
-    .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-    .build()
     .map_err(|_| "secureVaultUnavailable")?;
     let cancel_app = app.clone();
     let cancel_id = id.clone();
-    child.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed)
-            && let Ok(mut pending) = cancel_app.state::<SecureVaultService>().pending.lock()
-        {
+    child.on_destroyed(move || {
+        if let Ok(mut pending) = cancel_app.state::<SecureVaultService>().pending.lock() {
             pending.remove(&cancel_id);
         }
     });
-    let _ = crate::window_first_show::focus_if_revealed(&child);
-    // Expiry and owner teardown cancel only pending interaction, never an accepted mutation.
-    let mut receiver = receiver;
-    let deadline = tokio::time::sleep(Duration::from_secs(180));
+    let _ = child.focus();
+    let template = PromptTemplate {
+        id: id.clone(),
+        kind,
+        owner_label: owner.to_owned(),
+        reset_fingerprint,
+        expires_at,
+    };
+    let end = answer_loop(
+        service,
+        &template,
+        receiver,
+        owner_valid,
+        || crate::secure_surface::exists(app, &label(&id)),
+        || vault.status() == initial,
+        |password, confirmation| {
+            apply_password(
+                kind,
+                password,
+                confirmation,
+                vault.clone(),
+                ssh_sync.clone(),
+            )
+        },
+    )
+    .await?;
+    match end {
+        PromptEnd::Applied => {
+            let _ = app.emit_to("main", "native-tray-vault-changed", ());
+            Ok(true)
+        }
+        PromptEnd::Reset => {
+            let _ = app.emit_to("main", "native-tray-vault-changed", ());
+            Ok(false)
+        }
+        PromptEnd::Cancelled => Ok(false),
+    }
+}
+
+/// Everything needed to re-arm the same prompt after a retryable failure.
+struct PromptTemplate {
+    id: String,
+    kind: SecureVaultKind,
+    owner_label: String,
+    reset_fingerprint: Option<[u8; 32]>,
+    expires_at: Instant,
+}
+
+impl PromptTemplate {
+    fn pending(&self, sender: oneshot::Sender<Answer>) -> Pending {
+        Pending {
+            prompt: SecureVaultPrompt {
+                id: self.id.clone(),
+                kind: self.kind,
+                can_reset: self.reset_fingerprint.is_some(),
+            },
+            sender,
+            owner_label: self.owner_label.clone(),
+            reset_fingerprint: self.reset_fingerprint,
+            expires_at: self.expires_at,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PromptEnd {
+    Applied,
+    Reset,
+    Cancelled,
+}
+
+/// Waits for protected-window answers and applies them. Expiry and owner
+/// teardown cancel only pending interaction, never an accepted mutation.
+async fn answer_loop<Apply, Fut>(
+    service: &SecureVaultService,
+    template: &PromptTemplate,
+    mut receiver: oneshot::Receiver<Answer>,
+    owner_valid: impl Fn() -> bool,
+    prompt_alive: impl Fn() -> bool,
+    status_unchanged: impl Fn() -> bool,
+    mut apply: Apply,
+) -> Result<PromptEnd, SecureVaultCommandError>
+where
+    Apply: FnMut(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), Box<CoreApiError>>>,
+{
+    let deadline = tokio::time::sleep(
+        template
+            .expires_at
+            .saturating_duration_since(Instant::now()),
+    );
     tokio::pin!(deadline);
     let mut owner_check = tokio::time::interval(Duration::from_millis(250));
-    let owner_valid = || vault_caller_owner(&app, &webview).as_deref() == Some(owner.as_str());
-    let answer = loop {
-        tokio::select! {
-            response = &mut receiver => {
-                let Ok(answer) = response else { return Ok(false); };
-                break answer;
+    loop {
+        let answer = loop {
+            tokio::select! {
+                response = &mut receiver => {
+                    let Ok(answer) = response else { return Ok(PromptEnd::Cancelled); };
+                    break answer;
+                }
+                _ = &mut deadline => return Ok(PromptEnd::Cancelled),
+                _ = owner_check.tick() => {
+                    if !owner_valid() { return Ok(PromptEnd::Cancelled); }
+                }
             }
-            _ = &mut deadline => return Ok(false),
-            _ = owner_check.tick() => {
-                if !owner_valid() { return Ok(false); }
-            }
+        };
+        if !owner_valid() {
+            return Ok(PromptEnd::Cancelled);
         }
-    };
-    if !owner_valid() {
-        return Ok(false);
+        let Answer::Password(answer) = answer else {
+            return Ok(PromptEnd::Reset);
+        };
+        let PasswordAnswer {
+            mut password,
+            mut confirmation,
+            confirmed,
+            verdict,
+        } = answer;
+        if !status_unchanged() {
+            let error = SecureVaultCommandError::from("secureVaultStateChanged");
+            let _ = verdict.send(Err(error.clone()));
+            return Err(error);
+        }
+        if kind_requires_confirmation(template.kind) && !confirmed {
+            let error = SecureVaultCommandError::from("secureVaultDenied");
+            let _ = verdict.send(Err(error.clone()));
+            return Err(error);
+        }
+        let result = apply(
+            std::mem::take(&mut *password),
+            std::mem::take(&mut *confirmation),
+        )
+        .await;
+        let Err(error) = result else {
+            let _ = verdict.send(Ok(()));
+            return Ok(PromptEnd::Applied);
+        };
+        let (error, outcome) = classify_vault_failure(error);
+        if outcome == PromptOutcome::Close || !owner_valid() {
+            let _ = verdict.send(Err(error.clone()));
+            return Err(error);
+        }
+        // Re-arm the same prompt before replying so the window's next submit
+        // finds it. Only one attempt is in flight at a time because the entry
+        // is removed while an answer is processed; the KDF cost bounds the
+        // retry rate and the original deadline still applies.
+        let (sender, next_receiver) = oneshot::channel();
+        service
+            .pending
+            .lock()
+            .map_err(|_| "secureVaultUnavailable")?
+            .insert(template.id.clone(), template.pending(sender));
+        // Checked after inserting: a prompt window destroyed before the insert
+        // is detected here, one destroyed after it removes the entry itself.
+        if !prompt_alive() {
+            if let Ok(mut pending) = service.pending.lock() {
+                pending.remove(&template.id);
+            }
+            let _ = verdict.send(Err(error));
+            return Ok(PromptEnd::Cancelled);
+        }
+        receiver = next_receiver;
+        let _ = verdict.send(Err(error));
     }
-    let Answer::Password(mut answer) = answer else {
-        let _ = app.emit_to("main", "native-tray-vault-changed", ());
-        return Ok(false);
-    };
-    if vault.status() != initial {
-        return Err("secureVaultStateChanged".into());
-    }
+}
+
+fn kind_requires_confirmation(kind: SecureVaultKind) -> bool {
+    matches!(
+        kind,
+        SecureVaultKind::EnableAutoUnlock | SecureVaultKind::EnableLocalAutoUnlock
+    )
+}
+
+async fn apply_password(
+    kind: SecureVaultKind,
+    password: String,
+    confirmation: String,
+    vault: State<'_, VaultService>,
+    ssh_sync: State<'_, NoriShellSshSyncLocalAdapter>,
+) -> Result<(), Box<CoreApiError>> {
     let meta = RequestMeta {
         request_id: norishell_core_api::RequestId::new(),
     };
-    let password = std::mem::take(&mut *answer.password);
-    let result = match kind {
+    match kind {
         SecureVaultKind::Create => crate::vault_service::vault_create(
             VaultCreateRequest {
                 meta,
                 password,
-                password_confirmation: std::mem::take(&mut *answer.confirmation),
+                password_confirmation: confirmation,
             },
             vault,
-        ),
+        )
+        .map(drop),
         SecureVaultKind::Unlock => {
+            let mut confirmation = confirmation;
+            confirmation.zeroize();
             crate::vault_service::vault_unlock(
                 VaultUnlockRequest { meta, password },
                 vault,
                 ssh_sync,
             )
             .await
+            .map(drop)
         }
         SecureVaultKind::EnableAutoUnlock | SecureVaultKind::EnableLocalAutoUnlock => {
-            if !answer.confirmed {
-                let mut password = password;
-                password.zeroize();
-                return Err("secureVaultDenied".into());
-            }
+            let mut confirmation = confirmation;
+            confirmation.zeroize();
             crate::vault_service::vault_auto_unlock_enable(
                 VaultAutoUnlockEnableRequest {
                     meta,
@@ -456,11 +663,9 @@ pub async fn secure_vault_open(
                 },
                 vault,
             )
+            .map(drop)
         }
-    };
-    result.map_err(|_| "secureVaultFailed".to_owned())?;
-    let _ = app.emit_to("main", "native-tray-vault-changed", ());
-    Ok(true)
+    }
 }
 #[tauri::command]
 pub fn secure_vault_get(
@@ -468,7 +673,15 @@ pub fn secure_vault_get(
     window: WebviewWindow,
     service: State<'_, SecureVaultService>,
 ) -> Result<SecureVaultPrompt, SecureVaultCommandError> {
-    require_window(&window, &id)?;
+    secure_vault_get_for_label(window.label(), id, &service)
+}
+
+pub(crate) fn secure_vault_get_for_label(
+    surface_label: &str,
+    id: String,
+    service: &SecureVaultService,
+) -> Result<SecureVaultPrompt, SecureVaultCommandError> {
+    require_label(surface_label, &id)?;
     service
         .pending
         .lock()
@@ -478,7 +691,7 @@ pub fn secure_vault_get(
         .ok_or_else(|| "secureVaultExpired".into())
 }
 #[tauri::command]
-pub fn secure_vault_submit(
+pub async fn secure_vault_submit(
     id: String,
     password: String,
     password_confirmation: String,
@@ -486,18 +699,40 @@ pub fn secure_vault_submit(
     window: WebviewWindow,
     service: State<'_, SecureVaultService>,
 ) -> Result<(), SecureVaultCommandError> {
-    let answer = PasswordAnswer {
-        password: Zeroizing::new(password),
-        confirmation: Zeroizing::new(password_confirmation),
+    secure_vault_submit_for_label(
+        window.label(),
+        id,
+        Zeroizing::new(password),
+        Zeroizing::new(password_confirmation),
         confirmed,
-    };
-    require_window(&window, &id)?;
-    if answer.password.is_empty()
-        || answer.password.len() > 65_536
-        || answer.confirmation.len() > 65_536
-    {
+        &service,
+    )
+    .await
+}
+
+/// Hands the answer to the waiting prompt owner and resolves with its verdict:
+/// `Ok` after the Vault mutation succeeded, a retryable error while the same
+/// prompt stays open (for example an incorrect password), or the final error
+/// before the prompt closes.
+pub(crate) async fn secure_vault_submit_for_label(
+    surface_label: &str,
+    id: String,
+    password: Zeroizing<String>,
+    password_confirmation: Zeroizing<String>,
+    confirmed: bool,
+    service: &SecureVaultService,
+) -> Result<(), SecureVaultCommandError> {
+    require_label(surface_label, &id)?;
+    if password.is_empty() || password.len() > 65_536 || password_confirmation.len() > 65_536 {
         return Err("secureVaultDenied".into());
     }
+    let (verdict, verdict_receiver) = oneshot::channel();
+    let answer = PasswordAnswer {
+        password,
+        confirmation: password_confirmation,
+        confirmed,
+        verdict,
+    };
     let pending = service
         .pending
         .lock()
@@ -507,7 +742,11 @@ pub fn secure_vault_submit(
     pending
         .sender
         .send(Answer::Password(answer))
-        .map_err(|_| "secureVaultExpired".into())
+        .map_err(|_| SecureVaultCommandError::from("secureVaultExpired"))?;
+    // A dropped verdict means the owner went away or the prompt expired.
+    verdict_receiver
+        .await
+        .unwrap_or_else(|_| Err("secureVaultExpired".into()))
 }
 #[tauri::command]
 pub fn secure_vault_reset(
@@ -519,7 +758,27 @@ pub fn secure_vault_reset(
     service: State<'_, SecureVaultService>,
     vault: State<'_, VaultService>,
 ) -> Result<(), SecureVaultCommandError> {
-    require_window(&window, &id)?;
+    secure_vault_reset_for_label(
+        window.label(),
+        id,
+        phrase,
+        confirmed,
+        &app,
+        &service,
+        &vault,
+    )
+}
+
+pub(crate) fn secure_vault_reset_for_label(
+    surface_label: &str,
+    id: String,
+    phrase: String,
+    confirmed: bool,
+    app: &AppHandle,
+    service: &SecureVaultService,
+    vault: &VaultService,
+) -> Result<(), SecureVaultCommandError> {
+    require_label(surface_label, &id)?;
     if phrase != "RESET" || !confirmed {
         return Err("secureVaultDenied".into());
     }
@@ -532,8 +791,8 @@ pub fn secure_vault_reset(
         || !entry.prompt.can_reset
         || entry.expires_at <= Instant::now()
         || entry.sender.is_closed()
-        || app.get_webview_window(&entry.owner_label).is_none()
-        || !allowed_caller(&app, &entry.owner_label)
+        || !crate::secure_surface::exists(app, &entry.owner_label)
+        || !allowed_caller(app, &entry.owner_label)
     {
         return Err("secureVaultExpired".into());
     }
@@ -560,7 +819,15 @@ pub fn secure_vault_cancel(
     window: WebviewWindow,
     service: State<'_, SecureVaultService>,
 ) -> Result<(), SecureVaultCommandError> {
-    require_window(&window, &id)?;
+    secure_vault_cancel_for_label(window.label(), id, &service)
+}
+
+pub(crate) fn secure_vault_cancel_for_label(
+    surface_label: &str,
+    id: String,
+    service: &SecureVaultService,
+) -> Result<(), SecureVaultCommandError> {
+    require_label(surface_label, &id)?;
     service
         .pending
         .lock()
@@ -573,6 +840,282 @@ pub fn secure_vault_cancel(
 mod tests {
     use super::*;
     use norishell_core_api::VaultUnlockPolicy;
+
+    fn template(id: &str, kind: SecureVaultKind) -> PromptTemplate {
+        PromptTemplate {
+            id: id.to_owned(),
+            kind,
+            owner_label: "main".to_owned(),
+            reset_fingerprint: None,
+            expires_at: Instant::now() + Duration::from_secs(30),
+        }
+    }
+
+    fn arm(service: &SecureVaultService, template: &PromptTemplate) -> oneshot::Receiver<Answer> {
+        let (sender, receiver) = oneshot::channel();
+        service
+            .pending
+            .lock()
+            .expect("pending prompts")
+            .insert(template.id.clone(), template.pending(sender));
+        receiver
+    }
+
+    async fn submit(
+        service: &SecureVaultService,
+        id: &str,
+        password: &str,
+        confirmation: &str,
+    ) -> Result<(), SecureVaultCommandError> {
+        secure_vault_submit_for_label(
+            &label(id),
+            id.to_owned(),
+            Zeroizing::new(password.to_owned()),
+            Zeroizing::new(confirmation.to_owned()),
+            false,
+            service,
+        )
+        .await
+    }
+
+    fn vault_error(error: VaultServiceError) -> Box<CoreApiError> {
+        crate::vault_service::map_service_error(RequestId::new(), error)
+    }
+
+    #[test]
+    fn vault_failures_keep_distinct_codes_and_prompt_outcomes() {
+        let cases = [
+            (
+                VaultServiceError::Vault(VaultError::AuthenticationFailed),
+                "vault.authentication_failed",
+                "secureWindow.vault.incorrectPassword",
+                PromptOutcome::Retry,
+            ),
+            (
+                VaultServiceError::PasswordConfirmationMismatch,
+                "vault.password_confirmation_mismatch",
+                "secureWindow.vault.confirmationMismatch",
+                PromptOutcome::Retry,
+            ),
+            (
+                VaultServiceError::Vault(VaultError::WeakPassword),
+                "vault.weak_password",
+                "secureWindow.vault.weakPassword",
+                PromptOutcome::Retry,
+            ),
+            (
+                VaultServiceError::Vault(VaultError::Locked),
+                "vault.in_use",
+                "secureWindow.vault.inUse",
+                PromptOutcome::Retry,
+            ),
+            (
+                VaultServiceError::Vault(VaultError::ReloadRequired),
+                "vault.requires_reload",
+                "secureWindow.vault.requiresReload",
+                PromptOutcome::Close,
+            ),
+            (
+                VaultServiceError::Vault(VaultError::InsecurePermissions),
+                "vault.insecure_permissions",
+                "secureWindow.vault.insecurePermissions",
+                PromptOutcome::Close,
+            ),
+            (
+                VaultServiceError::AvailabilityChanged,
+                "vault.availability_changed",
+                "secureWindow.vault.changed",
+                PromptOutcome::Close,
+            ),
+        ];
+        for (error, code, message_key, outcome) in cases {
+            let (error, actual) = classify_vault_failure(vault_error(error));
+            assert_eq!(error.0.code, code);
+            assert_eq!(error.0.message_key, message_key);
+            assert_eq!(actual, outcome, "{code}");
+        }
+        let (internal, outcome) = classify_vault_failure(vault_error(VaultServiceError::Vault(
+            VaultError::KeyDerivation,
+        )));
+        assert_eq!(internal.0.code, "core.internal");
+        assert!(internal.0.diagnostic_id.is_some());
+        assert_eq!(outcome, PromptOutcome::Close);
+    }
+
+    /// Regression: a wrong password used to close the prompt with a generic
+    /// "new passwords must be 8 characters" failure. It must stay on the same
+    /// prompt with a distinct code, keep the Vault locked, and accept a retry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrong_unlock_password_keeps_prompt_open_and_retry_unlocks() {
+        let directory = tempfile::tempdir().expect("temporary Vault");
+        let vault = VaultService::start(directory.path());
+        vault
+            .create_for_tests(b"correct horse battery")
+            .expect("create Vault");
+        vault.lock_for_tests().expect("lock Vault");
+        let service = SecureVaultService::default();
+        let template = template("retry", SecureVaultKind::Unlock);
+        let receiver = arm(&service, &template);
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let owner = answer_loop(
+            &service,
+            &template,
+            receiver,
+            || true,
+            || true,
+            || true,
+            |password, _confirmation| {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let result = vault
+                    .unlock_for_protected_operation(password.as_bytes())
+                    .map(drop)
+                    .map_err(vault_error);
+                async move { result }
+            },
+        );
+        let user = async {
+            let wrong = submit(&service, "retry", "wrong password", "")
+                .await
+                .expect_err("wrong password is rejected");
+            assert_eq!(wrong.0.code, "vault.authentication_failed");
+            assert_eq!(wrong.0.message_key, "secureWindow.vault.incorrectPassword");
+            assert!(wrong.0.diagnostic_id.is_none());
+            assert!(!vault.is_unlocked());
+            let prompt = secure_vault_get_for_label(&label("retry"), "retry".to_owned(), &service)
+                .expect("the same prompt stays available after a wrong password");
+            assert_eq!(prompt.kind, SecureVaultKind::Unlock);
+            submit(&service, "retry", "correct horse battery", "")
+                .await
+                .expect("retry with the correct password unlocks");
+        };
+        let (end, ()) = tokio::join!(owner, user);
+        assert_eq!(end.expect("prompt completes"), PromptEnd::Applied);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(vault.is_unlocked());
+        assert!(service.pending.lock().expect("pending").is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_retryable_failure_closes_prompt_with_the_same_stable_code() {
+        let service = SecureVaultService::default();
+        let template = template("close", SecureVaultKind::Unlock);
+        let receiver = arm(&service, &template);
+        let owner = answer_loop(
+            &service,
+            &template,
+            receiver,
+            || true,
+            || true,
+            || true,
+            |_password, _confirmation| async {
+                Err(vault_error(VaultServiceError::Vault(
+                    VaultError::ReloadRequired,
+                )))
+            },
+        );
+        let user = submit(&service, "close", "any password", "");
+        let (end, submitted) = tokio::join!(owner, user);
+        let window_error = submitted.expect_err("window receives the final error");
+        let caller_error = end.expect_err("caller receives the same final error");
+        assert_eq!(window_error.0.code, "vault.requires_reload");
+        assert_eq!(caller_error.0.code, "vault.requires_reload");
+        assert!(service.pending.lock().expect("pending").is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn create_confirmation_mismatch_is_retryable_and_distinct() {
+        let directory = tempfile::tempdir().expect("temporary Vault");
+        let vault = VaultService::start(directory.path());
+        let service = SecureVaultService::default();
+        let template = template("create", SecureVaultKind::Create);
+        let receiver = arm(&service, &template);
+        let owner = answer_loop(
+            &service,
+            &template,
+            receiver,
+            || true,
+            || true,
+            || true,
+            |password, confirmation| {
+                let result = vault
+                    .create_for_protected_operation(password.as_bytes(), confirmation.as_bytes())
+                    .map(drop)
+                    .map_err(vault_error);
+                async move { result }
+            },
+        );
+        let user = async {
+            let mismatch = submit(&service, "create", "first password", "second password")
+                .await
+                .expect_err("mismatch rejected");
+            assert_eq!(mismatch.0.code, "vault.password_confirmation_mismatch");
+            let weak = submit(&service, "create", "short", "short")
+                .await
+                .expect_err("weak password rejected");
+            assert_eq!(weak.0.code, "vault.weak_password");
+            submit(
+                &service,
+                "create",
+                "long enough password",
+                "long enough password",
+            )
+            .await
+            .expect("valid create");
+        };
+        let (end, ()) = tokio::join!(owner, user);
+        assert_eq!(end.expect("prompt completes"), PromptEnd::Applied);
+        assert!(vault.is_unlocked());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retryable_failure_after_prompt_window_closed_does_not_rearm() {
+        let service = SecureVaultService::default();
+        let template = template("closed", SecureVaultKind::Unlock);
+        let receiver = arm(&service, &template);
+        let owner = answer_loop(
+            &service,
+            &template,
+            receiver,
+            || true,
+            || false,
+            || true,
+            |_password, _confirmation| async {
+                Err(vault_error(VaultServiceError::Vault(
+                    VaultError::AuthenticationFailed,
+                )))
+            },
+        );
+        let user = submit(&service, "closed", "wrong password", "");
+        let (end, submitted) = tokio::join!(owner, user);
+        assert_eq!(
+            submitted.expect_err("rejected").0.code,
+            "vault.authentication_failed"
+        );
+        assert_eq!(end.expect("cancelled"), PromptEnd::Cancelled);
+        assert!(service.pending.lock().expect("pending").is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancel_while_waiting_reports_cancelled_not_failure() {
+        let service = SecureVaultService::default();
+        let template = template("cancel", SecureVaultKind::Unlock);
+        let receiver = arm(&service, &template);
+        let owner = answer_loop(
+            &service,
+            &template,
+            receiver,
+            || true,
+            || true,
+            || true,
+            |_password, _confirmation| async { Ok(()) },
+        );
+        let user = async {
+            secure_vault_cancel_for_label(&label("cancel"), "cancel".to_owned(), &service)
+                .expect("cancel");
+        };
+        let (end, ()) = tokio::join!(owner, user);
+        assert_eq!(end.expect("cancel is not an error"), PromptEnd::Cancelled);
+    }
 
     #[test]
     fn reset_conflict_and_uncertain_commit_have_distinct_codes() {

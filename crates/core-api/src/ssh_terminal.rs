@@ -49,6 +49,10 @@ pub enum SshSessionFailureCode {
     ResolutionFailed,
     ConnectionRefused,
     ConnectionTimedOut,
+    /// The server closed the socket before key exchange (for example sshd
+    /// per-source penalties after failed or unfinished logins). No host key was
+    /// observed and no authentication was attempted.
+    ConnectionClosedByServer,
     ProxyConnectionFailed,
     ProxyRejected,
     ProxyProtocolError,
@@ -58,7 +62,14 @@ pub enum SshSessionFailureCode {
     HostKeyRejected,
     HostKeyMismatch,
     HostKeyDecisionExpired,
+    /// Core could not complete the host-key check (trust store read/write or
+    /// decision handoff failed). Never a trust decision; retry opens afresh.
+    HostKeyVerificationFailed,
     CredentialUnavailable,
+    /// Every usable saved credential needs the Vault and it is locked. No
+    /// authentication attempt was made with those secrets; the recovery is an
+    /// explicit, user-initiated Vault unlock followed by a fresh connection.
+    VaultLocked,
     AuthenticationRejected,
     AuthenticationFailed,
     SshAgentKeyUnavailable,

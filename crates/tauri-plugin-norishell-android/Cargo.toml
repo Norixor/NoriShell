@@ -1,0 +1,27 @@
+[package]
+name = "tauri-plugin-norishell-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# tauri-build discovers the Gradle library module through this `links` key.
+links = "tauri-plugin-norishell-android"
+publish = false
+
+[lib]
+name = "tauri_plugin_norishell_android"
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.22", default-features = false }
+rustls-platform-verifier = "0.7"
+
+[build-dependencies]
+tauri-plugin = { version = "2.6.3", features = ["build"] }

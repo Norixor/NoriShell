@@ -51,7 +51,12 @@ fn supports_auto_install() -> bool {
         // Only an AppImage can replace itself; a deb is owned by the package manager.
         return std::env::var_os("APPIMAGE").is_some_and(|path| !path.is_empty());
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "android")]
+    {
+        // PackageInstaller with system confirmation; see android_update.rs.
+        true
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
     {
         true
     }

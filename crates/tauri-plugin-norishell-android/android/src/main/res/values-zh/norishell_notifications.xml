@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="norishell_alerts_channel_name">连接提醒</string>
+    <string name="norishell_alerts_channel_description">意外断开的连接和失败的端口转发。</string>
+    <string name="norishell_transfers_channel_name">文件传输</string>
+    <string name="norishell_transfers_channel_description">已完成和失败的文件传输。</string>
+</resources>

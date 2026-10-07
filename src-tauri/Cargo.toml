@@ -8,7 +8,7 @@ repository.workspace = true
 
 [lib]
 name = "norishell_desktop"
-crate-type = ["lib", "cdylib", "staticlib"]
+crate-type = ["lib", "cdylib"]
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
@@ -64,6 +64,8 @@ uuid.workspace = true
 zeroize.workspace = true
 zip.workspace = true
 tauri-plugin-updater = "2.12.0"
+# Same verifier crate (and version) the vendored updater uses; Android reuses it for APKs.
+minisign-verify = "0.2"
 tauri-plugin-process = "2.3.1"
 
 [dev-dependencies]
@@ -86,6 +88,12 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain", "protected"] }
 keyring-core = "1.0.0"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSButton", "NSControl", "NSView", "NSWindow", "NSWorkspace"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Android has no readable system root store for rustls-native-certs; the platform
+# verifier delegates to the system TrustManager instead.
+rustls-platform-verifier = "0.7"
+tauri-plugin-norishell-android = { path = "../crates/tauri-plugin-norishell-android" }
 
 [target.'cfg(windows)'.dependencies]
 cap-fs-ext.workspace = true

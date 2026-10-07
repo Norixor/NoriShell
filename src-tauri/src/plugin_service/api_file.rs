@@ -16,6 +16,63 @@ use norishell_core_api::{
     PluginFilePickerKind,
 };
 
+/// Desktop: the native dialog plugin, bounded by the API's five-minute wait.
+#[cfg(not(target_os = "android"))]
+async fn choose_selection(
+    app: &tauri::AppHandle,
+    kind: PluginFilePickerKind,
+) -> Result<crate::content_access::Selection, PluginApiErrorCode> {
+    let (selected, selection) = tokio::sync::oneshot::channel();
+    let dialog = app.dialog().file();
+    match kind {
+        PluginFilePickerKind::File => dialog.pick_file(move |path| {
+            let _ = selected.send(path);
+        }),
+        #[cfg(desktop)]
+        PluginFilePickerKind::Directory => dialog.pick_folder(move |path| {
+            let _ = selected.send(path);
+        }),
+        #[cfg(mobile)]
+        PluginFilePickerKind::Directory => {
+            drop((dialog, selected));
+            return Err(PluginApiErrorCode::Unsupported);
+        }
+    }
+    let selected = tokio::time::timeout(std::time::Duration::from_secs(300), selection)
+        .await
+        .map_err(|_| PluginApiErrorCode::TimedOut)?
+        .map_err(|_| PluginApiErrorCode::Cancelled)?
+        .ok_or(PluginApiErrorCode::Cancelled)?;
+    crate::content_access::classify_dialog(selected).map_err(|_| PluginApiErrorCode::InvalidRequest)
+}
+
+/// Android: Core's own document picker. The dialog plugin returns its result to
+/// MainActivity only once MainActivity is started again, which never happens
+/// while a plugin-isolated or other Secure Surface covers it; this one returns to
+/// whatever is in front, is cancellable and closes itself after a fixed timeout.
+/// Directory picks stay unsupported (the document picker yields content URIs).
+#[cfg(target_os = "android")]
+async fn choose_selection(
+    _app: &tauri::AppHandle,
+    kind: PluginFilePickerKind,
+) -> Result<crate::content_access::Selection, PluginApiErrorCode> {
+    use crate::content_access::{ContentAccessError, Selection, pick_document};
+    if matches!(kind, PluginFilePickerKind::Directory) {
+        return Err(PluginApiErrorCode::Unsupported);
+    }
+    let picked = tokio::task::spawn_blocking(|| pick_document(&["*/*"]))
+        .await
+        .map_err(|_| PluginApiErrorCode::Unavailable)?;
+    match picked {
+        Ok(Some(uri)) => Ok(Selection::Content(uri)),
+        Ok(None) => Err(PluginApiErrorCode::Cancelled),
+        Err(ContentAccessError::PickBusy) => Err(PluginApiErrorCode::Busy),
+        Err(ContentAccessError::PickTimeout) => Err(PluginApiErrorCode::TimedOut),
+        Err(ContentAccessError::Rejected) => Err(PluginApiErrorCode::InvalidRequest),
+        Err(_) => Err(PluginApiErrorCode::Unavailable),
+    }
+}
+
 impl PluginService {
     pub(super) async fn pick_api_file(
         &self,
@@ -49,23 +106,24 @@ impl PluginService {
         if !current() {
             return Err(PluginApiErrorCode::Revoked);
         }
-        let (selected, selection) = tokio::sync::oneshot::channel();
-        let dialog = app.dialog().file();
-        match kind {
-            PluginFilePickerKind::File => dialog.pick_file(move |path| {
-                let _ = selected.send(path);
-            }),
-            PluginFilePickerKind::Directory => dialog.pick_folder(move |path| {
-                let _ = selected.send(path);
-            }),
-        }
-        let path = tokio::time::timeout(std::time::Duration::from_secs(300), selection)
-            .await
-            .map_err(|_| PluginApiErrorCode::TimedOut)?
-            .map_err(|_| PluginApiErrorCode::Cancelled)?
-            .ok_or(PluginApiErrorCode::Cancelled)?
-            .into_path()
-            .map_err(|_| PluginApiErrorCode::InvalidRequest)?;
+        let selection = choose_selection(&app, kind).await?;
+        // The approval prompt and the plugin see the provider's display name
+        // for Android documents instead of the private snapshot path.
+        #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
+        let mut display_label: Option<String> = None;
+        #[cfg_attr(
+            not(target_os = "android"),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let path = match selection {
+            crate::content_access::Selection::Path(path) => path,
+            #[cfg(target_os = "android")]
+            crate::content_access::Selection::Content(uri) => {
+                let (path, label) = android_document_snapshot(&app, uri, access).await?;
+                display_label = Some(label);
+                path
+            }
+        };
         if !current() {
             return Err(PluginApiErrorCode::Revoked);
         }
@@ -115,6 +173,7 @@ impl PluginService {
         if !current() {
             return Err(PluginApiErrorCode::Revoked);
         }
+        let label = display_label.unwrap_or(label);
         let details = serde_json::to_string_pretty(&exact_scope)
             .map_err(|_| PluginApiErrorCode::InvalidRequest)?;
         let fence = self
@@ -150,6 +209,81 @@ impl PluginService {
         }
         Ok(PluginApiValue::FilePicked { root_handle, label })
     }
+}
+
+/// Largest Android document a plugin may receive as a read-only snapshot.
+#[cfg(target_os = "android")]
+const MAX_ANDROID_PLUGIN_FILE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Android documents are not filesystem objects. A plugin that only reads the
+/// selected file gets a private read-only snapshot; any write, rename, remove
+/// or watch access would silently diverge from the user's document, so it is
+/// refused with `Unsupported`. The snapshot directory stays until the
+/// process-start wipe or the exit cleanup because file grants have no drop hook.
+#[cfg(target_os = "android")]
+async fn android_document_snapshot(
+    app: &tauri::AppHandle,
+    uri: crate::content_access::ContentUri,
+    access: PluginFileAccessRequest,
+) -> Result<(std::path::PathBuf, String), PluginApiErrorCode> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    if access.write
+        || access.rename
+        || access.remove
+        || access.recursive_remove
+        || access.watch
+        || access.list
+    {
+        return Err(PluginApiErrorCode::Unsupported);
+    }
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut opened = uri
+            .open_regular(&app, MAX_ANDROID_PLUGIN_FILE_SNAPSHOT_BYTES)
+            .map_err(|error| match error {
+                crate::content_access::ContentAccessError::TooLarge => {
+                    PluginApiErrorCode::QuotaExceeded
+                }
+                crate::content_access::ContentAccessError::PermissionDenied
+                | crate::content_access::ContentAccessError::Rejected => {
+                    PluginApiErrorCode::PermissionDenied
+                }
+                _ => PluginApiErrorCode::Unavailable,
+            })?;
+        let name =
+            crate::content_access::safe_file_name(opened.display_name.as_deref(), "selected-file");
+        let directory = crate::content_access::PrivateDir::create(&app, "plugin-file")
+            .map_err(|_| PluginApiErrorCode::Unavailable)?;
+        let path = directory.path().join(&name);
+        let mut target = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .map_err(|_| PluginApiErrorCode::Unavailable)?;
+        let expected = opened.len.ok_or(PluginApiErrorCode::Unavailable)?;
+        let copied = std::io::copy(
+            &mut std::io::Read::take(&mut opened.file, MAX_ANDROID_PLUGIN_FILE_SNAPSHOT_BYTES + 1),
+            &mut target,
+        )
+        .map_err(|_| PluginApiErrorCode::Unavailable)?;
+        if copied != expected {
+            return Err(PluginApiErrorCode::Unavailable);
+        }
+        target
+            .flush()
+            .and_then(|()| target.sync_all())
+            .and_then(|()| target.set_permissions(std::fs::Permissions::from_mode(0o400)))
+            .map_err(|_| PluginApiErrorCode::Unavailable)?;
+        drop(target);
+        directory.keep_until_exit();
+        Ok((path, name))
+    })
+    .await
+    .map_err(|_| PluginApiErrorCode::Unavailable)?
 }
 
 fn validate_access(

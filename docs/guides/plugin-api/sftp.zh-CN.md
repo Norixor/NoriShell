@@ -52,6 +52,8 @@ rootHandle 来自 sftpOpen；directoryHandle、entryHandle、precondition 来自
 
 失败只读取稳定 `code`：`invalidRequest` 时修正字段、格式或边界；`permissionDenied`/`revoked` 时停止使用旧授权或句柄；需要受保护交互而处于后台时处理 `interactionRequired`，等待明确用户操作。不要自动重试未知结果的写操作。完整分支见[错误处理](../developers/development/errors.zh-CN.md)。
 
+同一 SFTP 连接上有传输进行时，列目录、读取和文件操作仍可在该连接上执行；若写操作涉及进行中传输的源、目标或其临时文件（或它们的上级目录），返回 `conflict`，请在传输完成后再试。
+
 ## 子操作
 
 内层 `operation.kind` 选择以下分支。完整参数与返回对象字段见[类型参考](./types.zh-CN.md#pluginsftpoperation)。

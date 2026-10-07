@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::OpenOptions,
-    io::Read as _,
+    io::Read,
     path::Path,
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
@@ -42,8 +42,9 @@ use norishell_core_api::{
     TerminalWorkspaceLayoutSnapshot, WireSequence,
 };
 use norishell_secret_vault::SecretKind;
-use norishell_ssh_transport::inspect_private_key;
+use norishell_ssh_transport::{PrivateKeyInspectionError, inspect_private_key};
 use tauri::{AppHandle, State};
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_dialog::DialogExt as _;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -1442,15 +1443,37 @@ pub async fn private_key_file_import(
     metrics: State<'_, MetricsSessionService>,
 ) -> CoreResult<Option<CredentialRefSummary>> {
     let request_id = request.meta.request_id.clone();
-    let selected = app.dialog().file().blocking_pick_file();
-    let Some(selected) = selected else {
-        return Ok(None);
+    // A retry after a passphrase error reuses the file the user already chose
+    // for this import operation instead of asking again.
+    let retained = retained_key_selection::take(&request.operation_id, &request.identity_id);
+    let selection = match retained {
+        Some(selection) => selection,
+        None => match pick_private_key_file(&app, &request_id).await? {
+            Some(selection) => selection,
+            None => return Ok(None),
+        },
     };
-    let path = selected
-        .into_path()
-        .map_err(|_| invalid_credential_error(request_id.clone()))?;
-    let secret = read_selected_private_key_file(&path)
-        .map_err(|_| invalid_credential_error(request_id.clone()))?;
+    let retry_selection = selection.clone();
+    let retry_operation = request.operation_id.clone();
+    let retry_identity = request.identity_id.clone();
+    let secret = tauri::async_runtime::spawn_blocking(move || match selection {
+        crate::content_access::Selection::Path(path) => read_selected_private_key_file(&path),
+        // Android: read the picked document straight into zeroizing memory;
+        // the key is never spooled to a private copy.
+        #[cfg(target_os = "android")]
+        crate::content_access::Selection::Content(uri) => {
+            let opened = uri
+                .open_read()
+                .map_err(|_| std::io::Error::other("private key document unavailable"))?;
+            // Unknown sizes preallocate the full bound so no reallocation
+            // copies key bytes.
+            let hint = opened.len.unwrap_or(MAX_PRIVATE_KEY_FILE_BYTES);
+            read_bounded_private_key(opened.file, hint)
+        }
+    })
+    .await
+    .map_err(|_| invalid_credential_error(request_id.clone()))?
+    .map_err(|_| invalid_credential_error(request_id.clone()))?;
     let mut import_request = CredentialImportRequest {
         meta: request.meta,
         operation_id: request.operation_id,
@@ -1467,11 +1490,174 @@ pub async fn private_key_file_import(
         .take()
         .map(|value| Zeroizing::new(value.into_bytes()));
     let credential =
-        import_credential_material(import_request, secret, passphrase, &service, &vault)?;
+        match import_credential_material(import_request, secret, passphrase, &service, &vault) {
+            Ok(credential) => credential,
+            Err(error) => {
+                if matches!(
+                    error.code.as_str(),
+                    "credential.passphrase_required" | "credential.incorrect_passphrase"
+                ) {
+                    retained_key_selection::keep(retry_operation, retry_identity, retry_selection);
+                }
+                return Err(error);
+            }
+        };
     let _ = metrics
         .recheck_hosts_referencing_identity(request_id, credential.identity_id.clone())
         .await;
     Ok(Some(credential))
+}
+
+/// Releases the file retained for a private-key import operation (the import
+/// dialog closed). Releasing an unknown operation is a no-op.
+#[tauri::command]
+pub fn private_key_file_import_release(operation_id: norishell_core_api::OperationId) {
+    let _ = retained_key_selection::take_any(&operation_id);
+}
+
+/// The file chosen for a private-key import that failed only because its
+/// passphrase was missing or wrong. Only the file reference (desktop path or
+/// Android document URI) is retained, never key bytes or the passphrase; it is
+/// bound to the import operation and Identity, used at most once and expires
+/// with the protected-prompt lifetime.
+mod retained_key_selection {
+    use std::{
+        collections::BTreeMap,
+        sync::Mutex,
+        time::{Duration, Instant},
+    };
+
+    use norishell_core_api::{IdentityId, OperationId};
+
+    use crate::content_access::Selection;
+
+    const LIFETIME: Duration = Duration::from_secs(180);
+    const MAX_RETAINED: usize = 8;
+
+    struct Retained {
+        identity_id: IdentityId,
+        selection: Selection,
+        expires_at: Instant,
+    }
+
+    static RETAINED: Mutex<BTreeMap<String, Retained>> = Mutex::new(BTreeMap::new());
+
+    fn prune(retained: &mut BTreeMap<String, Retained>) {
+        let now = Instant::now();
+        retained.retain(|_, entry| entry.expires_at > now);
+    }
+
+    pub(super) fn keep(operation_id: OperationId, identity_id: IdentityId, selection: Selection) {
+        let mut retained = RETAINED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune(&mut retained);
+        if retained.len() >= MAX_RETAINED {
+            return;
+        }
+        retained.insert(
+            operation_id.as_str().to_owned(),
+            Retained {
+                identity_id,
+                selection,
+                expires_at: Instant::now() + LIFETIME,
+            },
+        );
+    }
+
+    /// Takes the selection only for the same operation and Identity.
+    pub(super) fn take(operation_id: &OperationId, identity_id: &IdentityId) -> Option<Selection> {
+        let mut retained = RETAINED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune(&mut retained);
+        let entry = retained.remove(operation_id.as_str())?;
+        (entry.identity_id == *identity_id).then_some(entry.selection)
+    }
+
+    pub(super) fn take_any(operation_id: &OperationId) -> Option<Selection> {
+        RETAINED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(operation_id.as_str())
+            .map(|entry| entry.selection)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_retained_file_is_single_use_and_bound_to_operation_and_identity() {
+            let operation = OperationId::new();
+            let identity = IdentityId::new();
+            keep(
+                operation.clone(),
+                identity.clone(),
+                Selection::Path("/tmp/key".into()),
+            );
+            assert!(take(&operation, &IdentityId::new()).is_none());
+            // A mismatched Identity consumed the entry; it is never handed out later.
+            assert!(take(&operation, &identity).is_none());
+            keep(
+                operation.clone(),
+                identity.clone(),
+                Selection::Path("/tmp/key".into()),
+            );
+            assert!(take(&operation, &identity).is_some());
+            assert!(take(&operation, &identity).is_none());
+            keep(
+                operation.clone(),
+                identity.clone(),
+                Selection::Path("/tmp/key".into()),
+            );
+            assert!(take_any(&operation).is_some());
+            assert!(take(&operation, &identity).is_none());
+        }
+    }
+}
+
+/// The user's private-key file choice; `None` when the picker was cancelled.
+#[cfg(not(target_os = "android"))]
+async fn pick_private_key_file(
+    app: &AppHandle,
+    request_id: &RequestId,
+) -> CoreResult<Option<crate::content_access::Selection>> {
+    let Some(selected) = app.dialog().file().blocking_pick_file() else {
+        return Ok(None);
+    };
+    crate::content_access::classify_dialog(selected)
+        .map(Some)
+        .map_err(|_| invalid_credential_error(request_id.clone()))
+}
+
+/// Android: the import runs from the Host editor tool surface, which covers
+/// MainActivity; the dialog plugin would deliver its result to MainActivity
+/// only after that surface closed. Core's own picker returns to the surface
+/// that asked and is cancellable and time bounded.
+#[cfg(target_os = "android")]
+async fn pick_private_key_file(
+    _app: &AppHandle,
+    request_id: &RequestId,
+) -> CoreResult<Option<crate::content_access::Selection>> {
+    use crate::content_access::ContentAccessError;
+    let picked =
+        tauri::async_runtime::spawn_blocking(|| crate::content_access::pick_document(&["*/*"]))
+            .await
+            .map_err(|_| ContentAccessError::Unavailable)
+            .and_then(|result| result);
+    match picked {
+        Ok(uri) => Ok(uri.map(crate::content_access::Selection::Content)),
+        // A rejected URI is not a usable key document.
+        Err(ContentAccessError::Rejected) => Err(invalid_credential_error(request_id.clone())),
+        Err(error) => Err(crate::core_api_error::core_error(
+            request_id.clone(),
+            error.code(),
+            ErrorCategory::Unavailable,
+            RetryStrategy::Never,
+            "errors.core.unavailable",
+        )),
+    }
 }
 
 fn import_credential_material(
@@ -1494,7 +1680,7 @@ fn import_credential_material(
                 secret.as_slice(),
                 passphrase.as_ref().map(|value| value.as_slice()),
             )
-            .map_err(|_| invalid_credential_error(request_id.clone()))?,
+            .map_err(|error| private_key_inspection_error(request_id.clone(), error))?,
         ),
     };
     let record = service
@@ -1623,7 +1809,7 @@ fn read_selected_private_key_file(path: &Path) -> std::io::Result<Zeroizing<Vec<
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let mut source = options.open(path)?;
+    let source = options.open(path)?;
     let metadata = source.metadata()?;
     #[cfg(windows)]
     {
@@ -1638,9 +1824,21 @@ fn read_selected_private_key_file(path: &Path) -> std::io::Result<Zeroizing<Vec<
             "private key must be a bounded regular file",
         ));
     }
-    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    read_bounded_private_key(source, metadata.len())
+}
+
+/// Reads at most `MAX_PRIVATE_KEY_FILE_BYTES` into zeroizing memory; one byte
+/// more is rejected. The source may be a pipe (Android document providers).
+/// The buffer is preallocated so key bytes are never left behind in a freed
+/// allocation by a reallocation.
+fn read_bounded_private_key(
+    source: impl Read,
+    length_hint: u64,
+) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let capacity =
+        usize::try_from(length_hint.min(MAX_PRIVATE_KEY_FILE_BYTES) + 1).unwrap_or(usize::MAX);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
     source
-        .by_ref()
         .take(MAX_PRIVATE_KEY_FILE_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_PRIVATE_KEY_FILE_BYTES {
@@ -1705,6 +1903,32 @@ pub(crate) fn credential_summary(record: &CredentialRecord) -> CredentialRefSumm
         details,
         state_version: record.state_version,
     }
+}
+
+/// Keeps "wrong format", "passphrase missing" and "passphrase wrong" distinct
+/// so the credential prompt can tell the user which field to correct.
+fn private_key_inspection_error(
+    request_id: RequestId,
+    error: PrivateKeyInspectionError,
+) -> Box<CoreApiError> {
+    let (code, message_key) = match error {
+        PrivateKeyInspectionError::InvalidFormat => return invalid_credential_error(request_id),
+        PrivateKeyInspectionError::PassphraseRequired => (
+            "credential.passphrase_required",
+            "errors.credential.passphraseRequired",
+        ),
+        PrivateKeyInspectionError::IncorrectPassphrase => (
+            "credential.incorrect_passphrase",
+            "errors.credential.incorrectPassphrase",
+        ),
+    };
+    crate::core_api_error::core_error(
+        request_id,
+        code,
+        ErrorCategory::Validation,
+        RetryStrategy::WaitForUser,
+        message_key,
+    )
 }
 
 fn invalid_credential_error(request_id: RequestId) -> Box<CoreApiError> {
@@ -1817,6 +2041,28 @@ pub(crate) fn map_persistence_error(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn private_key_import_failures_keep_distinct_codes() {
+        use norishell_ssh_transport::PrivateKeyInspectionError;
+        for (error, code) in [
+            (
+                PrivateKeyInspectionError::InvalidFormat,
+                "credential.invalid_material",
+            ),
+            (
+                PrivateKeyInspectionError::PassphraseRequired,
+                "credential.passphrase_required",
+            ),
+            (
+                PrivateKeyInspectionError::IncorrectPassphrase,
+                "credential.incorrect_passphrase",
+            ),
+        ] {
+            let mapped = super::private_key_inspection_error(RequestId::new(), error);
+            assert_eq!(mapped.code, code);
+        }
+    }
+
     use std::{
         sync::{Arc, Barrier, mpsc},
         time::Duration,

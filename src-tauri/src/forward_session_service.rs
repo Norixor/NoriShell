@@ -186,6 +186,7 @@ pub(crate) enum ForwardFailureCode {
     CredentialUnavailable,
     AuthenticationRejected,
     TransportConnect,
+    ConnectionClosedByServer,
     Bind,
     RemoteRegistrationRejected,
     RemoteRegistrationUncertain,
@@ -2594,6 +2595,11 @@ fn map_transport_error(error: TransportError) -> ForwardRuntimeError {
             "transport-connect",
             "connecting the forward SSH transport timed out",
         ),
+        TransportError::ServerClosedBeforeHandshake => ForwardFailure::new(
+            ForwardFailureCode::ConnectionClosedByServer,
+            "transport-connect",
+            "the server closed the forward SSH connection before the handshake",
+        ),
         TransportError::ConnectFailed => ForwardFailure::new(
             ForwardFailureCode::TransportConnect,
             "transport-connect",
@@ -3178,6 +3184,9 @@ fn map_forward_failure(failure: ForwardFailure) -> wire::ForwardFailure {
             wire::ForwardFailureCode::AuthenticationRejected
         }
         ForwardFailureCode::TransportConnect => wire::ForwardFailureCode::TransportConnect,
+        ForwardFailureCode::ConnectionClosedByServer => {
+            wire::ForwardFailureCode::ConnectionClosedByServer
+        }
         ForwardFailureCode::Bind => wire::ForwardFailureCode::Bind,
         ForwardFailureCode::RemoteRegistrationRejected => {
             wire::ForwardFailureCode::RemoteRegistrationRejected
@@ -3269,6 +3278,19 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 
     use super::*;
+
+    #[test]
+    fn a_server_closing_before_the_handshake_has_its_own_forward_code() {
+        let error = map_transport_error(TransportError::ServerClosedBeforeHandshake);
+        assert_eq!(
+            error.failure.code,
+            ForwardFailureCode::ConnectionClosedByServer
+        );
+        assert_eq!(
+            map_forward_failure(error.failure).code,
+            wire::ForwardFailureCode::ConnectionClosedByServer
+        );
+    }
 
     #[test]
     fn vault_recovery_classifies_only_credential_failures() {

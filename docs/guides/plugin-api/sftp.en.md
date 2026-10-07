@@ -52,6 +52,8 @@ Correlate the reply by `callId`, then match `outcome.kind` and `value.kind="sftp
 
 Read the stable failure `code`: correct fields, formats, or bounds for `invalidRequest`; stop using stale grants/handles for `permissionDenied`/`revoked`; when protected interaction is needed in a background context, handle `interactionRequired` by waiting for an explicit user action. Never automatically replay writes with unknown outcomes. See [error handling](../developers/development/errors.en.md).
 
+While a transfer on the same SFTP connection is running, listing, reading, and file actions keep working on that connection. A write that touches the running transfer's source, target, or its temporary file (or one of their parent directories) fails with `conflict`; retry after the transfer finishes.
+
 ## Sub-operations
 
 The inner `operation.kind` selects a branch below. Full fields and result objects are in the [type reference](./types.en.md#pluginsftpoperation).

@@ -42,7 +42,10 @@ internal class RemoveListenerArgs {
   var permissions: List<String>? = null
 }
 
-abstract class Plugin(private val activity: Activity) {
+// NoriShell: `activity` follows a relaunched host Activity (see
+// PluginManager.onActivityCreate); upstream keeps the first, destroyed one.
+abstract class Plugin(activity: Activity) {
+  private var activity: Activity = activity
   var handle: PluginHandle? = null
   private val listeners: MutableMap<String, MutableList<Channel>> = mutableMapOf()
 
@@ -101,6 +104,19 @@ abstract class Plugin(private val activity: Activity) {
    */
   @Deprecated("use onDestroy(activity: AppCompatActivity) instead")
   open fun onDestroy() {}
+
+  /**
+   * NoriShell: the host Activity was recreated by the system (a configuration
+   * change the manifest cannot absorb, such as a navigation-mode overlay). The
+   * base class already points at [activity]; subclasses that keep their own
+   * Activity reference must update it here.
+   */
+  open fun onActivityRecreated(activity: AppCompatActivity) {}
+
+  internal fun triggerActivityRecreated(activity: AppCompatActivity) {
+    this.activity = activity
+    onActivityRecreated(activity)
+  }
 
   internal fun triggerOnDestroy(activity: AppCompatActivity) {
     onDestroy(activity)

@@ -233,12 +233,10 @@ pub(crate) async fn native_json_export<R: tauri::Runtime>(
     let spec = validate_json_object(&kind, &text)?;
 
     let (sender, receiver) = oneshot::channel();
-    let window = webview.window();
-    webview
-        .app_handle()
-        .dialog()
-        .file()
-        .set_parent(&window)
+    let dialog = webview.app_handle().dialog().file();
+    #[cfg(desktop)]
+    let dialog = dialog.set_parent(&webview.window());
+    dialog
         .set_file_name(spec.file_name)
         .add_filter("JSON", &["json"])
         .save_file(move |path| {
@@ -251,13 +249,27 @@ pub(crate) async fn native_json_export<R: tauri::Runtime>(
     else {
         return Ok(false);
     };
-    let path = path
-        .into_path()
+    let selection = crate::content_access::classify_dialog(path)
         .map_err(|_| "native-json-export-unavailable".to_owned())?;
 
-    tauri::async_runtime::spawn_blocking(move || write_json_atomically(path, text))
-        .await
-        .map_err(|_| "native-json-export-write-failed".to_owned())??;
+    tauri::async_runtime::spawn_blocking(move || match selection {
+        crate::content_access::Selection::Path(path) => write_json_atomically(path, text),
+        // Android: the content was validated in memory; it is streamed into
+        // the picked document and synced. A failure after truncation is
+        // reported separately so the user knows the file may be partial.
+        #[cfg(target_os = "android")]
+        crate::content_access::Selection::Content(uri) => {
+            uri.write_bytes(text.as_bytes())
+                .map_err(|error| match error {
+                    crate::content_access::ContentAccessError::WriteIncomplete => {
+                        "native-json-export-write-incomplete".to_owned()
+                    }
+                    _ => "native-json-export-write-failed".to_owned(),
+                })
+        }
+    })
+    .await
+    .map_err(|_| "native-json-export-write-failed".to_owned())??;
 
     Ok(true)
 }

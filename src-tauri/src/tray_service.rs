@@ -1,4 +1,7 @@
 //! The native tray projects Core snapshots; menu resource identifiers are never rebound to newer snapshots.
+//!
+//! Android has no system tray: only the command surface and an already-stopped service remain there.
+#![cfg_attr(mobile, allow(dead_code, unused_imports))]
 pub(crate) mod panel;
 mod projection;
 
@@ -9,8 +12,9 @@ use std::{
 };
 
 use norishell_core_api::*;
+use tauri::{App, AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
+#[cfg(desktop)]
 use tauri::{
-    App, AppHandle, Emitter, Manager, Runtime, State, WebviewWindow,
     menu::{Menu, MenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -381,6 +385,7 @@ fn meta() -> RequestMeta {
     }
 }
 
+#[cfg(desktop)]
 fn handle_click(app: &AppHandle, id: &str) {
     let Some(service) = app.try_state::<NativeTrayService>() else {
         return;
@@ -409,6 +414,7 @@ fn handle_click(app: &AppHandle, id: &str) {
     execute_action(app, &service, action);
 }
 
+#[cfg(desktop)]
 fn open_main_from_tray(app: &AppHandle) {
     panel::hide(app);
     if lifecycle::show_main_window(app).is_err() {
@@ -416,6 +422,7 @@ fn open_main_from_tray(app: &AppHandle) {
     }
 }
 
+#[cfg(desktop)]
 fn handle_left_click(app: &AppHandle, rect: tauri::Rect) {
     let Some(service) = app.try_state::<NativeTrayService>() else {
         return;
@@ -460,6 +467,7 @@ fn handle_left_click(app: &AppHandle, rect: tauri::Rect) {
     });
 }
 
+#[cfg(desktop)]
 fn handle_native_double_click(app: &AppHandle) {
     let Some(service) = app.try_state::<NativeTrayService>() else {
         return;
@@ -477,6 +485,7 @@ fn handle_native_double_click(app: &AppHandle) {
     open_main_from_tray(app);
 }
 
+#[cfg(desktop)]
 fn handle_left_button_down(app: &AppHandle) {
     let Some(service) = app.try_state::<NativeTrayService>() else {
         return;
@@ -499,6 +508,7 @@ fn handle_left_button_down(app: &AppHandle) {
     open_main_from_tray(app);
 }
 
+#[cfg(desktop)]
 fn handle_right_click(app: &AppHandle) {
     if let Some(service) = app.try_state::<NativeTrayService>() {
         service
@@ -595,6 +605,7 @@ fn dispatch_frontend(app: &AppHandle, service: &NativeTrayService, action: Nativ
     }
 }
 
+#[cfg(desktop)]
 fn item<R: Runtime>(
     app: &AppHandle<R>,
     row: &Row,
@@ -619,6 +630,7 @@ fn item<R: Runtime>(
     )
 }
 
+#[cfg(desktop)]
 fn render<R: Runtime>(app: &AppHandle<R>, mut projection: Projection) -> tauri::Result<()> {
     let service = app.state::<NativeTrayService>();
     let mut state = service
@@ -675,6 +687,12 @@ fn render<R: Runtime>(app: &AppHandle<R>, mut projection: Projection) -> tauri::
     Ok(())
 }
 
+// Android has no system tray, so there is nothing to project.
+#[cfg(mobile)]
+fn render<R: Runtime>(_app: &AppHandle<R>, _projection: Projection) -> tauri::Result<()> {
+    Ok(())
+}
+
 /// Remove the old menu immediately after settings commit; the next Core snapshot repopulates it.
 pub(crate) fn preferences_changed<R: Runtime>(app: &AppHandle<R>) {
     panel::hide(app);
@@ -694,6 +712,21 @@ pub(crate) fn preferences_changed<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
+/// Android has no system tray. The service is still managed, already stopped, so the
+/// tray commands resolve their state and report no pending actions.
+#[cfg(mobile)]
+pub(crate) fn install(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+    let (stop, _stopped) = watch::channel(true);
+    let inner: Arc<Mutex<TrayState>> = Arc::default();
+    inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .stopped = true;
+    app.manage(NativeTrayService { inner, stop });
+    Ok(())
+}
+
+#[cfg(desktop)]
 pub(crate) fn install(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let (stop, mut stopped) = watch::channel(false);
     app.manage(NativeTrayService {

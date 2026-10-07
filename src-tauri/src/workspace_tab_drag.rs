@@ -1,10 +1,11 @@
 //! Native, content-free Workspace Tab drag preview and global mouse release tracking.
 //!
-//! Linux does not support cross-window Tab drags (`workspace_tab_drag_begin` refuses there), so the
-//! rest of this module is inert on that platform while the command surface stays the same.
+//! Linux and Android do not support cross-window Tab drags (`workspace_tab_drag_begin` refuses there),
+//! so the rest of this module is inert on those platforms while the command surface stays the same.
+//! Android has a single window, so the native preview and pointer polling are not compiled there.
 #![cfg_attr(
-    target_os = "linux",
-    allow(dead_code, unreachable_code, unused_variables)
+    any(target_os = "linux", mobile),
+    allow(dead_code, unreachable_code, unused_variables, unused_imports)
 )]
 
 use serde::Serialize;
@@ -248,6 +249,7 @@ fn release_target<R: Runtime>(app: &AppHandle<R>, source: &str, x: f64, y: f64) 
     target_from_hits(source, &hits)
 }
 
+#[cfg(desktop)]
 fn poll_drag(app: AppHandle, state: WorkspaceTabDrag, nonce: String) {
     loop {
         thread::sleep(POLL_INTERVAL);
@@ -335,8 +337,20 @@ pub(crate) async fn workspace_tab_drag_begin(
     tabs.owns_tab(window.label(), &id)?;
     // Linux desktops differ too much in global pointer and window placement support (Wayland has neither);
     // moving a Tab between windows uses the Tab context menu there instead.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", mobile))]
     return Err("workspace_tab.drag_unsupported".into());
+    #[cfg(desktop)]
+    begin_preview(app, window, drag, id, nonce)
+}
+
+#[cfg(desktop)]
+fn begin_preview(
+    app: AppHandle,
+    window: WebviewWindow,
+    drag: State<'_, WorkspaceTabDrag>,
+    id: String,
+    nonce: String,
+) -> Result<(), String> {
     #[cfg(not(target_os = "linux"))]
     if nonce.is_empty() || nonce.len() > 128 || !nonce.is_ascii() {
         return Err("workspace_tab.drag_invalid_nonce".into());

@@ -63,11 +63,14 @@ impl ConnectivityHints {
     }
 }
 
+// Android has no native connectivity observer; resume notifications come from the run loop.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 struct NativeContext {
     tx: mpsc::Sender<()>,
     active: Arc<AtomicBool>,
 }
 
+#[cfg_attr(target_os = "android", allow(dead_code))]
 impl NativeContext {
     fn notify(&self) {
         if self.active.load(Ordering::Acquire) {

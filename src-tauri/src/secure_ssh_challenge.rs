@@ -5,7 +5,7 @@ use norishell_ssh_domain::Endpoint;
 use norishell_ssh_transport::ObservedHostKey;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Mutex, time::Duration};
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -18,9 +18,6 @@ pub enum ChallengeTarget {
     SshKeyboard {
         request: SshKeyboardInteractiveResponseRequest,
     },
-    MetricsHostKey {
-        request: MetricsHostKeyDecisionRequest,
-    },
     MetricsKeyboard {
         request: MetricsKeyboardInteractiveRespondRequest,
     },
@@ -31,7 +28,6 @@ pub enum ChallengeContent {
     SshHostKey(SshHostKeyChallenge),
     SftpHostKey(SftpHostKeyChallenge),
     SshKeyboard(SshKeyboardInteractiveChallenge),
-    MetricsHostKey(MetricsHostKeyChallenge),
     MetricsKeyboard(MetricsKeyboardInteractiveChallenge),
 }
 #[derive(Clone, Serialize)]
@@ -46,9 +42,24 @@ pub struct ChallengePrompt {
     id: String,
     content: ChallengeContent,
 }
+/// Error code of a host-key acceptance whose trust write failed. Core kept the
+/// challenge, so the same protected window offers the decision again.
+const TRUST_FAILED: &str = "secureChallengeTrustFailed";
+
+type Verdict = oneshot::Sender<Result<(), String>>;
+
 struct Answer {
     approved: bool,
     answers: Vec<Zeroizing<String>>,
+    /// Resolves the window's submit: `Ok` when applied, a retryable error
+    /// while the same window stays open, or the final error.
+    verdict: Option<Verdict>,
+}
+
+fn reply(verdict: Option<Verdict>, result: Result<(), String>) {
+    if let Some(verdict) = verdict {
+        let _ = verdict.send(result);
+    }
 }
 struct Pending {
     prompt: ChallengePrompt,
@@ -67,8 +78,8 @@ fn meta() -> RequestMeta {
 fn label(id: &str) -> String {
     format!("secure-ssh-challenge-{id}")
 }
-fn require_window(window: &WebviewWindow, id: &str) -> Result<(), String> {
-    if window.label() != label(id) {
+fn require_label(surface_label: &str, id: &str) -> Result<(), String> {
+    if surface_label != label(id) {
         return Err("secureChallengeDenied".into());
     }
     Ok(())
@@ -86,7 +97,6 @@ impl ChallengeTarget {
         match self {
             Self::SshHostKey { request } => format!("ssh-host:{}", request.challenge_id),
             Self::SshKeyboard { request } => format!("ssh-kbi:{}", request.challenge_id),
-            Self::MetricsHostKey { request } => format!("metrics-host:{}", request.challenge_id),
             Self::MetricsKeyboard { request } => format!("metrics-kbi:{}", request.challenge_id),
         }
     }
@@ -153,26 +163,6 @@ async fn content(app: &AppHandle, target: &ChallengeTarget) -> Result<ChallengeC
             }
             Ok(ChallengeContent::SshKeyboard(challenge))
         }
-        ChallengeTarget::MetricsHostKey { request } => {
-            let sessions = app
-                .state::<metrics::MetricsSessionService>()
-                .summaries(RequestId::new())
-                .await
-                .map_err(|_| expired())?;
-            let challenge = sessions
-                .into_iter()
-                .find(|s| {
-                    s.metrics_session_id == request.metrics_session_id
-                        && s.host_id == request.host_id
-                        && s.generation == request.expected_generation
-                })
-                .and_then(|s| s.host_key_challenge)
-                .ok_or_else(expired)?;
-            if challenge.challenge_id != request.challenge_id {
-                return Err(expired());
-            }
-            Ok(ChallengeContent::MetricsHostKey(challenge))
-        }
         ChallengeTarget::MetricsKeyboard { request } => {
             if !request.answer_ref_ids.is_empty() {
                 return Err("secureChallengeDenied".into());
@@ -213,22 +203,13 @@ async fn apply(app: &AppHandle, target: ChallengeTarget, mut answer: Answer) -> 
             };
             ssh::ssh_terminal_host_key_decide(request, app.state())
                 .await
-                .map_err(failed)?;
-        }
-        ChallengeTarget::MetricsHostKey { mut request } => {
-            if answer.approved
-                && matches!(&current, ChallengeContent::MetricsHostKey(c) if c.trusted_fingerprint_sha256.is_some())
-            {
-                return Err("secureChallengeDenied".into());
-            }
-            request.decision = if answer.approved {
-                MetricsHostKeyDecision::Accept
-            } else {
-                MetricsHostKeyDecision::Reject
-            };
-            metrics::metrics_host_key_decide(request, app.state())
-                .await
-                .map_err(failed)?;
+                .map_err(|error| {
+                    if error.code == "ssh_terminal.host_key_trust_failed" {
+                        TRUST_FAILED.to_owned()
+                    } else {
+                        "secureChallengeFailed".to_owned()
+                    }
+                })?;
         }
         ChallengeTarget::SshKeyboard { mut request } => {
             let ChallengeContent::SshKeyboard(challenge) = current else {
@@ -351,6 +332,7 @@ async fn cancel_target(app: &AppHandle, target: ChallengeTarget) -> Result<(), S
                 Answer {
                     approved: false,
                     answers: vec![],
+                    verdict: None,
                 },
             )
             .await;
@@ -387,6 +369,7 @@ async fn cancel_target(app: &AppHandle, target: ChallengeTarget) -> Result<(), S
                 Answer {
                     approved: false,
                     answers: vec![],
+                    verdict: None,
                 },
             )
             .await?;
@@ -405,9 +388,7 @@ impl Drop for Guard {
         if let Ok(mut pending) = self.app.state::<SecureSshChallengeService>().pending.lock() {
             pending.remove(&self.id);
         }
-        if let Some(window) = self.app.get_webview_window(&label(&self.id)) {
-            let _ = window.destroy();
-        }
+        crate::secure_surface::destroy(&self.app, &label(&self.id));
         if let Some(target) = self.target.take() {
             let app = self.app.clone();
             tauri::async_runtime::spawn(async move {
@@ -417,45 +398,32 @@ impl Drop for Guard {
     }
 }
 
-fn open_challenge_window(app: &AppHandle, id: &str) -> Result<WebviewWindow, String> {
-    let path = format!("secure-ssh-challenge.html?prompt={id}");
-    let expected = app
-        .config()
-        .build
-        .dev_url
-        .as_ref()
-        .and_then(|url| url.join(&path).ok());
-    let query = format!("prompt={id}");
-    let child = crate::secure_window_frame::apply_secure_window_frame(
+fn open_challenge_window(
+    app: &AppHandle,
+    id: &str,
+) -> Result<crate::secure_surface::SurfaceHandle, String> {
+    let child = crate::secure_surface::open(
         app,
-        &label(id),
-        WebviewWindowBuilder::new(app, label(id), WebviewUrl::App(path.into())).title("NoriShell"),
+        crate::secure_surface::SurfaceSpec::new(
+            crate::secure_surface::SurfaceKind::SshChallenge,
+            label(id),
+        )
+        .query(format!("prompt={id}"))
+        .navigation_guard(),
     )
-    .on_navigation(move |url| {
-        (cfg!(debug_assertions) && expected.as_ref().is_some_and(|e| e == url))
-            || (((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
-                || (matches!(url.scheme(), "http" | "https")
-                    && url.host_str() == Some("tauri.localhost")
-                    && url.port().is_none()))
-                && url.path() == "/secure-ssh-challenge.html"
-                && url.query() == Some(query.as_str()))
-    })
-    .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-    .build()
     .map_err(|_| "secureChallengeUnavailable".to_owned())?;
     let cancel_app = app.clone();
     let cancel_id = id.to_owned();
-    child.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed)
-            && let Ok(mut pending) = cancel_app
-                .state::<SecureSshChallengeService>()
-                .pending
-                .lock()
+    child.on_destroyed(move || {
+        if let Ok(mut pending) = cancel_app
+            .state::<SecureSshChallengeService>()
+            .pending
+            .lock()
         {
             pending.remove(&cancel_id);
         }
     });
-    let _ = crate::window_first_show::focus_if_revealed(&child);
+    let _ = child.focus();
     Ok(child)
 }
 
@@ -513,7 +481,7 @@ pub(crate) async fn prompt_sftp_host_key(
             value = &mut receiver => break value.is_ok_and(|answer| answer.approved && answer.answers.is_empty() && ordinary_owner_alive(app, owner_label)),
             _ = &mut deadline => break false,
             _ = tick.tick() => {
-                if !ordinary_owner_alive(app, owner_label) || app.get_webview_window(&label(&id)).is_none() {
+                if !ordinary_owner_alive(app, owner_label) || !crate::secure_surface::exists(app, &label(&id)) {
                     break false;
                 }
             }
@@ -571,26 +539,60 @@ pub async fn secure_ssh_challenge_open(
     let deadline = tokio::time::sleep(Duration::from_secs(180));
     tokio::pin!(deadline);
     let mut tick = tokio::time::interval(Duration::from_millis(500));
-    let answer = loop {
-        tokio::select! {
-            value = &mut receiver => break value.ok(),
-            _ = &mut deadline => break None,
-            _ = tick.tick() => { if !ordinary_owner_alive(&app, &owner) || crate::workspace_tab_views::ordinary_owner(&app, &webview).as_deref() != Ok(owner.as_str()) || content(&app, &target).await.is_err() { break None; } }
-        }
-    };
-    let Some(answer) = answer.filter(|answer| {
-        answer.approved
-            && ordinary_owner_alive(&app, &owner)
+    let owner_valid = || {
+        ordinary_owner_alive(&app, &owner)
             && crate::workspace_tab_views::ordinary_owner(&app, &webview).as_deref()
                 == Ok(owner.as_str())
-    }) else {
-        cancel_target(&app, target).await?;
-        guard.target = None;
-        return Ok(false);
     };
-    apply(&app, target, answer).await?;
-    guard.target = None;
-    Ok(true)
+    loop {
+        let answer = loop {
+            tokio::select! {
+                value = &mut receiver => break value.ok(),
+                _ = &mut deadline => break None,
+                _ = tick.tick() => { if !owner_valid() || content(&app, &target).await.is_err() { break None; } }
+            }
+        };
+        let Some(mut answer) = answer.filter(|answer| answer.approved && owner_valid()) else {
+            cancel_target(&app, target).await?;
+            guard.target = None;
+            return Ok(false);
+        };
+        let verdict = answer.verdict.take();
+        match apply(&app, target.clone(), answer).await {
+            Ok(()) => {
+                reply(verdict, Ok(()));
+                guard.target = None;
+                return Ok(true);
+            }
+            // Only a failed trust write keeps the prompt: Core retained the
+            // challenge, so the user can accept again or reject explicitly.
+            Err(code) if code == TRUST_FAILED && rearm(&service, &id, &mut receiver) => {
+                reply(verdict, Err(code));
+            }
+            Err(code) => {
+                reply(verdict, Err(code.clone()));
+                return Err(code);
+            }
+        }
+    }
+}
+
+/// Gives the pending prompt a fresh answer channel for another attempt.
+fn rearm(
+    service: &SecureSshChallengeService,
+    id: &str,
+    receiver: &mut oneshot::Receiver<Answer>,
+) -> bool {
+    let Ok(mut pending) = service.pending.lock() else {
+        return false;
+    };
+    let Some(entry) = pending.get_mut(id) else {
+        return false;
+    };
+    let (sender, next) = oneshot::channel();
+    entry.sender = Some(sender);
+    *receiver = next;
+    true
 }
 #[tauri::command]
 pub fn secure_ssh_challenge_get(
@@ -598,7 +600,15 @@ pub fn secure_ssh_challenge_get(
     window: WebviewWindow,
     service: State<'_, SecureSshChallengeService>,
 ) -> Result<ChallengePrompt, String> {
-    require_window(&window, &id)?;
+    secure_ssh_challenge_get_for_label(window.label(), id, &service)
+}
+
+pub(crate) fn secure_ssh_challenge_get_for_label(
+    surface_label: &str,
+    id: String,
+    service: &SecureSshChallengeService,
+) -> Result<ChallengePrompt, String> {
+    require_label(surface_label, &id)?;
     service
         .pending
         .lock()
@@ -608,18 +618,39 @@ pub fn secure_ssh_challenge_get(
         .ok_or_else(|| "secureChallengeExpired".into())
 }
 #[tauri::command]
-pub fn secure_ssh_challenge_submit(
+pub async fn secure_ssh_challenge_submit(
     id: String,
     approved: bool,
     answers: Vec<String>,
     window: WebviewWindow,
     service: State<'_, SecureSshChallengeService>,
 ) -> Result<(), String> {
+    secure_ssh_challenge_submit_for_label(
+        window.label(),
+        id,
+        approved,
+        answers.into_iter().map(Zeroizing::new).collect(),
+        &service,
+    )
+    .await
+}
+
+/// Hands the decision to the waiting prompt owner and resolves with its
+/// verdict. A dropped verdict means the prompt ended (its window closes).
+pub(crate) async fn secure_ssh_challenge_submit_for_label(
+    surface_label: &str,
+    id: String,
+    approved: bool,
+    answers: Vec<Zeroizing<String>>,
+    service: &SecureSshChallengeService,
+) -> Result<(), String> {
+    let (verdict, verdict_receiver) = oneshot::channel();
     let answer = Answer {
         approved,
-        answers: answers.into_iter().map(Zeroizing::new).collect(),
+        answers,
+        verdict: Some(verdict),
     };
-    require_window(&window, &id)?;
+    require_label(surface_label, &id)?;
     if answer.answers.len() > 32 || answer.answers.iter().map(|v| v.len()).sum::<usize>() > 65_536 {
         return Err("secureChallengeDenied".into());
     }
@@ -632,7 +663,8 @@ pub fn secure_ssh_challenge_submit(
         .ok_or("secureChallengeExpired")?;
     sender
         .send(answer)
-        .map_err(|_| "secureChallengeExpired".into())
+        .map_err(|_| "secureChallengeExpired".to_owned())?;
+    verdict_receiver.await.unwrap_or(Ok(()))
 }
 #[tauri::command]
 pub fn secure_ssh_challenge_cancel(
@@ -640,11 +672,71 @@ pub fn secure_ssh_challenge_cancel(
     window: WebviewWindow,
     service: State<'_, SecureSshChallengeService>,
 ) -> Result<(), String> {
-    require_window(&window, &id)?;
+    secure_ssh_challenge_cancel_for_label(window.label(), id, &service)
+}
+
+pub(crate) fn secure_ssh_challenge_cancel_for_label(
+    surface_label: &str,
+    id: String,
+    service: &SecureSshChallengeService,
+) -> Result<(), String> {
+    require_label(surface_label, &id)?;
     service
         .pending
         .lock()
         .map_err(|_| "secureChallengeUnavailable")?
         .remove(&id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending_entry() -> Pending {
+        Pending {
+            prompt: ChallengePrompt {
+                id: "id".into(),
+                content: ChallengeContent::SftpHostKey(SftpHostKeyChallenge {
+                    endpoint: "host:22".into(),
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint_sha256: "SHA256:x".into(),
+                }),
+            },
+            key: "k".into(),
+            sender: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_trust_write_rearms_the_same_prompt_for_another_decision() {
+        let service = SecureSshChallengeService::default();
+        service
+            .pending
+            .lock()
+            .unwrap()
+            .insert("id".into(), pending_entry());
+        let (_, mut receiver) = oneshot::channel::<Answer>();
+        assert!(rearm(&service, "id", &mut receiver));
+        let sender = service
+            .pending
+            .lock()
+            .unwrap()
+            .get_mut("id")
+            .and_then(|entry| entry.sender.take())
+            .expect("re-armed sender");
+        assert!(
+            sender
+                .send(Answer {
+                    approved: true,
+                    answers: vec![],
+                    verdict: None,
+                })
+                .is_ok()
+        );
+        assert!(receiver.try_recv().is_ok_and(|answer| answer.approved));
+        // A prompt that already ended is never re-armed.
+        let (_, mut other) = oneshot::channel::<Answer>();
+        assert!(!rearm(&service, "gone", &mut other));
+    }
 }

@@ -33,15 +33,19 @@ pub(crate) fn platform_device_key_store(app_data_directory: PathBuf) -> Arc<dyn 
 struct PlatformDeviceKeyStore {
     #[cfg(target_os = "windows")]
     protected_blob_path: PathBuf,
+    #[cfg(target_os = "android")]
+    wrapped_blob_path: PathBuf,
 }
 
 impl PlatformDeviceKeyStore {
     fn new(app_data_directory: PathBuf) -> Self {
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "android")))]
         let _ = app_data_directory;
         Self {
             #[cfg(target_os = "windows")]
             protected_blob_path: app_data_directory.join("vault").join("device-key.dpapi"),
+            #[cfg(target_os = "android")]
+            wrapped_blob_path: app_data_directory.join("vault").join("device-key.keystore"),
         }
     }
 }
@@ -281,7 +285,61 @@ mod windows_dpapi {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// AndroidKeyStore AES-256-GCM key (no user authentication) wraps the random
+/// device key; only the wrapped blob is stored in the app-private Vault
+/// directory. A missing blob, a missing/invalidated Keystore key, or a blob
+/// that no longer authenticates all map to `Missing` so auto-unlock falls back
+/// to the password.
+#[cfg(target_os = "android")]
+impl DeviceKeyStore for PlatformDeviceKeyStore {
+    fn load(&self) -> Result<DeviceUnlockKey, DeviceKeyStoreError> {
+        let wrapped = match std::fs::read(&self.wrapped_blob_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(DeviceKeyStoreError::Missing);
+            }
+            Err(_) => return Err(DeviceKeyStoreError::Platform),
+        };
+        let plaintext = zeroize::Zeroizing::new(
+            crate::android::device_key_unwrap(&wrapped).map_err(map_android_error)?,
+        );
+        DeviceUnlockKey::from_bytes(&plaintext).map_err(DeviceKeyStoreError::from)
+    }
+
+    fn store(&self, key: &DeviceUnlockKey) -> Result<(), DeviceKeyStoreError> {
+        let wrapped = crate::android::device_key_wrap(key.expose()).map_err(map_android_error)?;
+        if let Some(parent) = self.wrapped_blob_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| DeviceKeyStoreError::Platform)?;
+        }
+        let temporary = self.wrapped_blob_path.with_extension("keystore.staging");
+        std::fs::write(&temporary, wrapped).map_err(|_| DeviceKeyStoreError::Platform)?;
+        // rename(2) atomically replaces the previous blob on Android.
+        std::fs::rename(&temporary, &self.wrapped_blob_path).map_err(|_| {
+            let _ = std::fs::remove_file(&temporary);
+            DeviceKeyStoreError::Platform
+        })
+    }
+
+    fn delete(&self) -> Result<(), DeviceKeyStoreError> {
+        match std::fs::remove_file(&self.wrapped_blob_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(DeviceKeyStoreError::Platform),
+        }
+        crate::android::device_key_delete().map_err(map_android_error)
+    }
+}
+
+#[cfg(target_os = "android")]
+fn map_android_error(error: crate::android::DeviceKeyError) -> DeviceKeyStoreError {
+    match error {
+        crate::android::DeviceKeyError::Missing => DeviceKeyStoreError::Missing,
+        crate::android::DeviceKeyError::Unavailable => DeviceKeyStoreError::Unavailable,
+        crate::android::DeviceKeyError::Failed => DeviceKeyStoreError::Platform,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "android")))]
 impl DeviceKeyStore for PlatformDeviceKeyStore {
     fn load(&self) -> Result<DeviceUnlockKey, DeviceKeyStoreError> {
         Err(DeviceKeyStoreError::Unavailable)

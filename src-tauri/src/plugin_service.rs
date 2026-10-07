@@ -95,9 +95,7 @@ use norishell_plugin_platform::{
 
 use semver::Version;
 use sha2::{Digest, Sha256};
-use tauri::{
-    AppHandle, Emitter, Manager, State, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Emitter, Manager, State, Webview, WebviewWindow};
 use tauri_plugin_dialog::DialogExt as _;
 use uuid::Uuid;
 
@@ -1604,7 +1602,53 @@ impl PluginService {
         let metadata = source
             .metadata()
             .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        if metadata.len() == 0 || metadata.len() > self.package_limits.max_archive_bytes {
+        self.prepare_local_package_source(source, metadata.len(), request_id)
+    }
+
+    /// Android: the picked document is opened through the platform bridge as a
+    /// regular file of known length (pipes are spooled privately first), then
+    /// it follows the same private copy and SHA-256 binding as a desktop path.
+    #[cfg(target_os = "android")]
+    fn prepare_local_package_content(
+        &self,
+        app: &AppHandle,
+        uri: &crate::content_access::ContentUri,
+        request_id: RequestId,
+    ) -> CoreResult<PluginLocalPackagePreview> {
+        let opened = uri
+            .open_regular(app, self.package_limits.max_archive_bytes)
+            .map_err(|error| match error {
+                crate::content_access::ContentAccessError::TooLarge => platform_request_error(
+                    request_id.clone(),
+                    &PluginPlatformError::PackageTooLarge,
+                ),
+                _ => plugin_validation_error(request_id.clone()),
+            })?;
+        let is_zip = opened
+            .display_name
+            .as_deref()
+            .and_then(|name| Path::new(name).extension())
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"));
+        if !is_zip {
+            return Err(platform_request_error(
+                request_id,
+                &PluginPlatformError::RejectedArchivePath,
+            ));
+        }
+        let length = opened
+            .len
+            .ok_or_else(|| plugin_validation_error(request_id.clone()))?;
+        self.prepare_local_package_source(opened.file, length, request_id)
+    }
+
+    fn prepare_local_package_source(
+        &self,
+        source: File,
+        source_len: u64,
+        request_id: RequestId,
+    ) -> CoreResult<PluginLocalPackagePreview> {
+        if source_len == 0 || source_len > self.package_limits.max_archive_bytes {
             return Err(platform_request_error(
                 request_id,
                 &PluginPlatformError::PackageTooLarge,
@@ -1627,7 +1671,7 @@ impl PluginService {
             &mut target,
         )
         .map_err(|_| plugin_validation_error(request_id.clone()))?;
-        if copied != metadata.len() || copied > self.package_limits.max_archive_bytes {
+        if copied != source_len || copied > self.package_limits.max_archive_bytes {
             let _ = fs::remove_file(&private_path);
             return Err(platform_request_error(
                 request_id,
@@ -3313,6 +3357,16 @@ impl PluginService {
                 .retain(|_, binding| binding.plugin_id != *plugin_id);
             previous_crash
         };
+        // Android may reclaim the isolated Plugin Host under memory pressure;
+        // that is not a plugin fault and must not escalate to Quarantined.
+        #[cfg(target_os = "android")]
+        let previous_crash = previous_crash
+            && !failed_instance
+                .process
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+                .is_some_and(PluginHostProcess::reclaimed_by_system);
         if let Ok(record) = self
             .hosts
             .with_plugin_repository(|repository| repository.get_plugin_installation(plugin_id))
@@ -6669,12 +6723,12 @@ fn secure_host_approval_window_label(approval_id: &PluginApprovalId) -> String {
     format!("secure-plugin-host-{}", approval_id.as_str())
 }
 
-fn require_secure_host_approval_window(
-    window: &WebviewWindow,
+fn require_secure_host_approval_label(
+    surface_label: &str,
     approval_id: &PluginApprovalId,
     request_id: RequestId,
 ) -> CoreResult<()> {
-    if window.label() == secure_host_approval_window_label(approval_id) {
+    if surface_label == secure_host_approval_window_label(approval_id) {
         Ok(())
     } else {
         Err(plugin_permission_error(request_id))
@@ -6685,12 +6739,12 @@ fn secure_special_permission_window_label(approval_id: &PluginApprovalId) -> Str
     format!("secure-plugin-permission-{}", approval_id.as_str())
 }
 
-fn require_secure_special_permission_window(
-    window: &WebviewWindow,
+fn require_secure_special_permission_label(
+    surface_label: &str,
     approval_id: &PluginApprovalId,
     request_id: RequestId,
 ) -> CoreResult<()> {
-    if window.label() == secure_special_permission_window_label(approval_id) {
+    if surface_label == secure_special_permission_window_label(approval_id) {
         Ok(())
     } else {
         Err(plugin_permission_error(request_id))
@@ -6706,30 +6760,20 @@ pub(crate) async fn plugin_host_approval_open(
 ) -> CoreResult<()> {
     service.host_approval_snapshot(request.clone())?;
     let label = secure_host_approval_window_label(&request.approval_id);
-    if let Some(window) = app.get_webview_window(&label) {
-        crate::window_first_show::show_if_revealed(&window)
-            .map_err(|_| plugin_runtime_error(request.meta.request_id, None))?;
+    if let Some(shown) = crate::secure_surface::show_existing(&app, &label) {
+        shown.map_err(|_| plugin_runtime_error(request.meta.request_id, None))?;
         return Ok(());
     }
-    crate::secure_window_frame::apply_secure_window_frame(
+    crate::secure_surface::open(
         &app,
-        &label,
-        WebviewWindowBuilder::new(
-            &app,
-            label.clone(),
-            WebviewUrl::App(
-                format!(
-                    "secure-plugin-host-approval.html?approvalId={}",
-                    request.approval_id.as_str()
-                )
-                .into(),
-            ),
-        ),
+        crate::secure_surface::SurfaceSpec::new(
+            crate::secure_surface::SurfaceKind::PluginHostApproval,
+            label,
+        )
+        .query(format!("approvalId={}", request.approval_id.as_str()))
+        .resizable(false)
+        .centered(),
     )
-    .title("NoriShell")
-    .resizable(false)
-    .center()
-    .build()
     .map_err(|_| plugin_runtime_error(request.meta.request_id, None))?;
     Ok(())
 }
@@ -6740,8 +6784,16 @@ pub(crate) fn plugin_host_approval_get(
     window: WebviewWindow,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginHostApprovalSummary> {
-    require_secure_host_approval_window(
-        &window,
+    plugin_host_approval_get_for_label(window.label(), request, &service)
+}
+
+pub(crate) fn plugin_host_approval_get_for_label(
+    surface_label: &str,
+    request: PluginHostApprovalGetRequest,
+    service: &PluginService,
+) -> CoreResult<PluginHostApprovalSummary> {
+    require_secure_host_approval_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     )?;
@@ -6755,8 +6807,17 @@ pub(crate) fn plugin_host_approval_decide(
     app: AppHandle,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginHostApprovalDecisionResponse> {
-    require_secure_host_approval_window(
-        &window,
+    plugin_host_approval_decide_for_label(window.label(), request, &app, &service)
+}
+
+pub(crate) fn plugin_host_approval_decide_for_label(
+    surface_label: &str,
+    request: PluginHostApprovalDecisionRequest,
+    app: &AppHandle,
+    service: &PluginService,
+) -> CoreResult<PluginHostApprovalDecisionResponse> {
+    require_secure_host_approval_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     )?;
@@ -6796,8 +6857,16 @@ pub(crate) fn plugin_special_permission_get(
     window: WebviewWindow,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginSpecialPermissionSnapshot> {
-    require_secure_special_permission_window(
-        &window,
+    plugin_special_permission_get_for_label(window.label(), request, &service)
+}
+
+pub(crate) fn plugin_special_permission_get_for_label(
+    surface_label: &str,
+    request: PluginSpecialPermissionGetRequest,
+    service: &PluginService,
+) -> CoreResult<PluginSpecialPermissionSnapshot> {
+    require_secure_special_permission_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     )?;
@@ -6811,8 +6880,17 @@ pub(crate) async fn plugin_special_permission_decide(
     app: AppHandle,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginSpecialPermissionDecisionResponse> {
-    require_secure_special_permission_window(
-        &window,
+    plugin_special_permission_decide_for_label(window.label(), request, &app, &service).await
+}
+
+pub(crate) async fn plugin_special_permission_decide_for_label(
+    surface_label: &str,
+    request: PluginSpecialPermissionDecisionRequest,
+    app: &AppHandle,
+    service: &PluginService,
+) -> CoreResult<PluginSpecialPermissionDecisionResponse> {
+    require_secure_special_permission_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     )?;
@@ -6871,7 +6949,7 @@ pub(crate) fn plugin_isolated_surface_content(
     window: WebviewWindow,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginIsolatedSurfaceContent> {
-    service.isolated_surface_content(request, &window)
+    service.isolated_surface_content(request, window.label())
 }
 
 #[tauri::command]
@@ -6885,12 +6963,17 @@ pub(crate) async fn plugin_local_package_prepare(
     let Some(selected) = selected else {
         return Ok(None);
     };
-    let path = selected
-        .into_path()
+    let selection = crate::content_access::classify_dialog(selected)
         .map_err(|_| plugin_validation_error(request.meta.request_id.clone()))?;
-    service
-        .prepare_local_package(&path, request.meta.request_id)
-        .map(Some)
+    match selection {
+        crate::content_access::Selection::Path(path) => service
+            .prepare_local_package(&path, request.meta.request_id)
+            .map(Some),
+        #[cfg(target_os = "android")]
+        crate::content_access::Selection::Content(uri) => service
+            .prepare_local_package_content(&app, &uri, request.meta.request_id)
+            .map(Some),
+    }
 }
 
 #[tauri::command]
@@ -7725,12 +7808,12 @@ fn secure_terminal_input_window_label(approval_id: &PluginInputApprovalId) -> St
     format!("secure-plugin-input-{}", approval_id.as_str())
 }
 
-fn require_secure_terminal_input_window(
-    window: &WebviewWindow,
+fn require_secure_terminal_input_label(
+    surface_label: &str,
     approval_id: &PluginInputApprovalId,
     request_id: RequestId,
 ) -> CoreResult<()> {
-    if window.label() == secure_terminal_input_window_label(approval_id) {
+    if surface_label == secure_terminal_input_window_label(approval_id) {
         Ok(())
     } else {
         Err(plugin_permission_error(request_id))
@@ -7753,8 +7836,16 @@ pub(crate) fn plugin_terminal_input_get(
     window: WebviewWindow,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginTerminalInputProposal> {
-    require_secure_terminal_input_window(
-        &window,
+    plugin_terminal_input_get_for_label(window.label(), request, &service)
+}
+
+pub(crate) fn plugin_terminal_input_get_for_label(
+    surface_label: &str,
+    request: PluginTerminalInputGetRequest,
+    service: &PluginService,
+) -> CoreResult<PluginTerminalInputProposal> {
+    require_secure_terminal_input_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     )?;
@@ -7768,8 +7859,17 @@ pub(crate) async fn plugin_terminal_input_decide(
     app: AppHandle,
     service: State<'_, PluginService>,
 ) -> CoreResult<PluginTerminalInputDecisionResponse> {
-    require_secure_terminal_input_window(
-        &window,
+    plugin_terminal_input_decide_for_label(window.label(), request, &app, &service).await
+}
+
+pub(crate) async fn plugin_terminal_input_decide_for_label(
+    surface_label: &str,
+    request: PluginTerminalInputDecisionRequest,
+    app: &AppHandle,
+    service: &PluginService,
+) -> CoreResult<PluginTerminalInputDecisionResponse> {
+    require_secure_terminal_input_label(
+        surface_label,
         &request.approval_id,
         request.meta.request_id.clone(),
     )?;

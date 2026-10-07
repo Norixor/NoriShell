@@ -11,6 +11,16 @@ mod platform;
 #[cfg(windows)]
 #[path = "native_notifications/windows.rs"]
 mod platform;
+#[cfg(target_os = "android")]
+#[path = "native_notifications/android.rs"]
+mod platform;
+
+/// True while the user is using the application, for the background-only rule.
+/// tao never reports window focus on Android, so the Activity lifecycle is used.
+#[cfg(target_os = "android")]
+pub fn android_activity_resumed() -> bool {
+    tauri_plugin_norishell_android::activity_resumed()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +29,15 @@ pub enum NotificationPermission {
     Granted,
     Denied,
     Unavailable,
+}
+
+/// Which user-facing group a notification belongs to. Android posts each group
+/// to its own notification channel; macOS and Windows ignore it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationCategory {
+    /// Unexpected disconnects, failed forwards and the test notification.
+    Alerts,
+    Transfers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,17 +66,17 @@ type DispatchGuard = Arc<dyn Fn() -> bool + Send + Sync>;
 /// Create once on the Tauri setup main thread and retain as managed state until process exit.
 /// Methods may run in Rust background tasks without a WebView or frontend timer.
 pub struct NativeNotifications {
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(target_os = "macos", windows, target_os = "android"))]
     platform: platform::Adapter,
 }
 
 impl NativeNotifications {
     pub fn new(app: AppHandle, on_click: impl Fn(String) + Send + Sync + 'static) -> Self {
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "android"))]
         return Self {
             platform: platform::Adapter::new(app, Arc::new(on_click)),
         };
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(not(any(target_os = "macos", windows, target_os = "android")))]
         {
             let _ = (app, on_click);
             Self {}
@@ -65,17 +84,17 @@ impl NativeNotifications {
     }
 
     pub async fn permission(&self) -> Result<NotificationPermission, NotificationError> {
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "android"))]
         return self.platform.permission().await;
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(not(any(target_os = "macos", windows, target_os = "android")))]
         Ok(NotificationPermission::Unavailable)
     }
 
     /// Call only after an explicit user action to enable notifications. Windows has no in-app prompt; return actual system settings.
     pub async fn request_permission(&self) -> Result<NotificationPermission, NotificationError> {
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "android"))]
         return self.platform.request_permission().await;
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(not(any(target_os = "macos", windows, target_os = "android")))]
         Ok(NotificationPermission::Unavailable)
     }
 
@@ -87,13 +106,15 @@ impl NativeNotifications {
         title: &str,
         body: &str,
     ) -> Result<DispatchResult, NotificationError> {
-        self.send_if(id, title, body, || true).await
+        self.send_if(id, NotificationCategory::Alerts, title, body, || true)
+            .await
     }
 
     /// Recheck host settings, foreground context, and lifecycle before the OS actually receives the request.
     pub async fn send_if(
         &self,
         id: &str,
+        category: NotificationCategory,
         title: &str,
         body: &str,
         guard: impl Fn() -> bool + Send + Sync + 'static,
@@ -104,10 +125,21 @@ impl NativeNotifications {
             NotificationPermission::Unavailable => return Err(NotificationError::Unavailable),
             _ => return Err(NotificationError::PermissionDenied),
         }
+        #[cfg(target_os = "android")]
+        return self
+            .platform
+            .send(id, category, title, body, Arc::new(guard))
+            .await;
         #[cfg(any(target_os = "macos", windows))]
-        return self.platform.send(id, title, body, Arc::new(guard)).await;
-        #[cfg(not(any(target_os = "macos", windows)))]
-        Err(NotificationError::Unavailable)
+        {
+            let _ = category;
+            self.platform.send(id, title, body, Arc::new(guard)).await
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "android")))]
+        {
+            let _ = category;
+            Err(NotificationError::Unavailable)
+        }
     }
 }
 

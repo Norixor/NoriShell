@@ -18,6 +18,23 @@ fn ordinary_window(
 ) -> bool {
     views.ordinary_owner(webview, workspaces).as_deref() == Ok(expected_owner)
 }
+
+/// Single-document hosts (Android) render Desktop Tabs inside the main WebView instead of
+/// a child Tab WebView. Only there does the main document own Desktop sessions; desktop
+/// platforms keep every session bound to its native Tab view.
+fn main_document_caller(webview: &Webview) -> bool {
+    main_document_owner_allowed(cfg!(mobile), webview.label(), webview.window().label())
+}
+
+fn main_document_owner_allowed(single_document: bool, webview: &str, window: &str) -> bool {
+    single_document && crate::workspace_windows::is_main_document(webview, window)
+}
+
+/// Android reports no window focus (`Window::is_focused` is always false there); its only
+/// window is the foreground Activity whenever the main document can deliver input events.
+fn input_window_focused(webview: &Webview) -> bool {
+    main_document_caller(webview) || webview.window().is_focused().unwrap_or(false)
+}
 #[tauri::command]
 pub(crate) fn desktop_availability() -> Vec<DesktopAvailability> {
     vec![
@@ -39,6 +56,27 @@ pub(crate) fn desktop_availability() -> Vec<DesktopAvailability> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_single_document_hosts_let_the_main_webview_own_desktop_sessions() {
+        // Desktop builds keep every session bound to its native Tab WebView.
+        assert!(!main_document_owner_allowed(false, "main", "main"));
+        assert!(main_document_owner_allowed(true, "main", "main"));
+        assert!(!main_document_owner_allowed(
+            true,
+            "workspace-tab-ZGVza3RvcDpvbmU",
+            "main"
+        ));
+        assert!(!main_document_owner_allowed(
+            true,
+            "main",
+            "workspace-window-a"
+        ));
+        assert_eq!(
+            cfg!(mobile),
+            main_document_owner_allowed(cfg!(mobile), "main", "main")
+        );
+    }
 
     fn rect(x: u16, y: u16, width: u16, height: u16) -> DesktopRect {
         DesktopRect {
@@ -425,6 +463,31 @@ pub(crate) async fn desktop_session_open_owned(
     uuid::Uuid::parse_str(&request.operation_id)
         .map_err(|_| map_error(&request.meta, EngineError::InvalidConfiguration))?;
 
+    if main_document_caller(&webview) {
+        // The registry owns the handle before DesktopService can create the session,
+        // exactly like a native Tab after its idle-to-owned projection swap.
+        let session_id = request.operation_id.clone();
+        workspaces
+            .adopt_main_document_desktop(&app, &session_id)
+            .map_err(|error| map_tab_error(&request.meta, error))?;
+        return match service.open(request.clone()) {
+            Ok(summary) => Ok(summary),
+            Err(error) => {
+                if let Err(rollback) =
+                    workspaces.release_main_document_desktop(&app, &session_id, 1)
+                {
+                    eprintln!(
+                        "desktop main-document open rollback failed: open={error}, rollback={rollback}"
+                    );
+                    return Err(map_tab_error(
+                        &request.meta,
+                        "workspace_tab.projection_rollback_failed".into(),
+                    ));
+                }
+                Err(map_error(&request.meta, error))
+            }
+        };
+    }
     // Serialize with native move/close and other child projection writes. The
     // registry owns the handle before DesktopService can create the session.
     let (operation, live) = views
@@ -510,9 +573,17 @@ fn require_owned_session(
     workspaces: &crate::workspace_windows::WorkspaceWindows,
     views: &crate::workspace_tab_views::WorkspaceTabViews,
 ) -> CoreResult<()> {
-    let (id, kind, owner) = views
-        .projection_identity(webview)
-        .map_err(|error| map_tab_error(meta, error))?;
+    let (id, kind, owner) = if main_document_caller(webview) {
+        (
+            crate::workspace_windows::main_document_desktop_tab_id(session_id),
+            "desktop".to_owned(),
+            crate::workspace_windows::MAIN_DOCUMENT_OWNER.to_owned(),
+        )
+    } else {
+        views
+            .projection_identity(webview)
+            .map_err(|error| map_tab_error(meta, error))?
+    };
     if kind != "desktop"
         || !workspaces
             .owns_desktop_session(&owner, &id, session_id, generation)
@@ -526,6 +597,7 @@ fn require_owned_session(
 #[tauri::command]
 pub(crate) async fn desktop_session_close_owned(
     request: DesktopSessionRequest,
+    app: AppHandle,
     webview: Webview,
     service: State<'_, DesktopService>,
     workspaces: State<'_, crate::workspace_windows::WorkspaceWindows>,
@@ -548,6 +620,16 @@ pub(crate) async fn desktop_session_close_owned(
         .lock()
         .map_err(|_| map_error(&request.meta, EngineError::Protocol))?
         .remove(&request.session_id);
+    // A native Tab record is removed with its view; a main-document Tab has no view.
+    if main_document_caller(&webview)
+        && let Err(error) = workspaces.release_main_document_desktop(
+            &app,
+            &request.session_id,
+            request.generation.get(),
+        )
+    {
+        eprintln!("desktop main-document Tab release failed: {error}");
+    }
     Ok(())
 }
 
@@ -684,7 +766,7 @@ pub(crate) async fn desktop_focus_change(
                 let terminal = ssh
                     .terminal_focus_snapshot_unserialized(request.meta.request_id.clone())
                     .await?;
-                if !window.is_focused().unwrap_or(false)
+                if !input_window_focused(&webview)
                     || terminal.target.is_some()
                     || service.prompts.has_pending()
                     || session.summary().state != DesktopSessionState::Running
@@ -748,7 +830,7 @@ pub(crate) async fn desktop_input(
             let terminal = ssh
                 .terminal_focus_snapshot_unserialized(request.meta.request_id.clone())
                 .await?;
-            if !window.is_focused().unwrap_or(false)
+            if !input_window_focused(&webview)
                 || terminal.target.is_some()
                 || service.prompts.has_pending()
                 || focus.session.as_deref() != Some(&request.session_id)
@@ -960,7 +1042,7 @@ pub(crate) fn desktop_clipboard_get(
         .session(&request.session_id, request.generation.get())
         .map_err(|error| map_error(&request.meta, error))?;
     if !ordinary_window(&webview, &workspaces, &views, window.label())
-        || !window.is_focused().unwrap_or(false)
+        || !input_window_focused(&webview)
         || !session.summary().profile.clipboard_enabled
     {
         return Err(map_error(&request.meta, EngineError::StaleInput));

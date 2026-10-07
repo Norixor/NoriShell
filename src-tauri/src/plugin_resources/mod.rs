@@ -946,9 +946,9 @@ const fn stable_forward_error(code: ForwardFailureCode) -> &'static str {
         | ForwardFailureCode::VaultLocked
         | ForwardFailureCode::CredentialUnavailable
         | ForwardFailureCode::AuthenticationRejected => "unexpectedAuthenticationPath",
-        ForwardFailureCode::TransportConnect | ForwardFailureCode::TransportLost => {
-            "parentTransportLost"
-        }
+        ForwardFailureCode::TransportConnect
+        | ForwardFailureCode::ConnectionClosedByServer
+        | ForwardFailureCode::TransportLost => "parentTransportLost",
         ForwardFailureCode::Bind => "forwardBindFailed",
         ForwardFailureCode::RemoteRegistrationRejected => "remoteForwardRejected",
         ForwardFailureCode::RemoteRegistrationUncertain => "remoteForwardUncertain",

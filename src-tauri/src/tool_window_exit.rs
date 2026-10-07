@@ -6,7 +6,9 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::{Emitter, Manager, State, WebviewWindow};
+#[cfg(not(target_os = "android"))]
+use tauri::{Emitter, Manager};
+use tauri::{State, WebviewWindow};
 use tokio::sync::oneshot;
 
 use crate::tool_windows::ToolWindows;
@@ -115,9 +117,8 @@ impl ToolWindowExit {
     ) -> Result<ToolWindowExitPermit, ()> {
         // Starting the attempt fences window creation before taking the live inventory.
         let (permit, _) = self.start(BTreeSet::new())?;
-        let labels = app
-            .webview_windows()
-            .into_keys()
+        let labels = live_tool_labels(app)
+            .into_iter()
             .filter(|label| windows.contains(label))
             .collect::<BTreeSet<_>>();
         let (completion, receiver) = oneshot::channel();
@@ -132,28 +133,88 @@ impl ToolWindowExit {
             }
         }
         for label in labels {
-            let Some(window) = app.get_webview_window(&label) else {
-                self.destroyed(&label);
-                continue;
-            };
-            // An unresponsive renderer or failed event delivery cancels the exit, never the draft.
-            if !crate::window_first_show::show_if_revealed(&window).map_err(|_| ())? {
-                return Err(());
+            #[cfg(not(target_os = "android"))]
+            {
+                let Some(window) = app.get_webview_window(&label) else {
+                    self.destroyed(&label);
+                    continue;
+                };
+                // An unresponsive renderer or failed event delivery cancels the exit, never the draft.
+                if !crate::window_first_show::show_if_revealed(&window).map_err(|_| ())? {
+                    return Err(());
+                }
+                window
+                    .emit(
+                        "tool-window-exit-requested",
+                        ExitRequest {
+                            attempt_id: permit.attempt_id.clone(),
+                        },
+                    )
+                    .map_err(|_| ())?;
             }
-            window
-                .emit(
-                    "tool-window-exit-requested",
-                    ExitRequest {
-                        attempt_id: permit.attempt_id.clone(),
-                    },
-                )
+            #[cfg(target_os = "android")]
+            {
+                use crate::secure_surface::android as surface;
+                let attempt_id = permit.attempt_id.clone();
+                // Bridge calls wait for the Android UI thread; keep them off the runtime.
+                let delivered = tauri::async_runtime::spawn_blocking(move || {
+                    // Every editor gets the request; the surface that shows a
+                    // draft confirmation is brought forward.
+                    surface::bring_forward(&label)
+                        .and_then(|()| {
+                            surface::post_event(
+                                &label,
+                                "tool-window-exit-requested",
+                                ExitRequest { attempt_id },
+                            )
+                        })
+                        .map_err(|_| label)
+                })
+                .await
                 .map_err(|_| ())?;
+                if let Err(label) = delivered {
+                    if surface::is_alive(&label) {
+                        // Failed delivery cancels the exit, never the draft.
+                        return Err(());
+                    }
+                    self.destroyed(&label);
+                }
+            }
         }
         match tokio::time::timeout(Duration::from_secs(120), receiver).await {
             Ok(Ok(true)) => Ok(permit),
             _ => Err(()),
         }
     }
+}
+
+/// Labels of every live tool surface: native windows on desktop, Kotlin
+/// Secure Surfaces on Android.
+fn live_tool_labels<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<String> {
+    #[cfg(not(target_os = "android"))]
+    {
+        app.webview_windows().into_keys().collect()
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        crate::secure_surface::android::live_labels("tool-")
+    }
+}
+
+/// Android: the Kotlin-bound tool surface answers the exit request.
+#[cfg(target_os = "android")]
+pub(crate) fn tool_window_exit_reply_for_label(
+    label: &str,
+    windows: &ToolWindows,
+    state: &ToolWindowExit,
+    attempt_id: &str,
+    approved: bool,
+) -> Result<(), String> {
+    if !windows.contains(label) {
+        return Err("unavailable".into());
+    }
+    state.reply(label, attempt_id, approved)
 }
 
 #[tauri::command]

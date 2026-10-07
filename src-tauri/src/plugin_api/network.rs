@@ -753,6 +753,7 @@ async fn next_command(
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn tls_connector() -> Result<TlsConnector, ()> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -762,6 +763,23 @@ fn tls_connector() -> Result<TlsConnector, ()> {
     tls_connector_with_roots(roots)
 }
 
+/// Android cannot expose a readable system root store to rustls, so trust decisions (system and
+/// user-installed CAs) are delegated to the platform TrustManager. Provider, protocol versions and
+/// the absence of client auth match the desktop path.
+#[cfg(target_os = "android")]
+fn tls_connector() -> Result<TlsConnector, ()> {
+    use rustls_platform_verifier::BuilderVerifierExt;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| ())?
+        .with_platform_verifier()
+        .map_err(|_| ())?
+        .with_no_client_auth();
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
+#[cfg(any(test, not(target_os = "android")))]
 fn tls_connector_with_roots(roots: rustls::RootCertStore) -> Result<TlsConnector, ()> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)

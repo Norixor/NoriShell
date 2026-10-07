@@ -1,6 +1,6 @@
 # Generated Tauri handler and main-window ACL directory
 
-Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the trusted-main allowlist in `src-tauri/permissions/app.toml`. It lists **302 registered command handlers**. Registration does not grant plugin access.
+Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the trusted-main allowlist in `src-tauri/permissions/app.toml`. It lists **309 registered command handlers**. Registration does not grant plugin access. Handlers marked with a platform exist only in builds for that platform.
 
 | Handler | Stable Core symbol | Main-window ACL |
 | --- | --- | --- |
@@ -76,9 +76,8 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `metrics_reconcile` | `COMMAND_METRICS_RECONCILE` | allowed |
 | `metrics_retry` | `COMMAND_METRICS_RETRY` | allowed |
 | `metrics_stop` | `COMMAND_METRICS_STOP` | allowed |
-| `metrics_host_key_decide` | `COMMAND_METRICS_HOST_KEY_DECIDE` | not allowed |
-| `metrics_keyboard_interactive_answer_prepare` | internal | not allowed |
-| `metrics_keyboard_interactive_respond` | internal | not allowed |
+| `metrics_keyboard_interactive_answer_prepare` | `COMMAND_METRICS_KEYBOARD_INTERACTIVE_ANSWER_PREPARE` | not allowed |
+| `metrics_keyboard_interactive_respond` | `COMMAND_METRICS_KEYBOARD_INTERACTIVE_RESPOND` | not allowed |
 | `identity_list` | `COMMAND_IDENTITY_LIST` | allowed |
 | `identity_create` | `COMMAND_IDENTITY_CREATE` | allowed |
 | `identity_update` | `COMMAND_IDENTITY_UPDATE` | allowed |
@@ -89,7 +88,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `credential_transient_prepare` | `COMMAND_CREDENTIAL_TRANSIENT_PREPARE` | not allowed |
 | `ssh_agent_key_list` | `COMMAND_SSH_AGENT_KEY_LIST` | allowed |
 | `ssh_agent_credential_create` | `COMMAND_SSH_AGENT_CREDENTIAL_CREATE` | allowed |
-| `keyboard_interactive_credential_create` | internal | allowed |
+| `keyboard_interactive_credential_create` | `COMMAND_KEYBOARD_INTERACTIVE_CREDENTIAL_CREATE` | allowed |
 | `openssh_config_preview` | `COMMAND_OPENSSH_CONFIG_PREVIEW` | allowed |
 | `openssh_config_commit` | `COMMAND_OPENSSH_CONFIG_COMMIT` | allowed |
 | `known_host_list` | `COMMAND_KNOWN_HOST_LIST` | allowed |
@@ -102,9 +101,9 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `ssh_terminal_attachment_heartbeat` | `COMMAND_SSH_TERMINAL_ATTACHMENT_HEARTBEAT` | allowed |
 | `ssh_terminal_detach` | `COMMAND_SSH_TERMINAL_DETACH` | allowed |
 | `ssh_terminal_host_key_decide` | `COMMAND_SSH_TERMINAL_HOST_KEY_DECIDE` | not allowed |
-| `ssh_terminal_keyboard_interactive_answer_prepare` | internal | not allowed |
-| `ssh_terminal_keyboard_interactive_respond` | internal | not allowed |
-| `ssh_terminal_login_automation_takeover` | internal | allowed |
+| `ssh_terminal_keyboard_interactive_answer_prepare` | `COMMAND_SSH_TERMINAL_KEYBOARD_INTERACTIVE_ANSWER_PREPARE` | not allowed |
+| `ssh_terminal_keyboard_interactive_respond` | `COMMAND_SSH_TERMINAL_KEYBOARD_INTERACTIVE_RESPOND` | not allowed |
+| `ssh_terminal_login_automation_takeover` | `COMMAND_SSH_TERMINAL_LOGIN_AUTOMATION_TAKEOVER` | allowed |
 | `ssh_terminal_input_focus_snapshot` | `COMMAND_SSH_TERMINAL_INPUT_FOCUS_SNAPSHOT` | allowed |
 | `ssh_terminal_input_focus_change` | `COMMAND_SSH_TERMINAL_INPUT_FOCUS_CHANGE` | allowed |
 | `terminal_input_focus_snapshot` | `COMMAND_TERMINAL_INPUT_FOCUS_SNAPSHOT` | allowed |
@@ -147,6 +146,12 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `release_update_readiness` | internal | allowed |
 | `release_update_prepare_install` | internal | allowed |
 | `release_update_allow_relaunch` | internal | allowed |
+| `release_update_cancel_install` (Android only) | internal | allowed |
+| `android_update_prepare` (Android only) | internal | allowed |
+| `android_update_open_install_settings` (Android only) | internal | allowed |
+| `android_update_install` (Android only) | internal | allowed |
+| `android_update_install_result` (Android only) | internal | allowed |
+| `android_set_system_bars` (Android only) | internal | allowed |
 | `telnet_terminal_open` | `COMMAND_TELNET_TERMINAL_OPEN` | allowed |
 | `telnet_terminal_snapshot` | `COMMAND_TELNET_TERMINAL_SNAPSHOT` | allowed |
 | `plugin_protocol_launch_list` | `COMMAND_PLUGIN_PROTOCOL_LAUNCH_LIST` | allowed |
@@ -154,7 +159,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `plugin_terminal_open` | `COMMAND_PLUGIN_TERMINAL_OPEN` | allowed |
 | `plugin_terminal_snapshot` | `COMMAND_PLUGIN_TERMINAL_SNAPSHOT` | allowed |
 | `plugin_terminal_attach` | `COMMAND_PLUGIN_TERMINAL_ATTACH` | allowed |
-| `plugin_terminal_attachment_heartbeat` | internal | allowed |
+| `plugin_terminal_attachment_heartbeat` | `COMMAND_PLUGIN_TERMINAL_ATTACHMENT_HEARTBEAT` | allowed |
 | `plugin_terminal_detach` | `COMMAND_PLUGIN_TERMINAL_DETACH` | allowed |
 | `plugin_terminal_input_lease_renew` | `COMMAND_PLUGIN_TERMINAL_INPUT_LEASE_RENEW` | allowed |
 | `plugin_terminal_input` | `COMMAND_PLUGIN_TERMINAL_INPUT` | allowed |
@@ -162,7 +167,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `plugin_terminal_disconnect` | `COMMAND_PLUGIN_TERMINAL_DISCONNECT` | allowed |
 | `plugin_terminal_reconnect` | `COMMAND_PLUGIN_TERMINAL_RECONNECT` | allowed |
 | `telnet_terminal_attach` | `COMMAND_TELNET_TERMINAL_ATTACH` | allowed |
-| `telnet_terminal_attachment_heartbeat` | internal | allowed |
+| `telnet_terminal_attachment_heartbeat` | `COMMAND_TELNET_TERMINAL_ATTACHMENT_HEARTBEAT` | allowed |
 | `telnet_terminal_detach` | `COMMAND_TELNET_TERMINAL_DETACH` | allowed |
 | `telnet_terminal_input_lease_renew` | `COMMAND_TELNET_TERMINAL_INPUT_LEASE_RENEW` | allowed |
 | `telnet_terminal_input` | `COMMAND_TELNET_TERMINAL_INPUT` | allowed |
@@ -248,6 +253,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `sftp_local_directory_open_child` | `COMMAND_SFTP_LOCAL_DIRECTORY_OPEN_CHILD` | allowed |
 | `sftp_local_directory_create_child` | `COMMAND_SFTP_LOCAL_DIRECTORY_CREATE_CHILD` | allowed |
 | `sftp_local_directory_release` | `COMMAND_SFTP_LOCAL_DIRECTORY_RELEASE` | allowed |
+| `sftp_local_file_mutate` | `COMMAND_SFTP_LOCAL_FILE_MUTATE` | allowed |
 | `plugin_target_context_open` | `COMMAND_PLUGIN_TARGET_CONTEXT_OPEN` | allowed |
 | `plugin_target_context_close` | `COMMAND_PLUGIN_TARGET_CONTEXT_CLOSE` | allowed |
 | `workspace_tab_drag_begin` | internal | allowed |
@@ -271,6 +277,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `ssh_sync_secure_prompt_get` | internal | not allowed |
 | `ssh_sync_secure_prompt_decide` | internal | not allowed |
 | `private_key_file_import` | `COMMAND_PRIVATE_KEY_FILE_IMPORT` | not allowed |
+| `private_key_file_import_release` | internal | not allowed |
 | `window_request_close` | `COMMAND_WINDOW_REQUEST_CLOSE` | allowed |
 | `application_request_exit` | `COMMAND_APPLICATION_REQUEST_EXIT` | allowed |
 | `native_json_export` | internal | allowed |

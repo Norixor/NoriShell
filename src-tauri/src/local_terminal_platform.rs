@@ -11,6 +11,8 @@ use std::{io, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalPtySpawnFailure {
+    // Android resolves a fixed shell and configured home, so never lookup-fails.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     AccountLookupFailed,
     InvalidDefaultShell,
     InvalidHomeDirectory,
@@ -70,12 +72,9 @@ fn shell_name(shell_path: &std::path::Path) -> io::Result<String> {
 #[cfg(unix)]
 mod platform {
     use std::{
-        ffi::CStr,
         fs::File,
         io::{self, Write},
-        mem::MaybeUninit,
         os::unix::{
-            ffi::OsStrExt,
             io::{AsRawFd, FromRawFd},
             process::{CommandExt, ExitStatusExt},
         },
@@ -87,6 +86,9 @@ mod platform {
 
     #[cfg(test)]
     use std::time::Instant;
+
+    #[cfg(not(target_os = "android"))]
+    use std::{ffi::CStr, mem::MaybeUninit, os::unix::ffi::OsStrExt};
 
     use crate::process_control::{ManagedProcessGroup, TerminationPolicy};
 
@@ -148,6 +150,13 @@ mod platform {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::PtySpawnFailed, error)
             })?;
             let mut command = Command::new(&shell);
+            // App-UID processes on Android inherit a loader/runtime-specific
+            // environment; start from an empty one and pass only what the
+            // shell needs.
+            #[cfg(target_os = "android")]
+            apply_android_environment(&mut command, &home).map_err(|error| {
+                LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidHomeDirectory, error)
+            })?;
             command
                 .arg("-i")
                 .current_dir(&home)
@@ -173,7 +182,7 @@ mod platform {
                     if libc::setsid() < 0 {
                         return Err(io::Error::last_os_error());
                     }
-                    if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+                    if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
                         return Err(io::Error::last_os_error());
                     }
                     Ok(())
@@ -231,7 +240,7 @@ mod platform {
             if unsafe {
                 libc::ioctl(
                     self.master.as_raw_fd(),
-                    libc::TIOCSWINSZ as libc::c_ulong,
+                    libc::TIOCSWINSZ as _,
                     &raw const size,
                 )
             } < 0
@@ -312,6 +321,80 @@ mod platform {
         home: PathBuf,
     }
 
+    /// Android app UIDs resolve to pw_dir=/data (not writable) through bionic,
+    /// so the account is the fixed system shell plus the app-private home
+    /// configured by the host. An unconfigured home fails closed.
+    #[cfg(target_os = "android")]
+    fn current_account() -> Result<CurrentAccount, LocalPtySpawnError> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        let home = super::configured_home().cloned().ok_or_else(|| {
+            LocalPtySpawnError::new(
+                LocalPtySpawnFailure::InvalidHomeDirectory,
+                io::Error::other("Android local terminal home directory is not configured"),
+            )
+        })?;
+        if !home.is_dir() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&home)
+                .map_err(|error| {
+                    LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidHomeDirectory, error)
+                })?;
+            // The mode passed to mkdir is filtered by umask and only applies
+            // to the leaf; pin the final permissions explicitly.
+            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidHomeDirectory, error),
+            )?;
+        }
+        let shell = PathBuf::from(ANDROID_SHELL);
+        validate_account_paths(&shell, &home)?;
+        Ok(CurrentAccount { shell, home })
+    }
+
+    #[cfg(target_os = "android")]
+    const ANDROID_SHELL: &str = "/system/bin/sh";
+    #[cfg(target_os = "android")]
+    const ANDROID_PATH: &str = "/product/bin:/apex/com.android.runtime/bin:\
+        /apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:\
+        /odm/bin:/vendor/bin:/vendor/xbin";
+    /// Platform locations the system shell and its tools need; they are set
+    /// by zygote/init for the app process and carry no user data.
+    #[cfg(target_os = "android")]
+    const ANDROID_PASSTHROUGH_ENV: &[&str] = &[
+        "ANDROID_DATA",
+        "ANDROID_ROOT",
+        "ANDROID_ART_ROOT",
+        "ANDROID_I18N_ROOT",
+        "ANDROID_TZDATA_ROOT",
+        "BOOTCLASSPATH",
+    ];
+
+    #[cfg(target_os = "android")]
+    fn apply_android_environment(command: &mut Command, home: &std::path::Path) -> io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let tmp = home.join("tmp");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&tmp)?;
+        command
+            .env_clear()
+            .env("HOME", home)
+            .env("TMPDIR", &tmp)
+            .env("PATH", ANDROID_PATH)
+            .env("SHELL", ANDROID_SHELL);
+        for name in ANDROID_PASSTHROUGH_ENV {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn current_account() -> Result<CurrentAccount, LocalPtySpawnError> {
         let initial_size = match unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) } {
             value if value > 0 => usize::try_from(value).unwrap_or(16 * 1024),
@@ -367,6 +450,7 @@ mod platform {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     fn passwd_path(value: *const libc::c_char, label: &str) -> io::Result<PathBuf> {
         if value.is_null() {
             return Err(io::Error::other(format!("current account has no {label}")));
@@ -635,6 +719,23 @@ mod platform {
         }
         Ok(path)
     }
+}
+
+/// Android app-private home used as the local shell's HOME and initial
+/// directory. Set once by the host during setup.
+#[cfg(target_os = "android")]
+static ANDROID_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Records the Android local-terminal home (`<app_data_dir>/home`). The first
+/// call wins; the directory is created lazily with mode 0700 on spawn.
+#[cfg(target_os = "android")]
+pub(crate) fn configure_home(path: PathBuf) {
+    let _ = ANDROID_HOME.set(path);
+}
+
+#[cfg(target_os = "android")]
+fn configured_home() -> Option<&'static PathBuf> {
+    ANDROID_HOME.get()
 }
 
 pub(crate) use platform::{LocalPtyProcess, LocalPtyWriter};

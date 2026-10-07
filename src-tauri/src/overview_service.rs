@@ -233,12 +233,13 @@ fn metrics_resource_counts(session: &MetricsSessionSummary) -> ServerResourceCou
         | MetricsSessionState::DetectingPlatform
         | MetricsSessionState::Sampling => counts.connecting = 1,
         MetricsSessionState::Ready => counts.running = 1,
-        MetricsSessionState::NeedsHostKeyReview
-        | MetricsSessionState::NeedsAuthentication
+        MetricsSessionState::NeedsAuthentication
         | MetricsSessionState::Backoff
         | MetricsSessionState::Disconnecting
         | MetricsSessionState::Closed => counts.lost = 1,
         MetricsSessionState::Failed => counts.failed = 1,
+        // No connection exists or is attempted; this is not a lost resource.
+        MetricsSessionState::NeedsHostTrust => {}
     }
     counts
 }
@@ -418,7 +419,6 @@ mod tests {
             failure_code: None,
             next_retry_at_unix_ms: None,
             latest_snapshot: None,
-            host_key_challenge: None,
             keyboard_interactive_challenge: None,
         };
         let ready = project_overview(
@@ -498,7 +498,6 @@ mod tests {
             failure_code: None,
             next_retry_at_unix_ms: None,
             latest_snapshot: None,
-            host_key_challenge: None,
             keyboard_interactive_challenge: None,
         };
 

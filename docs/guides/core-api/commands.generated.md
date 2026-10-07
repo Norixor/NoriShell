@@ -107,7 +107,6 @@ Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **2
 | `COMMAND_METRICS_RECONCILE` | `metrics_reconcile` |
 | `COMMAND_METRICS_RETRY` | `metrics_retry` |
 | `COMMAND_METRICS_STOP` | `metrics_stop` |
-| `COMMAND_METRICS_HOST_KEY_DECIDE` | `metrics_host_key_decide` |
 | `COMMAND_METRICS_KEYBOARD_INTERACTIVE_ANSWER_PREPARE` | `metrics_keyboard_interactive_answer_prepare` |
 | `COMMAND_METRICS_KEYBOARD_INTERACTIVE_RESPOND` | `metrics_keyboard_interactive_respond` |
 | `COMMAND_SSH_CONNECTION_TEST` | `ssh_connection_test` |
@@ -179,6 +178,7 @@ Generated from the `COMMAND_*` declarations in `crates/core-api/src/lib.rs`: **2
 | `COMMAND_SFTP_LOCAL_DIRECTORY_OPEN_CHILD` | `sftp_local_directory_open_child` |
 | `COMMAND_SFTP_LOCAL_DIRECTORY_CREATE_CHILD` | `sftp_local_directory_create_child` |
 | `COMMAND_SFTP_LOCAL_DIRECTORY_RELEASE` | `sftp_local_directory_release` |
+| `COMMAND_SFTP_LOCAL_FILE_MUTATE` | `sftp_local_file_mutate` |
 | `COMMAND_SFTP_DIRECTORY_LIST` | `sftp_directory_list` |
 | `COMMAND_SFTP_DIRECTORY_LIST_CANCEL` | `sftp_directory_list_cancel` |
 | `COMMAND_SFTP_FILE_PREVIEW` | `sftp_file_preview` |

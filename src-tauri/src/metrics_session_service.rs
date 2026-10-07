@@ -8,8 +8,7 @@ use norishell_app_persistence::KnownHostObservation;
 use norishell_core_api::{
     CoreApiError, CpuMetric, DiskMetric, DiskResourceId, ErrorCategory, HostCatalogEntry, HostId,
     IdentityId, MetricByteCount, MetricFieldState, MetricSnapshot, MetricsAuthenticationReason,
-    MetricsHostKeyChallenge, MetricsHostKeyChallengeId, MetricsHostKeyDecision,
-    MetricsHostKeyDecisionRequest, MetricsKeyboardInteractiveAnswerPrepareRequest,
+    MetricsKeyboardInteractiveAnswerPrepareRequest,
     MetricsKeyboardInteractiveAnswerPrepareResponse, MetricsKeyboardInteractiveChallenge,
     MetricsKeyboardInteractiveChallengeId, MetricsKeyboardInteractivePrompt,
     MetricsKeyboardInteractiveRespondRequest, MetricsPlatform, MetricsReconcileRequest,
@@ -78,9 +77,10 @@ impl MetricsSessionService {
             hosts: hosts.clone(),
         };
         tauri::async_runtime::spawn(run_actor(
-            Actor::new(tx, hosts, vault, transient_credentials, ssh_agent),
+            Actor::new(tx.clone(), hosts, vault, transient_credentials, ssh_agent),
             rx,
         ));
+        tauri::async_runtime::spawn(run_trust_recheck_ticker(tx));
         service
     }
 
@@ -168,18 +168,6 @@ impl MetricsSessionService {
             .await
     }
 
-    async fn decide_host_key(
-        &self,
-        request: MetricsHostKeyDecisionRequest,
-    ) -> ActorResult<MetricsSessionSummary> {
-        let request_id = request.meta.request_id.clone();
-        self.request(request_id, |reply| Message::HostKeyDecide {
-            request,
-            reply,
-        })
-        .await
-    }
-
     async fn prepare_keyboard_interactive_answer(
         &self,
         request: MetricsKeyboardInteractiveAnswerPrepareRequest,
@@ -265,14 +253,6 @@ pub async fn metrics_stop(
 }
 
 #[tauri::command]
-pub async fn metrics_host_key_decide(
-    request: MetricsHostKeyDecisionRequest,
-    service: State<'_, MetricsSessionService>,
-) -> CoreResult<MetricsSessionSummary> {
-    service.decide_host_key(request).await
-}
-
-#[tauri::command]
 pub async fn metrics_keyboard_interactive_answer_prepare(
     request: MetricsKeyboardInteractiveAnswerPrepareRequest,
     service: State<'_, MetricsSessionService>,
@@ -308,13 +288,11 @@ struct SessionRecord {
     vault_availability_epoch: u64,
     cleanup_uncertain: bool,
     monitoring_policy: MonitoringPolicy,
-    route_stages: BTreeMap<String, SshSessionRouteStage>,
     observed_host_keys: BTreeMap<String, (Endpoint, ObservedHostKey)>,
     task: Option<ConnectTask>,
     stop: Option<watch::Sender<bool>>,
     policy_updates: Option<watch::Sender<MonitoringPolicy>>,
     connectivity_hints: Option<watch::Sender<u64>>,
-    active_host_key_challenge: Option<ActiveHostKeyChallenge>,
     active_keyboard_challenge: Option<ActiveKeyboardChallenge>,
     prepared_answers: BTreeMap<String, PreparedAnswer>,
     consecutive_failures: u32,
@@ -324,12 +302,6 @@ struct SessionRecord {
 struct ConnectTask {
     generation: u64,
     handle: tauri::async_runtime::JoinHandle<bool>,
-}
-
-struct ActiveHostKeyChallenge {
-    challenge: MetricsHostKeyChallenge,
-    endpoint: Endpoint,
-    observed: ObservedHostKey,
 }
 
 struct ActiveKeyboardChallenge {
@@ -371,10 +343,6 @@ enum Message {
     },
     Stop {
         request: MetricsStopRequest,
-        reply: oneshot::Sender<ActorResult<MetricsSessionSummary>>,
-    },
-    HostKeyDecide {
-        request: MetricsHostKeyDecisionRequest,
         reply: oneshot::Sender<ActorResult<MetricsSessionSummary>>,
     },
     KeyboardAnswerPrepare {
@@ -446,6 +414,9 @@ enum Message {
         host_id: String,
         generation: u64,
     },
+    /// Periodic, read-only check that starts paused NeedsHostTrust sessions
+    /// once the user has trusted the server through an interactive connection.
+    TrustRecheck,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -574,12 +545,7 @@ impl Actor {
             return Err(validation_error(request_id));
         }
         let key = host_id.as_str().to_owned();
-        let host_key_now_trusted = self
-            .sessions
-            .get(&key)
-            .is_some_and(|record| paused_host_key_now_trusted(record, &self.hosts));
         if !force
-            && !host_key_now_trusted
             && self.sessions.get(&key).is_some_and(|record| {
                 paused_session_can_be_reused(
                     record,
@@ -608,8 +574,6 @@ impl Actor {
                 if !stop_record_and_wait(record).await {
                     return Err(unavailable_error(request_id));
                 }
-                record.active_host_key_challenge = None;
-                record.summary.host_key_challenge = None;
                 mark_snapshot_stale(record);
                 record.host_state_version = host_state_version;
                 record.monitoring_policy = monitoring_policy;
@@ -633,6 +597,25 @@ impl Actor {
         };
         validate_supported_selection(&profile.monitoring_policy.policy)
             .map_err(|()| validation_error(request_id.clone()))?;
+        if !route_endpoints_trusted(&self.hosts, &profile) {
+            // Never probe an untrusted server in the background: no socket,
+            // no handshake and no failure backoff until trust exists.
+            let record = self.sessions.entry(key).or_insert_with(|| {
+                new_record(host_id, host_state_version, monitoring_policy.clone())
+            });
+            if !stop_record_and_wait(record).await {
+                return Err(unavailable_error(request_id));
+            }
+            clear_keyboard_challenge(record, TransportError::AuthenticationRejected);
+            mark_snapshot_stale(record);
+            record.host_state_version = host_state_version;
+            record.monitoring_policy = monitoring_policy;
+            record.consecutive_failures = 0;
+            if record.summary.state != MetricsSessionState::NeedsHostTrust {
+                transition(record, MetricsSessionState::NeedsHostTrust, None, None);
+            }
+            return Ok(record.summary.clone());
+        }
         if !self.vault.is_unlocked() && profile_requires_vault(&profile) {
             let record = self.sessions.entry(key).or_insert_with(|| {
                 new_record(host_id, host_state_version, monitoring_policy.clone())
@@ -640,8 +623,6 @@ impl Actor {
             if !stop_record_and_wait(record).await {
                 return Err(unavailable_error(request_id));
             }
-            record.active_host_key_challenge = None;
-            record.summary.host_key_challenge = None;
             mark_snapshot_stale(record);
             record.host_state_version = host_state_version;
             record.monitoring_policy = monitoring_policy;
@@ -705,14 +686,11 @@ impl Actor {
         record.vault_availability_epoch = self
             .vault
             .with_vault_availability(|availability, _| availability.epoch);
-        record.route_stages = route_stage_map(&profile);
         record.observed_host_keys.clear();
         record.cleanup_uncertain = false;
         record.summary.generation =
             WireSequence::new(record.summary.generation.get().saturating_add(1).max(1));
-        record.summary.host_key_challenge = None;
         record.summary.keyboard_interactive_challenge = None;
-        record.active_host_key_challenge = None;
         clear_keyboard_challenge(record, TransportError::AuthenticationRejected);
         transition(record, MetricsSessionState::Connecting, None, None);
         let generation = record.summary.generation.get();
@@ -812,8 +790,6 @@ impl Actor {
             );
             return Err(unavailable_error(request.meta.request_id));
         }
-        record.active_host_key_challenge = None;
-        record.summary.host_key_challenge = None;
         transition(record, MetricsSessionState::Closed, None, None);
         Ok(record.summary.clone())
     }
@@ -838,61 +814,6 @@ impl Actor {
             request.host_id,
             snapshot.host.state_version,
             snapshot.config.monitoring_policy.policy,
-            true,
-        )
-        .await
-    }
-
-    async fn decide_host_key(
-        &mut self,
-        request: MetricsHostKeyDecisionRequest,
-    ) -> ActorResult<MetricsSessionSummary> {
-        if request.idempotency_key.trim().is_empty() {
-            return Err(validation_error(request.meta.request_id));
-        }
-        let record = self
-            .sessions
-            .get_mut(request.host_id.as_str())
-            .ok_or_else(|| not_found_error(request.meta.request_id.clone()))?;
-        if record.summary.metrics_session_id != request.metrics_session_id
-            || record.summary.generation != request.expected_generation
-        {
-            return Err(conflict_error(request.meta.request_id));
-        }
-        let active = record
-            .active_host_key_challenge
-            .take()
-            .ok_or_else(|| conflict_error(request.meta.request_id.clone()))?;
-        if active.challenge.challenge_id != request.challenge_id {
-            record.active_host_key_challenge = Some(active);
-            return Err(conflict_error(request.meta.request_id));
-        }
-        record.summary.host_key_challenge = None;
-        if request.decision == MetricsHostKeyDecision::Reject {
-            transition(
-                record,
-                MetricsSessionState::Failed,
-                None,
-                Some(MetricsSessionFailureCode::ConnectionUnavailable),
-            );
-            return Ok(record.summary.clone());
-        }
-        self.hosts
-            .trust_known_host(
-                active.endpoint.normalized_address(),
-                active.endpoint.port(),
-                &active.observed.algorithm,
-                &active.observed.public_key_blob,
-            )
-            .map_err(|_| conflict_error(request.meta.request_id.clone()))?;
-        let host_id = record.summary.host_id.clone();
-        let host_state_version = record.host_state_version;
-        let policy = record.monitoring_policy.clone();
-        self.ensure_started(
-            request.meta.request_id,
-            host_id,
-            host_state_version,
-            policy,
             true,
         )
         .await
@@ -1077,29 +998,9 @@ impl Actor {
                 let _ = reply.send(Ok(HostKeyDecision::Trusted));
             }
             Ok(KnownHostObservation::Unknown(_)) => {
-                let route_stage = record
-                    .route_stages
-                    .get(&endpoint_key(&endpoint))
-                    .cloned()
-                    .unwrap_or(SshSessionRouteStage::Target);
-                let challenge = MetricsHostKeyChallenge {
-                    challenge_id: MetricsHostKeyChallengeId::new(),
-                    metrics_session_id: record.summary.metrics_session_id.clone(),
-                    host_id: record.summary.host_id.clone(),
-                    generation: record.summary.generation,
-                    route_stage,
-                    algorithm: observed.algorithm.clone(),
-                    fingerprint_sha256: observed.fingerprint_sha256.clone(),
-                    trusted_fingerprint_sha256: None,
-                };
-                record.active_host_key_challenge = Some(ActiveHostKeyChallenge {
-                    challenge: challenge.clone(),
-                    endpoint,
-                    observed,
-                });
-                record.summary.host_key_challenge = Some(challenge);
-                transition(record, MetricsSessionState::NeedsHostKeyReview, None, None);
-                // A background reconcile never keeps an unauthenticated socket open.
+                // Only reachable if trust was removed after the pre-connect
+                // check. Background monitoring never offers first trust.
+                transition(record, MetricsSessionState::NeedsHostTrust, None, None);
                 let _ = reply.send(Ok(HostKeyDecision::Rejected));
             }
             Ok(KnownHostObservation::Mismatch { trusted, .. })
@@ -1211,10 +1112,7 @@ impl Actor {
             }
             return;
         }
-        if record.active_host_key_challenge.is_some()
-            && failure.code == MetricsSessionFailureCode::ConnectionUnavailable
-        {
-            transition(record, MetricsSessionState::NeedsHostKeyReview, None, None);
+        if record.summary.state == MetricsSessionState::NeedsHostTrust {
             return;
         }
         clear_keyboard_challenge(record, TransportError::AuthenticationRejected);
@@ -1256,7 +1154,8 @@ impl Actor {
             return;
         }
         record.consecutive_failures = record.consecutive_failures.saturating_add(1);
-        let delay = backoff_delay(
+        let delay = connection_backoff_delay(
+            failure.code,
             record.consecutive_failures,
             record.monitoring_policy.sample_interval_millis,
         );
@@ -1280,6 +1179,39 @@ impl Actor {
                 })
                 .await;
         });
+    }
+
+    async fn trust_recheck(&mut self) {
+        if self.shutting_down {
+            return;
+        }
+        let paused = self
+            .sessions
+            .values()
+            .filter(|record| {
+                record.summary.state == MetricsSessionState::NeedsHostTrust && record.task.is_none()
+            })
+            .map(|record| record.summary.host_id.clone())
+            .collect::<Vec<_>>();
+        for host_id in paused {
+            let Ok(snapshot) = self.hosts.get_connection_snapshot(&host_id) else {
+                continue;
+            };
+            let version = snapshot.host.state_version;
+            let policy = snapshot.config.monitoring_policy.policy;
+            if !policy.enabled {
+                continue;
+            }
+            let Ok(profile) = resolve_metrics_connection_profile(&self.hosts, &host_id, version)
+            else {
+                continue;
+            };
+            if route_endpoints_trusted(&self.hosts, &profile) {
+                let _ = self
+                    .ensure_started(RequestId::new(), host_id, version, policy, true)
+                    .await;
+            }
+        }
     }
 
     async fn retry_due(&mut self, host_id: &str, generation: u64) {
@@ -1470,8 +1402,6 @@ impl Actor {
                     );
                     continue;
                 }
-                record.active_host_key_challenge = None;
-                record.summary.host_key_challenge = None;
                 mark_snapshot_stale(record);
                 transition(
                     record,
@@ -1528,8 +1458,6 @@ impl Actor {
             }
         }
         for (host_id, record) in &mut self.sessions {
-            record.active_host_key_challenge = None;
-            record.summary.host_key_challenge = None;
             if failed_hosts.contains(host_id) {
                 transition(
                     record,
@@ -1581,9 +1509,6 @@ impl Actor {
             }
             Message::Stop { request, reply } => {
                 let _ = reply.send(self.stop(request).await);
-            }
-            Message::HostKeyDecide { request, reply } => {
-                let _ = reply.send(self.decide_host_key(request).await);
             }
             Message::KeyboardAnswerPrepare { request, reply } => {
                 let _ = reply.send(self.prepare_answer(request));
@@ -1659,6 +1584,7 @@ impl Actor {
             Message::VaultAvailabilityChanged { availability } => {
                 self.vault_availability_changed(availability).await
             }
+            Message::TrustRecheck => self.trust_recheck().await,
             Message::RetryDue {
                 host_id,
                 generation,
@@ -2064,6 +1990,10 @@ fn map_connection_failure(error: TransportError) -> WorkerFailure {
             code: MetricsSessionFailureCode::ConnectionUnavailable,
             recoverable: false,
         },
+        TransportError::ServerClosedBeforeHandshake => WorkerFailure {
+            code: MetricsSessionFailureCode::ConnectionClosedByServer,
+            recoverable: true,
+        },
         TransportError::AuthenticationTimeout | TransportError::SshAgentUnavailable => {
             WorkerFailure {
                 code: MetricsSessionFailureCode::ConnectionUnavailable,
@@ -2118,7 +2048,6 @@ fn new_record(
             failure_code: None,
             next_retry_at_unix_ms: None,
             latest_snapshot: None,
-            host_key_challenge: None,
             keyboard_interactive_challenge: None,
         },
         host_state_version,
@@ -2128,13 +2057,11 @@ fn new_record(
         vault_availability_epoch: 0,
         cleanup_uncertain: false,
         monitoring_policy,
-        route_stages: BTreeMap::new(),
         observed_host_keys: BTreeMap::new(),
         task: None,
         stop: None,
         policy_updates: None,
         connectivity_hints: None,
-        active_host_key_challenge: None,
         active_keyboard_challenge: None,
         prepared_answers: BTreeMap::new(),
         consecutive_failures: 0,
@@ -2247,32 +2174,32 @@ fn paused_session_can_be_reused(
                 == Some(MetricsAuthenticationReason::VaultLocked))
         && matches!(
             record.summary.state,
-            MetricsSessionState::NeedsHostKeyReview
-                | MetricsSessionState::NeedsAuthentication
-                | MetricsSessionState::Backoff
+            MetricsSessionState::NeedsAuthentication | MetricsSessionState::Backoff
         )
-}
-
-fn paused_host_key_now_trusted(record: &SessionRecord, hosts: &HostService) -> bool {
-    record
-        .active_host_key_challenge
-        .as_ref()
-        .is_some_and(|active| {
-            matches!(
-                hosts.observe_known_host(
-                    active.endpoint.normalized_address(),
-                    active.endpoint.port(),
-                    &active.observed.algorithm,
-                    &active.observed.public_key_blob,
-                ),
-                Ok(KnownHostObservation::Trusted(_))
-            )
-        })
 }
 
 fn mark_snapshot_stale(record: &mut SessionRecord) {
     if let Some(snapshot) = record.summary.latest_snapshot.as_mut() {
         snapshot.stale = true;
+    }
+}
+
+/// Minimum wait after the server refused this client before key exchange.
+/// OpenSSH adds `refuseconnection` (10 s by default) to an active penalty for
+/// every refused attempt; retrying no sooner than this lets the penalty drain
+/// instead of being extended by background monitoring.
+const SERVER_REFUSAL_MIN_BACKOFF: Duration = Duration::from_secs(60);
+
+fn connection_backoff_delay(
+    code: MetricsSessionFailureCode,
+    consecutive_failures: u32,
+    sample_interval_millis: u32,
+) -> Duration {
+    let delay = backoff_delay(consecutive_failures, sample_interval_millis);
+    if code == MetricsSessionFailureCode::ConnectionClosedByServer {
+        delay.max(SERVER_REFUSAL_MIN_BACKOFF)
+    } else {
+        delay
     }
 }
 
@@ -2285,29 +2212,48 @@ fn backoff_delay(consecutive_failures: u32, sample_interval_millis: u32) -> Dura
     )
 }
 
-fn route_stage_map(
+/// Read-only Known Hosts check for every SSH hop of the monitoring route. Any
+/// trusted key for the endpoint counts; a changed key is still detected (and
+/// blocked) by the normal verifier once connected. A store read failure is
+/// treated as untrusted so nothing connects.
+fn route_endpoints_trusted(
+    hosts: &HostService,
     profile: &ResolvedMetricsConnectionProfile,
-) -> BTreeMap<String, SshSessionRouteStage> {
-    let mut stages = BTreeMap::new();
-    for (index, jump) in profile.connection.jump_hosts.iter().enumerate() {
-        if let Ok(endpoint) = Endpoint::parse(&jump.endpoint.address, jump.endpoint.port) {
-            stages.insert(
-                endpoint_key(&endpoint),
-                SshSessionRouteStage::JumpHost {
-                    hop_index: u8::try_from(index).unwrap_or(u8::MAX),
-                    host_id: jump.host_id.clone(),
-                    endpoint: jump.endpoint.clone(),
-                },
-            );
+) -> bool {
+    let Ok(known_hosts) = hosts.with_desktop_repository(|repository| repository.list_known_hosts())
+    else {
+        return false;
+    };
+    let trusted = |address: &str, port: u16| {
+        Endpoint::parse(address, port).is_ok_and(|endpoint| {
+            known_hosts.iter().any(|known| {
+                known.normalized_address == endpoint.normalized_address() && known.port == port
+            })
+        })
+    };
+    profile
+        .connection
+        .jump_hosts
+        .iter()
+        .all(|jump| trusted(&jump.endpoint.address, jump.endpoint.port))
+        && trusted(
+            &profile.connection.endpoint.address,
+            profile.connection.endpoint.port,
+        )
+}
+
+const TRUST_RECHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+async fn run_trust_recheck_ticker(tx: mpsc::Sender<Message>) {
+    let mut interval = tokio::time::interval(TRUST_RECHECK_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        match tx.try_send(Message::TrustRecheck) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
         }
     }
-    if let Ok(endpoint) = Endpoint::parse(
-        &profile.connection.endpoint.address,
-        profile.connection.endpoint.port,
-    ) {
-        stages.insert(endpoint_key(&endpoint), SshSessionRouteStage::Target);
-    }
-    stages
 }
 
 fn endpoint_key(endpoint: &Endpoint) -> String {
@@ -2406,8 +2352,7 @@ mod tests {
         MetricsKeyboardInteractiveAnswerPrepareRequest, MetricsKeyboardInteractiveAnswerRefId,
         MetricsKeyboardInteractiveChallengeId, MetricsKeyboardInteractiveRespondRequest,
         MetricsPlatform, MetricsSessionFailureCode, MetricsSessionState, MetricsStopRequest,
-        MonitoringPolicy, NetworkResourceId, RequestId, RequestMeta, SshSessionRouteStage,
-        WireSequence,
+        MonitoringPolicy, NetworkResourceId, RequestId, RequestMeta, WireSequence,
     };
     use norishell_server_metrics::{
         CpuUsage, DiskUsage, LinuxMetricSample, MemoryUsage, MetricValue, NetworkRate,
@@ -2415,7 +2360,12 @@ mod tests {
     use norishell_ssh_domain::Endpoint;
     use norishell_ssh_transport::{
         HostKeyDecision, KeyboardInteractiveChallenge, KeyboardInteractivePrompt, ObservedHostKey,
-        TransportError,
+        PublicKeyBase64, TransportError,
+    };
+    use russh::server::{self, Auth};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use tempfile::TempDir;
     use tokio::sync::{mpsc, oneshot, watch};
@@ -2424,8 +2374,7 @@ mod tests {
         Actor, ConnectTask, KEYBOARD_INTERACTIVE_ANSWER_MAX_BYTES, KeyboardInteractiveRequest,
         MAX_BACKOFF_SECONDS, WORKER_STOP_TIMEOUT, WorkerFailure, backoff_delay, generation_matches,
         map_connection_failure, mark_snapshot_stale, metric_snapshot_from, new_record,
-        paused_host_key_now_trusted, paused_session_can_be_reused, validate_supported_selection,
-        wait_for_stop,
+        paused_session_can_be_reused, validate_supported_selection, wait_for_stop,
     };
     use crate::{
         host_service::HostService, ssh_agent_service::SshAgentService,
@@ -2632,6 +2581,32 @@ mod tests {
         selected.disk_mount_ids = vec![DiskResourceId::Root];
         selected.network_interface_ids.clear();
         assert!(validate_supported_selection(&selected).is_err());
+    }
+
+    #[test]
+    fn server_refusal_backs_off_no_faster_than_the_server_penalty() {
+        let failure = super::map_connection_failure(TransportError::ServerClosedBeforeHandshake);
+        assert_eq!(
+            failure.code,
+            MetricsSessionFailureCode::ConnectionClosedByServer
+        );
+        assert!(failure.recoverable);
+        for attempt in 1..=12 {
+            let delay = super::connection_backoff_delay(failure.code, attempt, 1_500);
+            assert!(
+                delay >= super::SERVER_REFUSAL_MIN_BACKOFF,
+                "attempt {attempt}"
+            );
+            assert!(delay <= Duration::from_secs(MAX_BACKOFF_SECONDS));
+        }
+        assert_eq!(
+            super::connection_backoff_delay(
+                MetricsSessionFailureCode::ConnectionUnavailable,
+                1,
+                15_000
+            ),
+            backoff_delay(1, 15_000)
+        );
     }
 
     #[test]
@@ -2859,7 +2834,7 @@ mod tests {
         assert!(actor.validate_trust(host_id.as_str(), 1).is_err());
         assert_eq!(
             actor.sessions[host_id.as_str()].summary.state,
-            MetricsSessionState::NeedsHostKeyReview
+            MetricsSessionState::NeedsHostTrust
         );
     }
 
@@ -2971,25 +2946,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_host_key_becomes_a_review_challenge_and_rejects_background_socket() {
+    async fn unknown_host_key_never_offers_first_trust_in_the_background() {
         let (_directory, mut actor) = actor();
         let host_id = HostId::new();
         install_active_record(&mut actor, host_id.clone());
-        let endpoint = Endpoint::parse("metrics.example", 22).expect("endpoint");
-        actor
-            .sessions
-            .get_mut(host_id.as_str())
-            .expect("record")
-            .route_stages
-            .insert(
-                "metrics.example:22".to_owned(),
-                SshSessionRouteStage::Target,
-            );
         let (decision, response) = oneshot::channel();
         actor.host_key_observed(
             host_id.as_str(),
             1,
-            endpoint,
+            Endpoint::parse("metrics.example", 22).expect("endpoint"),
             ObservedHostKey {
                 algorithm: "ssh-ed25519".to_owned(),
                 public_key_blob: vec![1, 2, 3],
@@ -3002,20 +2967,219 @@ mod tests {
             Ok(HostKeyDecision::Rejected)
         ));
         let summary = &actor.sessions[host_id.as_str()].summary;
-        assert_eq!(summary.state, MetricsSessionState::NeedsHostKeyReview);
-        assert!(summary.host_key_challenge.is_some());
-        assert!(!paused_host_key_now_trusted(
-            &actor.sessions[host_id.as_str()],
-            &actor.hosts
-        ));
-        actor
-            .hosts
-            .trust_known_host("metrics.example", 22, "ssh-ed25519", &[1, 2, 3])
-            .expect("trust observed key from another feature");
-        assert!(paused_host_key_now_trusted(
-            &actor.sessions[host_id.as_str()],
-            &actor.hosts
-        ));
+        assert_eq!(summary.state, MetricsSessionState::NeedsHostTrust);
+        assert!(summary.failure_code.is_none());
+    }
+
+    #[derive(Default)]
+    struct TrustGateServerEvidence {
+        tcp_connections: AtomicUsize,
+        auth_attempts: AtomicUsize,
+        exec_requests: AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    struct TrustGateServerHandler {
+        evidence: Arc<TrustGateServerEvidence>,
+    }
+
+    impl server::Handler for TrustGateServerHandler {
+        type Error = russh::Error;
+
+        async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+            self.evidence.auth_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(
+                if user == "metrics-user" && password == "metrics-password" {
+                    Auth::Accept
+                } else {
+                    Auth::reject()
+                },
+            )
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _channel: russh::Channel<server::Msg>,
+            reply: server::ChannelOpenHandle,
+            _session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            _command: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            self.evidence.exec_requests.fetch_add(1, Ordering::SeqCst);
+            session.channel_success(channel)?;
+            session.exit_status_request(channel, 1)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
+
+    /// User decision (N5 follow-up): background monitoring makes no connection
+    /// while the server identity is untrusted, and starts on its own once the
+    /// user trusts the key through an interactive connection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn untrusted_host_makes_zero_connections_until_trust_then_starts_automatically() {
+        let host_key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )
+        .expect("server key");
+        let host_key_blob = host_key.public_key().public_key_bytes();
+        let config = Arc::new(server::Config {
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            keys: vec![host_key],
+            ..server::Config::default()
+        });
+        let evidence = Arc::new(TrustGateServerEvidence::default());
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind isolated metrics server");
+        let port = listener.local_addr().expect("server address").port();
+        let accept_evidence = Arc::clone(&evidence);
+        let accept_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                accept_evidence
+                    .tcp_connections
+                    .fetch_add(1, Ordering::SeqCst);
+                let handler = TrustGateServerHandler {
+                    evidence: Arc::clone(&accept_evidence),
+                };
+                let config = Arc::clone(&config);
+                tokio::spawn(async move {
+                    if let Ok(session) = server::run_stream(config, stream, handler).await {
+                        let _ = session.await;
+                    }
+                });
+            }
+        });
+
+        let directory = tempfile::tempdir().expect("temp directory");
+        let mut repository = AppRepository::open(directory.path().join("ssh/norishell.sqlite3"))
+            .expect("fixture repository");
+        let identity = repository
+            .create_identity("Metrics", Some("metrics-user"))
+            .expect("identity");
+        let operation_id = norishell_core_api::OperationId::new();
+        let pending = repository
+            .begin_credential_import(
+                &operation_id,
+                "metrics-trust-gate-password",
+                &identity.identity_id,
+                norishell_core_api::CredentialKind::Password,
+                0,
+                "Metrics password",
+                false,
+            )
+            .expect("begin credential import");
+        let credential = repository
+            .mark_credential_import_ready(
+                &pending.credential_ref_id,
+                &operation_id,
+                pending.state_version,
+                None,
+                None,
+            )
+            .expect("credential ready");
+        let host = repository
+            .create_host(
+                "Metrics",
+                "127.0.0.1",
+                port,
+                None,
+                Some(&identity.identity_id),
+                false,
+            )
+            .expect("host");
+        let current = repository
+            .get_monitoring_policy(&host.host_id)
+            .expect("monitoring policy");
+        repository
+            .replace_monitoring_policy(&host.host_id, current.revision, &policy(true))
+            .expect("enable monitoring");
+        drop(repository);
+
+        let vault = VaultService::start(directory.path());
+        vault
+            .create_for_tests(b"metrics-trust-gate-vault")
+            .expect("create Vault");
+        let norishell_app_persistence::CredentialRecordDetails::Password { secret_ref_id } =
+            credential.details
+        else {
+            panic!("password credential");
+        };
+        vault
+            .insert_secrets(&[crate::vault_service::VaultSecretInsert {
+                secret_ref_id,
+                kind: norishell_secret_vault::SecretKind::Password,
+                value: zeroize::Zeroizing::new(b"metrics-password".to_vec()),
+            }])
+            .expect("store password");
+        let hosts = HostService::start(directory.path()).expect("host service");
+        let service = super::MetricsSessionService::start(
+            hosts.clone(),
+            vault,
+            TransientCredentialService::default(),
+            SshAgentService::default(),
+        );
+
+        let sessions = service
+            .reconcile_hosts(RequestId::new())
+            .await
+            .expect("reconcile");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].state, MetricsSessionState::NeedsHostTrust);
+        assert!(sessions[0].failure_code.is_none());
+        assert!(sessions[0].next_retry_at_unix_ms.is_none());
+        // Several recheck ticks and a second reconcile still never connect.
+        tokio::time::sleep(Duration::from_millis(4_500)).await;
+        service
+            .reconcile_hosts(RequestId::new())
+            .await
+            .expect("second reconcile");
+        assert_eq!(evidence.tcp_connections.load(Ordering::SeqCst), 0);
+
+        // The user accepts the key through an interactive Terminal connection.
+        hosts
+            .trust_known_host("127.0.0.1", port, "ssh-ed25519", &host_key_blob)
+            .expect("trust key interactively");
+        let started = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let summaries = service
+                    .summaries(RequestId::new())
+                    .await
+                    .expect("summaries");
+                if evidence.exec_requests.load(Ordering::SeqCst) > 0
+                    && summaries[0].state != MetricsSessionState::NeedsHostTrust
+                {
+                    break summaries[0].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("monitoring starts after trust without a restart");
+        assert!(evidence.tcp_connections.load(Ordering::SeqCst) >= 1);
+        assert!(evidence.auth_attempts.load(Ordering::SeqCst) >= 1);
+        assert_ne!(started.state, MetricsSessionState::NeedsHostTrust);
+        let known = hosts
+            .with_desktop_repository(|repository| repository.list_known_hosts())
+            .expect("known hosts");
+        assert_eq!(known.len(), 1);
+        assert_eq!(
+            known[0].last_verified_at_unix_ms, known[0].first_trusted_at_unix_ms,
+            "background verification must not touch the last-verified time"
+        );
+        let _ = service.shutdown_all(RequestId::new()).await;
+        accept_task.abort();
     }
 
     #[tokio::test]

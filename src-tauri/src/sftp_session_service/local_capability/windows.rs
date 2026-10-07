@@ -1,8 +1,8 @@
 //! Windows local browsing and upload capabilities. Enumeration and child opens
 //! remain relative to retained handles even if an ancestor is renamed.
 use super::{
-    LocalBoundary, LocalBoundaryCapability, LocalObjectIdentity, LocalObjectKind,
-    safe_local_name_display,
+    LocalBoundary, LocalBoundaryCapability, LocalBusySet, LocalMutationFailure,
+    LocalObjectIdentity, LocalObjectKind, safe_local_name_display,
 };
 use cap_fs_ext::{
     DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsMaybeDirExt as _,
@@ -108,6 +108,21 @@ fn component(bytes: &[u8]) -> io::Result<&str> {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
     Ok(value)
+}
+
+fn windows_mutation_failure(error: &io::Error) -> LocalMutationFailure {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists => LocalMutationFailure::TargetExists,
+        io::ErrorKind::DirectoryNotEmpty => LocalMutationFailure::DirectoryNotEmpty,
+        io::ErrorKind::NotFound => LocalMutationFailure::PreconditionChanged,
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
+            LocalMutationFailure::PermissionDenied
+        }
+        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidFilename => {
+            LocalMutationFailure::InvalidName
+        }
+        _ => LocalMutationFailure::Io,
+    }
 }
 
 #[derive(Debug)]
@@ -254,6 +269,109 @@ impl NativeLocalDirectoryCapability {
         }
         let next = (!stream.ended || !stream.pending.is_empty()).then_some(stream);
         Ok((entries, next))
+    }
+    fn mutation_component(name: &[u8]) -> Result<&str, LocalMutationFailure> {
+        component(name).map_err(|_| LocalMutationFailure::InvalidName)
+    }
+    fn listed_entry(
+        &self,
+        name: &str,
+        expected: &LocalObjectIdentity,
+    ) -> Result<NativeFileIdentity, LocalMutationFailure> {
+        let observed = NativeFileIdentity::from_file(
+            &self
+                .open_entry(name.as_bytes(), false)
+                .map_err(|error| windows_mutation_failure(&error))?,
+        )
+        .map_err(|error| windows_mutation_failure(&error))?;
+        let same_object = expected.device == observed.device && expected.object == observed.inode;
+        let matches = match expected.kind {
+            LocalObjectKind::Directory => observed.is_directory() && same_object,
+            LocalObjectKind::File => observed.is_regular() && expected.matches_native(&observed),
+            LocalObjectKind::Symlink | LocalObjectKind::Other => false,
+        };
+        if matches {
+            Ok(observed)
+        } else {
+            Err(LocalMutationFailure::PreconditionChanged)
+        }
+    }
+    /// Windows: an upload keeps its source open without delete sharing, so
+    /// the OS refuses to rename or delete it; the busy set stays empty here.
+    pub(in super::super) fn create_directory_entry(
+        &self,
+        name: &[u8],
+        _busy: &LocalBusySet,
+    ) -> Result<(), LocalMutationFailure> {
+        let name = Self::mutation_component(name)?;
+        self.directory
+            .create_dir(name)
+            .map_err(|error| windows_mutation_failure(&error))
+    }
+    pub(in super::super) fn create_empty_file(
+        &self,
+        name: &[u8],
+        _busy: &LocalBusySet,
+    ) -> Result<(), LocalMutationFailure> {
+        let name = Self::mutation_component(name)?;
+        let mut options = CapOpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        self.directory
+            .open_with(name, &options)
+            .map(drop)
+            .map_err(|error| windows_mutation_failure(&error))
+    }
+    pub(in super::super) fn rename_entry(
+        &self,
+        name: &[u8],
+        expected: &LocalObjectIdentity,
+        new_name: &[u8],
+        _busy: &LocalBusySet,
+    ) -> Result<(), LocalMutationFailure> {
+        let name = Self::mutation_component(name)?;
+        let new_name = Self::mutation_component(new_name)?;
+        let observed = self.listed_entry(name, expected)?;
+        if observed.is_regular() {
+            // A new link fails when the name exists, so nothing is replaced.
+            self.directory
+                .hard_link(name, &self.directory, new_name)
+                .map_err(|error| windows_mutation_failure(&error))?;
+            return self
+                .directory
+                .remove_file(name)
+                .map_err(|error| windows_mutation_failure(&error));
+        }
+        // Windows never lets a directory rename replace an existing name.
+        match self.directory.symlink_metadata(new_name) {
+            Ok(_) => return Err(LocalMutationFailure::TargetExists),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(windows_mutation_failure(&error)),
+        }
+        self.directory
+            .rename(name, &self.directory, new_name)
+            .map_err(|error| windows_mutation_failure(&error))
+    }
+    pub(in super::super) fn delete_entry(
+        &self,
+        name: &[u8],
+        expected: &LocalObjectIdentity,
+        recursive: bool,
+        _busy: &LocalBusySet,
+    ) -> Result<(), LocalMutationFailure> {
+        let name = Self::mutation_component(name)?;
+        let observed = self.listed_entry(name, expected)?;
+        let result = if !observed.is_directory() {
+            self.directory.remove_file(name)
+        } else if recursive {
+            // cap-std removes reparse points themselves, never their targets.
+            self.directory.remove_dir_all(name)
+        } else {
+            self.directory.remove_dir(name)
+        };
+        result.map_err(|error| windows_mutation_failure(&error))
     }
     pub(in super::super) fn open_child(
         &self,

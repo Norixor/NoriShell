@@ -320,7 +320,14 @@ pub(super) fn toggle(app: &AppHandle, rect: tauri::Rect, clicked_at: Instant) {
         });
     });
 }
+// Android has no tray, so the tray panel window is never created there.
+#[cfg(mobile)]
+fn ensure_window<R: Runtime>(_app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
+    Err(tauri::Error::WindowNotFound)
+}
+
 /// Create the hidden panel once and reuse it; hiding never destroys the WebView (only application stop does).
+#[cfg(desktop)]
 fn ensure_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
     if let Some(window) = app.get_webview_window(LABEL) {
         return Ok(window);

@@ -162,27 +162,18 @@ impl PluginService {
     ) -> CoreResult<PluginApprovalId> {
         let snapshot = self.prepare_special_permission(request.clone())?;
         let label = secure_special_permission_window_label(&snapshot.approval_id);
-        let opened = crate::secure_window_frame::apply_secure_window_frame(
+        let opened = crate::secure_surface::open(
             &app,
-            &label,
-            WebviewWindowBuilder::new(
-                &app,
-                label.clone(),
-                WebviewUrl::App(
-                    format!(
-                        "secure-plugin-permission.html?approvalId={}",
-                        snapshot.approval_id.as_str()
-                    )
-                    .into(),
-                ),
-            ),
-        )
-        .title("NoriShell")
-        .inner_size(760.0, 760.0)
-        .min_inner_size(640.0, 620.0)
-        .resizable(true)
-        .center()
-        .build();
+            crate::secure_surface::SurfaceSpec::new(
+                crate::secure_surface::SurfaceKind::PluginPermission,
+                label,
+            )
+            .query(format!("approvalId={}", snapshot.approval_id.as_str()))
+            .size(760.0, 760.0)
+            .min_size(640.0, 620.0)
+            .resizable(true)
+            .centered(),
+        );
         let window = match opened {
             Ok(window) => window,
             Err(_) => {
@@ -195,10 +186,8 @@ impl PluginService {
         let service = self.clone();
         let approval_id = snapshot.approval_id;
         let result_id = approval_id.clone();
-        window.on_window_event(move |event| {
-            if matches!(event, tauri::WindowEvent::Destroyed)
-                && let Some(outcome) = service.cancel_special_permission(&approval_id)
-            {
+        window.on_destroyed(move || {
+            if let Some(outcome) = service.cancel_special_permission(&approval_id) {
                 let _ = app.emit_to("main", "plugin-special-permission-changed", outcome);
             }
         });

@@ -182,6 +182,14 @@ fn map_transport_error(request_id: RequestId, error: TransportError) -> Box<Core
             RetryStrategy::AfterMilliseconds(1_000),
             "errors.sshSession.connectionTimedOut",
         ),
+        // The server is likely rate-limiting this device; an automatic retry
+        // would extend the penalty, so the user decides when to try again.
+        TransportError::ServerClosedBeforeHandshake => (
+            "connection_closed_by_server",
+            ErrorCategory::Unavailable,
+            RetryStrategy::WaitForUser,
+            "errors.sshSession.connectionClosedByServer",
+        ),
         TransportError::ConnectFailed => (
             "connection_failed",
             ErrorCategory::Unavailable,
@@ -279,6 +287,23 @@ mod tests {
         assert_eq!(error.code, "ssh_connection_test.host_key_untrusted");
         assert_eq!(error.retry_strategy, RetryStrategy::WaitForUser);
         assert_eq!(error.message_key, "errors.connectionTest.hostKeyUntrusted");
+    }
+
+    #[test]
+    fn a_server_closing_before_the_handshake_is_named_and_not_auto_retried() {
+        let error = map_transport_error(
+            RequestId::new(),
+            TransportError::ServerClosedBeforeHandshake,
+        );
+        assert_eq!(
+            error.code,
+            "ssh_connection_test.connection_closed_by_server"
+        );
+        assert_eq!(error.retry_strategy, RetryStrategy::WaitForUser);
+        assert_eq!(
+            error.message_key,
+            "errors.sshSession.connectionClosedByServer"
+        );
     }
 
     #[test]

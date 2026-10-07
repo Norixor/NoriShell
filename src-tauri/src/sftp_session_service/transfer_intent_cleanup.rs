@@ -363,6 +363,7 @@ mod tests {
             remaining_seconds: None,
             state_revision: WireSequence::new(7),
             state: wire::SftpTransferState::Failed,
+            cancellable: false,
             commit_outcome,
             failure_code: Some(wire::SftpTransferFailureCode::CleanupIncomplete),
             cleanup_residual: Some(

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="norishell_alerts_channel_name">Connection alerts</string>
+    <string name="norishell_alerts_channel_description">Unexpected disconnects and failed port forwarding.</string>
+    <string name="norishell_transfers_channel_name">Transfers</string>
+    <string name="norishell_transfers_channel_description">Completed and failed file transfers.</string>
+</resources>

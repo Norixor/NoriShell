@@ -5,7 +5,7 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, State, WebviewWindow};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(
@@ -38,6 +38,13 @@ impl ToolTarget {
             Self::HostEditor { .. } => "hostEditor",
             Self::DesktopEditor { .. } => "desktopEditor",
             Self::SftpFile { .. } => "sftpFile",
+        }
+    }
+    fn surface_kind(&self) -> crate::secure_surface::SurfaceKind {
+        match self {
+            Self::HostEditor { .. } => crate::secure_surface::SurfaceKind::ToolHostEditor,
+            Self::DesktopEditor { .. } => crate::secure_surface::SurfaceKind::ToolDesktopEditor,
+            Self::SftpFile { .. } => crate::secure_surface::SurfaceKind::ToolSftpFile,
         }
     }
     fn title(&self) -> &str {
@@ -145,37 +152,21 @@ pub(crate) async fn tool_window_open(
         if !ordinary_owner_alive(&app, &owner) {
             return Err("unavailable".into());
         }
-        if let Some(child) = app.get_webview_window(&label) {
-            crate::window_first_show::show_if_revealed(&child).map_err(|_| "unavailable")?;
+        if let Some(shown) = crate::secure_surface::show_existing(&app, &label) {
+            shown.map_err(|_| "unavailable")?;
         }
         return Ok(());
     }
-    let expected = app
-        .config()
-        .build
-        .dev_url
-        .as_ref()
-        .and_then(|url| url.join("tool-window.html").ok());
-    let builder =
-        WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("tool-window.html".into()))
-            .title(target.title())
-            .on_navigation(move |url| {
-                (cfg!(debug_assertions)
-                    && expected.as_ref().is_some_and(|expected| expected == url))
-                    || (((url.scheme() == "tauri" && url.host_str() == Some("localhost"))
-                        || (matches!(url.scheme(), "http" | "https")
-                            && url.host_str() == Some("tauri.localhost")
-                            && url.port().is_none()))
-                        && url.path() == "/tool-window.html"
-                        && url.query().is_none())
-            })
-            .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
     let default_size =
         crate::secure_window_frame::default_window_size(&app, (1000.0, 760.0), (640.0, 480.0));
-    let child = crate::secure_window_frame::apply_secure_window_frame(&app, &label, builder)
-        .inner_size(default_size.0, default_size.1)
-        .min_inner_size(640.0, 480.0)
-        .build();
+    let child = crate::secure_surface::open(
+        &app,
+        crate::secure_surface::SurfaceSpec::new(target.surface_kind(), label.clone())
+            .title(target.title())
+            .size(default_size.0, default_size.1)
+            .min_size(640.0, 480.0)
+            .navigation_guard(),
+    );
     let child = match child {
         Ok(child) => child,
         Err(_) => {
@@ -189,7 +180,7 @@ pub(crate) async fn tool_window_open(
             .is_preparing()
     {
         state.0.lock().map_err(|_| "unavailable")?.remove(&label);
-        let _ = child.destroy();
+        child.destroy();
         return Err("unavailable".into());
     }
     let exit = app
@@ -197,22 +188,26 @@ pub(crate) async fn tool_window_open(
         .inner()
         .clone();
     let registry = state.inner().clone();
-    child.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed)
-            && let Ok(mut items) = registry.0.lock()
-        {
+    child.on_destroyed(move || {
+        if let Ok(mut items) = registry.0.lock() {
             items.remove(&label);
             exit.destroyed(&label);
         }
     });
-    crate::window_first_show::focus_if_revealed(&child).map_err(|_| "unavailable".into())
+    child.focus().map_err(|_| "unavailable".into())
 }
 #[tauri::command]
 pub(crate) fn tool_window_get(
     window: WebviewWindow,
     state: State<'_, ToolWindows>,
 ) -> Result<ToolTarget, String> {
-    state.target(window.label())
+    tool_window_get_for_label(window.label(), &state)
+}
+pub(crate) fn tool_window_get_for_label(
+    surface_label: &str,
+    state: &ToolWindows,
+) -> Result<ToolTarget, String> {
+    state.target(surface_label)
 }
 #[tauri::command]
 pub(crate) fn tool_window_changed(
@@ -220,9 +215,27 @@ pub(crate) fn tool_window_changed(
     window: WebviewWindow,
     state: State<'_, ToolWindows>,
 ) -> Result<(), String> {
-    let target = state.target(window.label())?;
+    tool_window_changed_for_label(&app, window.label(), &state)
+}
+pub(crate) fn tool_window_changed_for_label(
+    app: &tauri::AppHandle,
+    surface_label: &str,
+    state: &ToolWindows,
+) -> Result<(), String> {
+    let target = state.target(surface_label)?;
     app.emit_to("main", "tool-window-changed", target.kind())
         .map_err(|_| "unavailable".into())
+}
+/// Android: the Kotlin-bound surface asks to close itself.
+#[cfg(target_os = "android")]
+pub(crate) fn tool_window_close_for_label(
+    app: &tauri::AppHandle,
+    surface_label: &str,
+    state: &ToolWindows,
+) -> Result<(), String> {
+    state.target(surface_label)?;
+    crate::secure_surface::destroy(app, surface_label);
+    Ok(())
 }
 #[tauri::command]
 pub(crate) fn tool_window_close(
@@ -239,7 +252,14 @@ pub(crate) async fn tool_file_preview(
     state: State<'_, ToolWindows>,
     service: State<'_, crate::sftp_session_service::SftpSessionService>,
 ) -> Result<wire::SftpFilePreview, Box<wire::CoreApiError>> {
-    let target = state.target(window.label()).map_err(|_| {
+    tool_file_preview_for_label(window.label(), &state, service).await
+}
+pub(crate) async fn tool_file_preview_for_label(
+    surface_label: &str,
+    state: &ToolWindows,
+    service: State<'_, crate::sftp_session_service::SftpSessionService>,
+) -> Result<wire::SftpFilePreview, Box<wire::CoreApiError>> {
+    let target = state.target(surface_label).map_err(|_| {
         crate::core_api_error::core_error(
             wire::RequestId::new(),
             "tool_window.unavailable",
@@ -266,7 +286,15 @@ pub(crate) async fn tool_file_tail(
     service: State<'_, crate::sftp_session_service::SftpSessionService>,
     offset: wire::WireSequence,
 ) -> Result<wire::SftpFileTailResult, Box<wire::CoreApiError>> {
-    let target = state.target(window.label()).map_err(|_| {
+    tool_file_tail_for_label(window.label(), &state, service, offset).await
+}
+pub(crate) async fn tool_file_tail_for_label(
+    surface_label: &str,
+    state: &ToolWindows,
+    service: State<'_, crate::sftp_session_service::SftpSessionService>,
+    offset: wire::WireSequence,
+) -> Result<wire::SftpFileTailResult, Box<wire::CoreApiError>> {
+    let target = state.target(surface_label).map_err(|_| {
         crate::core_api_error::core_error(
             wire::RequestId::new(),
             "tool_window.unavailable",
@@ -307,7 +335,27 @@ pub(crate) async fn tool_file_save(
     meta: wire::RequestMeta,
     operation_id: wire::OperationId,
 ) -> Result<(), Box<wire::CoreApiError>> {
-    let target = state.target(window.label()).map_err(|_| {
+    tool_file_save_for_label(
+        window.label(),
+        &state,
+        service,
+        lifecycle,
+        text,
+        meta,
+        operation_id,
+    )
+    .await
+}
+pub(crate) async fn tool_file_save_for_label(
+    surface_label: &str,
+    state: &ToolWindows,
+    service: State<'_, crate::sftp_session_service::SftpSessionService>,
+    lifecycle: State<'_, crate::lifecycle::LifecycleState>,
+    text: String,
+    meta: wire::RequestMeta,
+    operation_id: wire::OperationId,
+) -> Result<(), Box<wire::CoreApiError>> {
+    let target = state.target(surface_label).map_err(|_| {
         crate::core_api_error::core_error(
             meta.request_id.clone(),
             "tool_window.unavailable",

@@ -1,21 +1,24 @@
-#[cfg(unix)]
+#[cfg(not(target_os = "android"))]
+use std::path::Path;
+#[cfg(all(unix, not(target_os = "android")))]
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 #[cfg(windows)]
 use std::{ffi::OsString, fs::File};
-use std::{io, path::Path, time::Duration};
+use std::{io, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use norishell_core_api::{PluginHostRequest, PluginRuntimeOutput};
 use sha2::{Digest, Sha256};
+#[cfg(not(target_os = "android"))]
 use tempfile::TempDir;
 
 use crate::plugin_host_protocol::{
     ChildFrame, PLUGIN_HOST_FRAME_MAX_BYTES, PLUGIN_HOST_PROTOCOL_MAJOR,
     PLUGIN_HOST_PROTOCOL_MINOR, ParentFrame, read_frame_with_timeout, write_frame,
 };
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 use crate::process_control::TerminationOutcome;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 use crate::process_control::{ManagedProcessGroup, TerminationPolicy};
 #[cfg(windows)]
 use crate::windows_process_control::{ManagedJobProcess, TerminationOutcome, TerminationPolicy};
@@ -39,18 +42,24 @@ pub(crate) enum PluginHostProcessError {
     Cleanup,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 type PluginHostOwnedProcess = ManagedProcessGroup;
 #[cfg(windows)]
 type PluginHostOwnedProcess = ManagedJobProcess;
-#[cfg(unix)]
+#[cfg(target_os = "android")]
+type PluginHostOwnedProcess = android_host::IsolatedHostProcess;
+#[cfg(all(unix, not(target_os = "android")))]
 type PluginHostInput = ChildStdin;
 #[cfg(windows)]
 type PluginHostInput = File;
-#[cfg(unix)]
+#[cfg(target_os = "android")]
+type PluginHostInput = android_host::HostSocket;
+#[cfg(all(unix, not(target_os = "android")))]
 type PluginHostOutput = ChildStdout;
 #[cfg(windows)]
 type PluginHostOutput = File;
+#[cfg(target_os = "android")]
+type PluginHostOutput = android_host::HostSocket;
 
 #[cfg(any(unix, windows))]
 pub(crate) struct PluginHostProcess {
@@ -62,6 +71,7 @@ pub(crate) struct PluginHostProcess {
     next_sequence: u64,
     guest_protocol_major: u16,
     guest_protocol_minor: u16,
+    #[cfg(not(target_os = "android"))]
     _working_directory: TempDir,
 }
 
@@ -82,17 +92,40 @@ impl PluginHostProcess {
         if instance_generation == 0 || module_bytes.is_empty() {
             return Err(PluginHostProcessError::Spawn);
         }
-        let executable = std::env::current_exe().map_err(|_| PluginHostProcessError::Spawn)?;
-        Self::spawn_executable(
-            &executable,
-            module_bytes,
-            instance_generation,
-            guest_protocol_major,
-            guest_protocol_minor,
-        )
+        #[cfg(target_os = "android")]
+        {
+            // The isolated `PluginHostService` process owns the other socket end;
+            // `current_exe()` is the zygote-forked app process and cannot be exec'd.
+            let (process, channel) = android_host::IsolatedHostProcess::start()?;
+            let output = channel
+                .try_clone()
+                .map_err(|_| PluginHostProcessError::Spawn)?;
+            Self {
+                process,
+                input: channel,
+                output,
+                instance_generation,
+                nonce: uuid::Uuid::new_v4().to_string(),
+                next_sequence: 1,
+                guest_protocol_major,
+                guest_protocol_minor,
+            }
+            .initialize(module_bytes)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let executable = std::env::current_exe().map_err(|_| PluginHostProcessError::Spawn)?;
+            Self::spawn_executable(
+                &executable,
+                module_bytes,
+                instance_generation,
+                guest_protocol_major,
+                guest_protocol_minor,
+            )
+        }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_os = "android")))]
     pub(crate) fn spawn_with_executable_for_tests(
         executable: &Path,
         module_bytes: &[u8],
@@ -107,6 +140,7 @@ impl PluginHostProcess {
         )
     }
 
+    #[cfg(not(target_os = "android"))]
     fn spawn_executable(
         executable: &Path,
         module_bytes: &[u8],
@@ -115,7 +149,7 @@ impl PluginHostProcess {
         guest_protocol_minor: u16,
     ) -> Result<Self, PluginHostProcessError> {
         let working_directory = tempfile::tempdir().map_err(|_| PluginHostProcessError::Spawn)?;
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         let (process, input, output) = {
             let mut command = Command::new(executable);
             command
@@ -157,19 +191,27 @@ impl PluginHostProcess {
             drop(stdio.stderr);
             (process, stdio.stdin, stdio.stdout)
         };
-        let nonce = uuid::Uuid::new_v4().to_string();
-        let module_sha256 = hex::encode(Sha256::digest(module_bytes));
-        let mut host = Self {
+        Self {
             process,
             input,
             output,
             instance_generation,
-            nonce: nonce.clone(),
+            nonce: uuid::Uuid::new_v4().to_string(),
             next_sequence: 1,
             guest_protocol_major,
             guest_protocol_minor,
             _working_directory: working_directory,
-        };
+        }
+        .initialize(module_bytes)
+    }
+
+    /// Initialize/Ready handshake shared by every platform transport. Dropping
+    /// `self` on failure releases the child through its platform owner.
+    fn initialize(mut self, module_bytes: &[u8]) -> Result<Self, PluginHostProcessError> {
+        let host = &mut self;
+        let nonce = host.nonce.clone();
+        let instance_generation = host.instance_generation;
+        let module_sha256 = hex::encode(Sha256::digest(module_bytes));
         write_frame(
             &mut host.input,
             &ParentFrame::Initialize {
@@ -181,19 +223,13 @@ impl PluginHostProcess {
                 module_base64: STANDARD.encode(module_bytes),
             },
         )
-        .map_err(|_| PluginHostProcessError::Protocol)?;
+        .map_err(|error| host.channel_error(&error))?;
         let ready: ChildFrame = read_frame_with_timeout(
             &mut host.output,
             PLUGIN_HOST_FRAME_MAX_BYTES,
             PLUGIN_HOST_RESPONSE_TIMEOUT,
         )
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                PluginHostProcessError::TimedOut
-            } else {
-                PluginHostProcessError::Protocol
-            }
-        })?;
+        .map_err(|error| host.channel_error(&error))?;
         if ready
             != (ChildFrame::Ready {
                 protocol_major: PLUGIN_HOST_PROTOCOL_MAJOR,
@@ -205,7 +241,34 @@ impl PluginHostProcess {
         {
             return Err(PluginHostProcessError::Protocol);
         }
-        Ok(host)
+        Ok(self)
+    }
+
+    /// Maps a channel failure and lets the platform owner remember that the
+    /// child side is gone (Android uses it to classify system reclaims).
+    fn channel_error(&mut self, error: &io::Error) -> PluginHostProcessError {
+        #[cfg(target_os = "android")]
+        if matches!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+        ) {
+            self.process.mark_peer_closed();
+        }
+        if error.kind() == io::ErrorKind::TimedOut {
+            PluginHostProcessError::TimedOut
+        } else {
+            PluginHostProcessError::Protocol
+        }
+    }
+
+    /// True only when the platform proved the host was reclaimed by the OS
+    /// (Android low-memory kill) rather than failing on its own. Such exits
+    /// must not escalate a plugin to Quarantined.
+    #[cfg(target_os = "android")]
+    pub(crate) fn reclaimed_by_system(&mut self) -> bool {
+        self.process.reclaimed_by_system()
     }
 
     pub(crate) fn process_id(&self) -> u32 {
@@ -237,19 +300,13 @@ impl PluginHostProcess {
                 request,
             },
         )
-        .map_err(|_| PluginHostProcessError::Protocol)?;
-        let response: ChildFrame = read_frame_with_timeout(
+        .map_err(|error| self.channel_error(&error))?;
+        let response: io::Result<ChildFrame> = read_frame_with_timeout(
             &mut self.output,
             PLUGIN_HOST_FRAME_MAX_BYTES,
             PLUGIN_HOST_RESPONSE_TIMEOUT,
-        )
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::TimedOut {
-                PluginHostProcessError::TimedOut
-            } else {
-                PluginHostProcessError::Protocol
-            }
-        })?;
+        );
+        let response = response.map_err(|error| self.channel_error(&error))?;
         match response {
             ChildFrame::Result {
                 instance_generation,
@@ -291,20 +348,14 @@ impl PluginHostProcess {
                 sequence,
             },
         )
-        .map_err(|_| PluginHostProcessError::Protocol)
+        .map_err(|error| self.channel_error(&error))
         .and_then(|()| {
-            let response: ChildFrame = read_frame_with_timeout(
+            let response: io::Result<ChildFrame> = read_frame_with_timeout(
                 &mut self.output,
                 PLUGIN_HOST_FRAME_MAX_BYTES,
                 PLUGIN_HOST_RESPONSE_TIMEOUT,
-            )
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::TimedOut {
-                    PluginHostProcessError::TimedOut
-                } else {
-                    PluginHostProcessError::Protocol
-                }
-            })?;
+            );
+            let response = response.map_err(|error| self.channel_error(&error))?;
             if matches!(
                 response,
                 ChildFrame::Stopped {
@@ -320,7 +371,20 @@ impl PluginHostProcess {
                 Err(PluginHostProcessError::Protocol)
             }
         });
-        let exited_after_graceful = graceful.is_ok()
+        #[cfg(target_os = "android")]
+        {
+            // Unbinding lets the system kill the isolated process even when the
+            // graceful exchange failed; only a confirmed death is clean.
+            let _ = graceful;
+            self.process.stop_and_confirm()
+        }
+        #[cfg(not(target_os = "android"))]
+        self.stop_desktop_process(graceful.is_ok())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn stop_desktop_process(&mut self, graceful: bool) -> Result<(), PluginHostProcessError> {
+        let exited_after_graceful = graceful
             && self
                 .process
                 .wait_for_exit(Duration::from_secs(2))
@@ -342,13 +406,13 @@ impl PluginHostProcess {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "android"))]
 type RlimitResource = libc::c_int;
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 type RlimitResource = libc::__rlimit_resource_t;
 
 #[cfg(unix)]
-fn set_limit(resource: RlimitResource, value: libc::rlim_t) -> io::Result<()> {
+pub(crate) fn set_limit(resource: RlimitResource, value: libc::rlim_t) -> io::Result<()> {
     let limit = libc::rlimit {
         rlim_cur: value,
         rlim_max: value,
@@ -357,6 +421,184 @@ fn set_limit(resource: RlimitResource, value: libc::rlim_t) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
+    }
+}
+
+/// Android transport: one `android:isolatedProcess` `PluginHostService` per
+/// plugin instance, reached over a socketpair whose peer end Kotlin passes to
+/// the service over Binder. The Kotlin side owns binding, death detection and
+/// exit classification; this side owns the frame protocol and the bounded
+/// confirmation that the process is gone.
+#[cfg(target_os = "android")]
+pub(crate) mod android_host {
+    use std::{
+        io::{self, Read, Write},
+        os::{
+            fd::{AsRawFd, RawFd},
+            unix::net::UnixStream,
+        },
+    };
+
+    use serde::Deserialize;
+    use tauri_plugin_norishell_android as bridge;
+
+    use super::PluginHostProcessError;
+
+    /// Exit classification reported by Kotlin for a system low-memory kill.
+    const REASON_LOW_MEMORY: &str = "low_memory";
+
+    /// Socket end used by both the parent and the isolated child. Writes use
+    /// `MSG_NOSIGNAL` so a dead peer surfaces as `BrokenPipe` instead of a
+    /// process-wide SIGPIPE inside ART.
+    pub(crate) struct HostSocket(UnixStream);
+
+    impl HostSocket {
+        pub(crate) fn new(stream: UnixStream) -> Self {
+            Self(stream)
+        }
+
+        pub(crate) fn try_clone(&self) -> io::Result<Self> {
+            self.0.try_clone().map(Self)
+        }
+    }
+
+    impl Read for HostSocket {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            (&self.0).read(buffer)
+        }
+    }
+
+    impl Write for HostSocket {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            loop {
+                // SAFETY: the descriptor is owned by `self.0` and the buffer is
+                // valid for `buffer.len()` bytes for the duration of the call.
+                let written = unsafe {
+                    libc::send(
+                        self.0.as_raw_fd(),
+                        buffer.as_ptr().cast(),
+                        buffer.len(),
+                        libc::MSG_NOSIGNAL,
+                    )
+                };
+                if written >= 0 {
+                    return Ok(written.unsigned_abs());
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsRawFd for HostSocket {
+        fn as_raw_fd(&self) -> RawFd {
+            self.0.as_raw_fd()
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct Started {
+        pid: u32,
+    }
+
+    #[derive(Deserialize)]
+    struct Stopped {
+        alive: bool,
+        reason: String,
+    }
+
+    pub(crate) struct IsolatedHostProcess {
+        instance_id: String,
+        process_id: u32,
+        peer_closed: bool,
+        /// Last confirmed exit classification; `None` while not confirmed dead.
+        exit_reason: Option<String>,
+    }
+
+    impl IsolatedHostProcess {
+        /// Binds a fresh isolated service instance and hands it the child end
+        /// of a new socketpair. The child end stays open here until Kotlin has
+        /// duplicated it (the command resolves only after the service took it).
+        pub(crate) fn start() -> Result<(Self, HostSocket), PluginHostProcessError> {
+            let (parent, child) = UnixStream::pair().map_err(|_| PluginHostProcessError::Spawn)?;
+            let instance_id = uuid::Uuid::new_v4().simple().to_string();
+            let started: Result<Started, _> = bridge::run_command(
+                "pluginHostStart",
+                serde_json::json!({ "instanceId": instance_id, "fd": child.as_raw_fd() }),
+            );
+            drop(child);
+            let started = started.map_err(|error| {
+                bridge::log::warn(&format!("plugin host start failed: {}", error.code()));
+                PluginHostProcessError::Spawn
+            })?;
+            let process = Self {
+                instance_id,
+                process_id: started.pid,
+                peer_closed: false,
+                exit_reason: None,
+            };
+            if started.pid == 0 {
+                return Err(PluginHostProcessError::Spawn);
+            }
+            Ok((process, HostSocket::new(parent)))
+        }
+
+        pub(crate) fn process_id(&self) -> u32 {
+            self.process_id
+        }
+
+        pub(crate) fn mark_peer_closed(&mut self) {
+            self.peer_closed = true;
+        }
+
+        /// Unbinds the service (the system kills an unbound isolated process)
+        /// and waits, bounded on the Kotlin side, for Binder death. Idempotent:
+        /// a confirmed exit is remembered so retries do not rebind or re-wait.
+        pub(crate) fn stop_and_confirm(&mut self) -> Result<(), PluginHostProcessError> {
+            if self.exit_reason.is_some() {
+                return Ok(());
+            }
+            let stopped: Stopped = bridge::run_command(
+                "pluginHostStop",
+                serde_json::json!({ "instanceId": self.instance_id }),
+            )
+            .map_err(|error| {
+                bridge::log::warn(&format!("plugin host stop failed: {}", error.code()));
+                PluginHostProcessError::Cleanup
+            })?;
+            if stopped.alive {
+                bridge::log::warn("plugin host death was not confirmed");
+                return Err(PluginHostProcessError::Cleanup);
+            }
+            self.exit_reason = Some(stopped.reason);
+            Ok(())
+        }
+
+        /// Only a host whose channel already closed is asked about; a live
+        /// host that merely timed out or broke protocol is the plugin's fault.
+        pub(crate) fn reclaimed_by_system(&mut self) -> bool {
+            if !self.peer_closed || self.stop_and_confirm().is_err() {
+                return false;
+            }
+            self.exit_reason.as_deref() == Some(REASON_LOW_MEMORY)
+        }
+    }
+
+    impl Drop for IsolatedHostProcess {
+        fn drop(&mut self) {
+            // Failed handshakes drop the owner without `shutdown`; unbind so
+            // the isolated process cannot outlive its owner. Best effort only:
+            // callers that need proof keep the owner and call `shutdown`.
+            if self.exit_reason.is_none() {
+                let _ = self.stop_and_confirm();
+            }
+        }
     }
 }
 

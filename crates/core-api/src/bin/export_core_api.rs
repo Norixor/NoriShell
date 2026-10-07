@@ -73,7 +73,6 @@ fn declarations() -> String {
         KnownHostId::decl(&config),
         SshSessionId::decl(&config),
         MetricsSessionId::decl(&config),
-        MetricsHostKeyChallengeId::decl(&config),
         MetricsKeyboardInteractiveChallengeId::decl(&config),
         MetricsKeyboardInteractiveAnswerRefId::decl(&config),
         SshAttachmentId::decl(&config),
@@ -609,14 +608,11 @@ fn declarations() -> String {
         MetricSnapshot::decl(&config),
         MetricsSessionFailureCode::decl(&config),
         MetricsSessionSummary::decl(&config),
-        MetricsHostKeyChallenge::decl(&config),
-        MetricsHostKeyDecision::decl(&config),
         MetricsKeyboardInteractivePrompt::decl(&config),
         MetricsKeyboardInteractiveChallenge::decl(&config),
         MetricsReconcileRequest::decl(&config),
         MetricsRetryRequest::decl(&config),
         MetricsStopRequest::decl(&config),
-        MetricsHostKeyDecisionRequest::decl(&config),
         MetricsKeyboardInteractiveAnswerPrepareRequest::decl(&config),
         MetricsKeyboardInteractiveAnswerPrepareResponse::decl(&config),
         MetricsKeyboardInteractiveRespondRequest::decl(&config),
@@ -821,6 +817,9 @@ fn declarations() -> String {
         SftpLocalDirectoryOpenChildRequest::decl(&config),
         SftpLocalDirectoryCreateChildRequest::decl(&config),
         SftpLocalDirectoryReleaseRequest::decl(&config),
+        SftpLocalFileMutation::decl(&config),
+        SftpLocalFileMutationRequest::decl(&config),
+        SftpLocalFileMutationResult::decl(&config),
         SftpSessionSnapshotRequest::decl(&config),
         SftpSessionSnapshot::decl(&config),
         SftpSessionDisconnectRequest::decl(&config),
@@ -997,7 +996,7 @@ fn declarations() -> String {
         .replace(
             "  sshTerminalOpen:",
             &format!(
-                "  serverOverviewSnapshot: {COMMAND_SERVER_OVERVIEW_SNAPSHOT:?},\n  metricsReconcile: {COMMAND_METRICS_RECONCILE:?},\n  metricsRetry: {COMMAND_METRICS_RETRY:?},\n  metricsStop: {COMMAND_METRICS_STOP:?},\n  metricsHostKeyDecide: {COMMAND_METRICS_HOST_KEY_DECIDE:?},\n  metricsKeyboardInteractiveAnswerPrepare: {COMMAND_METRICS_KEYBOARD_INTERACTIVE_ANSWER_PREPARE:?},\n  metricsKeyboardInteractiveRespond: {COMMAND_METRICS_KEYBOARD_INTERACTIVE_RESPOND:?},\n  sshTerminalOpen:"
+                "  serverOverviewSnapshot: {COMMAND_SERVER_OVERVIEW_SNAPSHOT:?},\n  metricsReconcile: {COMMAND_METRICS_RECONCILE:?},\n  metricsRetry: {COMMAND_METRICS_RETRY:?},\n  metricsStop: {COMMAND_METRICS_STOP:?},\n  metricsKeyboardInteractiveAnswerPrepare: {COMMAND_METRICS_KEYBOARD_INTERACTIVE_ANSWER_PREPARE:?},\n  metricsKeyboardInteractiveRespond: {COMMAND_METRICS_KEYBOARD_INTERACTIVE_RESPOND:?},\n  sshTerminalOpen:"
             ),
         )
         .replace(
@@ -1052,7 +1051,7 @@ fn declarations() -> String {
         .replace(
             "  terminalWorkspaceLayoutGet:",
             &format!(
-                "  forwardRuleList: {COMMAND_FORWARD_RULE_LIST:?},\n  forwardRuleCreate: {COMMAND_FORWARD_RULE_CREATE:?},\n  forwardRuleUpdate: {COMMAND_FORWARD_RULE_UPDATE:?},\n  forwardRuleDelete: {COMMAND_FORWARD_RULE_DELETE:?},\n  forwardRulePreflight: {COMMAND_FORWARD_RULE_PREFLIGHT:?},\n  forwardSessionStart: {COMMAND_FORWARD_SESSION_START:?},\n  forwardSessionSnapshot: {COMMAND_FORWARD_SESSION_SNAPSHOT:?},\n  forwardSessionStop: {COMMAND_FORWARD_SESSION_STOP:?},\n  forwardCleanupRetain: {COMMAND_FORWARD_CLEANUP_RETAIN:?},\n  sftpSessionOpen: {COMMAND_SFTP_SESSION_OPEN:?},\n  sftpSessionSnapshot: {COMMAND_SFTP_SESSION_SNAPSHOT:?},\n  sftpSessionDisconnect: {COMMAND_SFTP_SESSION_DISCONNECT:?},\n  sftpLocalBoundaryRegister: {COMMAND_SFTP_LOCAL_BOUNDARY_REGISTER:?},\n  sftpLocalDirectoryRegister: {COMMAND_SFTP_LOCAL_DIRECTORY_REGISTER:?},\n  sftpLocalDirectoryList: {COMMAND_SFTP_LOCAL_DIRECTORY_LIST:?},\n  sftpLocalDirectoryOpenChild: {COMMAND_SFTP_LOCAL_DIRECTORY_OPEN_CHILD:?},\n  sftpLocalDirectoryCreateChild: {COMMAND_SFTP_LOCAL_DIRECTORY_CREATE_CHILD:?},\n  sftpLocalDirectoryRelease: {COMMAND_SFTP_LOCAL_DIRECTORY_RELEASE:?},\n  sftpDirectoryList: {COMMAND_SFTP_DIRECTORY_LIST:?},\n  sftpDirectoryListCancel: {COMMAND_SFTP_DIRECTORY_LIST_CANCEL:?},\n  sftpFilePreview: {COMMAND_SFTP_FILE_PREVIEW:?},\n  sftpFileTail: {COMMAND_SFTP_FILE_TAIL:?},\n  sftpFileMutate: {COMMAND_SFTP_FILE_MUTATE:?},\n  sftpTransferEnqueue: {COMMAND_SFTP_TRANSFER_ENQUEUE:?},\n  sftpTransferIntentPrepare: {COMMAND_SFTP_TRANSFER_INTENT_PREPARE:?},\n  sftpTransferIntentEnqueue: {COMMAND_SFTP_TRANSFER_INTENT_ENQUEUE:?},\n  sftpTransferIntentSnapshot: {COMMAND_SFTP_TRANSFER_INTENT_SNAPSHOT:?},\n  sftpTransferIntentCancel: {COMMAND_SFTP_TRANSFER_INTENT_CANCEL:?},\n  sftpTransferIntentCleanupRetry: {COMMAND_SFTP_TRANSFER_INTENT_CLEANUP_RETRY:?},\n  sftpTransferIntentCleanupRetain: {COMMAND_SFTP_TRANSFER_INTENT_CLEANUP_RETAIN:?},\n  sftpTransferCancel: {COMMAND_SFTP_TRANSFER_CANCEL:?},\n  sftpTransferResume: {COMMAND_SFTP_TRANSFER_RESUME:?},\n  sftpRemoteCleanupRetry: {COMMAND_SFTP_REMOTE_CLEANUP_RETRY:?},\n  sftpRemoteCleanupRetain: {COMMAND_SFTP_REMOTE_CLEANUP_RETAIN:?},\n  terminalWorkspaceLayoutGet:"
+                "  forwardRuleList: {COMMAND_FORWARD_RULE_LIST:?},\n  forwardRuleCreate: {COMMAND_FORWARD_RULE_CREATE:?},\n  forwardRuleUpdate: {COMMAND_FORWARD_RULE_UPDATE:?},\n  forwardRuleDelete: {COMMAND_FORWARD_RULE_DELETE:?},\n  forwardRulePreflight: {COMMAND_FORWARD_RULE_PREFLIGHT:?},\n  forwardSessionStart: {COMMAND_FORWARD_SESSION_START:?},\n  forwardSessionSnapshot: {COMMAND_FORWARD_SESSION_SNAPSHOT:?},\n  forwardSessionStop: {COMMAND_FORWARD_SESSION_STOP:?},\n  forwardCleanupRetain: {COMMAND_FORWARD_CLEANUP_RETAIN:?},\n  sftpSessionOpen: {COMMAND_SFTP_SESSION_OPEN:?},\n  sftpSessionSnapshot: {COMMAND_SFTP_SESSION_SNAPSHOT:?},\n  sftpSessionDisconnect: {COMMAND_SFTP_SESSION_DISCONNECT:?},\n  sftpLocalBoundaryRegister: {COMMAND_SFTP_LOCAL_BOUNDARY_REGISTER:?},\n  sftpLocalDirectoryRegister: {COMMAND_SFTP_LOCAL_DIRECTORY_REGISTER:?},\n  sftpLocalDirectoryList: {COMMAND_SFTP_LOCAL_DIRECTORY_LIST:?},\n  sftpLocalDirectoryOpenChild: {COMMAND_SFTP_LOCAL_DIRECTORY_OPEN_CHILD:?},\n  sftpLocalDirectoryCreateChild: {COMMAND_SFTP_LOCAL_DIRECTORY_CREATE_CHILD:?},\n  sftpLocalDirectoryRelease: {COMMAND_SFTP_LOCAL_DIRECTORY_RELEASE:?},\n  sftpLocalFileMutate: {COMMAND_SFTP_LOCAL_FILE_MUTATE:?},\n  sftpDirectoryList: {COMMAND_SFTP_DIRECTORY_LIST:?},\n  sftpDirectoryListCancel: {COMMAND_SFTP_DIRECTORY_LIST_CANCEL:?},\n  sftpFilePreview: {COMMAND_SFTP_FILE_PREVIEW:?},\n  sftpFileTail: {COMMAND_SFTP_FILE_TAIL:?},\n  sftpFileMutate: {COMMAND_SFTP_FILE_MUTATE:?},\n  sftpTransferEnqueue: {COMMAND_SFTP_TRANSFER_ENQUEUE:?},\n  sftpTransferIntentPrepare: {COMMAND_SFTP_TRANSFER_INTENT_PREPARE:?},\n  sftpTransferIntentEnqueue: {COMMAND_SFTP_TRANSFER_INTENT_ENQUEUE:?},\n  sftpTransferIntentSnapshot: {COMMAND_SFTP_TRANSFER_INTENT_SNAPSHOT:?},\n  sftpTransferIntentCancel: {COMMAND_SFTP_TRANSFER_INTENT_CANCEL:?},\n  sftpTransferIntentCleanupRetry: {COMMAND_SFTP_TRANSFER_INTENT_CLEANUP_RETRY:?},\n  sftpTransferIntentCleanupRetain: {COMMAND_SFTP_TRANSFER_INTENT_CLEANUP_RETAIN:?},\n  sftpTransferCancel: {COMMAND_SFTP_TRANSFER_CANCEL:?},\n  sftpTransferResume: {COMMAND_SFTP_TRANSFER_RESUME:?},\n  sftpRemoteCleanupRetry: {COMMAND_SFTP_REMOTE_CLEANUP_RETRY:?},\n  sftpRemoteCleanupRetain: {COMMAND_SFTP_REMOTE_CLEANUP_RETAIN:?},\n  terminalWorkspaceLayoutGet:"
             ),
         )
         .replace(

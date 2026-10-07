@@ -1,8 +1,12 @@
 mod algorithm_policy;
+#[cfg(target_os = "android")]
+mod android;
+mod android_update;
 mod application_preferences;
 mod connection_profile;
 mod connection_test_service;
 mod connectivity_hints;
+mod content_access;
 mod core_api_error;
 mod desktop_preferences;
 mod desktop_service;
@@ -41,6 +45,7 @@ mod process_control;
 mod release_check;
 mod secure_credential_service;
 mod secure_ssh_challenge;
+mod secure_surface;
 mod secure_vault_service;
 mod secure_window_frame;
 mod sftp_session_service;
@@ -80,9 +85,11 @@ pub fn run_plugin_host_if_requested() -> Option<i32> {
     plugin_host_entry::run_if_requested()
 }
 
+#[cfg(desktop)]
+use lifecycle::handle_application_menu_event;
 use lifecycle::{
-    LifecycleState, UpdateExitState, application_request_exit, handle_application_menu_event,
-    hide_window_on_close, install_tray, window_request_close,
+    LifecycleState, UpdateExitState, application_request_exit, hide_window_on_close, install_tray,
+    window_request_close,
 };
 
 macro_rules! production_invoke_handler {
@@ -160,7 +167,6 @@ macro_rules! production_invoke_handler {
             metrics_session_service::metrics_reconcile,
             metrics_session_service::metrics_retry,
             metrics_session_service::metrics_stop,
-            metrics_session_service::metrics_host_key_decide,
             metrics_session_service::metrics_keyboard_interactive_answer_prepare,
             metrics_session_service::metrics_keyboard_interactive_respond,
             host_service::identity_list,
@@ -231,6 +237,18 @@ macro_rules! production_invoke_handler {
             release_check::release_update_readiness,
             lifecycle::release_update_prepare_install,
             lifecycle::release_update_allow_relaunch,
+            #[cfg(target_os = "android")]
+            lifecycle::release_update_cancel_install,
+            #[cfg(target_os = "android")]
+            android_update::android_update_prepare,
+            #[cfg(target_os = "android")]
+            android_update::android_update_open_install_settings,
+            #[cfg(target_os = "android")]
+            android_update::android_update_install,
+            #[cfg(target_os = "android")]
+            android_update::android_update_install_result,
+            #[cfg(target_os = "android")]
+            android::system_bars::android_set_system_bars,
             telnet_session_service::telnet_terminal_open,
             telnet_session_service::telnet_terminal_snapshot,
             plugin_service::protocol_terminal::plugin_protocol_launch_list,
@@ -345,6 +363,7 @@ impl ProductionInvokeRuntime for tauri::Wry {
             sftp_session_service::sftp_local_directory_open_child,
             sftp_session_service::sftp_local_directory_create_child,
             sftp_session_service::sftp_local_directory_release,
+            sftp_session_service::local_mutation::sftp_local_file_mutate,
             plugin_service::plugin_target_context_open,
             plugin_service::plugin_target_context_close,
             workspace_tab_drag::workspace_tab_drag_begin,
@@ -368,6 +387,7 @@ impl ProductionInvokeRuntime for tauri::Wry {
             ssh_sync_exchange_local::ssh_sync_secure_prompt_get,
             ssh_sync_exchange_local::ssh_sync_secure_prompt_decide,
             host_service::private_key_file_import,
+            host_service::private_key_file_import_release,
             window_request_close,
             application_request_exit,
             json_export::native_json_export,
@@ -438,13 +458,19 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build());
+        .plugin(tauri_plugin_process::init());
+    // Android installs updates through the system package installer, not the desktop updater.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    // Registered before `.setup`: Vault auto-unlock reads the Keystore during setup.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(android::plugin());
     // The custom Header replaces native window chrome; on Linux an explicit menu would add a GTK menu bar above it.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(desktop, not(target_os = "linux")))]
     let builder = builder.menu(lifecycle::application_menu);
+    #[cfg(desktop)]
+    let builder = builder.on_menu_event(handle_application_menu_event);
     let builder = builder
-        .on_menu_event(handle_application_menu_event)
         .manage(LifecycleState::default())
         .manage(UpdateExitState::default())
         .manage(window_first_show::WindowFirstShow::default())
@@ -478,6 +504,8 @@ pub fn run() {
                 let _ = main_window.center();
             }
             let app_data_directory = app.path().app_data_dir()?;
+            #[cfg(target_os = "android")]
+            android::setup(app.handle(), &app_data_directory);
             let host_service = host_service::HostService::start(&app_data_directory)
                 .map_err(std::io::Error::other)?;
             let desktop_preferences_service =
@@ -643,6 +671,8 @@ pub fn run() {
             app.manage(sftp_session_service);
             app.manage(plugin_service.clone());
             install_tray(app)?;
+            #[cfg(target_os = "android")]
+            android::start_foreground_worker(app.handle());
             if !startup_plugins.is_empty() {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -758,6 +788,8 @@ pub fn run() {
             eprintln!("NoriShell event loop exited");
             #[cfg(target_os = "macos")]
             window_frame::cleanup_macos_header_bridge();
+            #[cfg(target_os = "android")]
+            android::on_exit(app);
             if let Some(service) = app.try_state::<tray_service::NativeTrayService>() {
                 service.stop(app);
             }

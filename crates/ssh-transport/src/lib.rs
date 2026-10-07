@@ -26,7 +26,10 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -764,26 +767,63 @@ pub struct PrivateKeyMetadata {
 
 /// Validates copied private-key material before it is committed to the Vault
 /// and derives the only public metadata persisted in SQLite.
+/// Why a private key could not be inspected. Distinct results let the UI ask
+/// for a missing passphrase, report a wrong one, or reject unusable material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum PrivateKeyInspectionError {
+    #[error("private key material is not a supported, well-formed private key")]
+    InvalidFormat,
+    #[error("the private key is encrypted and needs its passphrase")]
+    PassphraseRequired,
+    #[error("the private key passphrase is incorrect")]
+    IncorrectPassphrase,
+}
+
 pub fn inspect_private_key(
     private_key: &[u8],
     passphrase: Option<&[u8]>,
-) -> Result<PrivateKeyMetadata> {
+) -> std::result::Result<PrivateKeyMetadata, PrivateKeyInspectionError> {
     if private_key.is_empty() || private_key.len() > MAX_PRIVATE_KEY_BYTES {
-        return Err(TransportError::InvalidPrivateKey);
+        return Err(PrivateKeyInspectionError::InvalidFormat);
     }
     let private_key =
-        std::str::from_utf8(private_key).map_err(|_| TransportError::InvalidPrivateKey)?;
+        std::str::from_utf8(private_key).map_err(|_| PrivateKeyInspectionError::InvalidFormat)?;
+    // A non-UTF-8 passphrase can never decrypt an OpenSSH key.
     let passphrase = passphrase
         .map(std::str::from_utf8)
         .transpose()
-        .map_err(|_| TransportError::InvalidPrivateKey)?;
-    let key = decode_secret_key(private_key, passphrase)
-        .map_err(|_| TransportError::InvalidPrivateKey)?;
+        .map_err(|_| PrivateKeyInspectionError::IncorrectPassphrase)?;
+    let key = match decode_secret_key(private_key, passphrase) {
+        Ok(key) => key,
+        Err(error) => {
+            // Re-read the container without a passphrase: only material that
+            // parses and reports "encrypted" is a passphrase problem. Unpadded
+            // ciphers cannot tell a wrong passphrase from a corrupted
+            // encrypted body, so that case is reported as a wrong passphrase.
+            let encrypted = is_encrypted_key_error(&error)
+                || decode_secret_key(private_key, None)
+                    .err()
+                    .is_some_and(|error| is_encrypted_key_error(&error));
+            return Err(match (encrypted, passphrase) {
+                (true, None) => PrivateKeyInspectionError::PassphraseRequired,
+                (true, Some(_)) => PrivateKeyInspectionError::IncorrectPassphrase,
+                (false, _) => PrivateKeyInspectionError::InvalidFormat,
+            });
+        }
+    };
     let public_key = key.public_key();
     Ok(PrivateKeyMetadata {
         algorithm: public_key.algorithm().to_string(),
         fingerprint_sha256: ssh_sha256_fingerprint(&public_key.public_key_bytes()),
     })
+}
+
+fn is_encrypted_key_error(error: &russh::keys::Error) -> bool {
+    matches!(
+        error,
+        russh::keys::Error::KeyIsEncrypted
+            | russh::keys::Error::SshKey(russh::keys::ssh_key::Error::Encrypted)
+    )
 }
 
 impl Authentication {
@@ -875,6 +915,8 @@ pub enum TransportError {
     HostKeyVerificationFailed,
     #[error("SSH handshake timed out")]
     HandshakeTimeout,
+    #[error("the server closed the connection before the SSH key exchange")]
+    ServerClosedBeforeHandshake,
     #[error("host-key decision timed out")]
     HostKeyDecisionTimeout,
     #[error("SSH authentication timed out")]
@@ -1003,8 +1045,147 @@ impl std::error::Error for JumpTransportError {}
 
 pub type Result<T> = std::result::Result<T, TransportError>;
 
+/// Records whether the peer ended the byte stream (EOF or reset) so a failed
+/// handshake can be classified without inspecting any payload bytes.
+struct PeerCloseObserver<S> {
+    inner: S,
+    peer_closed: Arc<AtomicBool>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PeerCloseObserver<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        match &result {
+            Poll::Ready(Ok(())) if buf.filled().len() == before && buf.remaining() > 0 => {
+                self.peer_closed.store(true, Ordering::SeqCst);
+            }
+            Poll::Ready(Err(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                self.peer_closed.store(true, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PeerCloseObserver<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let Poll::Ready(Err(error)) = &result
+            && matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+            )
+        {
+            self.peer_closed.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Receives fixed, secret-free protocol diagnostics (an error category, never
+/// addresses, keys, usernames or payload bytes). Installed once by the host
+/// application; without a sink the diagnostics are dropped.
+static DIAGNOSTIC_SINK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Installs the process-wide diagnostic sink. Later calls are ignored.
+pub fn set_diagnostic_sink(sink: fn(&str)) {
+    let _ = DIAGNOSTIC_SINK.set(sink);
+}
+
+fn report_diagnostic(message: &str) {
+    if let Some(sink) = DIAGNOSTIC_SINK.get() {
+        sink(message);
+    }
+}
+
+/// Stable category for a protocol-library error that collapses into
+/// `TransportError::Protocol`, so a generic protocol failure stays traceable.
+#[must_use]
+pub fn russh_error_category(error: &russh::Error) -> Cow<'static, str> {
+    // Optional russh features (compression) add variants; keep a fallback.
+    #[allow(unreachable_patterns)]
+    Cow::Borrowed(match error {
+        russh::Error::CouldNotReadKey => "could_not_read_key",
+        russh::Error::KexInit => "kex_init",
+        russh::Error::UnknownAlgo => "unknown_algorithm",
+        russh::Error::NoCommonAlgo { .. } => "no_common_algorithm",
+        russh::Error::Version => "version",
+        russh::Error::Kex => "kex",
+        russh::Error::PacketAuth => "packet_auth",
+        russh::Error::Inconsistent => "inconsistent_state",
+        russh::Error::NotAuthenticated => "not_authenticated",
+        russh::Error::UnsupportedAuthMethod => "unsupported_auth_method",
+        russh::Error::IndexOutOfBounds => "index_out_of_bounds",
+        russh::Error::UnknownKey => "unknown_key",
+        russh::Error::WrongServerSig => "wrong_server_signature",
+        russh::Error::PacketSize(_) => "packet_size",
+        russh::Error::WrongChannel => "wrong_channel",
+        russh::Error::ChannelOpenFailure(_) => "channel_open_failure",
+        russh::Error::Disconnect => "disconnect",
+        russh::Error::NoHomeDir => "no_home_dir",
+        russh::Error::KeyChanged { .. } => "key_changed",
+        russh::Error::HUP => "hangup",
+        russh::Error::ConnectionTimeout => "connection_timeout",
+        russh::Error::KeepaliveTimeout => "keepalive_timeout",
+        russh::Error::InactivityTimeout => "inactivity_timeout",
+        russh::Error::NoAuthMethod => "no_auth_method",
+        russh::Error::SendError => "send_error",
+        russh::Error::Pending => "pending",
+        russh::Error::DecryptionError => "decryption_error",
+        russh::Error::RequestDenied => "request_denied",
+        russh::Error::Keys(_) => "keys",
+        russh::Error::IO(error) => {
+            return Cow::Owned(format!("io:{:?}", error.kind()));
+        }
+        russh::Error::Utf8(_) => "utf8",
+        russh::Error::Join(_) => "join",
+        russh::Error::Elapsed(_) => "elapsed",
+        russh::Error::StrictKeyExchangeViolation { .. } => "strict_kex_violation",
+        russh::Error::Signature(_) => "signature",
+        russh::Error::SshKey(_) => "ssh_key",
+        russh::Error::SshEncoding(_) => "ssh_encoding",
+        russh::Error::InvalidConfig(_) => "invalid_config",
+        russh::Error::RecvError => "recv_error",
+        _ => "other",
+    })
+}
+
 impl From<russh::Error> for TransportError {
     fn from(error: russh::Error) -> Self {
+        if !matches!(error, russh::Error::NoCommonAlgo { .. }) {
+            report_diagnostic(&format!(
+                "SSH transport protocol error: category={}",
+                russh_error_category(&error)
+            ));
+        }
         match error {
             russh::Error::NoCommonAlgo { kind, ours, theirs } => {
                 let category = match kind {
@@ -1210,12 +1391,37 @@ where
             shared_remote_forwards: Arc::clone(&shared_remote_forwards),
             transport_closed,
         };
+        let peer_closed = Arc::new(AtomicBool::new(false));
+        let stream = PeerCloseObserver {
+            inner: stream,
+            peer_closed: Arc::clone(&peer_closed),
+        };
         let session = timeout(
             timeouts.handshake,
             client::connect_stream(config, stream, handler),
         )
         .await
-        .map_err(|_| TransportError::HandshakeTimeout)??;
+        .map_err(|_| TransportError::HandshakeTimeout)?
+        .map_err(|error| {
+            let key_exchange_done = negotiated_algorithms
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some();
+            // A server that refuses this client (for example OpenSSH
+            // PerSourcePenalties) closes the socket before key exchange. That
+            // is not a malformed protocol exchange and no host key was seen.
+            if matches!(error, TransportError::Protocol)
+                && !key_exchange_done
+                && peer_closed.load(Ordering::SeqCst)
+            {
+                report_diagnostic(
+                    "SSH transport: server closed the connection before key exchange",
+                );
+                TransportError::ServerClosedBeforeHandshake
+            } else {
+                error
+            }
+        })?;
 
         Ok(Self {
             session,
@@ -2828,8 +3034,8 @@ mod tests {
     use super::{
         AgentClient, AgentIdentity, AlgorithmCategory, AlgorithmPolicy, Authentication,
         ConnectRequest, HostKeyDecision, HostKeyVerifier, IngressFailureKind, IngressStage,
-        JumpFailureKind, JumpStage, ObservedHostKey, ProxyCredentials, PtySize,
-        RemoteExecStreamEvent, RemoteExecStreamLimits, RemoteForwardBinding, RemoteShell,
+        JumpFailureKind, JumpStage, ObservedHostKey, PrivateKeyInspectionError, ProxyCredentials,
+        PtySize, RemoteExecStreamEvent, RemoteExecStreamLimits, RemoteForwardBinding, RemoteShell,
         RouteIngress, ShellEvent, TransportError, VerifiedTransport, VerifyFuture,
         algorithm_policy_catalog, client_config, inspect_private_key,
         validated_forwarded_tcpip_metadata, validated_keyboard_interactive_challenge,
@@ -4408,6 +4614,38 @@ mod tests {
         transport.disconnect().await.expect("poisoned cleanup");
     }
 
+    /// OpenSSH `PerSourcePenalties` refuses a penalised source by writing a
+    /// non-SSH banner line and resetting the socket before any key exchange.
+    /// That is a server refusal, not a protocol exchange failure, and the host
+    /// key is never observed.
+    #[tokio::test]
+    async fn server_refusal_before_identification_is_distinct_from_protocol_failure() {
+        for banner in [b"Not allowed at this time\r\n".as_slice(), b"".as_slice()] {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("bind refusing listener");
+            let port = listener.local_addr().expect("listener address").port();
+            let refusing = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                stream.write_all(banner).await.expect("banner");
+                drop(stream);
+            });
+            let verifier = Arc::new(RecordingVerifier::new(HostKeyDecision::Trusted));
+            let error = VerifiedTransport::connect(
+                ConnectRequest::new("127.0.0.1", port).expect("endpoint"),
+                Arc::clone(&verifier),
+            )
+            .await
+            .expect_err("refused connection fails");
+            refusing.await.expect("refusing server task");
+            assert!(
+                matches!(error, TransportError::ServerClosedBeforeHandshake),
+                "unexpected {error:?}"
+            );
+            assert!(verifier.observations().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn host_key_rejection_and_mismatch_happen_before_authentication() {
         for decision in [
@@ -4629,6 +4867,44 @@ mod tests {
             .into_authenticated()
             .expect("final round marks the transport authenticated");
         assert_eq!(server.evidence.auth_attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn private_key_inspection_separates_format_and_passphrase_failures() {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("client key");
+        let encrypted = key
+            .encrypt(&mut rand::rng(), b"right-passphrase")
+            .expect("encrypt private key")
+            .to_openssh(LineEnding::LF)
+            .expect("encode encrypted private key");
+        let plain = key.to_openssh(LineEnding::LF).expect("encode private key");
+
+        assert_eq!(
+            inspect_private_key(encrypted.as_bytes(), None).expect_err("needs passphrase"),
+            PrivateKeyInspectionError::PassphraseRequired
+        );
+        assert_eq!(
+            inspect_private_key(encrypted.as_bytes(), Some(b"wrong-passphrase"))
+                .expect_err("wrong passphrase"),
+            PrivateKeyInspectionError::IncorrectPassphrase
+        );
+        assert!(inspect_private_key(encrypted.as_bytes(), Some(b"right-passphrase")).is_ok());
+        // A passphrase for an unencrypted key is ignored, as OpenSSH does.
+        assert!(inspect_private_key(plain.as_bytes(), Some(b"unused")).is_ok());
+
+        let mut corrupted = plain.clone();
+        corrupted.replace_range(60..80, "AAAAAAAAAAAAAAAAAAAA");
+        for invalid in [
+            corrupted.as_bytes(),
+            b"not a private key".as_slice(),
+            b"".as_slice(),
+            &[0xff, 0xfe][..],
+        ] {
+            assert_eq!(
+                inspect_private_key(invalid, None).expect_err("invalid key"),
+                PrivateKeyInspectionError::InvalidFormat
+            );
+        }
     }
 
     #[tokio::test]
