@@ -13,13 +13,14 @@ members = [
   "crates/ssh-profile-sync",
   "crates/ssh-transport",
   "crates/telnet-runtime",
+  "crates/tauri-plugin-norishell-android",
   "src-tauri",
 ]
 exclude = ["vendor/russh", "vendor/russh-sftp", "vendor/vnc-rs", "vendor/picky", "vendor/sspi", "vendor/ironrdp-connector", "vendor/ironrdp-session", "vendor/ironrdp-rdpsnd", "vendor/ironrdp-upstream", "vendor/tauri-plugin-updater"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.97.1"
 license = "GPL-3.0-only"

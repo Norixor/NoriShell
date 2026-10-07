@@ -1,0 +1,262 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="800" viewBox="0 0 1160 800" role="img" aria-labelledby="title desc" lang="en">
+<title id="title">NoriShell on Android preview</title><desc id="desc">Illustration of three phone screens of the NoriShell Android preview. The first shows a terminal with a current-tab pill, a tab counter and a plus button, shell output, an extra-keys row and bottom navigation. The second shows the server overview with compact host cards, each with a status dot, a New Terminal action and CPU, memory, disk and network readings. The third shows Settings as a grouped list with a detail page on top.</desc>
+<defs><filter id="win" x="-8%" y="-6%" width="116%" height="114%"><feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#16203a" flood-opacity=".16"/></filter><filter id="card" x="-10%" y="-10%" width="120%" height="124%"><feDropShadow dx="0" dy="-6" stdDeviation="10" flood-color="#000000" flood-opacity=".45"/></filter></defs>
+<g font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+<rect x="1" y="1" width="1158" height="798" rx="24" fill="#f7f9fc" stroke="#e0e6ee"/>
+<rect x="40" y="40" width="5" height="36" rx="2.5" fill="#1f5fd2"/>
+<text x="60" y="68" font-size="30" fill="#192b45" font-weight="650">NoriShell on Android (Preview)</text>
+<text x="40" y="108" font-size="19" fill="#586478" font-weight="400">The same Core and SSH sessions in a single-screen mobile layout.</text>
+<g id="phone-1">
+<rect x="56" y="146" width="300" height="560" rx="36" fill="#101217" filter="url(#win)"/>
+<rect x="56.5" y="146.5" width="299" height="559" rx="35.5" fill="none" stroke="#414958"/>
+<clipPath id="screen1"><rect x="66" y="156" width="280" height="540" rx="28"/></clipPath>
+<g clip-path="url(#screen1)">
+<rect x="66" y="156" width="280" height="540" fill="#171a20"/>
+<text x="90" y="177" font-size="11" fill="#f2f4f7" font-weight="600">9:41</text>
+<rect x="270.0" y="173" width="3" height="3" rx=".8" fill="#b6bfcc"/>
+<rect x="274.5" y="171" width="3" height="5" rx=".8" fill="#b6bfcc"/>
+<rect x="279.0" y="169" width="3" height="7" rx=".8" fill="#b6bfcc"/>
+<rect x="283.5" y="167" width="3" height="9" rx=".8" fill="#b6bfcc"/>
+<rect x="296" y="167" width="20" height="10" rx="2.5" fill="none" stroke="#b6bfcc" stroke-width="1.2"/>
+<rect x="298" y="169" width="13" height="6" rx="1.2" fill="#55b978"/>
+<rect x="317" y="170" width="2" height="4" rx=".8" fill="#b6bfcc"/>
+<rect x="78" y="186" width="184" height="36" rx="18" fill="#1e222a" stroke="#6e9bff" stroke-opacity=".55" stroke-width="1.2"/>
+<circle cx="92" cy="204" r="4" fill="#55b978"/>
+<text x="103" y="208.5" font-size="12" fill="#f2f4f7" font-weight="650">prod-web <tspan fill="#8c97a8" font-weight="400">· Connected</tspan></text>
+<g transform="translate(244 196) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<rect x="270" y="190" width="28" height="28" rx="7" fill="none" stroke="#b6bfcc" stroke-width="1.6"/>
+<text x="284" y="208.5" font-size="12.5" fill="#f2f4f7" font-weight="650" text-anchor="middle">3</text>
+<rect x="306" y="190" width="28" height="28" rx="7" fill="#1b2b4a"/>
+<g transform="translate(311 195) scale(0.7500)" fill="none" stroke="#6e9bff" stroke-width="2.80" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></g>
+<path d="M66 232.5H346" stroke="#2c323d"/>
+<rect x="66" y="233" width="280" height="353" fill="#101217"/>
+<text x="80" y="254" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#98c379">$ </tspan><tspan fill="#f2f4f7">uptime</tspan></text>
+<text x="80" y="271.5" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#b6bfcc"> up 84 days, load: </tspan><tspan fill="#f2f4f7">0.21 0.18</tspan></text>
+<text x="80" y="289.0" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#98c379">$ </tspan><tspan fill="#f2f4f7">docker ps</tspan></text>
+<text x="80" y="306.5" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#8c97a8">CONTAINER  IMAGE        STATUS</tspan></text>
+<text x="80" y="324.0" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#56b6c2">a1c2e3f4   </tspan><tspan fill="#f2f4f7">nginx:1.27   </tspan><tspan fill="#55b978">Up 12d</tspan></text>
+<text x="80" y="341.5" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#56b6c2">9b8a7c6d   </tspan><tspan fill="#f2f4f7">api:2.4.1    </tspan><tspan fill="#55b978">Up 12d</tspan></text>
+<text x="80" y="359.0" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#56b6c2">f0e1d2c3   </tspan><tspan fill="#f2f4f7">redis:7      </tspan><tspan fill="#55b978">Up 12d</tspan></text>
+<text x="80" y="376.5" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#98c379">$ </tspan><tspan fill="#f2f4f7">tail -f /var/log/nginx/access.log</tspan></text>
+<text x="80" y="394.0" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#8c97a8">10:42:13 </tspan><tspan fill="#61afef">GET  </tspan><tspan fill="#f2f4f7">/api/orders 200</tspan></text>
+<text x="80" y="411.5" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#8c97a8">10:42:19 </tspan><tspan fill="#61afef">POST </tspan><tspan fill="#f2f4f7">/api/cart 201</tspan></text>
+<text x="80" y="429.0" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#8c97a8">10:42:26 </tspan><tspan fill="#e5c07b">GET  </tspan><tspan fill="#f2f4f7">/health 503</tspan></text>
+<text x="80" y="446.5" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#8c97a8">10:42:31 </tspan><tspan fill="#61afef">GET  </tspan><tspan fill="#f2f4f7">/api/orders 200</tspan></text>
+<text x="80" y="464.0" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#8c97a8">10:42:40 </tspan><tspan fill="#61afef">GET  </tspan><tspan fill="#f2f4f7">/static/app.js 304</tspan></text>
+<text x="80" y="481.5" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#8c97a8">10:42:44 </tspan><tspan fill="#61afef">POST </tspan><tspan fill="#f2f4f7">/api/login 200</tspan></text>
+<text x="80" y="499.0" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#8c97a8">^C</tspan></text>
+<text x="80" y="516.5" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#98c379">$ </tspan><tspan fill="#f2f4f7">sudo systemctl restart nginx</tspan></text>
+<text x="80" y="534.0" font-size="10.5" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace" xml:space="preserve"><tspan fill="#98c379">$ </tspan><tspan fill="#6e9bff">▍</tspan></text>
+<rect x="66" y="586" width="280" height="44" fill="#171a20"/>
+<path d="M66 586.5H346" stroke="#2c323d"/>
+<rect x="69.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="81.0" y="612" font-size="8.5" fill="#f2f4f7" font-weight="600" text-anchor="middle">Esc</text>
+<rect x="94.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="106.0" y="612" font-size="8.5" fill="#f2f4f7" font-weight="600" text-anchor="middle">Tab</text>
+<rect x="119.8" y="595" width="22.5" height="26" rx="6" fill="#1b2b4a" stroke="#414958" stroke-width=".8"/>
+<text x="131.0" y="612" font-size="8.5" fill="#6e9bff" font-weight="600" text-anchor="middle">Ctrl</text>
+<rect x="144.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="156.0" y="612" font-size="8.5" fill="#f2f4f7" font-weight="600" text-anchor="middle">Alt</text>
+<rect x="169.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="181.0" y="612.5" font-size="11" fill="#f2f4f7" font-weight="600" text-anchor="middle">↑</text>
+<rect x="194.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="206.0" y="612.5" font-size="11" fill="#f2f4f7" font-weight="600" text-anchor="middle">↓</text>
+<rect x="219.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="231.0" y="612.5" font-size="11" fill="#f2f4f7" font-weight="600" text-anchor="middle">←</text>
+<rect x="244.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="256.0" y="612.5" font-size="11" fill="#f2f4f7" font-weight="600" text-anchor="middle">→</text>
+<rect x="269.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="281.0" y="612.5" font-size="11" fill="#f2f4f7" font-weight="600" text-anchor="middle">|</text>
+<rect x="294.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="306.0" y="612.5" font-size="11" fill="#f2f4f7" font-weight="600" text-anchor="middle">~</text>
+<rect x="319.8" y="595" width="22.5" height="26" rx="6" fill="#1e222a" stroke="#414958" stroke-width=".8"/>
+<text x="331.0" y="612.5" font-size="11" fill="#f2f4f7" font-weight="600" text-anchor="middle">/</text>
+<rect x="66" y="630" width="280" height="66" fill="#171a20"/>
+<path d="M66 630.5H346" stroke="#2c323d"/>
+<g transform="translate(85.0 640) scale(0.7500)" fill="none" stroke="#b6bfcc" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></g>
+<text x="94.0" y="677" font-size="9.5" fill="#b6bfcc" font-weight="500" text-anchor="middle">Overview</text>
+<rect x="128.0" y="637" width="44" height="24" rx="12" fill="#1b2b4a"/>
+<g transform="translate(141.0 640) scale(0.7500)" fill="none" stroke="#6e9bff" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="150.0" y="677" font-size="9.5" fill="#6e9bff" font-weight="600" text-anchor="middle">Terminal</text>
+<g transform="translate(197.0 640) scale(0.7500)" fill="none" stroke="#b6bfcc" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01"/></g>
+<text x="206.0" y="677" font-size="9.5" fill="#b6bfcc" font-weight="500" text-anchor="middle">Hosts</text>
+<g transform="translate(253.0 640) scale(0.7500)" fill="none" stroke="#b6bfcc" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></g>
+<text x="262.0" y="677" font-size="9.5" fill="#b6bfcc" font-weight="500" text-anchor="middle">SFTP</text>
+<g transform="translate(309.0 640) scale(0.7500)" fill="none" stroke="#b6bfcc" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h.01M12 12h.01M19 12h.01"/></g>
+<text x="318.0" y="677" font-size="9.5" fill="#b6bfcc" font-weight="500" text-anchor="middle">More</text>
+<rect x="166" y="688" width="80" height="3.5" rx="1.75" fill="#414958"/>
+</g></g>
+<g id="phone-2">
+<rect x="430" y="146" width="300" height="560" rx="36" fill="#101217" filter="url(#win)"/>
+<rect x="430.5" y="146.5" width="299" height="559" rx="35.5" fill="none" stroke="#414958"/>
+<clipPath id="screen2"><rect x="440" y="156" width="280" height="540" rx="28"/></clipPath>
+<g clip-path="url(#screen2)">
+<rect x="440" y="156" width="280" height="540" fill="#171a20"/>
+<text x="464" y="177" font-size="11" fill="#f2f4f7" font-weight="600">9:41</text>
+<rect x="644.0" y="173" width="3" height="3" rx=".8" fill="#b6bfcc"/>
+<rect x="648.5" y="171" width="3" height="5" rx=".8" fill="#b6bfcc"/>
+<rect x="653.0" y="169" width="3" height="7" rx=".8" fill="#b6bfcc"/>
+<rect x="657.5" y="167" width="3" height="9" rx=".8" fill="#b6bfcc"/>
+<rect x="670" y="167" width="20" height="10" rx="2.5" fill="none" stroke="#b6bfcc" stroke-width="1.2"/>
+<rect x="672" y="169" width="13" height="6" rx="1.2" fill="#55b978"/>
+<rect x="691" y="170" width="2" height="4" rx=".8" fill="#b6bfcc"/>
+<text x="456" y="212" font-size="18" fill="#f2f4f7" font-weight="650">Overview</text>
+<g transform="translate(684 196) scale(0.8333)" fill="none" stroke="#b6bfcc" stroke-width="2.28" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></g>
+<rect x="452" y="230" width="256" height="88" rx="12" fill="#1e222a"/>
+<circle cx="468" cy="250" r="4.5" fill="#55b978"/>
+<text x="480" y="254.5" font-size="13" fill="#f2f4f7" font-weight="650">prod-web</text>
+<text x="480" y="271" font-size="10" fill="#55b978" font-weight="500">Connected<tspan fill="#8c97a8"> · 2s</tspan></text>
+<rect x="606" y="241" width="92" height="24" rx="12" fill="#1f5fd2"/>
+<g transform="translate(615 246) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="633" y="257" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
+<text x="468" y="288" font-size="9.5" fill="#8c97a8" font-weight="500">CPU</text>
+<text x="518" y="288" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">38%</text>
+<rect x="468" y="294" width="50" height="4" rx="2" fill="#2c323d"/><rect x="468" y="294" width="19.0" height="4" rx="2" fill="#55b978"/>
+<text x="528" y="288" font-size="9.5" fill="#8c97a8" font-weight="500">Mem</text>
+<text x="578" y="288" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">62%</text>
+<rect x="528" y="294" width="50" height="4" rx="2" fill="#2c323d"/><rect x="528" y="294" width="31.0" height="4" rx="2" fill="#55b978"/>
+<text x="588" y="288" font-size="9.5" fill="#8c97a8" font-weight="500">Disk</text>
+<text x="638" y="288" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">71%</text>
+<rect x="588" y="294" width="50" height="4" rx="2" fill="#2c323d"/><rect x="588" y="294" width="35.5" height="4" rx="2" fill="#e5c07b"/>
+<text x="648" y="288" font-size="9.5" fill="#8c97a8" font-weight="500">Net</text>
+<text x="672" y="288" font-size="8.5" fill="#b6bfcc" font-weight="500" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace">↑ 1.2M</text>
+<text x="672" y="300" font-size="8.5" fill="#b6bfcc" font-weight="500" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace">↓ 8.4M</text>
+<rect x="452" y="326" width="256" height="88" rx="12" fill="#1e222a"/>
+<circle cx="468" cy="346" r="4.5" fill="#55b978"/>
+<text x="480" y="350.5" font-size="13" fill="#f2f4f7" font-weight="650">db-01</text>
+<text x="480" y="367" font-size="10" fill="#55b978" font-weight="500">Connected<tspan fill="#8c97a8"> · 2s</tspan></text>
+<rect x="606" y="337" width="92" height="24" rx="12" fill="#1f5fd2"/>
+<g transform="translate(615 342) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="633" y="353" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
+<text x="468" y="384" font-size="9.5" fill="#8c97a8" font-weight="500">CPU</text>
+<text x="518" y="384" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">12%</text>
+<rect x="468" y="390" width="50" height="4" rx="2" fill="#2c323d"/><rect x="468" y="390" width="6.0" height="4" rx="2" fill="#55b978"/>
+<text x="528" y="384" font-size="9.5" fill="#8c97a8" font-weight="500">Mem</text>
+<text x="578" y="384" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">81%</text>
+<rect x="528" y="390" width="50" height="4" rx="2" fill="#2c323d"/><rect x="528" y="390" width="40.5" height="4" rx="2" fill="#e5c07b"/>
+<text x="588" y="384" font-size="9.5" fill="#8c97a8" font-weight="500">Disk</text>
+<text x="638" y="384" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">93%</text>
+<rect x="588" y="390" width="50" height="4" rx="2" fill="#2c323d"/><rect x="588" y="390" width="46.5" height="4" rx="2" fill="#e06c75"/>
+<text x="648" y="384" font-size="9.5" fill="#8c97a8" font-weight="500">Net</text>
+<text x="672" y="384" font-size="8.5" fill="#b6bfcc" font-weight="500" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace">↑ 240K</text>
+<text x="672" y="396" font-size="8.5" fill="#b6bfcc" font-weight="500" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace">↓ 3.1M</text>
+<rect x="452" y="422" width="256" height="88" rx="12" fill="#1e222a"/>
+<circle cx="468" cy="442" r="4.5" fill="#55b978"/>
+<text x="480" y="446.5" font-size="13" fill="#f2f4f7" font-weight="650">staging-api</text>
+<text x="480" y="463" font-size="10" fill="#55b978" font-weight="500">Connected<tspan fill="#8c97a8"> · 2s</tspan></text>
+<rect x="606" y="433" width="92" height="24" rx="12" fill="#1f5fd2"/>
+<g transform="translate(615 438) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="633" y="449" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
+<text x="468" y="480" font-size="9.5" fill="#8c97a8" font-weight="500">CPU</text>
+<text x="518" y="480" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">4%</text>
+<rect x="468" y="486" width="50" height="4" rx="2" fill="#2c323d"/><rect x="468" y="486" width="2.0" height="4" rx="2" fill="#55b978"/>
+<text x="528" y="480" font-size="9.5" fill="#8c97a8" font-weight="500">Mem</text>
+<text x="578" y="480" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">27%</text>
+<rect x="528" y="486" width="50" height="4" rx="2" fill="#2c323d"/><rect x="528" y="486" width="13.5" height="4" rx="2" fill="#55b978"/>
+<text x="588" y="480" font-size="9.5" fill="#8c97a8" font-weight="500">Disk</text>
+<text x="638" y="480" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">40%</text>
+<rect x="588" y="486" width="50" height="4" rx="2" fill="#2c323d"/><rect x="588" y="486" width="20.0" height="4" rx="2" fill="#55b978"/>
+<text x="648" y="480" font-size="9.5" fill="#8c97a8" font-weight="500">Net</text>
+<text x="672" y="480" font-size="8.5" fill="#b6bfcc" font-weight="500" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace">↑ 12K</text>
+<text x="672" y="492" font-size="8.5" fill="#b6bfcc" font-weight="500" font-family="SFMono-Regular, Menlo, Cascadia Mono, Segoe UI Mono, Consolas, monospace">↓ 56K</text>
+<rect x="452" y="518" width="256" height="88" rx="12" fill="#1e222a"/>
+<circle cx="468" cy="538" r="4.5" fill="#8c97a8"/>
+<text x="480" y="542.5" font-size="13" fill="#f2f4f7" font-weight="650">edge-eu</text>
+<text x="480" y="559" font-size="10" fill="#8c97a8" font-weight="500">Disconnected</text>
+<rect x="606" y="529" width="92" height="24" rx="12" fill="#1f5fd2"/>
+<g transform="translate(615 534) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="633" y="545" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
+<text x="468" y="578" font-size="10" fill="#8c97a8" font-weight="500">Monitoring off</text>
+<rect x="468" y="586" width="224" height="4" rx="2" fill="#2c323d" stroke="#414958" stroke-width=".6" stroke-dasharray="3 3"/>
+<rect x="440" y="630" width="280" height="66" fill="#171a20"/>
+<path d="M440 630.5H720" stroke="#2c323d"/>
+<rect x="446.0" y="637" width="44" height="24" rx="12" fill="#1b2b4a"/>
+<g transform="translate(459.0 640) scale(0.7500)" fill="none" stroke="#6e9bff" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></g>
+<text x="468.0" y="677" font-size="9.5" fill="#6e9bff" font-weight="600" text-anchor="middle">Overview</text>
+<g transform="translate(515.0 640) scale(0.7500)" fill="none" stroke="#b6bfcc" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="524.0" y="677" font-size="9.5" fill="#b6bfcc" font-weight="500" text-anchor="middle">Terminal</text>
+<g transform="translate(571.0 640) scale(0.7500)" fill="none" stroke="#b6bfcc" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01"/></g>
+<text x="580.0" y="677" font-size="9.5" fill="#b6bfcc" font-weight="500" text-anchor="middle">Hosts</text>
+<g transform="translate(627.0 640) scale(0.7500)" fill="none" stroke="#b6bfcc" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></g>
+<text x="636.0" y="677" font-size="9.5" fill="#b6bfcc" font-weight="500" text-anchor="middle">SFTP</text>
+<g transform="translate(683.0 640) scale(0.7500)" fill="none" stroke="#b6bfcc" stroke-width="2.53" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h.01M12 12h.01M19 12h.01"/></g>
+<text x="692.0" y="677" font-size="9.5" fill="#b6bfcc" font-weight="500" text-anchor="middle">More</text>
+<rect x="540" y="688" width="80" height="3.5" rx="1.75" fill="#414958"/>
+</g></g>
+<g id="phone-3">
+<rect x="804" y="146" width="300" height="560" rx="36" fill="#101217" filter="url(#win)"/>
+<rect x="804.5" y="146.5" width="299" height="559" rx="35.5" fill="none" stroke="#414958"/>
+<clipPath id="screen3"><rect x="814" y="156" width="280" height="540" rx="28"/></clipPath>
+<g clip-path="url(#screen3)">
+<rect x="814" y="156" width="280" height="540" fill="#171a20"/>
+<text x="838" y="177" font-size="11" fill="#f2f4f7" font-weight="600">9:41</text>
+<rect x="1018.0" y="173" width="3" height="3" rx=".8" fill="#b6bfcc"/>
+<rect x="1022.5" y="171" width="3" height="5" rx=".8" fill="#b6bfcc"/>
+<rect x="1027.0" y="169" width="3" height="7" rx=".8" fill="#b6bfcc"/>
+<rect x="1031.5" y="167" width="3" height="9" rx=".8" fill="#b6bfcc"/>
+<rect x="1044" y="167" width="20" height="10" rx="2.5" fill="none" stroke="#b6bfcc" stroke-width="1.2"/>
+<rect x="1046" y="169" width="13" height="6" rx="1.2" fill="#55b978"/>
+<rect x="1065" y="170" width="2" height="4" rx=".8" fill="#b6bfcc"/>
+<text x="830" y="212" font-size="18" fill="#f2f4f7" font-weight="650">Settings</text>
+<g transform="translate(1058 196) scale(0.8333)" fill="none" stroke="#b6bfcc" stroke-width="2.28" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></g>
+<text x="840" y="246" font-size="9.5" fill="#8c97a8" font-weight="650" letter-spacing=".6">GENERAL</text>
+<rect x="826" y="254" width="256" height="102" rx="12" fill="#1e222a"/>
+<text x="840" y="275.5" font-size="12" fill="#f2f4f7" font-weight="500">Language</text>
+<g transform="translate(1060 263) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<path d="M840 288.5H1082" stroke="#2c323d"/>
+<text x="840" y="309.5" font-size="12" fill="#f2f4f7" font-weight="500">Appearance</text>
+<g transform="translate(1060 297) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<path d="M840 322.5H1082" stroke="#2c323d"/>
+<text x="840" y="343.5" font-size="12" fill="#f2f4f7" font-weight="500">On startup</text>
+<g transform="translate(1060 331) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<text x="840" y="388" font-size="9.5" fill="#8c97a8" font-weight="650" letter-spacing=".6">SECURITY</text>
+<rect x="826" y="396" width="256" height="102" rx="12" fill="#1e222a"/>
+<text x="840" y="417.5" font-size="12" fill="#f2f4f7" font-weight="500">Vault</text>
+<g transform="translate(1060 405) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<path d="M840 430.5H1082" stroke="#2c323d"/>
+<text x="840" y="451.5" font-size="12" fill="#f2f4f7" font-weight="500">Known Hosts</text>
+<g transform="translate(1060 439) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<path d="M840 464.5H1082" stroke="#2c323d"/>
+<text x="840" y="485.5" font-size="12" fill="#f2f4f7" font-weight="500">SSH Identities</text>
+<g transform="translate(1060 473) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<text x="840" y="530" font-size="9.5" fill="#8c97a8" font-weight="650" letter-spacing=".6">TERMINAL</text>
+<rect x="826" y="538" width="256" height="68" rx="12" fill="#1e222a"/>
+<text x="840" y="559.5" font-size="12" fill="#f2f4f7" font-weight="500">Font size</text>
+<g transform="translate(1060 547) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<path d="M840 572.5H1082" stroke="#2c323d"/>
+<text x="840" y="593.5" font-size="12" fill="#f2f4f7" font-weight="500">Extra keys</text>
+<g transform="translate(1060 581) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<rect x="836" y="392" width="258" height="304" rx="22" fill="#171a20" filter="url(#card)"/>
+<rect x="836.5" y="392.5" width="257" height="303" rx="21.5" fill="none" stroke="#414958"/>
+<g transform="translate(848 410) scale(0.7500)" fill="none" stroke="#6e9bff" stroke-width="2.80" stroke-linecap="round" stroke-linejoin="round"><path d="m15 6-6 6 6 6"/></g>
+<text x="868" y="423.5" font-size="12" fill="#6e9bff" font-weight="500">Settings</text>
+<text x="854" y="462" font-size="17" fill="#f2f4f7" font-weight="650">Appearance</text>
+<rect x="848" y="480" width="234" height="114" rx="12" fill="#1e222a"/>
+<text x="862" y="504" font-size="12" fill="#f2f4f7" font-weight="500">Theme</text>
+<text x="1052" y="504" font-size="11.5" fill="#8c97a8" font-weight="400" text-anchor="end">System</text>
+<g transform="translate(1058 491) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<path d="M862 518.5H1082" stroke="#2c323d"/>
+<text x="862" y="542" font-size="12" fill="#f2f4f7" font-weight="500">Accent</text>
+<text x="1052" y="542" font-size="11.5" fill="#8c97a8" font-weight="400" text-anchor="end">Blue</text>
+<g transform="translate(1058 529) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<path d="M862 556.5H1082" stroke="#2c323d"/>
+<text x="862" y="580" font-size="12" fill="#f2f4f7" font-weight="500">Font size</text>
+<text x="1052" y="580" font-size="11.5" fill="#8c97a8" font-weight="400" text-anchor="end">13 pt</text>
+<g transform="translate(1058 567) scale(0.6667)" fill="none" stroke="#8c97a8" stroke-width="2.85" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></g>
+<rect x="848" y="616" width="234" height="32" rx="10" fill="#1e222a"/>
+<rect x="851" y="619" width="72.0" height="26" rx="8" fill="#1b2b4a"/>
+<text x="887.0" y="636.5" font-size="11" fill="#6e9bff" font-weight="600" text-anchor="middle">System</text>
+<text x="965.0" y="636.5" font-size="11" fill="#b6bfcc" font-weight="500" text-anchor="middle">Light</text>
+<text x="1043.0" y="636.5" font-size="11" fill="#b6bfcc" font-weight="500" text-anchor="middle">Dark</text>
+<rect x="914" y="688" width="80" height="3.5" rx="1.75" fill="#414958"/>
+</g></g>
+<rect x="192.0" y="712" width="28" height="3" rx="1.5" fill="#1f5fd2"/>
+<text x="206.0" y="742" font-size="16.5" fill="#192b45" font-weight="620" text-anchor="middle">Tab pill + tab switcher</text>
+<text x="206.0" y="764" font-size="12.5" fill="#586478" font-weight="400" text-anchor="middle">Extra keys row for Ctrl / Alt / arrows</text>
+<rect x="566.0" y="712" width="28" height="3" rx="1.5" fill="#1f5fd2"/>
+<text x="580.0" y="742" font-size="16.5" fill="#192b45" font-weight="620" text-anchor="middle">Dense server overview</text>
+<text x="580.0" y="764" font-size="12.5" fill="#586478" font-weight="400" text-anchor="middle">Status, New Terminal and live metrics per host</text>
+<rect x="940.0" y="712" width="28" height="3" rx="1.5" fill="#1f5fd2"/>
+<text x="954.0" y="742" font-size="16.5" fill="#192b45" font-weight="620" text-anchor="middle">Settings list → detail</text>
+<text x="954.0" y="764" font-size="12.5" fill="#586478" font-weight="400" text-anchor="middle">Back key closes one layer at a time</text>
+</g></svg>

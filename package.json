@@ -1,7 +1,7 @@
 {
   "name": "norishell",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "packageManager": "pnpm@10.32.1",
   "engines": {
@@ -20,11 +20,13 @@
     "tauri": "tauri",
     "generate:core-api": "cargo run --quiet -p norishell-core-api --bin export-core-api -- src/core-api/generated/core-api.ts",
     "check:core-api": "cargo run --quiet -p norishell-core-api --bin export-core-api -- --check src/core-api/generated/core-api.ts",
+    "docs:core-api": "python3 tools/generate_core_api_docs.py",
+    "docs:core-api:check": "python3 tools/generate_core_api_docs.py --check",
     "typecheck": "vue-tsc -b",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "pnpm check:core-api && pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+    "check": "pnpm check:core-api && pnpm docs:core-api:check && pnpm typecheck && pnpm lint && pnpm test && pnpm build"
   },
   "dependencies": {
     "@codemirror/language": "^6.12.4",

@@ -4,12 +4,12 @@
 <h1 align="center">NoriShell</h1>
 <p align="center">
   <strong>Terminals, file transfers, and remote desktops. One workspace.</strong><br />
-  SSH, local shells, SFTP, tunnels, RDP/VNC, and server monitoring on macOS and Windows. Organize hosts locally and protect saved credentials with an encrypted Vault.
+  SSH, local shells, SFTP, tunnels, RDP/VNC, and server monitoring on macOS and Windows, with Linux and Android previews. Organize hosts locally and protect saved credentials with an encrypted Vault.
 </p>
 <p align="center">
   <a href="https://github.com/Norixor/NoriShell/releases/latest"><img src="https://img.shields.io/github/v/release/Norixor/NoriShell?label=release&color=blue" alt="Latest release" /></a>
   <a href="https://github.com/Norixor/NoriShell/releases"><img src="https://img.shields.io/github/downloads/Norixor/NoriShell/total?label=downloads&color=brightgreen" alt="Total downloads" /></a>
-  <a href="#installation-and-quick-start"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-8250df" alt="macOS and Windows" /></a>
+  <a href="#installation-and-quick-start"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20(preview)%20%7C%20Android%20(preview)-8250df" alt="macOS, Windows, Linux (preview) and Android (preview)" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-orange" alt="GPL-3.0-only license" /></a>
   <a href="https://github.com/Norixor/NoriShell/stargazers"><img src="https://img.shields.io/github/stars/Norixor/NoriShell?color=yellow" alt="GitHub stars" /></a>
 </p>
@@ -38,18 +38,18 @@
 
 ## About
 
-Working on a server often means switching between terminal tabs, file transfer windows, port forwarding settings, and remote desktop tools. NoriShell brings those tasks into one desktop workspace, with hosts and saved credentials managed on your device. It is built for day-to-day work across macOS and Windows, whether you manage one server or many.
+Working on a server often means switching between terminal tabs, file transfer windows, port forwarding settings, and remote desktop tools. NoriShell brings those tasks into one desktop workspace, with hosts and saved credentials managed on your device. It is built for day-to-day work across macOS and Windows, with a Linux preview, whether you manage one server or many.
 
 ## Installation and quick start
 
-Latest release: **[v0.1.7](https://github.com/Norixor/NoriShell/releases/tag/v0.1.7)**. Choose an installer or a standalone ZIP for your device; Linux packages are listed below as a preview.
+Latest release: **[v0.1.8](https://github.com/Norixor/NoriShell/releases/tag/v0.1.8)**. Choose an installer or a standalone ZIP for your device; Linux packages and the Android APK are listed below as previews.
 
 | Platform | Architecture | Installer | Standalone ZIP |
 | --- | --- | --- | --- |
-| macOS 13 or later | Apple Silicon (ARM64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_arm64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_arm64.zip) |
-| macOS 13 or later | Intel (x64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_x64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_macos_x64.zip) |
-| Windows | x64 (Intel / AMD) | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_x64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_x64.zip) |
-| Windows | ARM64 | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_arm64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_windows_arm64.zip) |
+| macOS 13 or later | Apple Silicon (ARM64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_arm64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_arm64.zip) |
+| macOS 13 or later | Intel (x64) | [Download DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_x64.dmg) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_x64.zip) |
+| Windows | x64 (Intel / AMD) | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_x64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_x64.zip) |
+| Windows | ARM64 | [Download setup](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_arm64-setup.exe) | [Download ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_arm64.zip) |
 
 For a macOS installer, drag NoriShell into Applications; on Windows, follow the installer. ZIP builds use the same local settings and data directories. Extract the full archive before running. The Windows ZIP requires WebView2 Runtime to be installed.
 
@@ -57,10 +57,20 @@ For a macOS installer, drag NoriShell into Applications; on Windows, follow the 
 
 | Platform | Architecture | AppImage | deb |
 | --- | --- | --- | --- |
-| Linux (Preview) | x64 | [Download AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_x64.AppImage) | [Download deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_x64.deb) |
-| Linux (Preview) | ARM64 | [Download AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_arm64.AppImage) | [Download deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.7/NoriShell_0.1.7_linux_arm64.deb) |
+| Linux (Preview) | x64 | [Download AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_x64.AppImage) | [Download deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_x64.deb) |
+| Linux (Preview) | ARM64 | [Download AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_arm64.AppImage) | [Download deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_arm64.deb) |
 
 Linux is a preview and has so far only been verified on Ubuntu 22.04 (GNOME, Wayland). The tray, native notifications, and system-keychain auto-unlock are not implemented on Linux yet. Only the AppImage can update in the app; the deb is a manual download.
+
+**Android (Preview)**
+
+| Platform | Architecture | APK |
+| --- | --- | --- |
+| Android 10 or later (Preview) | ARM64 | [Download NoriShell_0.1.8_android_arm64.apk](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_android_arm64.apk) |
+
+Android is a preview and has so far only been verified on the Android emulator (API 36, arm64), not on real devices. NoriShell is not on any app store: open the APK on your phone and, when Android asks, allow installing apps from that source (for example your browser or file manager). The APK is a signed release build; later versions update in the app after you confirm, and Android keeps your data because every release is signed with the same key.
+
+![NoriShell on Android: terminal with tab pill and extra-keys row, dense server overview, and settings list to detail](.github/assets/illustrations/android.en.svg)
 
 ### First connection
 
@@ -72,7 +82,7 @@ Linux is a preview and has so far only been verified on Ubuntu 22.04 (GNOME, Way
 
 ### Check for updates
 
-Open **Settings → About** and click “Check for updates”. The macOS and Windows installers can install stable updates in the app after you confirm. For ZIP builds and beta updates, download the file for your platform from [GitHub Releases](https://github.com/Norixor/NoriShell/releases).
+Open **Settings → About** and click “Check for updates”. The macOS and Windows installers, the Linux AppImage, and the Android APK can install stable updates in the app after you confirm. For ZIP builds, the Linux deb package and beta updates, download the file for your platform from [GitHub Releases](https://github.com/Norixor/NoriShell/releases).
 
 ## Key features
 
@@ -136,7 +146,7 @@ NoriShell uses Tauri 2, Vue 3, TypeScript, xterm, and Rust.
 - Node.js **22 or newer**.
 - pnpm **10.32.1**, matching `packageManager` in `package.json`.
 - Rust **1.97.1**, pinned by `rust-toolchain.toml`, with `rustfmt` and `clippy`.
-- [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/): Xcode Command Line Tools on macOS; MSVC C++ build tools and WebView2 on Windows.
+- [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/): Xcode Command Line Tools on macOS; MSVC C++ build tools and WebView2 on Windows; on Debian/Ubuntu, `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`, `libxdo-dev`, `libasound2-dev` and `libudev-dev`.
 
 ### Run locally
 
@@ -162,6 +172,16 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 pnpm tauri build
 ```
 
+### Android (preview)
+
+Release APKs are published with each release (see [Installation and quick start](#installation-and-quick-start)); building from source is only needed for development. The Android preview has only been verified on the Android emulator (API 36, arm64). It needs Android SDK 36, NDK 28, JDK 17, and the `aarch64-linux-android` Rust target:
+
+```sh
+pnpm tauri android build --debug --apk --target aarch64
+```
+
+The debug APK is written to `src-tauri/gen/android/app/build/outputs/apk/universal/debug/`. Android requires Android 10 (API 29) or newer.
+
 ## Troubleshooting
 
 ### macOS reports that the app is damaged
@@ -183,8 +203,8 @@ Use the pnpm and Rust versions pinned by the repository. If dependencies are inc
 
 ```text
 src/                    Vue UI and shared components
-src-tauri/              Tauri desktop entry point and native windows
-crates/                 Rust Core, protocols, Vault, persistence, and plugin capabilities
+src-tauri/              Tauri desktop entry point and native windows; Android project in src-tauri/gen/android
+crates/                 Rust Core, protocols, Vault, persistence, plugin capabilities, and the Android bridge
 docs/guides/            User, plugin development, Plugin API, and Core API documentation
 examples/plugins/       Wasm plugin and SDK examples
 example/self-host-sync/ Self-hosted sync plugin and Go server
