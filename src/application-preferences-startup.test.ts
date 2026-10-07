@@ -54,7 +54,8 @@ describe("Core preference startup migration", () => {
     const pinia = createPinia();
     await initializeApplicationPreferences(pinia);
     expect([...snapshots.keys()].sort()).toEqual(["appearance", "application", "files", "highlights", "interaction", "shortcuts"]);
-    expect(snapshots.get("application")?.value).toMatchObject({ themePreference: "dark", locale: "en" });
+    // A never-set startup choice takes the current default; it is not a stored choice to preserve.
+    expect(snapshots.get("application")?.value).toMatchObject({ themePreference: "dark", locale: "en", terminalStartupBehavior: "overview" });
     expect(snapshots.get("appearance")?.value).toMatchObject({ terminalFontSize: 16, appTheme });
     expect(snapshots.get("interaction")?.value).toMatchObject({ pasteWarning: "always" });
     expect(snapshots.get("files")?.value).toMatchObject({ browser: { showHidden: false }, rememberLastDirectory: true });
@@ -79,6 +80,9 @@ describe("Core preference startup migration", () => {
     const ui = useUiStore(pinia);
     expect(ui.themePreference).toBe("dark");
     expect(ui.localePreference).toBe("zh-CN");
+    // An existing Core choice is kept; the newer Overview default never overrides it.
+    expect(ui.terminalStartupBehavior).toBe("restoreHistory");
+    expect(snapshots.get("application")?.value).toMatchObject({ terminalStartupBehavior: "restoreHistory" });
     rejectWrites = true;
     await expect(ui.setThemePreference("light")).rejects.toThrow("application_preferences.conflict");
     expect(ui.themePreference).toBe("dark");

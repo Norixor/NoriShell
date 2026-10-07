@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { UI_PREFERENCES_KEY } from "../ui-preferences";
+import { DEFAULT_APPLICATION_PREFERENCES, validateApplicationPreferences } from "../ui-transfer";
 import { useUiStore } from "./ui";
 
 function stubSystemTheme(initiallyDark = false) {
@@ -94,6 +95,45 @@ describe("application theme preference", () => {
 
     expect(store.themePreference).toBe("light");
     expect(store.theme).toBe("light");
+    store.$dispose();
+  });
+});
+
+describe("after-startup preference", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("defaults never-set preferences to Overview and keeps any stored choice", () => {
+    setActivePinia(createPinia());
+    expect(useUiStore().terminalStartupBehavior).toBe("overview");
+    expect(DEFAULT_APPLICATION_PREFERENCES.terminalStartupBehavior).toBe("overview");
+
+    for (const stored of ["welcome", "restoreHistory", "overview"] as const) {
+      localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({ terminalStartupBehavior: stored }));
+      setActivePinia(createPinia());
+      const store = useUiStore();
+      expect(store.terminalStartupBehavior).toBe(stored);
+      expect(store.legacyApplicationPreferences().terminalStartupBehavior).toBe(stored);
+      store.$dispose();
+    }
+
+    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({ themePreference: "dark" }));
+    setActivePinia(createPinia());
+    expect(useUiStore().terminalStartupBehavior).toBe("overview");
+  });
+
+  it("persists the Overview choice and accepts older exports while rejecting unknown values", async () => {
+    setActivePinia(createPinia());
+    const store = useUiStore();
+    expect(await store.setTerminalStartupBehavior("welcome")).toBe(true);
+    expect(await store.setTerminalStartupBehavior("overview")).toBe(true);
+    expect(JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY)!).terminalStartupBehavior).toBe("overview");
+
+    for (const behavior of ["overview", "welcome", "restoreHistory"]) {
+      expect(validateApplicationPreferences({ ...DEFAULT_APPLICATION_PREFERENCES, terminalStartupBehavior: behavior })).toBe(true);
+    }
+    for (const behavior of ["dashboard", "Overview", null, undefined]) {
+      expect(validateApplicationPreferences({ ...DEFAULT_APPLICATION_PREFERENCES, terminalStartupBehavior: behavior })).toBe(false);
+    }
     store.$dispose();
   });
 });

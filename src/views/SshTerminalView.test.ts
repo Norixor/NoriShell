@@ -765,7 +765,8 @@ describe("SshTerminalView route and Header behavior", () => {
     vi.clearAllMocks();
     nativeEvents.clear();
     localStorage.clear();
-    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ newTerminalBehavior: "terminalWelcome" }));
+    // History restore was the implicit default before Overview became the startup default.
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ newTerminalBehavior: "terminalWelcome", terminalStartupBehavior: "restoreHistory" }));
     resetTerminalInputFocusForTests();
     paneControls.clear();
     i18n.global.locale.value = "zh-CN";
@@ -2628,6 +2629,18 @@ describe("SshTerminalView single-document workspace (Android)", () => {
     expect(written.expectedRevision).toBe("4");
     // The history Tab is kept beside the new Tab for a later history start.
     expect(written.layout.tabs.map((tab) => tab.tabId)).toEqual([historyTab.tabId, tabs.terminalTabs[0]!.groupId]);
+    wrapper.unmount();
+  });
+
+  it("with the Overview startup preference neither restores history nor starts a Session when Terminal opens later", async () => {
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "overview" }));
+    const { wrapper, pinia } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    expect(tabs.terminalTabs).toHaveLength(0);
+    expect(wrapper.find(".ssh-terminal-empty").exists()).toBe(true);
+    expect(wrapper.findComponent(SshPaneContractStub).exists()).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(client.replaceTerminalWorkspaceLayout).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

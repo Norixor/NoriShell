@@ -1,15 +1,25 @@
 import { createRouter, createWebHashHistory, START_LOCATION } from "vue-router";
 import { workspaceHostMode } from "./platform-host";
 import { usePluginExtensionsStore } from "./stores/pluginExtensions";
+import { useUiStore } from "./stores/ui";
 import { showWorkspaceTabFailure } from "./workspace-tab-errors";
 import { openManagedPluginPage } from "./workspace-tab-view-shell";
 import { workspaceWindowLabel } from "./workspace-tab-windows";
 import { isWorkspaceTabView } from "./workspace-window-context";
 
+/**
+ * Only the main document starts at "/" (workspace windows and Tab views set their own
+ * hash), so this is where the "After startup" preference picks the first page. The
+ * Overview choice only shows the page: it never creates a Terminal Tab or connects.
+ */
+export function startupRoute(): "/overview" | "/terminal" {
+  return useUiStore().terminalStartupBehavior === "overview" ? "/overview" : "/terminal";
+}
+
 export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: "/", redirect: "/terminal" },
+    { path: "/", redirect: startupRoute },
     { path: "/overview", component: () => import("./views/OverviewView.vue") },
     { path: "/hosts", component: () => import("./views/HostsView.vue") },
     { path: "/terminal", component: () => import("./views/SshTerminalView.vue") },

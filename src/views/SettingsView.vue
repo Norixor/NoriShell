@@ -223,6 +223,10 @@ const localeOptions = computed(() => [
 
 const terminalStartupBehaviorOptions = computed(() => [
   {
+    value: "overview",
+    label: t("sshSettings.applicationPreferences.startupBehaviors.overview"),
+  },
+  {
     value: "welcome",
     label: t("sshSettings.applicationPreferences.startupBehaviors.welcome"),
   },

@@ -6,7 +6,10 @@ import { cloneDefaultAppThemeProfile } from "../app-theme";
 import { corePreferencesEnabled, saveApplicationPreferences } from "../core-api/application-preferences";
 import { parseCoreApiError } from "../core-api/client";
 import { publishSecureWindowAppearance } from "../secure-window-appearance";
-import { validateApplicationPreferences, validateAppearancePreferences, type ApplicationPreferences, type AppearancePreferences } from "../ui-transfer";
+import {
+  DEFAULT_TERMINAL_STARTUP_BEHAVIOR, isTerminalStartupBehavior, validateApplicationPreferences, validateAppearancePreferences,
+  type ApplicationPreferences, type AppearancePreferences, type TerminalStartupBehavior,
+} from "../ui-transfer";
 import { applyUiZoom, isUiZoom, type UiZoom } from "../ui-zoom";
 import { i18n, resolveLocale, type LocalePreference } from "../locales";
 import {
@@ -41,7 +44,7 @@ import {
 
 export type Theme = "light" | "dark";
 export type { ThemePreference } from "../ui-preferences";
-export type TerminalStartupBehavior = "welcome" | "restoreHistory";
+export type { TerminalStartupBehavior } from "../ui-transfer";
 export type NewTerminalBehavior = "welcome" | "terminalWelcome" | "sftpWelcome" | "localTerminal";
 export type SinglePaneTabCloseBehavior = "confirm" | "closeDirectly";
 
@@ -113,8 +116,9 @@ export const useUiStore = defineStore("ui", () => {
   };
   window.addEventListener("languagechange", updateSystemLanguage);
   onScopeDispose(() => window.removeEventListener("languagechange", updateSystemLanguage));
+  // A stored choice is kept as is; only a missing or unknown value takes the current default.
   const terminalStartupBehavior = ref<TerminalStartupBehavior>(
-    stored.terminalStartupBehavior === "welcome" ? "welcome" : "restoreHistory",
+    isTerminalStartupBehavior(stored.terminalStartupBehavior) ? stored.terminalStartupBehavior : DEFAULT_TERMINAL_STARTUP_BEHAVIOR,
   );
   const newTerminalBehavior = ref<NewTerminalBehavior>(
     stored.newTerminalBehavior === "terminalWelcome" || stored.newTerminalBehavior === "sftpWelcome"
