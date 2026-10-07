@@ -45,6 +45,9 @@ const previewVaultMode = ref<OfflineVaultImportMode | null>(null);
 const duplicatePolicy = ref<OfflineDuplicatePolicy>("skip");
 const busy = ref(false);
 const recoveryError = ref("");
+// The secure backup page has no Tips host of its own (the window shows only this view), so
+// every result is also rendered inline; the Tips entries keep the shared scope semantics.
+const notice = ref<{ tone: "info" | "error"; title: string; message?: string } | null>(null);
 
 const canExport = computed(() =>
   exportSelection.value.ssh || exportSelection.value.desktop || exportSelection.value.vault,
@@ -80,21 +83,22 @@ function updateImport(key: keyof OfflineBackupSelection, value: boolean) {
 
 function clearMessages() {
   recoveryError.value = "";
+  notice.value = null;
   tips.dismissScope("offline-backup");
 }
 
+function showResult(tone: "success" | "error", title: string, message?: string) {
+  // The inline notice has no success tone; a completed operation reads as an informational result.
+  notice.value = { tone: tone === "success" ? "info" : "error", title, message };
+  tips.show({ scope: "offline-backup", tone, title, message });
+}
 function showError(key: string) {
-  tips.show({ scope: "offline-backup", tone: "error", title: t(key) });
+  showResult("error", t(key));
 }
 function showFailure(error: unknown, fallback: string) {
   const failure = parseCoreApiError(error);
   const key = failure?.messageKey && te(failure.messageKey) ? failure.messageKey : fallback;
-  tips.show({
-    scope: "offline-backup",
-    tone: "error",
-    title: t(key),
-    message: failure?.diagnosticId ? t("diagnostics.id", { id: failure.diagnosticId }) : undefined,
-  });
+  showResult("error", t(key), failure?.diagnosticId ? t("diagnostics.id", { id: failure.diagnosticId }) : undefined);
 }
 function failureKey(error: unknown, fallback: string): string {
   const messageKey = parseCoreApiError(error)?.messageKey;
@@ -114,9 +118,16 @@ async function exportFile() {
       if (!unlocked) return;
     }
     const saved = await exportOfflineBackup({ ...exportSelection.value });
-    if (saved) tips.show({ scope: "offline-backup", tone: "success", title: t("offlineBackup.exportSuccess") });
+    if (saved) showResult("success", t("offlineBackup.exportSuccess"));
   } catch (error) {
-    showFailure(error, "offlineBackup.exportFailed");
+    // Stable Core code for a document-picker write that truncated the target before failing;
+    // it overrides any generic message key so the user learns the file may be partial.
+    const failure = parseCoreApiError(error);
+    if (failure?.code === "offline-backup-write-incomplete") {
+      showResult("error", t("offlineBackupErrors.writeIncomplete"), failure.diagnosticId ? t("diagnostics.id", { id: failure.diagnosticId }) : undefined);
+    } else {
+      showFailure(error, "offlineBackup.exportFailed");
+    }
   } finally {
     busy.value = false;
   }
@@ -198,7 +209,7 @@ async function applyImport() {
       if (!unlocked) return;
     }
     await applyOfflineBackup(opened.value.handle, preview.value.handle);
-    tips.show({ scope: "offline-backup", tone: "success", title: t("offlineBackup.importSuccess") });
+    showResult("success", t("offlineBackup.importSuccess"));
     opened.value = null;
     preview.value = null;
     previewVaultMode.value = null;
@@ -391,6 +402,14 @@ async function applyImport() {
       </section>
     </div>
 
+    <NvxInlineNotice
+      v-if="notice"
+      class="offline-backup__result"
+      :tone="notice.tone"
+      :title="notice.title"
+    >
+      {{ notice.message }}
+    </NvxInlineNotice>
     <NvxInlineNotice
       v-if="recoveryError"
       tone="error"

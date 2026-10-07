@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ChevronDown, Columns2, Download, Eye, FolderOpen, FolderPlus, Pencil, Rows2, Server, Trash2, Upload, X } from "lucide-vue-next";
+import { ChevronDown, Columns2, Copy, Download, Ellipsis, Eye, FolderOpen, FolderPlus, Pencil, Plus, Rows2, Server, Trash2, Upload, X } from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
 
+import { isMobileLayout } from "../../platform-host";
 import { NvxButton, NvxIcon } from "../ui";
 import { usePopoverMenu } from "../ui/usePopoverMenu";
 import NvxPluginContributionSlot from "../terminal/NvxPluginContributionSlot.vue";
@@ -18,9 +19,12 @@ defineProps<{
   canSplitHorizontal: boolean;
   canSplitVertical: boolean;
   canClose: boolean;
+  /** Phone top bar: the page's "New file tab" entry lives in this menu instead of a button. */
+  showNewTab?: boolean;
 }>();
 
 const emit = defineEmits<{
+  newTab: [];
   chooseFolder: [];
   upload: [];
   download: [];
@@ -33,9 +37,12 @@ const emit = defineEmits<{
   addRemote: [];
   addLocal: [];
   close: [];
+  /** Phone only: tap alternative to cross-Pane drag and drop for the single selected entry. */
+  sendToPane: [];
 }>();
 
 const { t } = useI18n();
+const mobileLayout = isMobileLayout();
 const { rootRef, triggerRef, viewportPanelRef, viewportPanelStyle, open, closeMenu, toggleMenu, handleMenuKeyDown } = usePopoverMenu();
 
 function run(action: "chooseFolder" | "upload" | "download" | "mkdir" | "rename" | "delete" | "close") {
@@ -54,12 +61,21 @@ function runSplit(direction: "horizontal" | "vertical") {
   closeMenu(true);
 }
 
+function sendToPane() {
+  emit("sendToPane");
+  closeMenu(true);
+}
+
 function addRemote() {
   emit("addRemote");
   closeMenu(true);
 }
 function addLocal() {
   emit("addLocal");
+  closeMenu(true);
+}
+function newTab() {
+  emit("newTab");
   closeMenu(true);
 }
 
@@ -85,10 +101,17 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
       :aria-expanded="open"
       @click="toggleMenu"
     >
-      {{ t("sftp.more") }}<NvxIcon
-        :icon="ChevronDown"
-        :size="16"
+      <NvxIcon
+        v-if="mobileLayout"
+        :icon="Ellipsis"
+        :size="20"
       />
+      <template v-else>
+        {{ t("sftp.more") }}<NvxIcon
+          :icon="ChevronDown"
+          :size="16"
+        />
+      </template>
     </NvxButton>
 
     <Teleport to="body">
@@ -107,6 +130,23 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
           menu
           :instance-key="paneId"
         />
+        <template v-if="showNewTab">
+          <button
+            class="sftp-pane-actions-menu__item"
+            type="button"
+            role="menuitem"
+            @click="newTab"
+          >
+            <NvxIcon
+              :icon="Plus"
+              :size="16"
+            />{{ t("fileWorkspace.newFileTab") }}
+          </button>
+          <div
+            class="sftp-pane-actions-menu__separator"
+            role="separator"
+          />
+        </template>
         <button
           class="sftp-pane-actions-menu__item"
           type="button"
@@ -138,7 +178,7 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
           role="separator"
         />
         <button
-          v-if="kind === 'local'"
+          v-if="kind === 'local' && !mobileLayout"
           class="sftp-pane-actions-menu__item"
           type="button"
           role="menuitem"
@@ -150,29 +190,45 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
             :size="16"
           />{{ t("sftp.changeLocalFolder") }}
         </button>
+        <!-- Phones never add a Pane to a file Tab: one visible Pane, switched by the segment control. -->
+        <template v-if="!mobileLayout">
+          <button
+            class="sftp-pane-actions-menu__item"
+            type="button"
+            role="menuitem"
+            :disabled="pending || (!canSplitHorizontal && !canSplitVertical)"
+            @click="addLocal"
+          >
+            <NvxIcon
+              :icon="FolderOpen"
+              :size="16"
+            />{{ t("fileWorkspace.addLocalPane") }}
+          </button>
+          <button
+            class="sftp-pane-actions-menu__item"
+            type="button"
+            role="menuitem"
+            :disabled="pending || (!canSplitHorizontal && !canSplitVertical)"
+            @click="addRemote"
+          >
+            <NvxIcon
+              :icon="Server"
+              :size="16"
+            />{{ t("sftp.addRemotePane") }}
+          </button>
+        </template>
         <button
+          v-if="mobileLayout"
           class="sftp-pane-actions-menu__item"
           type="button"
           role="menuitem"
-          :disabled="pending || (!canSplitHorizontal && !canSplitVertical)"
-          @click="addLocal"
+          :disabled="pending || !ready || !singleSelection"
+          @click="sendToPane"
         >
           <NvxIcon
-            :icon="FolderOpen"
+            :icon="Copy"
             :size="16"
-          />{{ t("fileWorkspace.addLocalPane") }}
-        </button>
-        <button
-          class="sftp-pane-actions-menu__item"
-          type="button"
-          role="menuitem"
-          :disabled="pending || (!canSplitHorizontal && !canSplitVertical)"
-          @click="addRemote"
-        >
-          <NvxIcon
-            :icon="Server"
-            :size="16"
-          />{{ t("sftp.addRemotePane") }}
+          />{{ t("mobile.sftpSendTo") }}
         </button>
         <template v-if="kind === 'remote'">
           <button
@@ -203,6 +259,9 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
             class="sftp-pane-actions-menu__separator"
             role="separator"
           />
+        </template>
+        <!-- Local panes change files only inside their Core-registered directory capability. -->
+        <template v-if="kind === 'remote' || kind === 'local'">
           <button
             class="sftp-pane-actions-menu__item"
             type="button"
@@ -244,30 +303,32 @@ function toggleBrowserPreference(action: "toggleShowHidden" | "toggleFoldersFirs
           class="sftp-pane-actions-menu__separator"
           role="separator"
         />
-        <button
-          class="sftp-pane-actions-menu__item"
-          type="button"
-          role="menuitem"
-          :disabled="pending || !canSplitHorizontal"
-          @click="runSplit('horizontal')"
-        >
-          <NvxIcon
-            :icon="Columns2"
-            :size="16"
-          />{{ t("sftp.splitRight") }}
-        </button>
-        <button
-          class="sftp-pane-actions-menu__item"
-          type="button"
-          role="menuitem"
-          :disabled="pending || !canSplitVertical"
-          @click="runSplit('vertical')"
-        >
-          <NvxIcon
-            :icon="Rows2"
-            :size="16"
-          />{{ t("sftp.splitDown") }}
-        </button>
+        <template v-if="!mobileLayout">
+          <button
+            class="sftp-pane-actions-menu__item"
+            type="button"
+            role="menuitem"
+            :disabled="pending || !canSplitHorizontal"
+            @click="runSplit('horizontal')"
+          >
+            <NvxIcon
+              :icon="Columns2"
+              :size="16"
+            />{{ t("sftp.splitRight") }}
+          </button>
+          <button
+            class="sftp-pane-actions-menu__item"
+            type="button"
+            role="menuitem"
+            :disabled="pending || !canSplitVertical"
+            @click="runSplit('vertical')"
+          >
+            <NvxIcon
+              :icon="Rows2"
+              :size="16"
+            />{{ t("sftp.splitDown") }}
+          </button>
+        </template>
         <button
           class="sftp-pane-actions-menu__item sftp-pane-actions-menu__item--danger"
           type="button"

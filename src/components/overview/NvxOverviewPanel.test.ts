@@ -6,6 +6,12 @@ import { i18n } from "../../locales";
 import NvxSelect from "../ui/NvxSelect.vue";
 import NvxOverviewPanel from "./NvxOverviewPanel.vue";
 
+const host = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
+
 function card(
   label: string,
   state: ServerOverviewCard["connectionState"],
@@ -54,25 +60,100 @@ function card(
 
 describe("NvxOverviewPanel", () => {
   let resizeCallback: ResizeObserverCallback | null;
+  const resizeCallbacks: ResizeObserverCallback[] = [];
   const observe = vi.fn();
+  const unobserve = vi.fn();
   const disconnect = vi.fn();
 
   beforeEach(() => {
     i18n.global.locale.value = "zh-CN";
     resizeCallback = null;
+    resizeCallbacks.length = 0;
     observe.mockReset();
+    unobserve.mockReset();
     disconnect.mockReset();
     vi.stubGlobal("ResizeObserver", class {
       constructor(callback: ResizeObserverCallback) {
         resizeCallback = callback;
+        resizeCallbacks.push(callback);
       }
 
       observe = observe;
+      unobserve = unobserve;
       disconnect = disconnect;
     });
   });
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    host.mobile = false;
+    vi.unstubAllGlobals();
+  });
+
+  it("puts the summary counts on the status chips and drops the KPI tiles on the phone", async () => {
+    host.mobile = true;
+    const wrapper = mount(NvxOverviewPanel, {
+      props: {
+        snapshot: {
+          snapshotRevision: "1",
+          cards: [card("Alpha", "connected"), card("Beta", "disconnected"), card("Gamma", "connecting", 3)],
+        },
+      },
+      global: { plugins: [i18n] },
+    });
+    expect(wrapper.find(".nvx-overview-panel__summary").exists()).toBe(false);
+    expect(wrapper.find(".nvx-overview-panel__averages").exists()).toBe(false);
+    // All / Online / Issues / Offline – Online follows the filter (connecting counts as online).
+    expect(wrapper.findAll(".nvx-overview-panel__status-count").map((count) => count.text()))
+      .toEqual(["3", "2", "0", "1"]);
+    expect(wrapper.findAll(".nvx-server-card--compact")).toHaveLength(3);
+
+    const chips = wrapper.findAll('[role="group"] button[aria-pressed]');
+    await chips[3]!.trigger("click");
+    expect(wrapper.findAll(".nvx-overview-panel__card")).toHaveLength(1);
+    expect(wrapper.text()).toContain("Beta");
+  });
+
+  it("windows the phone catalog with the compact Card pitch", async () => {
+    host.mobile = true;
+    const wrapper = mount(NvxOverviewPanel, {
+      props: {
+        snapshot: {
+          snapshotRevision: "1",
+          cards: Array.from({ length: 40 }, (_, index) => card(`Host ${String(index).padStart(2, "0")}`, "disconnected", index + 1)),
+        },
+      },
+      global: { plugins: [i18n] },
+    });
+    expect(wrapper.get(".nvx-overview-panel__grid-viewport").attributes("style"))
+      .toContain(`height: ${40 * 116}px`);
+    expect(wrapper.findAll(".nvx-overview-panel__card").length).toBeLessThan(40);
+  });
+
+  it("lets a measured, taller phone Card move the rows below it instead of clipping to the assumed pitch", async () => {
+    host.mobile = true;
+    const wrapper = mount(NvxOverviewPanel, {
+      props: {
+        snapshot: {
+          snapshotRevision: "1",
+          cards: Array.from({ length: 40 }, (_, index) => card(`Host ${String(index).padStart(2, "0")}`, "disconnected", index + 1)),
+        },
+      },
+      global: { plugins: [i18n] },
+    });
+    const rendered = wrapper.findAll(".nvx-overview-panel__card");
+    // Every rendered Card wrapper is measured; the virtual window keeps its ResizeObserver too.
+    expect(observe.mock.calls.filter(([element]) => (element as Element).classList.contains("nvx-overview-panel__card")))
+      .toHaveLength(rendered.length);
+    // The second Card has an open-session row and renders 140px tall instead of the assumed 108px.
+    const tall = rendered[1]!.element as HTMLElement;
+    tall.getBoundingClientRect = () => ({ height: 140 } as DOMRect);
+    for (const callback of resizeCallbacks) callback([{ target: tall } as unknown as ResizeObserverEntry], {} as ResizeObserver);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get(".nvx-overview-panel__grid-viewport").attributes("style"))
+      .toContain(`height: ${39 * 116 + 148}px`);
+    // Measuring is a phone-only path: the desktop grid keeps its fixed pitch.
+    expect(wrapper.get(".nvx-overview-panel__grid--virtual").attributes("style")).toContain("translateY(0px)");
+  });
 
   it("filters without omitting saved Hosts from the source snapshot", async () => {
     const snapshot = {

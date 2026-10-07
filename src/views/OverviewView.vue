@@ -74,13 +74,12 @@ function findMetricsSession(hostId: string): MetricsSessionSummary | null {
 async function beginMetricsAction(hostId: string) {
   const session = findMetricsSession(hostId);
   if (!session || actionSaving.value) return;
-  const challenge = session.hostKeyChallenge ?? session.keyboardInteractiveChallenge;
+  const challenge = session.keyboardInteractiveChallenge;
   if (challenge) {
     actionSaving.value = true;
     try {
       const request = { metricsSessionId: challenge.metricsSessionId, hostId: challenge.hostId, expectedGeneration: challenge.generation, challengeId: challenge.challengeId };
-      if (session.hostKeyChallenge) await requestSecureSshChallenge({ kind: "metricsHostKey", request });
-      else if (session.keyboardInteractiveChallenge) await requestSecureSshChallenge({ kind: "metricsKeyboard", request: { ...request, roundIndex: session.keyboardInteractiveChallenge.roundIndex } });
+      await requestSecureSshChallenge({ kind: "metricsKeyboard", request: { ...request, roundIndex: challenge.roundIndex } });
       await refresh();
     } catch {
       tips.show({ scope: "overview-metrics-action", tone: "error", title: t("overview.actionFailed") });

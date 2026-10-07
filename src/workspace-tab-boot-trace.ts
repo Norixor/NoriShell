@@ -1,4 +1,6 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
+
+import { workspaceHostMode } from "./platform-host";
 
 /**
  * Opt-in startup timing for native Tab WebViews (see Core `tab_boot_trace`). A mark
@@ -17,7 +19,7 @@ export function tabBootTraceId(tabId: string): string {
 }
 
 export function markTabBoot(tabId: string, view: "shell" | "tab", stage: string): void {
-  if (!isTauri() || !tabId) return;
+  if (workspaceHostMode() !== "nativeTabs" || !tabId) return;
   // Wall-clock time lets marks from separate WebViews line up in one log.
   const atMs = performance.timeOrigin + performance.now();
   enabled ??= invoke<boolean>("tab_boot_trace_enabled").catch(() => false);

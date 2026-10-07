@@ -5,16 +5,19 @@ import { useI18n } from "vue-i18n";
 
 import { createPreferenceAdapters } from "../../preference-adapters";
 import { applicationPreferenceFailure } from "../../core-api/application-preferences";
-import { exportJsonFile } from "../../platform-file-export";
+import { exportJsonFile, isJsonExportWriteIncomplete } from "../../platform-file-export";
 import {
   applyPreferencePreview, exportPreferenceTransfer, MAX_PREFERENCE_TRANSFER_BYTES,
   parsePreferenceTransfer, PREFERENCE_GROUP_IDS, previewPreferenceTransfer,
   PreferenceTransferError,
   type PreferenceGroupId, type PreferencePreviewGroup, type PreferenceTransferFile,
 } from "../../preferences-transfer";
+import { isMobileLayout } from "../../platform-host";
 import { NvxButton, NvxCheckbox, NvxInlineNotice, NvxStatusLabel } from "../ui";
 
 const { t } = useI18n();
+// The "desktop" group holds only notification rules on the phone shell (no window or tray fields).
+const groupLabel = (id: string) => t(isMobileLayout() && id === "desktop" ? "mobile.settings.transferGroupDesktop" : `preferenceTransfer.groups.${id}`);
 const adapters = createPreferenceAdapters();
 const fileInput = useTemplateRef<HTMLInputElement>("fileInput");
 const visibleGroups = PREFERENCE_GROUP_IDS.filter((id) => id !== "commandNotifications");
@@ -32,6 +35,7 @@ function toggle(id: PreferenceGroupId, checked: boolean) {
   selected.value = checked ? [...new Set([...selected.value, id])] : selected.value.filter((key) => key !== id);
 }
 function fail(caught: unknown) {
+  if (isJsonExportWriteIncomplete(caught)) { error.value = "writeIncomplete"; return; }
   const code = caught instanceof PreferenceTransferError ? caught.code : "failed";
   error.value = ["tooLarge", "emptySelection", "invalidFile", "invalidGroup", "unavailableGroup"].includes(code) ? code : "failed";
 }
@@ -117,7 +121,7 @@ onBeforeUnmount(() => {
         :disabled="busy"
         @update:model-value="toggle(id, $event)"
       >
-        {{ t(`preferenceTransfer.groups.${id}`) }}
+        {{ groupLabel(id) }}
       </NvxCheckbox>
     </fieldset>
     <div class="preference-transfer__actions">
@@ -179,7 +183,7 @@ onBeforeUnmount(() => {
         class="preference-transfer__group"
       >
         <div class="preference-transfer__group-heading">
-          <strong>{{ t(`preferenceTransfer.groups.${group.id}`) }}</strong>
+          <strong>{{ groupLabel(group.id) }}</strong>
           <NvxStatusLabel :tone="group.result === 'failed' || group.result === 'conflict' ? 'warning' : group.result === 'applied' ? 'success' : 'neutral'">
             {{ t(`preferenceTransfer.results.${group.result}`) }}
           </NvxStatusLabel>

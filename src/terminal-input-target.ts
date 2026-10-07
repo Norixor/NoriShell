@@ -21,6 +21,8 @@ export interface FocusedTerminalInputTarget {
   applyFocusLease(lease: TerminalInputLease | null): void;
   canAcceptInput(): boolean;
   canAcceptRawInput?(): boolean;
+  /** DECCKM state of the Pane's xterm, so helper keys encode cursor keys the way the foreground program expects. */
+  cursorKeysMode?(): "normal" | "application";
   send(value: string): Promise<void>;
 }
 
@@ -320,6 +322,32 @@ export async function runInFocusedTerminal(command: string): Promise<FocusedTerm
     // after Core accepted the bytes, so the user must inspect the terminal
     // before deciding whether to run the command again.
     await target.send(`${command}\r`);
+    return "sent";
+  } catch {
+    return "failed";
+  }
+}
+
+/** Whether the focused Pane's terminal is in application cursor keys mode (DECCKM). */
+export function focusedTerminalUsesApplicationCursorKeys(): boolean {
+  return currentTarget()?.cursorKeysMode?.() === "application";
+}
+
+export const canSendKeysToFocusedTerminal = computed(() => {
+  const target = currentTarget();
+  return Boolean(target && (target.canAcceptRawInput?.() ?? target.canAcceptInput()));
+});
+
+/**
+ * Sends a raw key sequence (no Enter appended) to the focused Pane through the
+ * same acknowledged-focus path as Quick Commands. Like them it fails closed when
+ * no Pane holds a valid lease and never retries.
+ */
+export async function sendKeysToFocusedTerminal(sequence: string): Promise<FocusedTerminalRunResult> {
+  const target = currentTarget();
+  if (!target || !(target.canAcceptRawInput?.() ?? target.canAcceptInput())) return "unavailable";
+  try {
+    await target.send(sequence);
     return "sent";
   } catch {
     return "failed";

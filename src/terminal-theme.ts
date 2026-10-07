@@ -1,3 +1,5 @@
+import { isMobileLayout } from "./platform-host";
+
 export const TERMINAL_COLOR_KEYS = [
   "background",
   "foreground",
@@ -258,7 +260,9 @@ export interface ParsedTerminalAppearance {
   hasCustomPalette: boolean;
 }
 
-export const DEFAULT_TERMINAL_FONT_SIZE = 13;
+export const DESKTOP_DEFAULT_TERMINAL_FONT_SIZE = 13;
+/** Phones fit more columns at a smaller size; see `defaultTerminalFontSize`. */
+export const MOBILE_DEFAULT_TERMINAL_FONT_SIZE = 11;
 export const MIN_TERMINAL_FONT_SIZE = 10;
 export const MAX_TERMINAL_FONT_SIZE = 28;
 export const DEFAULT_TERMINAL_FONT_FAMILY = "Menlo";
@@ -288,6 +292,17 @@ const TERMINAL_FONT_FALLBACK = [
   "monospace",
 ].join(", ");
 
+/**
+ * The terminal font size used when the user has never chosen one. This is the single
+ * source of the platform default: the stored preference (local or Core) is always a
+ * concrete integer, so the platform difference lives only here, at the frontend
+ * projection layer, and the Core schema and its 10–28 validation stay shared. A size
+ * the user (or an earlier launch) already stored is never rewritten by this default.
+ */
+export function defaultTerminalFontSize(): number {
+  return isMobileLayout() ? MOBILE_DEFAULT_TERMINAL_FONT_SIZE : DESKTOP_DEFAULT_TERMINAL_FONT_SIZE;
+}
+
 export function parseTerminalFontSize(value: unknown): number {
   const parsed = typeof value === "number"
     ? value
@@ -298,7 +313,7 @@ export function parseTerminalFontSize(value: unknown): number {
     && parsed >= MIN_TERMINAL_FONT_SIZE
     && parsed <= MAX_TERMINAL_FONT_SIZE
     ? parsed
-    : DEFAULT_TERMINAL_FONT_SIZE;
+    : defaultTerminalFontSize();
 }
 
 export function parseTerminalFontWeight(

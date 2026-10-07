@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { secureInvoke } from "../secure-transport";
 
 export type SecureCredentialKind = "password" | "privateKey";
 
@@ -30,11 +31,11 @@ export function requestSecureCredential(request: SecureCredentialRequest): Promi
 }
 
 export const secureCredentialClient = {
-  get: (id: string) => invoke<SecureCredentialPrompt>("secure_credential_get", { id }),
-  submit: (id: string, secret: string, passphrase: string) => invoke<void>("secure_credential_submit", {
+  get: (id: string) => secureInvoke<SecureCredentialPrompt>("secure_credential_get", { id }),
+  submit: (id: string, secret: string, passphrase: string) => secureInvoke<void>("secure_credential_submit", {
     id,
     secret,
     passphrase,
   }),
-  cancel: (id: string) => invoke<void>("secure_credential_cancel", { id }),
+  cancel: (id: string) => secureInvoke<void>("secure_credential_cancel", { id }),
 };

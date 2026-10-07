@@ -41,6 +41,8 @@ const props = withDefaults(
     createDisabled?: boolean;
     dragEnabled?: boolean;
     incomingDrag?: boolean;
+    /** Single-document hosts (Android) have no native popup menu; a long press on a Tab then does nothing. */
+    nativeContextMenu?: boolean;
   }>(),
   {
     closeLabel: "Close tab",
@@ -56,6 +58,7 @@ const props = withDefaults(
     createDisabled: false,
     dragEnabled: false,
     incomingDrag: false,
+    nativeContextMenu: true,
   },
 );
 
@@ -168,6 +171,7 @@ function handleTabKeydown(event: KeyboardEvent, index: number) {
 // Tab content lives in native child WebViews layered above this Header
 // WebView, so an HTML menu would be clipped; always use the native popup.
 function openContextMenu(groupId: string, x: number, y: number) {
+  if (!props.nativeContextMenu) return;
   void openNativeContextMenu(groupId, x, y).catch((error: unknown) => {
     console.error("Native Tab menu failed", error);
   });

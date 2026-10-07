@@ -2,6 +2,8 @@ import { emitTo } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 import { createUuidV7 } from "./core-api/ids";
+import { workspaceHostMode } from "./platform-host";
+import { closeSingleDocumentNewPage, performSingleDocumentShellAction } from "./single-document-workspace";
 import { isWorkspaceTabView } from "./workspace-window-context";
 import { getWorkspaceTabContext } from "./workspace-tab-windows";
 import { requestReply, SHELL_ACTION_TIMEOUT_MS } from "./workspace-tab-reply";
@@ -28,6 +30,12 @@ export async function requestWorkspaceTabShellAction(
   action: WorkspaceTabShellAction,
   options?: { closeSourceOnSuccess?: boolean },
 ): Promise<void> {
+  if (workspaceHostMode() !== "nativeTabs") {
+    // The New page is an in-document Page Tab here; it closes itself after a successful action.
+    await performSingleDocumentShellAction(action);
+    if (options?.closeSourceOnSuccess) closeSingleDocumentNewPage();
+    return;
+  }
   const id = new URLSearchParams(window.location.search).get("tabId");
   if (!isWorkspaceTabView() || !id) throw new Error("workspace_tab.invalid_view");
   const context = await getWorkspaceTabContext();

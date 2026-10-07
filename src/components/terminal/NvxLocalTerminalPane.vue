@@ -39,6 +39,15 @@ import NvxTerminalPaneOverflowMenu from "./NvxTerminalPaneOverflowMenu.vue";
 import NvxTerminalTools from "./NvxTerminalTools.vue";
 import NvxTerminalView from "./NvxTerminalView.vue";
 import { createFencedTerminalResize } from "./fencedTerminalResize";
+import { keepTerminalFocusOnPointerDown } from "./mobileToolbarPointer";
+import { useTerminalPaneImmersive } from "./useTerminalPaneImmersive";
+import {
+  createTerminalInputWriter,
+  TerminalInputDroppedError,
+  TerminalInputFenceChangedError,
+  type TerminalInputDispatch,
+  type TerminalInputWriteResult,
+} from "../../terminal/input-coalescer";
 import NvxNativeTerminalTools from "./NvxNativeTerminalTools.vue";
 import { recordNativeTerminalHistory } from "../../core-api/native-terminal";
 import { useNativeTerminalStore } from "../../stores/nativeTerminal";
@@ -61,6 +70,7 @@ interface TerminalViewExpose {
   clear(): void;
   pasteFromClipboard(): Promise<void> | undefined;
   currentDraft(): string | null;
+  applicationCursorKeys?(): boolean;
   invalidateDraft(): void;
 }
 
@@ -105,6 +115,8 @@ const emit = defineEmits<{
 }>();
 
 const { t, te } = useI18n();
+// Landscape + soft keyboard on phones: the toolbar collapses to a state strip so the terminal keeps its rows.
+const immersive = useTerminalPaneImmersive();
 const tips = useTipsStore();
 const nativeHistory = useNativeTerminalStore();
 const nativeTools = ref<InstanceType<typeof NvxNativeTerminalTools> | null>(null);
@@ -441,6 +453,7 @@ async function open(initialOpen?: InitialLocalOpen, onInitialFailure?: (error: u
     // but never deduplicate or label new-session input or output with the old process counter.
     lastAppliedEventSeq = 0n;
     lastAppliedOutputSeq = 0n;
+    inputWriter.discardQueued();
     inputSequence = 0n;
     if (initialOpen) {
       updateSummary(response.session);
@@ -741,58 +754,76 @@ async function renewLease() {
   }
 }
 
-async function send(value: string) {
+function prepareInputDispatch(): TerminalInputDispatch | null {
   const current = session.value;
   const currentAttachment = attachment.value;
   const currentLease = lease.value;
-  if (!current?.ptyId || !currentAttachment || !currentLease || !writable.value) {
-    throw new Error("Local terminal input is unavailable");
-  }
-  inputSequence += 1n;
-  // A prompt can arrive after typed-ahead input; do not mistake this line for empty input.
-  await sendLocalInput({
+  const ptyId = current?.ptyId;
+  if (!current || !ptyId || !currentAttachment || !currentLease || !writable.value) return null;
+  const fence = {
     sessionId: current.sessionId,
     expectedGeneration: current.generation,
-    expectedStateRevision: current.stateRevision,
-    ptyId: current.ptyId,
+    ptyId,
     attachmentId: currentAttachment.attachmentId,
     viewId,
     leaseId: currentLease.leaseId,
     focusEpoch: currentLease.focusEpoch,
     inputEpoch: currentLease.inputEpoch,
-    clientSeq: inputSequence.toString(),
-    bytes: Array.from(new TextEncoder().encode(value)),
-  });
+  };
+  // The state revision is re-read for every request but is not an ownership fence, so it does not split batches.
+  return {
+    key: JSON.stringify(fence),
+    async write(value: string) {
+      inputSequence += 1n;
+      const clientSeq = inputSequence;
+      // A prompt can arrive after typed-ahead input; do not mistake this line for empty input.
+      await sendLocalInput({ ...fence, expectedStateRevision: current.stateRevision, clientSeq: clientSeq.toString(), bytes: Array.from(new TextEncoder().encode(value)) });
+      return clientSeq;
+    },
+  };
+}
+
+// One request in flight per Pane; input typed meanwhile is merged under the same fence.
+const inputWriter = createTerminalInputWriter(prepareInputDispatch, {
+  unavailable: () => new Error("Local terminal input is unavailable"),
+});
+
+async function send(value: string) {
+  await inputWriter.send(value);
 }
 
 async function handleTerminalInput(value: string, observedCommand?: string) {
   const current = session.value;
   const attached = attachment.value;
   const inputLease = lease.value;
-  const previousSequence = inputSequence;
+  let written: TerminalInputWriteResult;
   try {
-    await send(value);
-  } catch {
-    // The PTY write is non-idempotent. Its IPC rejection may be
-    // delivery-uncertain, so stop accepting input until Core grants a fresh
-    // focus lease and tell the user to inspect terminal output before retrying.
-    applyFocusLease(null);
+    written = await inputWriter.send(value, { seal: Boolean(observedCommand) });
+  } catch (error) {
+    // A batch dropped behind an earlier failure was never written; that failure already revoked input and informed the user.
+    if (error instanceof TerminalInputDroppedError) return;
     const current = session.value;
     tips.show({
       scope: `local-terminal-input:${current?.sessionId ?? props.paneId}:${current?.generation ?? "none"}`,
       tone: "error",
       title: t("quickCommands.runFailed"),
     });
+    // A fence change before sending wrote nothing and belongs to the new owner; keep its lease.
+    if (error instanceof TerminalInputFenceChangedError) return;
+    // The PTY write is non-idempotent. Its IPC rejection may be
+    // delivery-uncertain, so stop accepting input until Core grants a fresh
+    // focus lease and tell the user to inspect terminal output before retrying.
+    applyFocusLease(null);
     return;
   }
-  if (!observedCommand || value !== "\r" || !current?.ptyId || !attached || !inputLease
-    || inputSequence !== previousSequence + 1n) return;
+  if (!observedCommand || !value.endsWith("\r") || !written.lastInBatch || !current?.ptyId || !attached || !inputLease
+    || inputSequence !== written.clientSeq) return;
   try {
     const recorded = await recordNativeTerminalHistory({ command: observedCommand, inputFence: { kind: "local", payload: {
       sessionId: current.sessionId, expectedGeneration: current.generation, expectedStateRevision: current.stateRevision,
       ptyId: current.ptyId, attachmentId: attached.attachmentId, viewId,
       focusEpoch: inputLease.focusEpoch, leaseId: inputLease.leaseId,
-      inputEpoch: inputLease.inputEpoch, clientSeq: inputSequence.toString(),
+      inputEpoch: inputLease.inputEpoch, clientSeq: written.clientSeq.toString(),
     } } });
     if (recorded) nativeHistory.historyChanged();
   } catch { /* Uncertain history capture must not change terminal input or retry its Enter. */ }
@@ -848,6 +879,7 @@ function registerInputTarget() {
     focusTarget: currentFocusTarget,
     applyFocusLease,
     canAcceptInput: () => writable.value,
+    cursorKeysMode: () => terminalView.value?.applicationCursorKeys?.() ? "application" : "normal",
     send,
   });
 }
@@ -925,7 +957,14 @@ onBeforeUnmount(() => {
     @pointerdown="activateTerminalSurface"
     @focusin="activateTerminalSurface"
   >
-    <header class="local-terminal-pane__status">
+    <header
+      class="local-terminal-pane__status"
+      :class="{ 'local-terminal-pane__status--immersive': immersive }"
+      :data-tone="immersive ? (viewUnavailable || state === 'failed' ? 'danger' : state === 'running' ? 'success' : 'neutral') : undefined"
+      :role="immersive ? 'status' : undefined"
+      :aria-label="immersive ? stateLabel : undefined"
+      @pointerdown="keepTerminalFocusOnPointerDown"
+    >
       <div class="local-terminal-pane__identity">
         <NvxStatusLabel :tone="viewUnavailable || state === 'failed' ? 'danger' : state === 'running' ? 'success' : 'neutral'">
           {{ stateLabel }}
@@ -1146,5 +1185,27 @@ onBeforeUnmount(() => {
   top: 44px;
   right: var(--nvx-space-3);
   left: var(--nvx-space-3);
+}
+
+/* Phone immersive mode: a 4px strip keeps the Session state visible (the status role and label carry it for assistive tech). */
+.local-terminal-pane__status--immersive {
+  min-height: 0;
+  height: 4px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--nvx-color-text-tertiary);
+}
+
+.local-terminal-pane__status--immersive > * {
+  display: none !important;
+}
+
+.local-terminal-pane__status--immersive[data-tone="success"] {
+  background: var(--nvx-color-success);
+}
+
+.local-terminal-pane__status--immersive[data-tone="danger"] {
+  background: var(--nvx-color-danger);
 }
 </style>

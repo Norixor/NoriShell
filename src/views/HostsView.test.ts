@@ -19,6 +19,11 @@ vi.mock("../saved-connections", () => ({ onSavedConnectionsChanged: vi.fn(async 
   return () => { savedConnections.changed = undefined; };
 }) }));
 vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: nativeWindows.vault }));
+const platformHost = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../platform-host")>()),
+  isMobileLayout: () => platformHost.mobile,
+}));
 
 const client = vi.hoisted(() => ({
   cancelHostCreatePassword: vi.fn(),
@@ -40,6 +45,7 @@ const client = vi.hoisted(() => ({
   getHostConnectionConfig: vi.fn(),
   fetchVaultStatus: vi.fn(),
   importPrivateKeyFile: vi.fn(),
+  releasePrivateKeyFileImport: vi.fn(async () => undefined),
   listCredentialRefs: vi.fn(),
   listHostCatalog: vi.fn(),
   listHostGroups: vi.fn(),
@@ -88,6 +94,7 @@ vi.mock("../core-api/client", async (importOriginal) => {
     getHostConnectionConfig: client.getHostConnectionConfig,
     fetchVaultStatus: client.fetchVaultStatus,
     importPrivateKeyFile: client.importPrivateKeyFile,
+    releasePrivateKeyFileImport: client.releasePrivateKeyFileImport,
     listCredentialRefs: client.listCredentialRefs,
     listHostCatalog: client.listHostCatalog,
     listHostGroups: client.listHostGroups,
@@ -237,6 +244,21 @@ async function chooseSelectOption(selectId: string, label: string) {
 }
 
 const body = () => new DOMWrapper(document.body);
+
+function menuItems() {
+  return Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="menu"] [role="menuitem"]'));
+}
+
+function menuItem(label: string) {
+  return menuItems().find((candidate) => candidate.textContent?.trim() === label);
+}
+
+async function openMenu(label: string) {
+  const trigger = document.body.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+  if (!trigger) throw new Error(`Missing menu trigger: ${label}`);
+  trigger.click();
+  await flushPromises();
+}
 
 describe("HostsView single-Host management contract", () => {
   beforeEach(() => {
@@ -523,6 +545,150 @@ describe("HostsView single-Host management contract", () => {
     document.body.innerHTML = "";
   });
 
+  it("hides the system SSH Agent entry on the phone shell while keeping the paste-based config import", async () => {
+    platformHost.mobile = true;
+    try {
+      const { wrapper } = await mountView();
+      expect(button("Add Host")).toBeDefined();
+      await openMenu("More host actions");
+      expect(menuItem("Import SSH Config")).toBeDefined();
+      expect(button("SSH Agent")).toBeUndefined();
+      wrapper.unmount();
+    } finally {
+      platformHost.mobile = false;
+    }
+  });
+
+  it("keeps one primary Add Host in the phone header and moves secondary actions into the overflow", async () => {
+    platformHost.mobile = true;
+    try {
+      const { wrapper } = await mountView();
+      const actions = wrapper.get(".hosts-page__primary-actions");
+      const headerButtons = actions.findAll("button");
+      expect(headerButtons.map((candidate) => candidate.text())).toEqual(["Add Host", ""]);
+      expect(actions.get('[aria-label="More host actions"]').attributes("aria-haspopup")).toBe("menu");
+      expect(button("Import SSH Config")).toBeUndefined();
+
+      await openMenu("More host actions");
+      expect(menuItems().map((item) => item.textContent?.trim())).toEqual([
+        "Import SSH Config",
+        "Interactive auth",
+        "Manage groups and tags",
+      ]);
+      menuItem("Import SSH Config")?.click();
+      await flushPromises();
+      expect(document.querySelector('[role="menu"]')).toBeNull();
+      expect(document.querySelector("#openssh-config-text")).not.toBeNull();
+      wrapper.unmount();
+    } finally {
+      platformHost.mobile = false;
+    }
+  });
+
+  it("renders a dense phone row with inline Connect and the other actions in a row menu", async () => {
+    platformHost.mobile = true;
+    try {
+      const { wrapper } = await mountView();
+      const row = wrapper.get(".hosts-list__row");
+      expect(row.find(".hosts-list__actions").exists()).toBe(false);
+      expect(row.text()).not.toContain("Endpoint");
+      expect(row.text()).toContain("deploy · ssh.example.test:22");
+      expect(row.get(".hosts-list__favorite-mark").attributes("aria-label")).toBe("Favorite");
+      expect(row.findAll("button").map((candidate) => candidate.text())).toEqual(["Connect", ""]);
+
+      row.get(".hosts-list__connect").element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await flushPromises();
+      expect(terminalNavigation.open).toHaveBeenCalledWith({ hostId: host.hostId });
+
+      await openMenu("Actions for Production");
+      expect(menuItems().map((item) => item.textContent?.trim())).toEqual([
+        "Remove from favorites",
+        "Connection Route",
+        "Post-login commands",
+        "Edit",
+        "Delete",
+      ]);
+      expect(menuItem("Delete")?.classList).toContain("nvx-action-menu__item--danger");
+      menuItem("Edit")?.click();
+      await flushPromises();
+      expect(nativeWindows.open).toHaveBeenCalledWith(expect.objectContaining({
+        kind: "hostEditor",
+        hostId: host.hostId,
+        initialSection: "connection",
+      }));
+      wrapper.unmount();
+    } finally {
+      platformHost.mobile = false;
+    }
+  });
+
+  it("toggles the favorite and asks for delete confirmation from the phone row menu", async () => {
+    platformHost.mobile = true;
+    try {
+      const { wrapper } = await mountView();
+      await openMenu("Actions for Production");
+      menuItem("Remove from favorites")?.click();
+      await flushPromises();
+      expect(client.updateHostFavorite).toHaveBeenCalledWith({
+        hostId: host.hostId,
+        expectedStateVersion: host.stateVersion,
+        favorite: false,
+      });
+
+      await openMenu("Actions for Production");
+      expect(menuItem("Add to favorites")).toBeDefined();
+      menuItem("Delete")?.click();
+      await flushPromises();
+      expect(client.deleteHost).not.toHaveBeenCalled();
+      await button("Delete Host")?.click();
+      await flushPromises();
+      expect(client.deleteHost).toHaveBeenCalledWith(host.hostId, "5");
+      wrapper.unmount();
+    } finally {
+      platformHost.mobile = false;
+    }
+  });
+
+  it("keeps the phone empty state compact without a second Add Host button", async () => {
+    platformHost.mobile = true;
+    client.listHostCatalog.mockResolvedValue([]);
+    try {
+      const { wrapper } = await mountView();
+      const empty = wrapper.get(".hosts-empty");
+      expect(empty.text()).toContain("No saved hosts");
+      expect(empty.find("button").exists()).toBe(false);
+      expect(Array.from(document.body.querySelectorAll("button"))
+        .filter((candidate) => candidate.textContent?.trim() === "Add Host")).toHaveLength(1);
+      wrapper.unmount();
+    } finally {
+      platformHost.mobile = false;
+    }
+  });
+
+  it("keeps the desktop header and row actions inline", async () => {
+    const { wrapper } = await mountView();
+    expect(wrapper.get(".hosts-page__primary-actions").findAll("button").map((candidate) => candidate.text())).toEqual([
+      "Import SSH Config",
+      "SSH Agent",
+      "Interactive auth",
+      "Manage groups and tags",
+      "Add Host",
+    ]);
+    expect(wrapper.find(".nvx-action-menu").exists()).toBe(false);
+    expect(wrapper.find(".hosts-list__favorite-mark").exists()).toBe(false);
+    const row = wrapper.get(".hosts-list__row");
+    expect(row.text()).toContain("Endpoint");
+    expect(row.get(".hosts-list__actions").findAll("button").map((candidate) => candidate.text())).toEqual([
+      "",
+      "Connection Route",
+      "Post-login commands",
+      "Edit",
+      "Delete",
+      "Connect",
+    ]);
+    wrapper.unmount();
+  });
+
   it("keeps dirty native-window drafts until discard is explicitly confirmed", async () => {
     const { wrapper } = await mountView("/hosts?create=1");
     const editor = wrapper.getComponent(NvxHostEditor);
@@ -675,16 +841,12 @@ describe("HostsView single-Host management contract", () => {
     }));
     expect(client.importPrivateKeyFile.mock.calls[0]?.[0]).not.toHaveProperty("path");
     expect(client.importPrivateKeyFile.mock.calls[0]?.[0]).not.toHaveProperty("secret");
-    expect(body().text()).toContain("Imported: ssh-rsa · SHA256:aws-key");
-
+    // A successful import closes its dialog; the editor itself carries the derived metadata.
     const privateKeyDialog = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'))
       .find((candidate) => candidate.querySelector(".nvx-dialog__title")?.textContent?.trim()
         === "Import SSH private key");
-    const closeImport = Array.from(privateKeyDialog?.querySelectorAll<HTMLButtonElement>("button") ?? [])
-      .find((candidate) => candidate.textContent?.trim() === "Cancel");
-    await closeImport?.click();
-    await flushPromises();
-
+    expect(privateKeyDialog).toBeUndefined();
+    expect(body().text()).toContain("Imported: ssh-rsa · SHA256:aws-key");
     expect(body().text()).toContain("Private key encrypted into the Vault");
     await button("Save Host")?.click();
     await flushPromises();
@@ -1266,8 +1428,8 @@ describe("HostsView single-Host management contract", () => {
 
     const sections = wrapper.findAll(".hosts-list__section");
     expect(sections).toHaveLength(2);
-    expect(wrapper.text()).toContain("Personal · 1 hosts");
-    expect(wrapper.text()).toContain("Production · 1 hosts");
+    expect(wrapper.text()).toContain("Personal · 1 host");
+    expect(wrapper.text()).toContain("Production · 1 host");
     const productionRow = sections.find((section) => section.text().includes("Production"))!;
     expect(productionRow.get(".hosts-list__title-row").text()).toContain("Production");
     expect(productionRow.get(".hosts-list__title-row").text()).toContain("Critical");
@@ -1323,6 +1485,8 @@ describe("HostsView single-Host management contract", () => {
     }));
     expect(client.importPrivateKeyFile.mock.calls[0]?.[0]).not.toHaveProperty("path");
     expect(client.importPrivateKeyFile.mock.calls[0]?.[0]).not.toHaveProperty("secret");
+    expect(Array.from(document.querySelectorAll<HTMLElement>(".nvx-dialog__title")).map((title) => title.textContent?.trim()))
+      .not.toContain("Import SSH private key");
     expect(body().text()).toContain("Imported: ssh-rsa · SHA256:aws-key");
     expect(tips.items).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -1331,6 +1495,69 @@ describe("HostsView single-Host management contract", () => {
         title: "Private key encrypted into the Vault",
       }),
     ]));
+    wrapper.unmount();
+  });
+
+  it("retries a passphrase error with the file Core kept and releases it when the dialog closes", async () => {
+    client.importPrivateKeyFile.mockRejectedValueOnce({
+      code: "credential.incorrect_passphrase", category: "validation", retryStrategy: "waitForUser",
+      messageKey: "errors.credential.incorrectPassphrase", params: {}, requestId: null, diagnosticId: null, conflict: null,
+    });
+    const { wrapper } = await mountView();
+
+    await button("Edit")?.click();
+    await flushPromises();
+    await button("Import private key file")?.click();
+    await flushPromises();
+    await button("Choose and import file")?.click();
+    await flushPromises();
+
+    // The chosen file stays with Core; only the passphrase is asked again.
+    expect(button("Import with this passphrase")).toBeDefined();
+    client.importPrivateKeyFile.mockRejectedValueOnce({
+      code: "credential.incorrect_passphrase", category: "validation", retryStrategy: "waitForUser",
+      messageKey: "errors.credential.incorrectPassphrase", params: {}, requestId: null, diagnosticId: null, conflict: null,
+    });
+    await button("Import with this passphrase")?.click();
+    await flushPromises();
+    const [first, second] = client.importPrivateKeyFile.mock.calls.map((call) => call[0] as { operationId: string });
+    expect(second?.operationId).toBe(first?.operationId);
+    expect(client.releasePrivateKeyFileImport).not.toHaveBeenCalled();
+
+    const privateKeyDialog = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'))
+      .find((candidate) => candidate.querySelector(".nvx-dialog__title")?.textContent?.trim() === "Import SSH private key");
+    Array.from(privateKeyDialog!.querySelectorAll<HTMLButtonElement>("button"))
+      .find((candidate) => candidate.textContent?.trim() === "Cancel")?.click();
+    await flushPromises();
+    expect(client.releasePrivateKeyFileImport).toHaveBeenCalledWith(first?.operationId);
+    wrapper.unmount();
+  });
+
+  it("names a broken key file inside the import dialog instead of a bottom Tip", async () => {
+    client.importPrivateKeyFile.mockRejectedValueOnce({
+      code: "credential.invalid_material", category: "validation", retryStrategy: "never",
+      messageKey: "errors.credential.invalidMaterial", params: {}, requestId: null, diagnosticId: null, conflict: null,
+    });
+    const { tips, wrapper } = await mountView();
+
+    await button("Edit")?.click();
+    await flushPromises();
+    await button("Import private key file")?.click();
+    await flushPromises();
+    await button("Choose and import file")?.click();
+    await flushPromises();
+
+    const privateKeyDialog = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'))
+      .find((candidate) => candidate.querySelector(".nvx-dialog__title")?.textContent?.trim() === "Import SSH private key");
+    expect(privateKeyDialog).toBeDefined();
+    const inline = privateKeyDialog!.querySelector("[data-private-key-import-error]");
+    expect(inline?.textContent).toContain("The private key is invalid or corrupted. Check that it is a complete OpenSSH private key.");
+    expect(tips.items.filter((item) => item.scope === "host-editor-private-key")).toHaveLength(0);
+    // A retry clears the inline error before Core answers again.
+    client.importPrivateKeyFile.mockResolvedValueOnce(null);
+    await button("Choose and import file")?.click();
+    await flushPromises();
+    expect(privateKeyDialog!.querySelector("[data-private-key-import-error]")).toBeNull();
     wrapper.unmount();
   });
 
@@ -1458,7 +1685,7 @@ describe("HostsView single-Host management contract", () => {
       expect.objectContaining({
         scope: "hosts-openssh-import",
         tone: "success",
-        title: "Atomically imported 1 host(s)",
+        title: "Atomically imported 1 host",
       }),
     ]));
     wrapper.unmount();

@@ -1,20 +1,32 @@
 <script setup lang="ts">
+import { isMobileLayout } from "../../platform-host";
+
 defineProps<{
   breadcrumb: string;
   title: string;
   description?: string;
 }>();
+
+// The phone shell shows a one-row header (title + actions); the breadcrumb and the long
+// description are desktop-only. A platform fact, never a viewport measurement.
+const compact = isMobileLayout();
 </script>
 
 <template>
-  <header class="nvx-page-header">
-    <p class="nvx-page-header__breadcrumb">
+  <header
+    class="nvx-page-header"
+    :class="{ 'nvx-page-header--compact': compact }"
+  >
+    <p
+      v-if="!compact"
+      class="nvx-page-header__breadcrumb"
+    >
       {{ breadcrumb }}
     </p>
     <div class="nvx-page-header__row">
       <div>
         <h1>{{ title }}</h1>
-        <p v-if="description">
+        <p v-if="description && !compact">
           {{ description }}
         </p>
       </div>

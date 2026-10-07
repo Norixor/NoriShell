@@ -11,6 +11,9 @@ const native = vi.hoisted(() => ({
   closeEmpty: vi.fn(),
 }));
 
+const hostMode = vi.hoisted(() => ({ value: "nativeTabs" as "nativeTabs" | "singleDocument" }));
+vi.mock("./platform-host", () => ({ workspaceHostMode: () => hostMode.value }));
+
 vi.mock("./workspace-tab-windows", () => ({
   workspaceWindowLabel: () => native.owner,
   snapshotWorkspaceTabs: native.snapshot,
@@ -104,4 +107,17 @@ describe("native Workspace Tab movement", () => {
     expect(native.closeEmpty).toHaveBeenCalledWith("workspace-a");
   });
 
+});
+
+describe("single-document hosts", () => {
+  afterEach(() => { hostMode.value = "nativeTabs"; });
+
+  it("never reparents or opens a native window for a Tab hosted in one document", async () => {
+    hostMode.value = "singleDocument";
+    vi.clearAllMocks();
+    await expect(moveWorkspaceTab(id, "workspace-a")).rejects.toThrow("workspace_tab.native_views_unsupported");
+    await expect(moveWorkspaceTabToNewWindow(id)).rejects.toThrow("workspace_tab.native_views_unsupported");
+    expect(native.moveView).not.toHaveBeenCalled();
+    expect(native.openWindow).not.toHaveBeenCalled();
+  });
 });

@@ -15,6 +15,7 @@ vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ label: "
 vi.mock("./workspace-window-context", () => ({ isWorkspaceTabView: () => bridge.tabView }));
 vi.mock("./workspace-tab-windows", () => ({ getWorkspaceTabContext: bridge.context }));
 vi.mock("./workspace-tab-view-shell", () => ({ performWorkspaceTabShellAction: bridge.perform }));
+vi.mock("./platform-host", () => ({ workspaceHostMode: () => "nativeTabs" }));
 
 import { openWorkspaceTerminalHost, requestWorkspaceTabShellAction } from "./workspace-tab-shell-action";
 

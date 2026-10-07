@@ -1,5 +1,8 @@
 import type { ComponentPublicInstance, CSSProperties } from "vue";
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+
+import { mountMobileSheetBackdrop, pushMobileOverlay, type MobileOverlayHandle, type MobileSheetBackdropHandle } from "../../mobile-overlays";
+import { isMobileLayout } from "../../platform-host";
 
 interface ComponentTrigger {
   $el?: HTMLElement;
@@ -8,6 +11,14 @@ interface ComponentTrigger {
 /**
   * Centralizes the host Popover Menu lifecycle for opening, focus, keyboard interaction, and outside dismissal.
   * Each calling component still owns its menu actions and visible items.
+  *
+  * On the phone shell the same menu renders as a bottom action sheet: the panel is
+  * tagged `data-nvx-mobile-sheet` (styled globally), gets a scrim and joins the
+  * overlay stack so the Android back key closes it. While open, the panel is hosted
+  * directly under `body`: an ancestor with `contain`, `transform` or `filter` would
+  * otherwise become the containing block of the fixed sheet and trap it beneath the
+  * body-level scrim. The panel returns to its place before Vue patches the consumer.
+  * Desktop positioning is unchanged.
  */
 export function usePopoverMenu(options: { enabled?: boolean } = {}) {
   const root = ref<HTMLElement | null>(null);
@@ -16,10 +27,57 @@ export function usePopoverMenu(options: { enabled?: boolean } = {}) {
   const viewportPanelStyle = ref<CSSProperties>({ visibility: "hidden" });
   const open = ref(false);
   let visibilityObserver: ResizeObserver | null = null;
+  const mobileSheet = isMobileLayout();
+  let overlay: MobileOverlayHandle | null = null;
+  let removeBackdrop: MobileSheetBackdropHandle | null = null;
+  let hostedPanel: HTMLElement | null = null;
+  let hostedPlaceholder: Comment | null = null;
+
+  function hostPanelInBody(panel: HTMLElement) {
+    if (hostedPanel || panel.parentNode === document.body || !panel.parentNode) return;
+    hostedPlaceholder = document.createComment("nvx-mobile-sheet");
+    panel.parentNode.insertBefore(hostedPlaceholder, panel);
+    document.body.appendChild(panel);
+    hostedPanel = panel;
+  }
+
+  function restoreHostedPanel() {
+    const panel = hostedPanel;
+    const placeholder = hostedPlaceholder;
+    hostedPanel = null;
+    hostedPlaceholder = null;
+    if (!placeholder) return;
+    // A panel Vue already removed stays removed; only a live one goes back for Vue to unmount in place.
+    if (panel?.isConnected && placeholder.parentNode) placeholder.parentNode.insertBefore(panel, placeholder);
+    placeholder.remove();
+  }
+
+  function presentMobileSheet() {
+    const panel = viewportPanel.value ?? root.value?.querySelector<HTMLElement>('[role="menu"]') ?? null;
+    if (panel) {
+      panel.dataset.nvxMobileSheet = "";
+      hostPanelInBody(panel);
+    }
+    if (viewportPanel.value) viewportPanelStyle.value = {};
+    removeBackdrop ??= mountMobileSheetBackdrop(() => closeMenu(true));
+    overlay ??= pushMobileOverlay(() => { closeMenu(true); return true; }, () => [removeBackdrop?.element, panel]);
+    overlay.refresh();
+  }
+
+  function dismissMobileSheet() {
+    restoreHostedPanel();
+    removeBackdrop?.();
+    removeBackdrop = null;
+    overlay?.release();
+    overlay = null;
+  }
+
+  // Consumers that write `open` directly still get the panel back before their re-render.
+  if (mobileSheet) watch(open, (value) => { if (!value) dismissMobileSheet(); }, { flush: "pre" });
 
   function menuItems() {
     return Array.from(
-      (viewportPanel.value ?? root.value)?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [],
+      (viewportPanel.value ?? hostedPanel ?? root.value)?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [],
     );
   }
 
@@ -65,6 +123,7 @@ export function usePopoverMenu(options: { enabled?: boolean } = {}) {
   function closeMenu(restoreFocus = false) {
     open.value = false;
     viewportPanelStyle.value = { visibility: "hidden" };
+    if (mobileSheet) dismissMobileSheet();
     if (restoreFocus) void nextTick(() => triggerElement()?.focus());
   }
 
@@ -72,21 +131,33 @@ export function usePopoverMenu(options: { enabled?: boolean } = {}) {
     open.value = !open.value;
     if (open.value) void (async () => {
       await nextTick();
-      if (viewportPanel.value) {
+      if (mobileSheet) {
+        presentMobileSheet();
+        await nextTick();
+      } else if (viewportPanel.value) {
         await positionViewportPanel();
         await nextTick();
       }
       menuItems()[0]?.focus();
     })();
-    else viewportPanelStyle.value = { visibility: "hidden" };
+    else {
+      viewportPanelStyle.value = { visibility: "hidden" };
+      if (mobileSheet) dismissMobileSheet();
+    }
   }
 
   function handleDocumentPointerDown(event: PointerEvent) {
-    if (open.value && !root.value?.contains(event.target as Node) && !viewportPanel.value?.contains(event.target as Node)) closeMenu();
+    const target = event.target as Node;
+    if (open.value && !root.value?.contains(target) && !viewportPanel.value?.contains(target) && !hostedPanel?.contains(target)) closeMenu();
   }
 
   function dismissForViewportChange(event: Event) {
-    if (event.target instanceof Node && viewportPanel.value?.contains(event.target)) return;
+    // A phone sheet is anchored to the viewport bottom by CSS, so a viewport change never
+    // invalidates it. Opening the sheet moves focus off the terminal, which closes the soft
+    // keyboard and resizes the window; dismissing here would make the sheet vanish before
+    // it is seen and the tap look swallowed.
+    if (mobileSheet && event.type === "resize") return;
+    if (event.target instanceof Node && (viewportPanel.value?.contains(event.target) || hostedPanel?.contains(event.target))) return;
     if (viewportPanel.value && open.value) closeMenu();
   }
 
@@ -127,6 +198,7 @@ export function usePopoverMenu(options: { enabled?: boolean } = {}) {
   });
 
   onBeforeUnmount(() => {
+    dismissMobileSheet();
     if (options.enabled === false) return;
     document.removeEventListener("pointerdown", handleDocumentPointerDown);
     document.removeEventListener("keydown", handleDocumentKeyDown);

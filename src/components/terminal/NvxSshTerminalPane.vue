@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { KeyRound, RotateCcw, Server, Unplug } from "lucide-vue-next";
+import { KeyRound, RotateCcw, Server, Unplug, X } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
@@ -47,13 +47,23 @@ import NvxHostMarker from "../hosts/NvxHostMarker.vue";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferences";
 import { useTipsStore } from "../../stores/tips";
-import { NvxButton, NvxDialog, NvxIcon, NvxInlineNotice, NvxStatusLabel } from "../ui";
+import { NvxButton, NvxDialog, NvxIcon, NvxIconButton, NvxInlineNotice, NvxStatusLabel } from "../ui";
+import { isMobileLayout } from "../../platform-host";
 import { usePopoverMenu } from "../ui/usePopoverMenu";
 import NvxTerminalPaneControls from "./NvxTerminalPaneControls.vue";
 import NvxTerminalPaneOverflowMenu from "./NvxTerminalPaneOverflowMenu.vue";
 import NvxTerminalTools from "./NvxTerminalTools.vue";
 import NvxTerminalView from "./NvxTerminalView.vue";
 import { createFencedTerminalResize } from "./fencedTerminalResize";
+import { keepTerminalFocusOnPointerDown } from "./mobileToolbarPointer";
+import { useTerminalPaneImmersive } from "./useTerminalPaneImmersive";
+import {
+  createTerminalInputWriter,
+  TerminalInputDroppedError,
+  TerminalInputFenceChangedError,
+  type TerminalInputDispatch,
+  type TerminalInputWriteResult,
+} from "../../terminal/input-coalescer";
 import NvxNativeTerminalTools from "./NvxNativeTerminalTools.vue";
 import { recordNativeTerminalHistory } from "../../core-api/native-terminal";
 import { useNativeTerminalStore } from "../../stores/nativeTerminal";
@@ -77,6 +87,7 @@ interface TerminalViewExpose {
   clear(): void;
   pasteFromClipboard(): Promise<void> | undefined;
   currentDraft(): string | null;
+  applicationCursorKeys?(): boolean;
   invalidateDraft(): void;
 }
 
@@ -125,6 +136,8 @@ const emit = defineEmits<{
 }>();
 
 const { t, te } = useI18n();
+// Landscape + soft keyboard on phones: the toolbar collapses to a state strip so the terminal keeps its rows.
+const immersive = useTerminalPaneImmersive();
 const hostMarkers = useHostMarkersStore();
 const terminalPreferences = useTerminalPreferencesStore();
 const tips = useTipsStore();
@@ -331,7 +344,7 @@ const heartbeatLabel = computed(() => {
       0,
     );
     return failures > 0
-      ? t("sshSession.heartbeat.transportFailures", { count: failures })
+      ? t("sshSession.heartbeat.transportFailures", failures)
       : t("sshSession.heartbeat.transportActive", { count: heartbeat.value.transports.length });
   }
   if (session.value?.state !== "running") return null;
@@ -416,6 +429,23 @@ const reconnectErrorMessage = computed(() => {
   return te(reconnectErrorKey.value)
     ? t(reconnectErrorKey.value)
     : t("sshSession.reconnectFailed");
+});
+const mobileLayout = isMobileLayout();
+const failureNoticeText = computed(() => reconnectErrorMessage.value ?? failureMessage.value);
+// Phones collapse the failure banner (tap to dismiss, or after a while) so it does not cover the
+// terminal; the danger status label in the Pane header keeps the state visible and re-opens it.
+const failureNoticeCollapsed = ref(false);
+let failureNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+const MOBILE_FAILURE_NOTICE_MS = 8_000;
+watch(failureNoticeText, (text) => {
+  failureNoticeCollapsed.value = false;
+  if (failureNoticeTimer !== null) clearTimeout(failureNoticeTimer);
+  failureNoticeTimer = null;
+  if (!mobileLayout || !text) return;
+  failureNoticeTimer = setTimeout(() => {
+    failureNoticeTimer = null;
+    failureNoticeCollapsed.value = true;
+  }, MOBILE_FAILURE_NOTICE_MS);
 });
 const needsCredentialInput = computed(
   () => failure.value?.retryStrategy === "chooseCredential"
@@ -998,27 +1028,41 @@ async function renewLease() {
   }
 }
 
-async function send(value: string) {
+function prepareInputDispatch(): TerminalInputDispatch | null {
   const current = session.value;
   const currentAttachment = attachment.value;
   const currentLease = lease.value;
-  if (!current || !currentAttachment?.channelId || !currentLease || !inputReady.value) {
-    throw new Error("SSH terminal input is unavailable");
-  }
-  inputSequence += 1n;
-  // Network delay can deliver the prompt after typed-ahead input; do not mistake this line for empty input.
-  await sendSshInput({
+  const channelId = currentAttachment?.channelId;
+  if (!current || !currentAttachment || !channelId || !currentLease || !inputReady.value) return null;
+  const fence = {
     sessionId: current.sessionId,
     expectedGeneration: current.generation,
-    channelId: currentAttachment.channelId,
+    channelId,
     attachmentId: currentAttachment.attachmentId,
     viewId,
     focusEpoch: currentLease.focusEpoch,
     leaseId: currentLease.leaseId,
     inputEpoch: currentLease.inputEpoch,
-    clientSeq: inputSequence.toString(),
-    bytes: Array.from(new TextEncoder().encode(value)),
-  });
+  };
+  return {
+    key: JSON.stringify(fence),
+    async write(value: string) {
+      inputSequence += 1n;
+      const clientSeq = inputSequence;
+      // Network delay can deliver the prompt after typed-ahead input; do not mistake this line for empty input.
+      await sendSshInput({ ...fence, clientSeq: clientSeq.toString(), bytes: Array.from(new TextEncoder().encode(value)) });
+      return clientSeq;
+    },
+  };
+}
+
+// One request in flight per Pane; input typed meanwhile is merged under the same fence.
+const inputWriter = createTerminalInputWriter(prepareInputDispatch, {
+  unavailable: () => new Error("SSH terminal input is unavailable"),
+});
+
+async function send(value: string) {
+  await inputWriter.send(value);
 }
 
 async function handleTerminalInput(value: string, observedCommand?: string) {
@@ -1026,31 +1070,35 @@ async function handleTerminalInput(value: string, observedCommand?: string) {
   const current = session.value;
   const attached = attachment.value;
   const inputLease = lease.value;
-  const previousSequence = inputSequence;
+  let written: TerminalInputWriteResult;
   try {
-    await send(value);
-  } catch {
-    // Input is non-idempotent: a rejected IPC result may still have reached
-    // the remote Shell. Revoke this renderer's local write path and require an
-    // explicit reconnect/focus recovery after the user checks terminal output.
-    lease.value = null;
-    stopLeaseHeartbeat();
+    written = await inputWriter.send(value, { seal: Boolean(observedCommand) });
+  } catch (error) {
+    // A batch dropped behind an earlier failure was never written; that failure already revoked input and informed the user.
+    if (error instanceof TerminalInputDroppedError) return;
     const current = session.value;
     tips.show({
       scope: `ssh-terminal-input:${current?.sessionId ?? props.paneId}:${current?.generation ?? "none"}`,
       tone: "error",
       title: t("quickCommands.runFailed"),
     });
+    // A fence change before sending wrote nothing and belongs to the new owner; keep its lease.
+    if (error instanceof TerminalInputFenceChangedError) return;
+    // Input is non-idempotent: a rejected IPC result may still have reached
+    // the remote Shell. Revoke this renderer's local write path and require an
+    // explicit reconnect/focus recovery after the user checks terminal output.
+    lease.value = null;
+    stopLeaseHeartbeat();
     return;
   }
-  if (!observedCommand || value !== "\r" || props.target.kind !== "host"
-    || !current || !attached?.channelId || !inputLease || inputSequence !== previousSequence + 1n) return;
+  if (!observedCommand || !value.endsWith("\r") || !written.lastInBatch || props.target.kind !== "host"
+    || !current || !attached?.channelId || !inputLease || inputSequence !== written.clientSeq) return;
   try {
     const recorded = await recordNativeTerminalHistory({ command: observedCommand, inputFence: { kind: "ssh", payload: {
       sessionId: current.sessionId, expectedGeneration: current.generation,
       channelId: attached.channelId, attachmentId: attached.attachmentId, viewId,
       focusEpoch: inputLease.focusEpoch, leaseId: inputLease.leaseId,
-      inputEpoch: inputLease.inputEpoch, clientSeq: inputSequence.toString(),
+      inputEpoch: inputLease.inputEpoch, clientSeq: written.clientSeq.toString(),
     } } });
     if (recorded) nativeHistory.historyChanged();
   } catch {
@@ -1159,11 +1207,48 @@ function disconnectForClose() {
   return performDisconnect(true);
 }
 
+/** A reconnect that a caller waits for could not start; nothing was sent to the server. */
+class SshReconnectUnavailableError extends Error {
+  constructor(readonly reason: "noSession" | "noAttachment" | "busy" | "notReconnectable") {
+    super(`SSH reconnect could not start: ${reason}`);
+    this.name = "SshReconnectUnavailableError";
+  }
+}
+
+function waitUntil(condition: () => boolean, timeoutMs: number) {
+  if (condition()) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => { stop(); resolve(condition()); }, timeoutMs);
+    const stop = watch(condition, (ready) => {
+      if (!ready) return;
+      clearTimeout(timer);
+      stop();
+      resolve(true);
+    });
+  });
+}
+
+/**
+ * An explicit credential (re-authentication from the launcher) arrives right
+ * after a secure prompt; on phones the main WebView was backgrounded meanwhile,
+ * so a foreground reconciliation or renderer re-attach may still be running and
+ * the attachment may be momentarily absent. Let that settle (re-attaching if
+ * needed) instead of silently dropping the user's credential.
+ */
+async function settleBeforeExplicitReconnect() {
+  if (foregroundReconcilePromise) await foregroundReconcilePromise.catch(() => undefined);
+  await waitUntil(() => !opening.value && !reconnecting.value, 10_000);
+  if (session.value && !attachment.value && !opening.value) await attachExistingSession(true);
+}
+
 async function reconnect(
   credentialRefId: string | null = null,
   vaultAlreadyUnlocked = false,
   propagateFailure = false,
 ) {
+  // Callers waiting for this reconnect (an explicit credential or a saved-credential retry) must get a result.
+  const mustReport = credentialRefId !== null || propagateFailure;
+  if (credentialRefId !== null) await settleBeforeExplicitReconnect();
   const current = session.value;
   if (credentialRefId === null && needsVaultUnlock.value && !vaultAlreadyUnlocked) {
     emit("requestVaultUnlock", props.paneId, current?.target ?? props.target);
@@ -1186,7 +1271,16 @@ async function reconnect(
     || !attachment.value
     || reconnecting.value
     || !["closed", "failed"].includes(current.state)
-  ) return;
+  ) {
+    // A Session that is already running again needs nothing more; anything else is reported, never dropped.
+    if (!mustReport || current?.state === "running") return;
+    const reason = !current ? "noSession"
+      : !attachment.value ? "noAttachment"
+        : reconnecting.value ? "busy"
+          : "notReconnectable";
+    reconnectErrorKey.value = "sshSession.reconnectFailed";
+    throw new SshReconnectUnavailableError(reason);
+  }
   const currentAttachment = attachment.value;
   if (credentialRefId === null && needsCredentialInput.value) {
     emit("requestCredential", props.paneId, current.target);
@@ -1218,6 +1312,7 @@ async function reconnect(
       lastAppliedEventSeq = 0n;
       lastAppliedOutputSeq = 0n;
     }
+    inputWriter.discardQueued();
     inputSequence = 0n;
     fencedResize.reset();
     attachment.value = details.attachments.find(
@@ -1349,6 +1444,7 @@ function registerInputTarget() {
     focusTarget: currentFocusTarget,
     applyFocusLease,
     canAcceptInput: () => writable.value,
+    cursorKeysMode: () => terminalView.value?.applicationCursorKeys?.() ? "application" : "normal",
     send,
   });
 }
@@ -1438,6 +1534,8 @@ watch(() => props.active, (active) => {
 });
 
 onBeforeUnmount(() => {
+  if (failureNoticeTimer !== null) clearTimeout(failureNoticeTimer);
+  failureNoticeTimer = null;
   window.removeEventListener("beforeunload", handleBeforeUnload);
   stopLeaseHeartbeat();
   stopAttachmentHeartbeat();
@@ -1453,7 +1551,14 @@ onBeforeUnmount(() => {
     @pointerdown="activateTerminalSurface"
     @focusin="activateTerminalSurface"
   >
-    <header class="ssh-terminal-pane__status">
+    <header
+      class="ssh-terminal-pane__status"
+      :class="{ 'ssh-terminal-pane__status--immersive': immersive }"
+      :data-tone="immersive ? (state === 'running' ? 'success' : state === 'failed' ? 'danger' : 'neutral') : undefined"
+      :role="immersive ? 'status' : undefined"
+      :aria-label="immersive ? stateDisplayLabel : undefined"
+      @pointerdown="keepTerminalFocusOnPointerDown"
+    >
       <div class="ssh-terminal-pane__identity">
         <div
           v-if="state === 'running'"
@@ -1505,6 +1610,20 @@ onBeforeUnmount(() => {
             </div>
           </Teleport>
         </div>
+        <button
+          v-else-if="failureNoticeCollapsed && failureNoticeText"
+          class="ssh-terminal-pane__state-toggle"
+          type="button"
+          :aria-label="`${stateDisplayLabel}: ${failureNoticeText}`"
+          @click="failureNoticeCollapsed = false"
+        >
+          <NvxStatusLabel
+            class="ssh-terminal-pane__state"
+            :tone="state === 'failed' ? 'danger' : 'neutral'"
+          >
+            {{ stateDisplayLabel }}
+          </NvxStatusLabel>
+        </button>
         <NvxStatusLabel
           v-else
           class="ssh-terminal-pane__state"
@@ -1649,18 +1768,27 @@ onBeforeUnmount(() => {
         </small>
       </div>
     </NvxInlineNotice>
-    <NvxInlineNotice
-      v-else-if="reconnectErrorMessage"
+    <div
+      v-else-if="failureNoticeText && !failureNoticeCollapsed"
       class="ssh-terminal-pane__failure"
-      tone="error"
-      :title="reconnectErrorMessage"
-    />
-    <NvxInlineNotice
-      v-else-if="failureMessage"
-      class="ssh-terminal-pane__failure"
-      tone="error"
-      :title="failureMessage"
-    />
+    >
+      <NvxInlineNotice
+        tone="error"
+        :title="failureNoticeText"
+      />
+      <NvxIconButton
+        v-if="mobileLayout"
+        class="ssh-terminal-pane__failure-dismiss"
+        size="sm"
+        :label="t('mobile.closeSheet')"
+        @click="failureNoticeCollapsed = true"
+      >
+        <NvxIcon
+          :icon="X"
+          :size="16"
+        />
+      </NvxIconButton>
+    </div>
     <NvxTerminalView
       ref="terminalView"
       :pane-id="paneId"
@@ -1886,6 +2014,26 @@ onBeforeUnmount(() => {
   left: var(--nvx-space-3);
 }
 
+.ssh-terminal-pane__failure-dismiss {
+  position: absolute;
+  top: var(--nvx-space-2);
+  right: var(--nvx-space-2);
+}
+
+.ssh-terminal-pane__failure:has(.ssh-terminal-pane__failure-dismiss) :deep(.nvx-inline-notice) {
+  padding-right: calc(var(--nvx-space-4) + 32px);
+}
+
+.ssh-terminal-pane__state-toggle {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+}
+
 .ssh-login-automation__body {
   display: grid;
   gap: var(--nvx-space-2);
@@ -1971,5 +2119,27 @@ onBeforeUnmount(() => {
 
 .ssh-host-key dd {
   overflow-wrap: anywhere;
+}
+
+/* Phone immersive mode: a 4px strip keeps the Session state visible (the status role and label carry it for assistive tech). */
+.ssh-terminal-pane__status--immersive {
+  min-height: 0;
+  height: 4px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--nvx-color-text-tertiary);
+}
+
+.ssh-terminal-pane__status--immersive > * {
+  display: none !important;
+}
+
+.ssh-terminal-pane__status--immersive[data-tone="success"] {
+  background: var(--nvx-color-success);
+}
+
+.ssh-terminal-pane__status--immersive[data-tone="danger"] {
+  background: var(--nvx-color-danger);
 }
 </style>

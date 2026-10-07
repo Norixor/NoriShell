@@ -4,17 +4,36 @@ import { createPinia } from "pinia";
 import App from "./App.vue";
 import { initializeApplicationPreferences, observeApplicationPreferenceProjection } from "./application-preferences-startup";
 import { parseCoreApiError } from "./core-api/client";
+import { retryWhileCoreStarting } from "./core-startup-retry";
 import { i18n } from "./locales";
 import { router } from "./router";
 import { useAppThemeStore } from "./stores/appTheme";
 import { useUiStore } from "./stores/ui";
+import { installMobileBackHandler } from "./mobile-overlays";
+import { isMobileLayout } from "./platform-host";
 import { disableDefaultWebviewContextMenu } from "./webview-context-menu";
 import { revealWindowAfterMount } from "./window-first-show";
 import "./styles/tokens.css";
 import "./styles/base.css";
+import "./styles/mobile.css";
 
 const pinia = createPinia();
 disableDefaultWebviewContextMenu();
+installMobileDocumentHost();
+
+/**
+ * Android only: the page draws under the status/navigation bars and lays out with
+ * `env(safe-area-inset-*)`; the base stylesheet drops the desktop minimum window
+ * size. Desktop WebViews keep the static viewport meta untouched.
+ */
+function installMobileDocumentHost() {
+  if (!isMobileLayout()) return;
+  document.documentElement.dataset.nvxHost = "mobile";
+  // The native Activity asks the page first on the back key; overlays close in stack order.
+  installMobileBackHandler();
+  document.querySelector('meta[name="viewport"]')
+    ?.setAttribute("content", "width=device-width, initial-scale=1.0, viewport-fit=cover");
+}
 
 async function revealMainWindow(): Promise<void> {
   const ui = useUiStore(pinia);
@@ -52,7 +71,7 @@ function showStartupFailure(stage: "preferences" | "application", error: unknown
 
 async function start() {
   try {
-    await initializeApplicationPreferences(pinia);
+    await retryWhileCoreStarting(() => initializeApplicationPreferences(pinia), { enabled: isMobileLayout() });
     const stopProjection = observeApplicationPreferenceProjection(pinia);
     window.addEventListener("pagehide", stopProjection, { once: true });
   } catch (error) {

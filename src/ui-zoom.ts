@@ -1,5 +1,6 @@
-import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+
+import { hasNativeWindowChrome, isMobileLayout } from "./platform-host";
 
 export const UI_ZOOM_LEVELS = [80, 90, 100, 110, 125, 150] as const;
 export type UiZoom = typeof UI_ZOOM_LEVELS[number];
@@ -9,10 +10,11 @@ export function isUiZoom(value: unknown): value is UiZoom {
 }
 
 export async function applyUiZoom(value: UiZoom): Promise<void> {
-  const scale = value / 100;
-  if (isTauri()) {
+  // The phone shell follows the device's own display scale; the saved desktop zoom is not applied there.
+  const scale = isMobileLayout() ? 1 : value / 100;
+  if (hasNativeWindowChrome()) {
     await getCurrentWebview().setZoom(scale);
-  } else {
+  } else if (!isMobileLayout()) {
     // Browser development previews use equivalent page scaling; native windows always call the WebView API.
     document.documentElement.style.zoom = String(scale);
   }

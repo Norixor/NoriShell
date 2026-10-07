@@ -635,7 +635,7 @@ function currentSummary(beforeDisplay = false) {
   if (kind === "file" && file) return {
     id: tabId, viewLabel, kind, route: permittedRoute,
     label: file.label || i18n.global.t(file.kind === "remote" ? "fileWorkspace.remoteTab" : "fileWorkspace.localTab"),
-    stateLabel: `${i18n.global.t("fileWorkspace.tabState")} · ${i18n.global.t("sshTerminal.paneCount", { count: file.paneCount })}`,
+    stateLabel: `${i18n.global.t("fileWorkspace.tabState")} · ${i18n.global.t("sshTerminal.paneCount", file.paneCount)}`,
   };
   const desktop = tabs.desktopTabs.find((tab) => tab.groupId === tabId);
   if (kind === "desktop" && desktop) return {
@@ -1137,7 +1137,7 @@ onBeforeUnmount(() => {
     plugin-protected
     :model-value="fallbackFileSessions.length > 0"
     :title="i18n.global.t('fileWorkspace.closeTabTitle')"
-    :description="i18n.global.t('fileWorkspace.closeTabDescription', { count: fallbackFileSessions.length })"
+    :description="i18n.global.t('fileWorkspace.closeTabDescription', fallbackFileSessions.length)"
     :close-label="i18n.global.t('fileWorkspace.closeDialog')"
     :dismissible="!fallbackFileCloseBusy"
     @update:model-value="(open) => { if (!open) cancelFallbackFileClose(); }"

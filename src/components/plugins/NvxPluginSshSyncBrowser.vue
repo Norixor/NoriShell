@@ -317,7 +317,7 @@ onBeforeUnmount(() => {
               :disabled="!hasSnapshot"
             />
           </div>
-          <span class="ssh-sync-browser__total">{{ totalCount === null ? '—' : t('desktopSync.resultCount', { count: totalCount }) }}</span>
+          <span class="ssh-sync-browser__total">{{ totalCount === null ? '—' : t('desktopSync.resultCount', totalCount) }}</span>
         </header>
         <div
           v-if="!hasSnapshot"
@@ -409,13 +409,13 @@ onBeforeUnmount(() => {
               v-if="rowsOmitted"
               class="ssh-sync-browser__omitted"
             >
-              {{ t('desktopSync.omitted', { count: rowsOmitted }) }}
+              {{ t('desktopSync.omitted', rowsOmitted) }}
             </p>
             <footer
               v-if="pageCount > 1 || query"
               class="ssh-sync-browser__pagination"
             >
-              <span>{{ t('desktopSync.resultCount', { count: filteredCount }) }}</span>
+              <span>{{ t('desktopSync.resultCount', filteredCount) }}</span>
               <div v-if="pageCount > 1">
                 <NvxButton
                   variant="ghost"

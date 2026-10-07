@@ -59,6 +59,20 @@ describe("OfflineBackup", () => {
     wrapper.unmount();
   });
 
+  it("names a truncated backup write by its stable Core code instead of the generic export failure", async () => {
+    client.exportBackup.mockRejectedValue({ code: "offline-backup-write-incomplete", messageKey: "offlineBackup.exportFailed" });
+    const wrapper = mountBackup();
+    await wrapper.findAll("button").find((item) => item.text() === "Choose location and export")!.trigger("click");
+    await flushPromises();
+
+    expect(useTipsStore().items[0]).toEqual(expect.objectContaining({
+      scope: "offline-backup", tone: "error", title: i18n.global.t("offlineBackupErrors.writeIncomplete"),
+    }));
+    expect(useTipsStore().items[0]?.title).toContain("Do not restore from it");
+    useTipsStore().clearAll();
+    wrapper.unmount();
+  });
+
   it("reports a failed backup open through the shared Tips store", async () => {
     client.openBackup.mockRejectedValue(new Error("fixture failure"));
     const wrapper = mountBackup();
@@ -69,7 +83,8 @@ describe("OfflineBackup", () => {
     expect(useTipsStore().items[0]).toEqual(expect.objectContaining({
       scope: "offline-backup", tone: "error", title: message,
     }));
-    expect(wrapper.text()).not.toContain(message);
+    // The secure window renders no Tips host, so the same result is also shown inline.
+    expect(wrapper.find(".offline-backup__result").text()).toContain(message);
     useTipsStore().clearAll();
     wrapper.unmount();
   });
@@ -157,6 +172,60 @@ describe("OfflineBackup", () => {
       "merge",
     );
     expect(wrapper.text()).toContain("merged into the unlocked Vault");
+    wrapper.unmount();
+  });
+
+  it("reports the import result inline because the secure window has no Tips host", async () => {
+    client.openBackup.mockResolvedValue({
+      handle: "opened-file",
+      inventory: { ssh: true, desktop: false, credentials: false, vault: false, hostCount: 2, desktopCount: 0, credentialCount: 0 },
+    });
+    client.previewBackup.mockResolvedValue({
+      handle: "preview-handle", hostCount: 2, desktopProfileCount: 0,
+      credentialCount: 0, duplicateHostCount: 0, duplicateDesktopProfileCount: 0, skippedCount: 0,
+    });
+    client.applyBackup.mockResolvedValue(undefined);
+    const wrapper = mountBackup();
+    await wrapper.findAll("button").find((item) => item.text() === "Choose backup file")!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((item) => item.text() === "Preview import")!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((item) => item.text() === "Confirm import")!.trigger("click");
+    await flushPromises();
+    expect(client.applyBackup).toHaveBeenCalledWith("opened-file", "preview-handle");
+    const status = wrapper.find(".offline-backup__result");
+    expect(status.exists()).toBe(true);
+    expect(status.text()).toContain("Selected contents imported.");
+    expect(useTipsStore().items.some((item) => item.title === "Selected contents imported.")).toBe(true);
+    // The next operation starts clean.
+    await wrapper.findAll("button").find((item) => item.text() === "Choose backup file")!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".offline-backup__result").exists()).toBe(false);
+    useTipsStore().clearAll();
+    wrapper.unmount();
+  });
+
+  it("keeps a failed import visible inline with its diagnostic id", async () => {
+    client.openBackup.mockResolvedValue({
+      handle: "opened-file",
+      inventory: { ssh: true, desktop: false, credentials: false, vault: false, hostCount: 1, desktopCount: 0, credentialCount: 0 },
+    });
+    client.previewBackup.mockResolvedValue({
+      handle: "preview-handle", hostCount: 1, desktopProfileCount: 0,
+      credentialCount: 0, duplicateHostCount: 0, duplicateDesktopProfileCount: 0, skippedCount: 0,
+    });
+    client.applyBackup.mockRejectedValue({ code: "offline-backup-apply-failed", messageKey: "offlineBackup.importFailed", diagnosticId: "diag-42" });
+    const wrapper = mountBackup();
+    await wrapper.findAll("button").find((item) => item.text() === "Choose backup file")!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((item) => item.text() === "Preview import")!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((item) => item.text() === "Confirm import")!.trigger("click");
+    await flushPromises();
+    const status = wrapper.find(".offline-backup__result");
+    expect(status.text()).toContain("Import did not finish");
+    expect(status.text()).toContain("diag-42");
+    useTipsStore().clearAll();
     wrapper.unmount();
   });
 });

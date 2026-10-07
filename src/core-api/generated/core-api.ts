@@ -163,8 +163,6 @@ export type SshSessionId = string;
 
 export type MetricsSessionId = string;
 
-export type MetricsHostKeyChallengeId = string;
-
 export type MetricsKeyboardInteractiveChallengeId = string;
 
 export type MetricsKeyboardInteractiveAnswerRefId = string;
@@ -1455,7 +1453,7 @@ export type KnownHostDeleteResponse = { knownHostId: KnownHostId, deleted: boole
 
 export type MetricByteCount = string;
 
-export type MetricsSessionState = "idle" | "connecting" | "verifyingHostKey" | "needsHostKeyReview" | "authenticating" | "needsAuthentication" | "detectingPlatform" | "sampling" | "ready" | "backoff" | "disconnecting" | "closed" | "failed";
+export type MetricsSessionState = "idle" | "connecting" | "verifyingHostKey" | "needsHostTrust" | "authenticating" | "needsAuthentication" | "detectingPlatform" | "sampling" | "ready" | "backoff" | "disconnecting" | "closed" | "failed";
 
 export type MetricsAuthenticationReason = "vaultLocked" | "keyboardInteractive" | "credentialUnavailable";
 
@@ -1485,13 +1483,9 @@ mount: string, usedBytes: MetricByteCount | null, availableBytes: MetricByteCoun
 
 export type MetricSnapshot = { hostId: HostId, metricsSessionId: MetricsSessionId, generation: WireSequence, sampleSequence: WireSequence, providerId: string, providerVersion: number, platform: MetricsPlatform, sampleStartedAtUnixMs: number, sampleCompletedAtUnixMs: number, stale: boolean, cpu: CpuMetric, memory: MemoryMetric, network: NetworkMetric, disks: Array<DiskMetric>, };
 
-export type MetricsSessionFailureCode = "connectionUnavailable" | "hostKeyMismatch" | "authenticationRejected" | "providerUnsupported" | "permissionDenied" | "sampleTimedOut" | "outputLimitExceeded" | "malformedOutput" | "transportLost";
+export type MetricsSessionFailureCode = "connectionUnavailable" | "connectionClosedByServer" | "hostKeyMismatch" | "authenticationRejected" | "providerUnsupported" | "permissionDenied" | "sampleTimedOut" | "outputLimitExceeded" | "malformedOutput" | "transportLost";
 
-export type MetricsSessionSummary = { metricsSessionId: MetricsSessionId, hostId: HostId, generation: WireSequence, stateRevision: WireSequence, state: MetricsSessionState, authenticationReason: MetricsAuthenticationReason | null, failureCode: MetricsSessionFailureCode | null, nextRetryAtUnixMs: number | null, latestSnapshot: MetricSnapshot | null, hostKeyChallenge: MetricsHostKeyChallenge | null, keyboardInteractiveChallenge: MetricsKeyboardInteractiveChallenge | null, };
-
-export type MetricsHostKeyChallenge = { challengeId: MetricsHostKeyChallengeId, metricsSessionId: MetricsSessionId, hostId: HostId, generation: WireSequence, routeStage: SshSessionRouteStage, algorithm: string, fingerprintSha256: string, trustedFingerprintSha256: string | null, };
-
-export type MetricsHostKeyDecision = "accept" | "reject";
+export type MetricsSessionSummary = { metricsSessionId: MetricsSessionId, hostId: HostId, generation: WireSequence, stateRevision: WireSequence, state: MetricsSessionState, authenticationReason: MetricsAuthenticationReason | null, failureCode: MetricsSessionFailureCode | null, nextRetryAtUnixMs: number | null, latestSnapshot: MetricSnapshot | null, keyboardInteractiveChallenge: MetricsKeyboardInteractiveChallenge | null, };
 
 export type MetricsKeyboardInteractivePrompt = { promptIndex: number, label: string, echo: boolean, };
 
@@ -1502,8 +1496,6 @@ export type MetricsReconcileRequest = { meta: RequestMeta, };
 export type MetricsRetryRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, hostId: HostId, expectedGeneration: WireSequence | null, };
 
 export type MetricsStopRequest = { meta: RequestMeta, hostId: HostId, expectedGeneration: WireSequence | null, };
-
-export type MetricsHostKeyDecisionRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, metricsSessionId: MetricsSessionId, hostId: HostId, expectedGeneration: WireSequence, challengeId: MetricsHostKeyChallengeId, decision: MetricsHostKeyDecision, };
 
 export type MetricsKeyboardInteractiveAnswerPrepareRequest = { meta: RequestMeta, answerRefId: MetricsKeyboardInteractiveAnswerRefId, metricsSessionId: MetricsSessionId, expectedGeneration: WireSequence, challengeId: MetricsKeyboardInteractiveChallengeId, roundIndex: number, promptIndex: number, value: string, };
 
@@ -1525,7 +1517,7 @@ export type SshSessionState = "resolving" | "connecting" | "verifyingHostKey" | 
 
 export type SshSessionFailureStage = "resolving" | "connecting" | "routeIngress" | "hostKeyVerification" | "authentication" | "channelOpen" | "running" | "disconnecting";
 
-export type SshSessionFailureCode = "resolutionFailed" | "connectionRefused" | "connectionTimedOut" | "proxyConnectionFailed" | "proxyRejected" | "proxyProtocolError" | "proxyCredentialLocked" | "proxyCredentialUnavailable" | "jumpChannelFailed" | "hostKeyRejected" | "hostKeyMismatch" | "hostKeyDecisionExpired" | "credentialUnavailable" | "authenticationRejected" | "authenticationFailed" | "sshAgentKeyUnavailable" | "sshAgentUnavailable" | "algorithmNegotiationFailed" | "channelOpenFailed" | "connectionLost" | "protocolError" | "disconnectTimedOut" | "internal";
+export type SshSessionFailureCode = "resolutionFailed" | "connectionRefused" | "connectionTimedOut" | "connectionClosedByServer" | "proxyConnectionFailed" | "proxyRejected" | "proxyProtocolError" | "proxyCredentialLocked" | "proxyCredentialUnavailable" | "jumpChannelFailed" | "hostKeyRejected" | "hostKeyMismatch" | "hostKeyDecisionExpired" | "hostKeyVerificationFailed" | "credentialUnavailable" | "vaultLocked" | "authenticationRejected" | "authenticationFailed" | "sshAgentKeyUnavailable" | "sshAgentUnavailable" | "algorithmNegotiationFailed" | "channelOpenFailed" | "connectionLost" | "protocolError" | "disconnectTimedOut" | "internal";
 
 export type SshSessionRetryStrategy = "never" | "retryOpen" | "refreshSession" | "unlockVault" | "chooseCredential" | "reviewHostKey";
 
@@ -1908,7 +1900,7 @@ export type ForwardRulePreflightResponse = { localBindAvailableAtCheck: boolean 
 
 export type ForwardSessionState = "starting" | "running" | "failed" | "stopping" | "stopped";
 
-export type ForwardFailureCode = "invalidRule" | "hostUnavailable" | "hostKeyReviewRequired" | "hostKeyRejected" | "hostKeyMismatch" | "vaultLocked" | "credentialUnavailable" | "authenticationRejected" | "transportConnect" | "bind" | "remoteRegistrationRejected" | "remoteRegistrationUncertain" | "transportLost" | "protocol" | "resourceLimit" | "socksTruncated" | "socksAuthenticationRejected" | "socksCommandRejected" | "socksAddressRejected" | "connectTimeout" | "targetConnect" | "relay" | "cleanupUncertain";
+export type ForwardFailureCode = "invalidRule" | "hostUnavailable" | "hostKeyReviewRequired" | "hostKeyRejected" | "hostKeyMismatch" | "vaultLocked" | "credentialUnavailable" | "authenticationRejected" | "transportConnect" | "connectionClosedByServer" | "bind" | "remoteRegistrationRejected" | "remoteRegistrationUncertain" | "transportLost" | "protocol" | "resourceLimit" | "socksTruncated" | "socksAuthenticationRejected" | "socksCommandRejected" | "socksAddressRejected" | "connectTimeout" | "targetConnect" | "relay" | "cleanupUncertain";
 
 export type ForwardFailure = { code: ForwardFailureCode, stage: string, messageKey: string, };
 
@@ -1934,7 +1926,7 @@ export type ForwardSessionEvent = { schemaVersion: number, eventSeq: WireSequenc
 
 export type SftpSessionState = "connecting" | "verifyingHostKey" | "authenticating" | "needsAuthentication" | "openingSubsystem" | "ready" | "disconnecting" | "closed" | "failed";
 
-export type SftpFailureCode = "hostUnavailable" | "hostKeyRejected" | "hostKeyMismatch" | "vaultLocked" | "credentialUnavailable" | "authenticationRejected" | "subsystemRejected" | "transportLost" | "unsupportedPathEncoding" | "permissionDenied" | "protocol" | "cleanupUncertain";
+export type SftpFailureCode = "hostUnavailable" | "hostKeyRejected" | "hostKeyMismatch" | "vaultLocked" | "credentialUnavailable" | "authenticationRejected" | "subsystemRejected" | "transportLost" | "connectionClosedByServer" | "unsupportedPathEncoding" | "permissionDenied" | "protocol" | "cleanupUncertain";
 
 export type SftpSessionFailure = { code: SftpFailureCode, stage: string, messageKey: string, };
 
@@ -1981,6 +1973,12 @@ export type SftpLocalDirectoryOpenChildRequest = { meta: RequestMeta, operationI
 export type SftpLocalDirectoryCreateChildRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, parentDirectoryRef: string, expectedParentRevision: WireSequence, name: string, };
 
 export type SftpLocalDirectoryReleaseRequest = { meta: RequestMeta, directoryRef: string, expectedRevision: WireSequence, };
+
+export type SftpLocalFileMutation = { "kind": "createDirectory", name: string, } | { "kind": "createEmptyFile", name: string, } | { "kind": "rename", entryRef: string, newName: string, } | { "kind": "delete", entryRef: string, recursive: boolean, irreversibleConfirmed: boolean, };
+
+export type SftpLocalFileMutationRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, directoryRef: string, expectedRevision: WireSequence, mutation: SftpLocalFileMutation, };
+
+export type SftpLocalFileMutationResult = { directoryRef: string, revision: WireSequence, };
 
 export type SftpSessionSnapshotRequest = { meta: RequestMeta, };
 
@@ -2046,7 +2044,12 @@ export type SftpTransferCommitOutcome = "notCommitted" | "committed" | "uncertai
 
 export type SftpTransferIntentCleanupResidual = { "kind": "remoteTemporaryTarget", sessionId: SftpSessionId, generation: WireSequence, path: SftpRemotePath, displayPath: string, } | { "kind": "localTemporaryTarget", directoryRef: string, revision: WireSequence, displayName: string, } | { "kind": "unknown", displayName: string, };
 
-export type SftpTransferIntentSummary = { transferId: TransferId, direction: SftpTransferIntentDirection, sourceDisplayName: string, targetDisplayName: string, sourcePaneId: string, targetPaneId: string, sourceEndpointRevision: WireSequence, targetEndpointRevision: WireSequence, sourceFence: SftpTransferEndpointFence, targetFence: SftpTransferEndpointFence, expectedBytes: number, transferredBytes: number, bytesPerSecond: number | null, remainingSeconds: number | null, stateRevision: WireSequence, state: SftpTransferState, commitOutcome: SftpTransferCommitOutcome, failureCode: SftpTransferFailureCode | null, cleanupResidual: SftpTransferIntentCleanupResidual | null, };
+export type SftpTransferIntentSummary = { transferId: TransferId, direction: SftpTransferIntentDirection, sourceDisplayName: string, targetDisplayName: string, sourcePaneId: string, targetPaneId: string, sourceEndpointRevision: WireSequence, targetEndpointRevision: WireSequence, sourceFence: SftpTransferEndpointFence, targetFence: SftpTransferEndpointFence, expectedBytes: number, transferredBytes: number, bytesPerSecond: number | null, remainingSeconds: number | null, stateRevision: WireSequence, state: SftpTransferState, commitOutcome: SftpTransferCommitOutcome, failureCode: SftpTransferFailureCode | null, cleanupResidual: SftpTransferIntentCleanupResidual | null,
+/**
+ * Core accepts a cancel for this transfer in its current state. Clients
+ * offer cancel from this fact instead of inferring it from `state`.
+ */
+cancellable: boolean, };
 
 export type SftpTransferIntentSnapshotRequest = { meta: RequestMeta, };
 
@@ -2064,7 +2067,12 @@ export type SftpTransferFailureCode = "targetExists" | "unsafeReplaceUnsupported
 
 export type SftpCleanupResidual = { "kind": "remoteTemporaryTarget", path: SftpRemotePath, displayPath: string, } | { "kind": "localTemporaryTarget", displayName: string, } | { "kind": "unknown", displayName: string, };
 
-export type SftpTransferSummary = { transferId: TransferId, sessionId: SftpSessionId, generation: WireSequence, direction: SftpTransferDirection, source: SftpTransferEndpoint, target: SftpTransferEndpoint, expectedBytes: number, transferredBytes: number, bytesPerSecond: number | null, remainingSeconds: number | null, stateRevision: WireSequence, state: SftpTransferState, commitOutcome: SftpTransferCommitOutcome, failureCode: SftpTransferFailureCode | null, cleanupResidual: SftpCleanupResidual | null, };
+export type SftpTransferSummary = { transferId: TransferId, sessionId: SftpSessionId, generation: WireSequence, direction: SftpTransferDirection, source: SftpTransferEndpoint, target: SftpTransferEndpoint, expectedBytes: number, transferredBytes: number, bytesPerSecond: number | null, remainingSeconds: number | null, stateRevision: WireSequence, state: SftpTransferState, commitOutcome: SftpTransferCommitOutcome, failureCode: SftpTransferFailureCode | null, cleanupResidual: SftpCleanupResidual | null,
+/**
+ * Core accepts a cancel for this transfer in its current state (for
+ * example an Android picked-document download while it is committing).
+ */
+cancellable: boolean, };
 
 export type SftpTransferEnqueueRequest = { meta: RequestMeta, operationId: OperationId, idempotencyKey: string, transferId: TransferId, sessionId: SftpSessionId, expectedGeneration: WireSequence, direction: SftpTransferDirection, source: SftpTransferEndpoint, target: SftpTransferEndpoint, expectedBytes: number, conflictPolicy: SftpConflictPolicy, };
 
@@ -2180,7 +2188,6 @@ export const coreApiCommands = {
   metricsReconcile: "metrics_reconcile",
   metricsRetry: "metrics_retry",
   metricsStop: "metrics_stop",
-  metricsHostKeyDecide: "metrics_host_key_decide",
   metricsKeyboardInteractiveAnswerPrepare: "metrics_keyboard_interactive_answer_prepare",
   metricsKeyboardInteractiveRespond: "metrics_keyboard_interactive_respond",
   pluginThemeList: "plugin_theme_list",
@@ -2304,6 +2311,7 @@ export const coreApiCommands = {
   sftpLocalDirectoryOpenChild: "sftp_local_directory_open_child",
   sftpLocalDirectoryCreateChild: "sftp_local_directory_create_child",
   sftpLocalDirectoryRelease: "sftp_local_directory_release",
+  sftpLocalFileMutate: "sftp_local_file_mutate",
   sftpDirectoryList: "sftp_directory_list",
   sftpDirectoryListCancel: "sftp_directory_list_cancel",
   sftpFilePreview: "sftp_file_preview",

@@ -4,9 +4,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import { useI18n } from "vue-i18n";
 
 import type { ServerOverviewSnapshot } from "../../core-api/generated/core-api";
+import { isMobileLayout } from "../../platform-host";
 import { NvxPluginExtensionTarget } from "../plugins";
 import { NvxButton, NvxIcon, NvxInput, NvxInlineNotice, NvxProgress, NvxSelect } from "../ui";
 import NvxServerCard from "./NvxServerCard.vue";
+import { createVirtualRowIndex, uniformRowPitches } from "./overviewVirtualRows";
 import {
   freshMetricPercents,
   nextMetricHistory,
@@ -22,6 +24,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+// Shorter placeholder for the phone shell (platform fact, not width).
+const mobileLayout = isMobileLayout();
 const query = ref("");
 const groupFilter = ref("all");
 const statusFilter = ref<"all" | "online" | "issues" | "offline">("all");
@@ -35,8 +39,11 @@ const gridViewportTop = ref(0);
 let viewportResizeObserver: ResizeObserver | null = null;
 const VIRTUAL_CARD_THRESHOLD = 30;
 const VIRTUAL_CARD_MIN_WIDTH = 312;
-const VIRTUAL_CARD_HEIGHT = 180;
-const VIRTUAL_GRID_GAP = 12;
+// Desktop Cards have a fixed 168px height in a 12px-gap grid. The phone renders the compact
+// Card in a single column with an 8px gap; its height is content-driven (108px minimum,
+// mobile.css), so 116px is only the pitch assumed for a Card that has not been measured yet.
+const VIRTUAL_CARD_HEIGHT = mobileLayout ? 116 : 180;
+const VIRTUAL_GRID_GAP = mobileLayout ? 8 : 12;
 const VIRTUAL_OVERSCAN_ROWS = 2;
 const UNGROUPED_FILTER = "ungrouped";
 type CardSection = {
@@ -89,6 +96,17 @@ const summary = computed(() => {
     offline: all.filter((card) => card.connectionState === "disconnected").length,
   };
 });
+// Phone chips carry the counts the desktop KPI tiles show; they use the filter's own semantics
+// (Online includes connecting Hosts) so a chip count always matches what tapping it reveals.
+const statusCounts = computed(() => {
+  const all = props.snapshot.cards;
+  return {
+    all: all.length,
+    online: all.filter((card) => ["connecting", "connected", "monitoringOnly"].includes(card.connectionState)).length,
+    issues: all.filter((card) => ["degraded", "failed"].includes(card.connectionState)).length,
+    offline: all.filter((card) => card.connectionState === "disconnected").length,
+  };
+});
 const summaryTiles = computed(() => [
   { key: "total", tone: "accent", icon: Server, value: summary.value.total, suffix: "", label: t("overview.kpi.total") },
   {
@@ -116,6 +134,10 @@ const averageLoads = computed(() => {
     { key: "disk", label: t("overview.kpi.averageDisk"), value: average(fresh.map((item) => item.disk)) },
   ];
 });
+// Phone strip: one line of fresh averages; hidden entirely while nothing is monitored.
+const compactAverages = computed(() => averageLoads.value
+  .filter((load): load is typeof load & { value: number } => load.value !== null)
+  .map((load) => ({ ...load, text: `${Math.round(load.value)}%` })));
 const metricHistory = shallowRef<MetricHistoryMap>(new Map());
 watch(
   () => props.snapshot,
@@ -181,18 +203,28 @@ const columnCount = computed(() => Math.max(1, Math.floor(
   (viewportWidth.value + VIRTUAL_GRID_GAP) / (VIRTUAL_CARD_MIN_WIDTH + VIRTUAL_GRID_GAP),
 )));
 const rowCount = computed(() => Math.ceil(cards.value.length / columnCount.value));
+// Phone only: the rendered height of each Card by Host id (one Card per row). A Card
+// that was never rendered keeps the assumed pitch until it is measured.
+const measuredCardHeights = shallowRef(new Map<string, number>());
+const rowIndex = computed(() => {
+  if (!mobileLayout) return createVirtualRowIndex(uniformRowPitches(rowCount.value, VIRTUAL_CARD_HEIGHT));
+  const measured = measuredCardHeights.value;
+  return createVirtualRowIndex(cards.value.map((card) => {
+    const height = measured.get(card.catalogEntry.host.hostId);
+    return height === undefined ? VIRTUAL_CARD_HEIGHT : height + VIRTUAL_GRID_GAP;
+  }));
+});
 const visibleStartRow = computed(() => {
   if (!virtualized.value) return 0;
   const relativeScrollTop = Math.max(0, viewportScrollTop.value - gridViewportTop.value);
-  return Math.max(0, Math.floor(relativeScrollTop / VIRTUAL_CARD_HEIGHT) - VIRTUAL_OVERSCAN_ROWS);
+  return Math.max(0, rowIndex.value.rowAt(relativeScrollTop) - VIRTUAL_OVERSCAN_ROWS);
 });
 const visibleEndRow = computed(() => {
   if (!virtualized.value) return rowCount.value;
   const relativeScrollTop = Math.max(0, viewportScrollTop.value - gridViewportTop.value);
-  const visibleRows = Math.ceil(viewportHeight.value / VIRTUAL_CARD_HEIGHT);
   return Math.min(
     rowCount.value,
-    Math.ceil(relativeScrollTop / VIRTUAL_CARD_HEIGHT) + visibleRows + VIRTUAL_OVERSCAN_ROWS,
+    rowIndex.value.rowAt(relativeScrollTop + viewportHeight.value) + 1 + VIRTUAL_OVERSCAN_ROWS,
   );
 });
 const renderedCards = computed(() => {
@@ -203,11 +235,38 @@ const renderedCards = computed(() => {
   );
 });
 const virtualViewportStyle = computed(() => virtualized.value
-  ? { height: `${rowCount.value * VIRTUAL_CARD_HEIGHT}px` }
+  ? { height: `${rowIndex.value.totalHeight}px` }
   : undefined);
 const virtualWindowStyle = computed(() => virtualized.value
-  ? { transform: `translateY(${visibleStartRow.value * VIRTUAL_CARD_HEIGHT}px)` }
+  ? { transform: `translateY(${rowIndex.value.offsetOf(visibleStartRow.value)}px)` }
   : undefined);
+
+// Phone: Card wrappers report their rendered height so taller Cards (open sessions,
+// wrapped text, a larger system font scale) move the rows below them instead of being
+// clipped to the assumed pitch.
+const cardHostIds = new WeakMap<Element, string>();
+let cardSizeObserver: ResizeObserver | null = null;
+function recordCardHeights(entries: ResizeObserverEntry[]) {
+  let next: Map<string, number> | null = null;
+  for (const entry of entries) {
+    const hostId = cardHostIds.get(entry.target);
+    if (!hostId) continue;
+    const height = Math.round(entry.target.getBoundingClientRect().height);
+    if (height <= 0 || measuredCardHeights.value.get(hostId) === height) continue;
+    next ??= new Map(measuredCardHeights.value);
+    next.set(hostId, height);
+  }
+  if (next) measuredCardHeights.value = next;
+}
+function observeCardSize(hostId: string, element: HTMLElement | null, previous: HTMLElement | undefined) {
+  if (!mobileLayout || typeof ResizeObserver === "undefined") return;
+  cardSizeObserver ??= new ResizeObserver(recordCardHeights);
+  if (previous && previous !== element) cardSizeObserver.unobserve(previous);
+  if (element) {
+    cardHostIds.set(element, hostId);
+    cardSizeObserver.observe(element);
+  }
+}
 
 function refreshViewport() {
   const panel = panelElement.value;
@@ -235,12 +294,16 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", refreshViewport);
   viewportResizeObserver?.disconnect();
   viewportResizeObserver = null;
+  cardSizeObserver?.disconnect();
+  cardSizeObserver = null;
 });
 watch([cards, virtualized], () => void nextTick(refreshViewport));
 
 function setCardElement(hostId: string, element: Element | null) {
+  const previous = cardElements.get(hostId);
   if (element instanceof HTMLElement) cardElements.set(hostId, element);
   else cardElements.delete(hostId);
+  observeCardSize(hostId, element instanceof HTMLElement ? element : null, previous);
 }
 
 async function moveCardFocus(hostId: string, direction: 1 | -1) {
@@ -257,7 +320,7 @@ async function moveCardFocus(hostId: string, direction: 1 | -1) {
   const targetIndex = cards.value.findIndex((card) => card.catalogEntry.host.hostId === targetId);
   if (!virtualized.value || targetIndex < 0 || !panelElement.value) return;
   panelElement.value.scrollTop = gridViewportTop.value
-    + Math.floor(targetIndex / columnCount.value) * VIRTUAL_CARD_HEIGHT;
+    + rowIndex.value.offsetOf(Math.floor(targetIndex / columnCount.value));
   refreshViewport();
   await nextTick();
   cardElements.get(targetId)?.focus();
@@ -306,7 +369,7 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
             v-model="query"
             class="nvx-overview-panel__search"
             :aria-label="t('overview.search')"
-            :placeholder="t('overview.searchPlaceholder')"
+            :placeholder="t(mobileLayout ? 'mobile.overviewSearchPlaceholder' : 'overview.searchPlaceholder')"
           />
         </span>
         <div
@@ -323,12 +386,35 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
             @click="statusFilter = option.value"
           >
             {{ option.label }}
+            <span
+              v-if="mobileLayout"
+              class="nvx-overview-panel__status-count"
+            >{{ statusCounts[option.value] }}</span>
           </NvxButton>
         </div>
       </div>
     </header>
 
+    <div
+      v-if="mobileLayout && compactAverages.length"
+      class="nvx-overview-panel__averages"
+      role="group"
+      :aria-label="t('overview.kpi.averageLoad')"
+    >
+      <span
+        v-for="load in compactAverages"
+        :key="load.key"
+        class="nvx-overview-panel__average"
+        role="status"
+        :aria-label="`${load.label}: ${load.text}`"
+      >
+        <span>{{ load.label }}</span>
+        <strong>{{ load.text }}</strong>
+      </span>
+    </div>
+
     <section
+      v-if="!mobileLayout"
       class="nvx-overview-panel__summary"
       :aria-label="t('overview.kpi.label')"
     >
@@ -426,7 +512,7 @@ function onCardKeydown(hostId: string, event: KeyboardEvent) {
       >
         <header class="nvx-overview-panel__section-header">
           <h2 :id="`overview-group-${section.key}`">
-            {{ t("overview.groupSection", { label: section.label, count: section.cards.length }) }}
+            {{ t("overview.groupSection", { label: section.label, count: section.cards.length }, section.cards.length) }}
           </h2>
         </header>
         <div class="nvx-overview-panel__grid">

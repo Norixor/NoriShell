@@ -10,6 +10,8 @@ const prompt = ref<SecureChallengePrompt | null>(null);
 const answers = ref<string[]>([]);
 const pending = ref(false);
 const failed = ref(false);
+/** Core kept the challenge after a failed trust write; the same decision can be retried here. */
+const trustFailed = ref(false);
 const content = computed(() => prompt.value?.content);
 const keyboard = computed(() => content.value?.kind === "sshKeyboard" || content.value?.kind === "metricsKeyboard");
 const fields = computed(() => {
@@ -20,9 +22,8 @@ const fields = computed(() => {
 });
 const key = computed(() => {
   const value = content.value;
-  if (value?.kind === "sshHostKey") return { endpoint: `${value.challenge.endpoint.address}:${value.challenge.endpoint.port}`, algorithm: value.challenge.keyAlgorithm, fingerprint: value.challenge.fingerprintSha256, mismatch: false };
-  if (value?.kind === "sftpHostKey") return { endpoint: value.challenge.endpoint, algorithm: value.challenge.algorithm, fingerprint: value.challenge.fingerprintSha256, mismatch: false };
-  if (value?.kind === "metricsHostKey") return { endpoint: value.challenge.hostId, algorithm: value.challenge.algorithm, fingerprint: value.challenge.fingerprintSha256, mismatch: value.challenge.trustedFingerprintSha256 !== null };
+  if (value?.kind === "sshHostKey") return { endpoint: `${value.challenge.endpoint.address}:${value.challenge.endpoint.port}`, algorithm: value.challenge.keyAlgorithm, fingerprint: value.challenge.fingerprintSha256 };
+  if (value?.kind === "sftpHostKey") return { endpoint: value.challenge.endpoint, algorithm: value.challenge.algorithm, fingerprint: value.challenge.fingerprintSha256 };
   return null;
 });
 const instructions = computed(() => {
@@ -33,11 +34,17 @@ const instructions = computed(() => {
 });
 function clear() { answers.value = fields.value.map(() => ""); }
 async function decide(approved: boolean) {
-  if (!prompt.value || pending.value || (approved && key.value?.mismatch)) return;
+  if (!prompt.value || pending.value) return;
   pending.value = true;
+  failed.value = false;
+  trustFailed.value = false;
   const request = secureSshChallengeClient.submit(id, approved, approved ? [...answers.value] : []);
   clear();
-  try { await request; } catch { failed.value = true; pending.value = false; }
+  try { await request; } catch (error) {
+    if (error === "secureChallengeTrustFailed") trustFailed.value = true;
+    else failed.value = true;
+    pending.value = false;
+  }
 }
 onMounted(async () => { try { prompt.value = await secureSshChallengeClient.get(id); clear(); } catch { failed.value = true; } });
 onBeforeUnmount(clear);
@@ -88,7 +95,12 @@ onBeforeUnmount(clear);
       />
     </form>
     <NvxInlineNotice
-      v-if="failed"
+      v-if="trustFailed"
+      tone="error"
+      :title="t('secureWindow.challenge.trustFailed')"
+    />
+    <NvxInlineNotice
+      v-else-if="failed"
       tone="error"
       :title="t('sshSession.keyboardInteractive.failed')"
     />
@@ -102,7 +114,7 @@ onBeforeUnmount(clear);
       </NvxButton>
       <NvxButton
         :loading="pending"
-        :disabled="pending || !prompt || key?.mismatch"
+        :disabled="pending || !prompt"
         @click="decide(true)"
       >
         {{ t(keyboard ? 'sshSession.keyboardInteractive.continue' : 'sshSession.hostKey.accept') }}

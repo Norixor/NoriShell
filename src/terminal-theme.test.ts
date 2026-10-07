@@ -6,7 +6,7 @@ import {
   DARK_TERMINAL_PALETTE,
   DEFAULT_TERMINAL_FONT_FAMILY,
   DEFAULT_TERMINAL_LINE_HEIGHT,
-  DEFAULT_TERMINAL_FONT_SIZE,
+  DESKTOP_DEFAULT_TERMINAL_FONT_SIZE,
   LIGHT_TERMINAL_PALETTE,
   parseTerminalPalette,
   parseStoredTerminalAppearance,
@@ -147,8 +147,8 @@ describe("terminal appearance", () => {
   it("normalizes, applies, and persists bounded terminal typography", async () => {
     expect(parseTerminalFontSize(10)).toBe(10);
     expect(parseTerminalFontSize("28")).toBe(28);
-    expect(parseTerminalFontSize(9)).toBe(DEFAULT_TERMINAL_FONT_SIZE);
-    expect(parseTerminalFontSize("13.5")).toBe(DEFAULT_TERMINAL_FONT_SIZE);
+    expect(parseTerminalFontSize(9)).toBe(DESKTOP_DEFAULT_TERMINAL_FONT_SIZE);
+    expect(parseTerminalFontSize("13.5")).toBe(DESKTOP_DEFAULT_TERMINAL_FONT_SIZE);
     expect(normalizeTerminalFontFamily("  JetBrains   Mono ")).toBe("JetBrains Mono");
     expect(DEFAULT_TERMINAL_FONT_FAMILY).toBe("Menlo");
     expect(normalizeTerminalFontFamily("Menlo, monospace")).toBe("Menlo");

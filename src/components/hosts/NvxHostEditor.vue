@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ArrowDown, ArrowUp, FileInput, Folder, FolderPlus, HeartPulse, KeyRound, Network, Plus, Server, ShieldCheck, Tag, Trash2, Workflow, X } from "lucide-vue-next";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import NvxHostMarkerEditor from "./NvxHostMarkerEditor.vue";
 import { normalizeHostMarker, type HostMarker } from "../../host-markers";
 import { useHostMarkersStore } from "../../stores/hostMarkers";
 import { NvxButton, NvxCheckbox, NvxDialog, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxSelect, NvxStatusLabel, NvxTextarea } from "../ui";
-import { canUseDesktopCore, cancelHostCreatePassword, cancelLoginAutomationSecret, createConfiguredHost, createHostGroup, createIdentity, createLoginAutomationSecret, createHostTag, getHostConnectionConfig, getAlgorithmPolicyCatalog, fetchVaultStatus, importPrivateKeyFile, listHostCatalog, listHostGroups, listHostTags, listIdentities, listCredentialRefs, replaceHostOrganization, replaceAlgorithmPolicy, replaceHeartbeatPolicy, replaceMonitoringPolicy, replaceLoginAutomation, replaceRoutePlan, stageHostCreatePassword, confirmLoginAutomation, testSshConnection, updateHost, parseCoreApiError, prepareTransientCredential } from "../../core-api/client";
+import { canUseDesktopCore, cancelHostCreatePassword, cancelLoginAutomationSecret, createConfiguredHost, createHostGroup, createIdentity, createLoginAutomationSecret, createHostTag, getHostConnectionConfig, getAlgorithmPolicyCatalog, fetchVaultStatus, importPrivateKeyFile, releasePrivateKeyFileImport, listHostCatalog, listHostGroups, listHostTags, listIdentities, listCredentialRefs, replaceHostOrganization, replaceAlgorithmPolicy, replaceHeartbeatPolicy, replaceMonitoringPolicy, replaceLoginAutomation, replaceRoutePlan, stageHostCreatePassword, confirmLoginAutomation, testSshConnection, updateHost, parseCoreApiError, prepareTransientCredential } from "../../core-api/client";
 import type { AlgorithmCategory, AlgorithmCompatibilityException, AlgorithmPolicyCatalog, CredentialRefSummary, HostCatalogEntry, HostCreateLoginAutomationStep, HostGroupSummary, HostSummary, HostTagSummary, HeartbeatPolicy, IdentitySummary, LoginAutomationStepInput, LoginAutomationStepSummary, MonitoringPolicy, RouteIngress, ShellHeartbeatLineEnding, VaultState } from "../../core-api/generated/core-api";
 import { createUuidV7 } from "../../core-api/ids";
 import { useTipsStore } from "../../stores/tips";
@@ -122,6 +122,10 @@ const privateKeyCredentialLabel = ref("");
 const privateKeyCredentialPriority = ref("100");
 
 const privateKeyPassphrase = ref("");
+// Field-level message for a missing or wrong passphrase; other failures use a tip.
+const privateKeyPassphraseError = ref("");
+// Import failures stay inside the dialog: a Tip at the bottom edge would cover the sheet's actions on phones.
+const privateKeyImportError = ref("");
 
 const importingPrivateKey = ref(false);
 
@@ -134,6 +138,11 @@ const privateKeyHostEditorBinding = ref(false);
 const privateKeyImportOperationId = ref<string | null>(null);
 
 const privateKeyImportIdempotencyKey = ref<string | null>(null);
+/**
+ * After a passphrase error Core keeps the chosen file for this import operation,
+ * so a retry only needs the passphrase. Closing the dialog releases it.
+ */
+const privateKeyFileRetained = ref(false);
 
 const routeHost = ref<HostSummary | null>(null);
 
@@ -1054,6 +1063,7 @@ async function removeLoginAutomationStep(index: number) {
 onBeforeUnmount(() => {
   hostPassword.value = "";
   privateKeyPassphrase.value = "";
+  releaseRetainedPrivateKeyFile();
   for (const step of loginAutomationSteps.value) {
     step.secretValue = "";
     if (step.stagedSecretId) void cancelStagedLoginAutomationSecret(step);
@@ -1338,6 +1348,7 @@ function openPrivateKeyImport(selectedIdentityId = "", bindToHostEditor = false)
     && privateKeyCredentialSummary.value?.identityId === selectedIdentityId
     && privateKeyCredentialSummary.value.details.kind === "privateKey";
   if (!keepsCurrentHostBinding) privateKeyCredentialSummary.value = null;
+  releaseRetainedPrivateKeyFile();
   privateKeyImportOperationId.value = createUuidV7();
   privateKeyImportIdempotencyKey.value = `private-key-file-import-${privateKeyImportOperationId.value}`;
   void suggestPrivateKeyPriority();
@@ -1345,10 +1356,22 @@ function openPrivateKeyImport(selectedIdentityId = "", bindToHostEditor = false)
   privateKeyDialogOpen.value = true;
 }
 
+function releaseRetainedPrivateKeyFile() {
+  const operationId = privateKeyImportOperationId.value;
+  if (!privateKeyFileRetained.value || !operationId) return;
+  privateKeyFileRetained.value = false;
+  void releasePrivateKeyFileImport(operationId).catch(() => undefined);
+}
+
 function updatePrivateKeyDialogOpen(open: boolean) {
   if (importingPrivateKey.value) return;
   privateKeyDialogOpen.value = open;
-  if (!open) privateKeyPassphrase.value = "";
+  if (!open) {
+    releaseRetainedPrivateKeyFile();
+    privateKeyPassphrase.value = "";
+    privateKeyPassphraseError.value = "";
+  privateKeyImportError.value = "";
+  }
 }
 
 async function suggestPrivateKeyPriority() {
@@ -1414,6 +1437,8 @@ async function importSelectedPrivateKeyFile() {
   }
   importingPrivateKey.value = true;
   privateKeyValidationFailed.value = false;
+  privateKeyPassphraseError.value = "";
+  privateKeyImportError.value = "";
   tips.dismissScope("host-editor-private-key");
   try {
     const imported = await importPrivateKeyFile({
@@ -1425,6 +1450,7 @@ async function importSelectedPrivateKeyFile() {
       label: privateKeyCredentialLabel.value.trim(),
     });
     privateKeyPassphrase.value = "";
+    privateKeyFileRetained.value = false;
     if (!imported) return;
     privateKeyCredentialSummary.value = imported;
     if (privateKeyHostEditorBinding.value) {
@@ -1433,19 +1459,32 @@ async function importSelectedPrivateKeyFile() {
     }
     privateKeyImportOperationId.value = null;
     privateKeyImportIdempotencyKey.value = null;
+    // The import is complete: the dialog closes and the editor's Authentication
+    // section shows the derived algorithm and fingerprint of the saved credential.
+    privateKeyDialogOpen.value = false;
     await refresh();
     tips.show({
       scope: "host-editor-private-key",
       tone: "success",
       title: t("sshHosts.privateKeyImport.saved"),
     });
-  } catch {
+  } catch (error) {
     privateKeyPassphrase.value = "";
-    tips.show({
-      scope: "host-editor-private-key",
-      tone: "error",
-      title: t("sshHosts.privateKeyImport.failed"),
-    });
+    const failure = parseCoreApiError(error);
+    if (failure?.code === "credential.passphrase_required"
+      || failure?.code === "credential.incorrect_passphrase") {
+      privateKeyPassphraseError.value = t(failure.messageKey);
+      privateKeyFileRetained.value = true;
+      importingPrivateKey.value = false;
+      await nextTick();
+      document.getElementById("private-key-passphrase")?.focus();
+      return;
+    }
+    privateKeyFileRetained.value = false;
+    // The file import only ever carries a private key, so invalid material is a key-format problem.
+    privateKeyImportError.value = failure?.code === "credential.invalid_material"
+      ? t("errors.credential.invalidPrivateKey")
+      : t("sshHosts.privateKeyImport.failed");
   } finally {
     importingPrivateKey.value = false;
   }
@@ -1732,18 +1771,29 @@ onMounted(async () => {
               :aria-label="t('sshHosts.identity')"
             />
           </NvxField>
-          <NvxButton
-            v-if="authenticationMode === 'savedIdentity'"
-            variant="secondary"
-            size="sm"
-            @click="openPrivateKeyImport(identityId, true)"
-          >
-            <NvxIcon
-              :icon="FileInput"
-              :size="16"
-            />
-            {{ t('sshHosts.privateKeyImport.manage') }}
-          </NvxButton>
+          <template v-if="authenticationMode === 'savedIdentity'">
+            <NvxInlineNotice
+              v-if="privateKeyCredentialSummary?.identityId === identityId
+                && privateKeyCredentialSummary.details.kind === 'privateKey'"
+              :title="t('sshHosts.privateKeyImport.saved')"
+            >
+              {{ t('sshHosts.privateKeyImport.importedMetadata', {
+                algorithm: privateKeyCredentialSummary.details.publicKeyAlgorithm,
+                fingerprint: privateKeyCredentialSummary.details.publicKeyFingerprint,
+              }) }}
+            </NvxInlineNotice>
+            <NvxButton
+              variant="secondary"
+              size="sm"
+              @click="openPrivateKeyImport(identityId, true)"
+            >
+              <NvxIcon
+                :icon="FileInput"
+                :size="16"
+              />
+              {{ t('sshHosts.privateKeyImport.manage') }}
+            </NvxButton>
+          </template>
           <template v-else-if="authenticationMode === 'privateKey'">
             <NvxInlineNotice
               v-if="privateKeyCredentialSummary?.identityId === identityId
@@ -2706,13 +2756,16 @@ onMounted(async () => {
       <NvxField
         for-id="private-key-passphrase"
         :label="t('sshHosts.privateKeyImport.passphrase')"
+        :error="privateKeyPassphraseError || undefined"
       >
         <NvxInput
           id="private-key-passphrase"
           v-model="privateKeyPassphrase"
           type="password"
           autocomplete="new-password"
+          :invalid="!!privateKeyPassphraseError"
           :placeholder="t('sshHosts.privateKeyImport.passphrasePlaceholder')"
+          @update:model-value="privateKeyPassphraseError = ''"
         />
       </NvxField>
       <p class="hosts-agent__note">
@@ -2726,6 +2779,12 @@ onMounted(async () => {
       v-if="privateKeyValidationFailed"
       tone="error"
       :title="t('sshHosts.privateKeyImport.failed')"
+    />
+    <NvxInlineNotice
+      v-else-if="privateKeyImportError"
+      tone="error"
+      :title="privateKeyImportError"
+      data-private-key-import-error
     />
     <p
       v-if="privateKeyCredentialSummary?.identityId === privateKeyIdentityId
@@ -2754,7 +2813,7 @@ onMounted(async () => {
           :icon="FileInput"
           :size="16"
         />
-        {{ t('sshHosts.privateKeyImport.chooseFile') }}
+        {{ t(privateKeyFileRetained ? 'sshHosts.privateKeyImport.retryWithPassphrase' : 'sshHosts.privateKeyImport.chooseFile') }}
       </NvxButton>
     </template>
   </NvxDialog>
@@ -3263,5 +3322,43 @@ onMounted(async () => {
     text-align: start;
   }
 
+}
+
+/* Phone (Android surface): the stacked layout must not stretch the section rail into
+   a tall band, so the rail keeps its own height and the content row takes the rest.
+   The rail is a compact single row of chips that scrolls sideways. */
+html[data-nvx-host="mobile"] .hosts-editor {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+html[data-nvx-host="mobile"] .hosts-editor__nav {
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  gap: var(--nvx-space-1);
+  padding: var(--nvx-space-2) var(--nvx-space-3);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  border-right: 0;
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+}
+
+html[data-nvx-host="mobile"] .hosts-editor__nav-item {
+  min-height: 36px;
+  gap: var(--nvx-space-2);
+  padding: 0 var(--nvx-space-3);
+  border-radius: 18px;
+  font-size: var(--nvx-font-size-sm);
+  white-space: nowrap;
+}
+
+html[data-nvx-host="mobile"] .hosts-editor__nav-item :deep(svg) {
+  width: 18px;
+  height: 18px;
+}
+
+html[data-nvx-host="mobile"] .hosts-editor__content {
+  padding: var(--nvx-space-3) var(--nvx-space-4);
 }
 </style>

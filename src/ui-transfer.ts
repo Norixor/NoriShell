@@ -7,7 +7,7 @@ import {
 } from "./app-theme";
 import {
   cloneTerminalPalette, DARK_TERMINAL_PALETTE, DEFAULT_TERMINAL_BOLD_FONT_WEIGHT,
-  DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_WEIGHT,
+  DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_TERMINAL_FONT_WEIGHT, defaultTerminalFontSize,
   DEFAULT_TERMINAL_LETTER_SPACING, DEFAULT_TERMINAL_LINE_HEIGHT, isTerminalPresetId,
   normalizeCustomTerminalPaletteName, normalizeTerminalFontFamily, parseTerminalFontSize,
   parseTerminalFontWeight, parseTerminalLetterSpacing, parseTerminalLineHeight,
@@ -46,7 +46,7 @@ export const DEFAULT_APPLICATION_PREFERENCES: ApplicationPreferences = {
 export function defaultAppearancePreferences(): AppearancePreferences {
   return {
     terminalThemeMode: "follow-app", terminalFontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
-    terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE, terminalFontWeight: DEFAULT_TERMINAL_FONT_WEIGHT,
+    terminalFontSize: defaultTerminalFontSize(), terminalFontWeight: DEFAULT_TERMINAL_FONT_WEIGHT,
     terminalBoldFontWeight: DEFAULT_TERMINAL_BOLD_FONT_WEIGHT, terminalLineHeight: DEFAULT_TERMINAL_LINE_HEIGHT,
     terminalLetterSpacing: DEFAULT_TERMINAL_LETTER_SPACING, terminalCursorStyle: "block", terminalCursorBlink: true,
     customTerminalPalette: cloneTerminalPalette(DARK_TERMINAL_PALETTE), customTerminalPaletteName: "",

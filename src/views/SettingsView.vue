@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {
+  ArrowLeft,
   Check,
+  ChevronRight,
   Globe2,
   KeyRound,
   LockKeyhole,
@@ -18,9 +20,9 @@ import {
   Keyboard,
   SlidersHorizontal,
 } from "lucide-vue-next";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import NvxAppThemeSettings from "../components/settings/NvxAppThemeSettings.vue";
 import NvxTerminalInteractionSettings from "../components/settings/NvxTerminalInteractionSettings.vue";
 import NvxPreferenceTransferSettings from "../components/settings/NvxPreferenceTransferSettings.vue";
@@ -45,6 +47,7 @@ import {
   NvxDialog,
   NvxField,
   NvxIcon,
+  NvxIconButton,
   NvxInlineNotice,
   NvxInput,
   NvxSelect,
@@ -72,6 +75,8 @@ import {
   type TerminalStartupBehavior,
 } from "../stores/ui";
 import { UI_ZOOM_LEVELS } from "../ui-zoom";
+import { isMobileLayout } from "../platform-host";
+import { pushMobileBackTarget, type MobileOverlayHandle } from "../mobile-overlays";
 import { detectInstalledTerminalFonts } from "../terminal-fonts";
 import {
   cloneTerminalPalette,
@@ -96,6 +101,7 @@ import {
 
 const { t, te } = useI18n();
 const route = useRoute();
+const router = useRouter();
 const ui = useUiStore();
 const tips = useTipsStore();
 const revealRoute = useRouteReveal();
@@ -110,9 +116,12 @@ const securityLinks = [
 type SettingsSection = "appearance" | "transfer" | "desktop" | "interaction" | "files" | "application" | "terminal" | "vault" | "knownHosts" | "identities" | "enhancements" | "highlights" | "shortcuts" | "about";
 
 const activeSection = ref<SettingsSection>("application");
+// Phones have no window chrome or tray and UI zoom is bypassed there (see ui-zoom.ts); those
+// controls are hidden instead of rendered inert. The window/tray section survives as "Notifications".
+const mobileLayout = isMobileLayout();
 const enhancementSections = [
   { id: "appearance" as const, icon: Palette, label: "appTheme.title" },
-  { id: "desktop" as const, icon: Settings, label: "desktopPreferences.title" },
+  { id: "desktop" as const, icon: Settings, label: mobileLayout ? "mobile.settings.notificationsTitle" : "desktopPreferences.title" },
   { id: "interaction" as const, icon: SlidersHorizontal, label: "terminalInteraction.title" },
   { id: "files" as const, icon: SlidersHorizontal, label: "sftpSettings.title" },
   { id: "enhancements" as const, icon: SlidersHorizontal, label: "terminalEnhancements.title" },
@@ -136,9 +145,62 @@ async function loadHighlightHosts() {
   catch { if (!settingsDisposed && sequence === highlightHostsSequence) highlightHostsFailed.value = true; }
 }
 watch(activeSection, (section) => { if (section === "highlights") initialHighlightLoad = loadHighlightHosts(); });
+const settingsSections: readonly SettingsSection[] = ["appearance", "application", "terminal", "vault", "knownHosts", "identities", "enhancements", "highlights", "shortcuts", "files", "interaction", "desktop", "transfer", "about"];
+function isSettingsSection(value: unknown): value is SettingsSection {
+  return typeof value === "string" && (settingsSections as readonly string[]).includes(value);
+}
+
+// Phone only: Settings is a list of sections and one section detail at a time, inside the same
+// route. The detail joins the Android back stack as a navigation level (not an overlay), so the
+// back key returns to the list before WebView history leaves the page; dialogs and selects
+// opened inside the detail register later and therefore close first. The URL mirrors the level
+// through `router.replace` (no history entries): `?section=` while a detail is open, none on the list.
+const detailOpen = ref(false);
+// The section the user last returned from; the list marks it so the place is kept (aria-current).
+const returnedSection = ref<SettingsSection | null>(null);
+let detailBackTarget: MobileOverlayHandle | null = null;
+
+function openDetail() {
+  detailOpen.value = true;
+  detailBackTarget ??= pushMobileBackTarget(() => {
+    closeDetail();
+    return true;
+  });
+}
+
+function releaseDetailBackTarget() {
+  detailBackTarget?.release();
+  detailBackTarget = null;
+}
+
+function closeDetail() {
+  if (!detailOpen.value) return;
+  detailOpen.value = false;
+  returnedSection.value = activeSection.value;
+  releaseDetailBackTarget();
+  // Dropping the query lets the same deep link (rail, tray, plugins page) open the detail again.
+  if (route.query.section !== undefined) void router.replace({ path: "/settings" }).catch(() => undefined);
+}
+
+function selectSection(section: SettingsSection) {
+  activeSection.value = section;
+  if (!mobileLayout) return;
+  openDetail();
+  if (route.query.section !== section) void router.replace({ path: "/settings", query: { section } }).catch(() => undefined);
+}
+
 watch(() => route.query.section, (section) => {
-  if (typeof section === "string" && ["appearance", "application", "terminal", "vault", "knownHosts", "identities", "enhancements", "highlights", "shortcuts", "files", "interaction", "desktop", "transfer", "about"].includes(section)) activeSection.value = section as SettingsSection;
+  if (isSettingsSection(section)) {
+    activeSection.value = section;
+    if (mobileLayout) openDetail();
+  } else if (mobileLayout && section === undefined) {
+    // An explicit navigation to plain /settings (e.g. the More sheet) shows the list.
+    if (detailOpen.value) returnedSection.value = activeSection.value;
+    detailOpen.value = false;
+    releaseDetailBackTarget();
+  }
 }, { immediate: true });
+onBeforeUnmount(releaseDetailBackTarget);
 
 const uiZoomOptions = UI_ZOOM_LEVELS.map((value) => ({ value: String(value), label: `${value}%` }));
 
@@ -257,7 +319,7 @@ const vaultPolicyOptions = computed(() => [
   },
   {
     value: "automatic",
-    label: t("sshSettings.vault.policies.automatic"),
+    label: t(mobileLayout ? "mobile.settings.vaultAutomatic" : "sshSettings.vault.policies.automatic"),
   },
   {
     value: "automaticLocal",
@@ -296,6 +358,54 @@ const autoUnlockFailureMessage = computed(() => {
 const autoUnlockRepairPolicy = computed(() => (
   vaultStatus.value?.unlockPolicy === "automaticLocal" ? "automaticLocal" : "automatic"
 ));
+
+interface MobileSettingsRow {
+  id: SettingsSection;
+  icon: Component;
+  title: string;
+  summary: string;
+  /** Tints the summary; the summary text itself always carries the state. */
+  tone?: "success" | "warning" | "neutral";
+  badge?: boolean;
+}
+
+// The phone list mirrors the desktop sidebar order, labels and icons, with a one-line summary per row.
+const mobileSettingsGroups = computed<{ id: string; label: string; rows: MobileSettingsRow[] }[]>(() => {
+  if (!mobileLayout) return [];
+  const summary = (id: SettingsSection) => t(`mobile.settings.summaries.${id}`);
+  return [
+    {
+      id: "general",
+      label: t("sshSettings.navigation.general"),
+      rows: [
+        { id: "application", icon: Settings, title: t("sshSettings.applicationPreferences.title"), summary: summary("application") },
+        { id: "terminal", icon: SquareTerminal, title: t("sshSettings.navigation.terminal"), summary: summary("terminal") },
+        ...enhancementSections.map((section) => ({ id: section.id, icon: section.icon, title: t(section.label), summary: summary(section.id) })),
+        {
+          id: "about",
+          icon: Info,
+          title: t("releases.aboutTitle"),
+          summary: appUpdate.hasUpdate ? t("releases.newBadgeAccessible") : summary("about"),
+          badge: appUpdate.hasUpdate,
+        },
+      ],
+    },
+    {
+      id: "security",
+      label: t("sshSettings.navigation.security"),
+      rows: [
+        { id: "vault", icon: LockKeyhole, title: t("sshSettings.vault.title"), summary: vaultStateLabel.value, tone: vaultStateTone.value },
+        ...securityLinks.map((link) => ({
+          id: link.section,
+          icon: link.icon,
+          title: t(`sshSettings.${link.key}.title`),
+          summary: t(`sshSettings.${link.key}.status`),
+          tone: "success" as const,
+        })),
+      ],
+    },
+  ];
+});
 
 const terminalFontOptions = computed(() => [
   {
@@ -415,6 +525,12 @@ function restoreTerminalFontSizeDraft() {
   terminalFontSizeDraft.value = String(ui.terminalFontSize);
 }
 
+// The size also changes outside this field (Android pinch on a terminal, preference
+// import or reset) while Settings stays mounted; follow it unless the field is being edited.
+watch(() => ui.terminalFontSize, (size) => {
+  if (document.activeElement?.id !== "terminal-font-size") terminalFontSizeDraft.value = String(size);
+});
+
 function updateTerminalLineHeight(value: string) {
   terminalLineHeightDraft.value = value;
   if (!terminalLineHeightInvalid.value) void saveApplicationPreference(() => ui.setTerminalLineHeight(value));
@@ -482,8 +598,11 @@ async function runSecureVault(mode: SecureVaultMode) {
   try {
     await requestSecureVault(mode);
     vaultStatus.value = await fetchVaultStatus();
-  } catch {
-    vaultActionError.value = t("sshHosts.vault.failed");
+  } catch (error) {
+    const coreError = parseCoreApiError(error);
+    vaultActionError.value = coreError?.messageKey && te(coreError.messageKey)
+      ? t(coreError.messageKey)
+      : t("secureWindow.vault.failed");
     vaultStatus.value = await fetchVaultStatus().catch(() => null);
   } finally {
     vaultActionLoading.value = false;
@@ -602,7 +721,10 @@ async function saveCustomScheme() {
 <template>
   <section class="settings-page">
     <div class="settings-shell">
-      <aside class="settings-sidebar">
+      <aside
+        v-if="!mobileLayout"
+        class="settings-sidebar"
+      >
         <h1>{{ t("sshSettings.title") }}</h1>
 
         <nav :aria-label="t('sshSettings.navigation.label')">
@@ -741,7 +863,91 @@ async function saveCustomScheme() {
         </nav>
       </aside>
 
-      <main class="settings-detail">
+      <nav
+        v-else-if="!detailOpen"
+        class="settings-mobile-list"
+        :aria-label="t('sshSettings.navigation.label')"
+      >
+        <h1 class="settings-mobile-list__title">
+          {{ t("sshSettings.title") }}
+        </h1>
+        <section
+          v-for="group in mobileSettingsGroups"
+          :key="group.id"
+          class="settings-mobile-list__group"
+          :aria-labelledby="`settings-mobile-group-${group.id}`"
+        >
+          <h2 :id="`settings-mobile-group-${group.id}`">
+            {{ group.label }}
+          </h2>
+          <ul>
+            <li
+              v-for="row in group.rows"
+              :key="row.id"
+            >
+              <button
+                class="settings-mobile-row"
+                :class="{ 'settings-mobile-row--current': returnedSection === row.id }"
+                type="button"
+                :data-section="row.id"
+                :aria-current="returnedSection === row.id ? 'true' : undefined"
+                @click="selectSection(row.id)"
+              >
+                <span
+                  class="settings-mobile-row__icon"
+                  aria-hidden="true"
+                >
+                  <NvxIcon
+                    :icon="row.icon"
+                    :size="20"
+                  />
+                </span>
+                <span class="settings-mobile-row__copy">
+                  <span class="settings-mobile-row__title">
+                    <span class="settings-mobile-row__label">{{ row.title }}</span>
+                    <span
+                      v-if="row.badge"
+                      class="settings-nav-item__update-badge"
+                      aria-hidden="true"
+                    >{{ t("releases.newBadge") }}</span>
+                  </span>
+                  <span
+                    class="settings-mobile-row__summary"
+                    :class="row.tone ? `settings-mobile-row__summary--${row.tone}` : undefined"
+                  >{{ row.summary }}</span>
+                </span>
+                <NvxIcon
+                  class="settings-mobile-row__chevron"
+                  :icon="ChevronRight"
+                  :size="16"
+                  aria-hidden="true"
+                />
+              </button>
+            </li>
+          </ul>
+        </section>
+      </nav>
+
+      <header
+        v-if="mobileLayout && detailOpen"
+        class="settings-mobile-bar"
+      >
+        <NvxIconButton
+          :label="t('mobile.settings.back')"
+          @click="closeDetail"
+        >
+          <NvxIcon
+            :icon="ArrowLeft"
+            :size="20"
+          />
+        </NvxIconButton>
+        <h1>{{ t("sshSettings.title") }}</h1>
+      </header>
+
+      <main
+        v-if="!mobileLayout || detailOpen"
+        class="settings-detail"
+      >
         <NvxPluginExtensionTarget
           target-id="settings.tools"
           instance-key="global"
@@ -760,11 +966,14 @@ async function saveCustomScheme() {
               <h2 id="application-preferences-title">
                 {{ t("sshSettings.applicationPreferences.title") }}
               </h2>
-              <p>{{ t("sshSettings.applicationPreferences.description") }}</p>
+              <p>{{ t(mobileLayout ? "mobile.settings.applicationDescription" : "sshSettings.applicationPreferences.description") }}</p>
             </div>
           </div>
           <div class="application-preferences__controls">
-            <div class="application-preference">
+            <div
+              v-if="!mobileLayout"
+              class="application-preference"
+            >
               <span class="application-preference__identity">
                 <NvxIcon
                   :icon="Type"
@@ -827,7 +1036,7 @@ async function saveCustomScheme() {
                 />
                 <span class="application-preference__copy">
                   <strong>{{ t("sshSettings.applicationPreferences.newTerminalBehavior") }}</strong>
-                  <small>{{ t("sshSettings.applicationPreferences.newTerminalBehaviorDescription") }}</small>
+                  <small>{{ t(mobileLayout ? "mobile.settings.newTerminalBehaviorDescription" : "sshSettings.applicationPreferences.newTerminalBehaviorDescription") }}</small>
                 </span>
               </span>
               <NvxSelect
@@ -1149,7 +1358,7 @@ async function saveCustomScheme() {
           <div class="settings-vault__heading">
             <div>
               <h2>{{ t("sshSettings.vault.title") }}</h2>
-              <p>{{ t("sshSettings.vault.description") }}</p>
+              <p>{{ t(mobileLayout ? "mobile.settings.vaultDescription" : "sshSettings.vault.description") }}</p>
             </div>
             <NvxStatusLabel :tone="vaultStateTone">
               {{ vaultStateLabel }}

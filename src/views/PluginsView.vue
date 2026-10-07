@@ -529,7 +529,7 @@ onBeforeUnmount(() => {
               :icon="attentionPluginCount > 0 ? CircleAlert : ShieldCheck"
               :size="16"
               aria-hidden="true"
-            />{{ t("plugins.summary.attentionValue", { count: attentionPluginCount }) }}</span>
+            />{{ t("plugins.summary.attentionValue", attentionPluginCount) }}</span>
           </div>
         </div>
         <p

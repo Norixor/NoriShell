@@ -212,6 +212,32 @@ describe("TunnelsView operations workspace", () => {
     vi.useRealTimers();
   });
 
+  it("ignores a stopping event that arrives after the stop reply and the following refresh", async () => {
+    client.listForwardRules.mockResolvedValue({ rules: [savedRule] });
+    const running = session({ stateRevision: "2" });
+    let onEvent: ((event: unknown) => void) | undefined;
+    client.startForwardSession.mockImplementation(async (_request: unknown, listener: (event: unknown) => void) => {
+      onEvent = listener;
+      return running;
+    });
+    client.stopForwardSession.mockResolvedValue(session({ state: "stopped", stateRevision: "4", childCount: 0 }));
+    const { wrapper } = await mountView();
+    await wrapper.findAll("button").find((button) => button.attributes("aria-label")?.includes("Start"))?.trigger("click");
+    await flushPromises();
+    expect(client.startForwardSession).toHaveBeenCalled();
+    client.fetchForwardSessionSnapshot.mockResolvedValue({ snapshotRevision: "0", sessions: [] });
+    await wrapper.find('button[aria-label="Stop"]').trigger("click");
+    await flushPromises();
+    expect(client.stopForwardSession).toHaveBeenCalledWith({ sessionId: running.sessionId, expectedGeneration: "1" });
+
+    onEvent?.({ schemaVersion: 1, eventSeq: "3", session: session({ state: "stopping", stateRevision: "3" }) });
+    onEvent?.({ schemaVersion: 1, eventSeq: "4", session: session({ state: "stopped", stateRevision: "4", childCount: 0 }) });
+    await flushPromises();
+    expect(wrapper.text()).not.toMatch(/Stopping(?! one tunnel)/);
+    expect(wrapper.find('button[aria-label="Stop"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("keeps uncertain cleanup visible and fences one explicitly confirmed exit attempt", async () => {
     const uncertain = session({
       state: "failed",

@@ -37,6 +37,14 @@ vi.mock("../workspace-window-context", async (importOriginal) => ({
   isWorkspaceChildWindow: () => workspaceView.tab,
   isWorkspaceTabView: () => workspaceView.tab,
 }));
+// Default: the vitest document is a single document without Core IPC (browser preview).
+const hostMode = vi.hoisted(() => ({ ipc: false, mode: "singleDocument" as "singleDocument" | "nativeTabs", mobile: false }));
+vi.mock("../platform-host", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../platform-host")>(),
+  hasTauriIpc: () => hostMode.ipc,
+  workspaceHostMode: () => hostMode.mode,
+  isMobileLayout: () => hostMode.mobile,
+}));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, callback: (event: { payload: unknown }) => void) => {
     nativeEvents.set(name, callback);
@@ -66,6 +74,7 @@ const client = vi.hoisted(() => ({
   importCredential: vi.fn(),
   listHostCatalog: vi.fn(),
   listHosts: vi.fn(),
+  listIdentities: vi.fn(),
   prepareTransientCredential: vi.fn(),
   replaceAuthenticationPlan: vi.fn(),
   replaceTerminalWorkspaceLayout: vi.fn(),
@@ -102,6 +111,7 @@ vi.mock("../core-api/client", async (importOriginal) => {
     importCredential: client.importCredential,
     listHostCatalog: client.listHostCatalog,
     listHosts: client.listHosts,
+    listIdentities: client.listIdentities,
     prepareTransientCredential: client.prepareTransientCredential,
     replaceAuthenticationPlan: client.replaceAuthenticationPlan,
     replaceTerminalWorkspaceLayout: client.replaceTerminalWorkspaceLayout,
@@ -748,6 +758,8 @@ describe("SshTerminalView route and Header behavior", () => {
   beforeEach(() => {
     workspaceLabel.value = "main";
     workspaceView.tab = false;
+    hostMode.ipc = false;
+    hostMode.mode = "singleDocument";
     pluginClient.fetchPluginTerminalSessionSnapshot.mockResolvedValue({ snapshotRevision: "0", sessions: [] });
     pluginClient.listPluginProtocolLaunches.mockResolvedValue([]);
     vi.clearAllMocks();
@@ -1054,6 +1066,147 @@ describe("SshTerminalView route and Header behavior", () => {
     await controller.openHost!({ hostId: readyHost.hostId, operationId: "019d0000-0000-7000-8000-000000000301" });
     await flushPromises();
     expect(wrapper.findAllComponents(SshPaneContractStub)).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("keeps an Identity-username Host bound to its HostId and label when connecting with a one-time credential", async () => {
+    workspaceView.tab = true;
+    const identityHost = { ...host, username: null, identityId: "019d0000-0000-7000-8000-000000000601", hasReadyCredential: false };
+    client.listHosts.mockResolvedValue([identityHost]);
+    client.listIdentities.mockResolvedValue([{ identityId: identityHost.identityId, label: "Ops", username: "deploy", stateVersion: "1" }]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked", vaultId: "vault", revision: "2", entryCount: 1 });
+    const { wrapper, pinia } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    const controller = tabs.terminalController!;
+    const id = createUuidV7();
+    await controller.createInitialTab!(id, "welcome");
+    await controller.openHost!({ hostId: identityHost.hostId, operationId: "019d0000-0000-7000-8000-000000000602" });
+    await flushPromises();
+    expect((document.querySelector("#quick-username") as HTMLInputElement | null)?.value).toBe("deploy");
+    secureCredential.mockResolvedValueOnce("019d0000-0000-7000-8000-000000000603");
+    document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
+    await flushPromises();
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    expect(pane.props("target")).toEqual(expect.objectContaining({ kind: "host", hostId: identityHost.hostId }));
+    expect(pane.props("label")).toBe(identityHost.label);
+    expect(client.createHost).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("re-authenticates an Identity-username Host Pane without changing its title or creating a Host", async () => {
+    const identityHost = { ...host, username: null, identityId: "019d0000-0000-7000-8000-000000000611", hasReadyCredential: false };
+    client.listHosts.mockResolvedValue([identityHost]);
+    client.listIdentities.mockResolvedValue([{ identityId: identityHost.identityId, label: "Ops", username: "deploy", stateVersion: "1" }]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked", vaultId: "vault", revision: "2", entryCount: 1 });
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({
+      revision: "7",
+      layout: { schemaVersion: 1, activeTabId: "tab-1", tabs: [{
+        tabId: "tab-1", layout: { kind: "pane", paneId: "pane-1", terminalId: "pane-1" },
+        activePaneId: "pane-1", panes: [{ kind: "sshHost", paneId: "pane-1", label: identityHost.label, hostId: identityHost.hostId }],
+      }] }, updatedAtUnixMs: 10,
+    });
+    const { wrapper } = await mountShell("/terminal", { restore: true });
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    pane.vm.$emit("requestCredential", "pane-1", { kind: "host", hostId: identityHost.hostId, expectedHostStateVersion: identityHost.stateVersion });
+    await flushPromises();
+    expect((document.querySelector("#quick-username") as HTMLInputElement | null)?.value).toBe("deploy");
+    secureCredential.mockResolvedValueOnce("019d0000-0000-7000-8000-000000000612");
+    document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
+    await flushPromises();
+    expect(secureCredential).toHaveBeenCalledWith(expect.objectContaining({ label: identityHost.label }));
+    expect(reconnectWithCredential).toHaveBeenCalledWith("019d0000-0000-7000-8000-000000000612");
+    const after = wrapper.findComponent(SshPaneContractStub);
+    expect(after.props("label")).toBe(identityHost.label);
+    expect(after.props("target")).toEqual(expect.objectContaining({ kind: "host", hostId: identityHost.hostId }));
+    expect(client.createHost).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("re-authenticates with a saved credential: reconnects the same Host Pane", async () => {
+    const identityHost = { ...host, username: null, identityId: "019d0000-0000-7000-8000-000000000621", hasReadyCredential: true };
+    client.listHosts.mockResolvedValue([identityHost]);
+    client.listIdentities.mockResolvedValue([{ identityId: identityHost.identityId, label: "Ops", username: "deploy", stateVersion: "1" }]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked", vaultId: "vault", revision: "2", entryCount: 1 });
+    client.getHostConnectionConfig.mockResolvedValue({ authenticationPlan: { hostId: identityHost.hostId, revision: "1", mode: "identity", credentialRefIds: [] } });
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({
+      revision: "7",
+      layout: { schemaVersion: 1, activeTabId: "tab-1", tabs: [{
+        tabId: "tab-1", layout: { kind: "pane", paneId: "pane-1", terminalId: "pane-1" },
+        activePaneId: "pane-1", panes: [{ kind: "sshHost", paneId: "pane-1", label: identityHost.label, hostId: identityHost.hostId }],
+      }] }, updatedAtUnixMs: 10,
+    });
+    const { wrapper } = await mountShell("/terminal", { restore: true });
+    const body = new DOMWrapper(document.body);
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    pane.vm.$emit("requestCredential", "pane-1", { kind: "host", hostId: identityHost.hostId, expectedHostStateVersion: identityHost.stateVersion });
+    await flushPromises();
+    await body.get("#quick-save-credential").setValue(true);
+    secureCredential.mockResolvedValueOnce("019d0000-0000-7000-8000-000000000622");
+    document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
+    await flushPromises();
+    expect(secureCredential).toHaveBeenCalledWith(expect.objectContaining({ identityId: identityHost.identityId, label: identityHost.label }));
+    expect(reconnectWithCredential).toHaveBeenCalledWith("019d0000-0000-7000-8000-000000000622");
+    const after = wrapper.findComponent(SshPaneContractStub);
+    expect(after.props("label")).toBe(identityHost.label);
+    expect(after.props("target")).toEqual(expect.objectContaining({ kind: "host", hostId: identityHost.hostId }));
+    expect(client.createHost).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("shows the save failure when the saved-credential re-authentication cannot store the credential", async () => {
+    const identityHost = { ...host, username: null, identityId: "019d0000-0000-7000-8000-000000000621", hasReadyCredential: true };
+    client.listHosts.mockResolvedValue([identityHost]);
+    client.listIdentities.mockResolvedValue([{ identityId: identityHost.identityId, label: "Ops", username: "deploy", stateVersion: "1" }]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked", vaultId: "vault", revision: "2", entryCount: 1 });
+    client.getHostConnectionConfig.mockResolvedValue({ authenticationPlan: { hostId: identityHost.hostId, revision: "1", mode: "identity", credentialRefIds: [] } });
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({
+      revision: "7",
+      layout: { schemaVersion: 1, activeTabId: "tab-1", tabs: [{
+        tabId: "tab-1", layout: { kind: "pane", paneId: "pane-1", terminalId: "pane-1" },
+        activePaneId: "pane-1", panes: [{ kind: "sshHost", paneId: "pane-1", label: identityHost.label, hostId: identityHost.hostId }],
+      }] }, updatedAtUnixMs: 10,
+    });
+    const { wrapper } = await mountShell("/terminal", { restore: true });
+    const body = new DOMWrapper(document.body);
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    pane.vm.$emit("requestCredential", "pane-1", { kind: "host", hostId: identityHost.hostId, expectedHostStateVersion: identityHost.stateVersion });
+    await flushPromises();
+    await body.get("#quick-save-credential").setValue(true);
+    secureCredential.mockRejectedValueOnce("secureCredentialFailed");
+    document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
+    await flushPromises();
+    expect(reconnectWithCredential).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("无法准备 SSH 连接");
+    expect(document.querySelector("#quick-address")).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it("keeps the launcher open with a specific error when the saved-credential reconnect cannot start", async () => {
+    const identityHost = { ...host, username: null, identityId: "019d0000-0000-7000-8000-000000000621", hasReadyCredential: true };
+    client.listHosts.mockResolvedValue([identityHost]);
+    client.listIdentities.mockResolvedValue([{ identityId: identityHost.identityId, label: "Ops", username: "deploy", stateVersion: "1" }]);
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked", vaultId: "vault", revision: "2", entryCount: 1 });
+    client.getHostConnectionConfig.mockResolvedValue({ authenticationPlan: { hostId: identityHost.hostId, revision: "1", mode: "identity", credentialRefIds: [] } });
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({
+      revision: "7",
+      layout: { schemaVersion: 1, activeTabId: "tab-1", tabs: [{
+        tabId: "tab-1", layout: { kind: "pane", paneId: "pane-1", terminalId: "pane-1" },
+        activePaneId: "pane-1", panes: [{ kind: "sshHost", paneId: "pane-1", label: identityHost.label, hostId: identityHost.hostId }],
+      }] }, updatedAtUnixMs: 10,
+    });
+    const { wrapper } = await mountShell("/terminal", { restore: true });
+    const body = new DOMWrapper(document.body);
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    pane.vm.$emit("requestCredential", "pane-1", { kind: "host", hostId: identityHost.hostId, expectedHostStateVersion: identityHost.stateVersion });
+    await flushPromises();
+    await body.get("#quick-save-credential").setValue(true);
+    secureCredential.mockResolvedValueOnce("019d0000-0000-7000-8000-000000000623");
+    reconnectWithCredential.mockRejectedValueOnce(new Error("SSH reconnect could not start: noAttachment"));
+    document.querySelector<HTMLButtonElement>(".nvx-dialog__actions .nvx-button--primary")?.click();
+    await flushPromises();
+    expect(reconnectWithCredential).toHaveBeenCalledWith("019d0000-0000-7000-8000-000000000623");
+    expect(document.body.textContent).toContain("凭据已保存，但 SSH 连接未建立");
+    expect(document.querySelector("#quick-address")).not.toBeNull();
     wrapper.unmount();
   });
 
@@ -2402,6 +2555,233 @@ describe("SshTerminalView route and Header behavior", () => {
     );
     expect(document.body.textContent).toContain("凭据已保存，但 SSH 连接未建立");
     expect(document.body.textContent).toContain("新凭据已安全保存到 Vault");
+    wrapper.unmount();
+  });
+});
+
+describe("SshTerminalView single-document workspace (Android)", () => {
+  const savedHost: HostSummary = { ...host, hasReadyCredential: true };
+  const historyTab = {
+    tabId: "019d0000-0000-7000-8000-000000000a01",
+    activePaneId: "019d0000-0000-7000-8000-000000000a02",
+    layout: { kind: "pane", paneId: "019d0000-0000-7000-8000-000000000a02", terminalId: "019d0000-0000-7000-8000-000000000a02" },
+    panes: [{ kind: "sshHost", paneId: "019d0000-0000-7000-8000-000000000a02", label: "Acceptance host", hostId: host.hostId }],
+  };
+
+  beforeEach(() => {
+    workspaceLabel.value = "main";
+    workspaceView.tab = false;
+    hostMode.ipc = true;
+    hostMode.mode = "singleDocument";
+    vi.clearAllMocks();
+    localStorage.clear();
+    resetTerminalInputFocusForTests();
+    i18n.global.locale.value = "zh-CN";
+    pluginClient.fetchPluginTerminalSessionSnapshot.mockResolvedValue({ snapshotRevision: "0", sessions: [] });
+    pluginClient.listPluginProtocolLaunches.mockResolvedValue([]);
+    client.listHosts.mockResolvedValue([savedHost]);
+    client.listHostCatalog.mockResolvedValue([{ host: savedHost, group: null, tags: [], recentConnection: null }]);
+    client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "0", sessions: [] });
+    client.fetchLocalSessionSnapshot.mockResolvedValue({ snapshotRevision: "0", sessions: [] });
+    client.fetchTelnetSessionSnapshot.mockResolvedValue({ snapshotRevision: "0", sessions: [] });
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({ revision: "4", updatedAtUnixMs: 0,
+      layout: { schemaVersion: 1, activeTabId: historyTab.tabId, tabs: [historyTab] } });
+    client.replaceTerminalWorkspaceLayout.mockResolvedValue({ revision: "5", updatedAtUnixMs: 0 });
+    client.fetchVaultStatus.mockResolvedValue({ state: "unlocked" });
+  });
+
+  afterEach(() => {
+    hostMode.ipc = false;
+    hostMode.mode = "singleDocument";
+  });
+
+  it("restores saved history in this document and starts fresh Sessions only for that preference", async () => {
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "restoreHistory" }));
+    const { wrapper, pinia } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    expect(tabs.terminalTabs.map((tab) => tab.groupId)).toEqual([historyTab.tabId]);
+    expect(tabs.activeTerminalTabId).toBe(historyTab.tabId);
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    expect(pane.props("paneId")).toBe(historyTab.activePaneId);
+    // A Host with a ready credential starts a new generation; no old socket is reused.
+    expect(pane.props("deferredStart")).toBe(false);
+    expect(pane.props("existingSession")).toBeNull();
+    expect(pane.props("target")).toMatchObject({ kind: "host", hostId: host.hostId });
+    wrapper.unmount();
+  });
+
+  it("keeps the welcome page and the saved history untouched until a new Tab exists", async () => {
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "welcome" }));
+    const { wrapper, pinia } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    expect(tabs.terminalTabs).toHaveLength(0);
+    expect(wrapper.find(".ssh-terminal-empty").exists()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(client.replaceTerminalWorkspaceLayout).not.toHaveBeenCalled();
+
+    tabs.terminalController!.createTab!("welcome");
+    await flushPromises();
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    await flushPromises();
+    expect(client.replaceTerminalWorkspaceLayout).toHaveBeenCalledTimes(1);
+    const written = client.replaceTerminalWorkspaceLayout.mock.calls[0]![0] as { expectedRevision: string; layout: { tabs: { tabId: string }[] } };
+    expect(written.expectedRevision).toBe("4");
+    // The history Tab is kept beside the new Tab for a later history start.
+    expect(written.layout.tabs.map((tab) => tab.tabId)).toEqual([historyTab.tabId, tabs.terminalTabs[0]!.groupId]);
+    wrapper.unmount();
+  });
+
+  it("re-activates the current Pane when the document returns to the Terminal page without a Tab activation", async () => {
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "restoreHistory" }));
+    const { wrapper, pinia, router } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    const controls = paneControls.get("Acceptance host")!;
+    // Opening a page (the "+" New page, a Secure Surface) releases the view ...
+    await tabs.terminalController!.deactivate();
+    await router.push("/hosts");
+    await flushPromises();
+    controls.activateFromTab.mockClear();
+    // ... and the bottom navigation routes back without activating a Tab.
+    await router.push("/terminal");
+    await flushPromises();
+    expect(wrapper.findComponent(SshPaneContractStub).props("active")).toBe(true);
+    expect(controls.activateFromTab).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("shows one Pane of a restored multi-Pane Tab with a switch in every orientation on the phone", async () => {
+    hostMode.mobile = true;
+    const listeners = new Set<() => void>();
+    let landscape = false;
+    const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: () => ({
+        get matches() { return landscape; },
+        addEventListener: (_: string, fn: () => void) => listeners.add(fn),
+        removeEventListener: (_: string, fn: () => void) => listeners.delete(fn),
+      }),
+    });
+    const rotate = (next: boolean) => { landscape = next; for (const fn of listeners) fn(); };
+    const leftPaneId = "019d0000-0000-7000-8000-000000000b02";
+    const rightPaneId = "019d0000-0000-7000-8000-000000000b03";
+    const splitTab = {
+      tabId: "019d0000-0000-7000-8000-000000000b01",
+      activePaneId: leftPaneId,
+      layout: {
+        kind: "split", splitId: "019d0000-0000-7000-8000-000000000b04", direction: "horizontal", ratio: 0.5,
+        first: { kind: "pane", paneId: leftPaneId, terminalId: leftPaneId },
+        second: { kind: "pane", paneId: rightPaneId, terminalId: rightPaneId },
+      },
+      panes: [
+        { kind: "sshHost", paneId: leftPaneId, label: "Left host", hostId: host.hostId },
+        { kind: "sshHost", paneId: rightPaneId, label: "Right host", hostId: host.hostId },
+      ],
+    };
+    client.fetchTerminalWorkspaceLayout.mockResolvedValue({ revision: "4", updatedAtUnixMs: 0,
+      layout: { schemaVersion: 1, activeTabId: splitTab.tabId, tabs: [splitTab] } });
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "restoreHistory" }));
+    try {
+      const { wrapper, pinia } = await mountShell();
+      const paneElement = (paneId: string) => wrapper.get(`.nvx-terminal-split-tree__pane[data-pane-id="${paneId}"]`);
+      // Portrait: the switch lists both Panes; only the active one is laid out, the other stays mounted but hidden.
+      const tabs = () => wrapper.findAll('.terminal-workspace__pane-switch [role="tab"]');
+      expect(tabs().map((tab) => tab.text())).toEqual(["Left host", "Right host"]);
+      expect(paneElement(leftPaneId).attributes("style")).toContain("width: 100%");
+      expect(paneElement(rightPaneId).attributes("style")).toContain("display: none");
+      expect(wrapper.findAll(".ssh-pane-contract-stub")).toHaveLength(2);
+      expect(wrapper.find(".nvx-terminal-split-tree__separator").exists()).toBe(false);
+      await tabs()[1]!.trigger("click");
+      await flushPromises();
+      expect(paneElement(rightPaneId).attributes("style")).toContain("width: 100%");
+      expect(paneElement(leftPaneId).attributes("style")).toContain("display: none");
+      expect(tabs()[1]!.attributes("aria-selected")).toBe("true");
+      // Landscape keeps the same single-Pane projection: phones never show Panes side by side.
+      rotate(true);
+      await flushPromises();
+      expect(tabs()).toHaveLength(2);
+      expect(paneElement(rightPaneId).attributes("style")).toContain("width: 100%");
+      expect(paneElement(leftPaneId).attributes("style")).toContain("display: none");
+      expect(wrapper.find(".nvx-terminal-split-tree__separator").exists()).toBe(false);
+      expect(wrapper.findAll(".ssh-pane-contract-stub")).toHaveLength(2);
+      // A hardware-keyboard split shortcut never adds a Pane on the phone, in any orientation.
+      useWorkspaceTabsStore(pinia).terminalController!.runShortcut!("terminal.split-right");
+      await flushPromises();
+      expect(wrapper.findAll(".nvx-terminal-split-tree__pane")).toHaveLength(2);
+      rotate(false);
+      await flushPromises();
+      expect(tabs()).toHaveLength(2);
+      expect(paneElement(rightPaneId).attributes("style")).toContain("width: 100%");
+      wrapper.unmount();
+    } finally {
+      if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
+      else Reflect.deleteProperty(window, "matchMedia");
+      hostMode.mobile = false;
+    }
+  });
+
+  it("reattaches a live Core Session after a WebView reload instead of restarting it", async () => {
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "welcome" }));
+    const liveSession: SshSessionSummary = {
+      ...runningSession,
+      target: { kind: "host", hostId: host.hostId, expectedHostStateVersion: host.stateVersion },
+    };
+    client.fetchSshSessionSnapshot.mockResolvedValue({ snapshotRevision: "1", sessions: [liveSession] });
+    client.getSshSession.mockResolvedValue({ session: liveSession, activeHostKeyChallenge: null, inputLease: null,
+      attachments: [{ viewId: historyTab.activePaneId, attachmentId: "019d0000-0000-7000-8000-000000000a03" }] });
+    const { wrapper, pinia } = await mountShell();
+    expect(useWorkspaceTabsStore(pinia).terminalTabs.map((tab) => tab.groupId)).toEqual([historyTab.tabId]);
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    expect(pane.props("paneId")).toBe(historyTab.activePaneId);
+    expect(pane.props("existingSession")).toMatchObject({ sessionId: liveSession.sessionId, generation: liveSession.generation });
+    wrapper.unmount();
+  });
+
+  it("opens every pending plugin protocol launch once with its Core Tab and Pane ids", async () => {
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "welcome" }));
+    const launch = (id: string, extra: Record<string, unknown> = {}) => ({ launchId: `launch-${id}`, pluginId: "provider.test",
+      providerId: "serial", label: `Device ${id}`, tabId: `tab-${id}`, paneId: `pane-${id}`, revision: "1", claimed: false,
+      expiresAtUnixMs: Date.now() + 60_000, ...extra });
+    pluginClient.listPluginProtocolLaunches.mockResolvedValue([launch("a"), launch("b"), launch("c", { claimed: true }),
+      launch("d", { expiresAtUnixMs: Date.now() - 1 })]);
+    const { wrapper, pinia } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    await tabs.terminalController!.reconcilePluginProtocolLaunches!();
+    await flushPromises();
+    expect(tabs.terminalTabs.map((tab) => tab.groupId)).toEqual(["tab-a", "tab-b"]);
+    await tabs.terminalController!.reconcilePluginProtocolLaunches!();
+    await flushPromises();
+    expect(tabs.terminalTabs).toHaveLength(2);
+    expect(wrapper.findAllComponents({ name: "NvxPluginTerminalPane" }).map((pane) => pane.props("paneId")))
+      .toEqual(["pane-a", "pane-b"]);
+    wrapper.unmount();
+  });
+
+  it("opens an approved plugin channel in a new Tab once per operation", async () => {
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "welcome" }));
+    const { wrapper, pinia } = await mountShell();
+    const tabs = useWorkspaceTabsStore(pinia);
+    const payload = { operationId: "019d0000-0000-7000-8000-000000000a10", authorizationToken: "one-time",
+      label: "pod shell", target: { kind: "host", hostId: host.hostId, expectedHostStateVersion: host.stateVersion } } as never;
+    await tabs.terminalController!.openApprovedPluginChannel!(payload);
+    await flushPromises();
+    expect(tabs.terminalTabs).toHaveLength(1);
+    const pane = wrapper.findComponent(SshPaneContractStub);
+    expect(pane.props("pluginAuthorizationToken")).toBe("one-time");
+    await expect(tabs.terminalController!.openApprovedPluginChannel!(payload)).rejects.toThrow("workspace_tab.plugin_channel_consumed");
+    expect(tabs.terminalTabs).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("keeps the desktop main shell free of Tabs: native Tab WebViews restore and persist them", async () => {
+    hostMode.mode = "nativeTabs";
+    localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ terminalStartupBehavior: "restoreHistory" }));
+    const { wrapper, pinia } = await mountShell();
+    expect(useWorkspaceTabsStore(pinia).terminalTabs).toHaveLength(0);
+    expect(client.fetchTerminalWorkspaceLayout).not.toHaveBeenCalled();
+    await expect(useWorkspaceTabsStore(pinia).terminalController!.openApprovedPluginChannel!({
+      operationId: "op", authorizationToken: "t", label: "x", target: { kind: "host", hostId: host.hostId, expectedHostStateVersion: "1" },
+    } as never)).rejects.toThrow("workspace_tab.invalid_plugin_channel");
     wrapper.unmount();
   });
 });

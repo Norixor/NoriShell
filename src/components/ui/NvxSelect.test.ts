@@ -1,7 +1,14 @@
 import { DOMWrapper, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { handleMobileBack, resetMobileOverlaysForTests } from "../../mobile-overlays";
 import NvxSelect from "./NvxSelect.vue";
+
+const host = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
 
 const options = [
   { value: "native", label: "Native" },
@@ -11,6 +18,8 @@ const options = [
 
 afterEach(() => {
   document.body.innerHTML = "";
+  host.mobile = false;
+  resetMobileOverlaysForTests();
 });
 
 function mountSelect(props: Record<string, unknown> = {}) {
@@ -168,5 +177,54 @@ describe("NvxSelect", () => {
     await trigger.trigger("click");
 
     expect(document.body.querySelector<HTMLElement>("[role='listbox']")?.style.width).toBe("160px");
+  });
+
+  it("keeps the anchored listbox on desktop (no sheet, no search)", async () => {
+    const wrapper = mountSelect();
+    await wrapper.find(".nvx-select__trigger").trigger("click");
+    expect(document.body.querySelector(".nvx-select__sheet")).toBeNull();
+    expect(document.body.querySelector(".nvx-select__search")).toBeNull();
+    expect(document.body.querySelector("[role='listbox']")?.getAttribute("style")).toContain("left");
+  });
+
+  it("opens a bottom sheet with a filter for long lists on the phone shell and closes on the back key", async () => {
+    host.mobile = true;
+    const many = Array.from({ length: 12 }, (_, index) => ({ value: `v${index}`, label: `Option ${index}` }));
+    const wrapper = mountSelect({ modelValue: "v3", options: many, searchLabel: "Filter options" });
+    await wrapper.find(".nvx-select__trigger").trigger("click");
+    await wrapper.vm.$nextTick();
+    const sheet = document.body.querySelector<HTMLElement>(".nvx-select__sheet")!;
+    expect(sheet.hasAttribute("data-nvx-mobile-sheet")).toBe(true);
+    expect(document.body.querySelector(".nvx-mobile-sheet-backdrop")).not.toBeNull();
+    const search = sheet.querySelector<HTMLInputElement>(".nvx-select__search")!;
+    expect(search.getAttribute("aria-label")).toBe("Filter options");
+    expect(optionElements()).toHaveLength(12);
+    search.value = "Option 1";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(optionElements().map((option) => option.text())).toEqual(["Option 1", "Option 10", "Option 11"]);
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["v1"]);
+    expect(document.body.querySelector(".nvx-mobile-sheet-backdrop")).toBeNull();
+
+    await wrapper.find(".nvx-select__trigger").trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(document.body.querySelector(".nvx-select__sheet")).not.toBeNull();
+    expect(handleMobileBack()).toBe(true);
+    await wrapper.vm.$nextTick();
+    expect(document.body.querySelector(".nvx-select__sheet")).toBeNull();
+    expect(document.body.querySelector(".nvx-mobile-sheet-backdrop")).toBeNull();
+  });
+
+  it("omits the filter for short lists on the phone shell", async () => {
+    host.mobile = true;
+    const wrapper = mountSelect();
+    await wrapper.find(".nvx-select__trigger").trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(document.body.querySelector(".nvx-select__sheet")).not.toBeNull();
+    expect(document.body.querySelector(".nvx-select__search")).toBeNull();
+    expect(optionElements()).toHaveLength(3);
   });
 });

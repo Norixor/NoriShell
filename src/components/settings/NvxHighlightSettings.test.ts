@@ -115,7 +115,7 @@ describe("highlight settings", () => {
       { line: 100, start: 0, end: 1, ruleId: "error" },
     ] } } as MessageEvent);
     await flushPromises();
-    expect(wrapper.text()).toContain("1 matches in sample text");
+    expect(wrapper.text()).toContain("1 match in sample text");
     const marked = wrapper.findAll(".nvx-highlight-settings__line span").filter(item => item.attributes("style")?.includes("background"));
     expect(marked.map(item => item.text())).toEqual(["ERROR"]);
     expect(worker.terminate).toHaveBeenCalled();

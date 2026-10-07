@@ -24,6 +24,23 @@ html:has(#app) body,
   min-height: calc(720px / var(--nvx-ui-zoom, 1));
 }
 
+/* The phone shell fills the WebView and follows the visual viewport when the soft keyboard is open. */
+html[data-nvx-host="mobile"],
+html[data-nvx-host="mobile"] body,
+html[data-nvx-host="mobile"] #app {
+  min-width: 0;
+  min-height: 0;
+}
+
+html[data-nvx-host="mobile"] #app {
+  height: var(--nvx-mobile-viewport-height, 100%);
+}
+
+html[data-nvx-host="mobile"] body {
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+
 html:has(#workspace-window-app),
 html:has(#workspace-window-app) body,
 #workspace-window-app {

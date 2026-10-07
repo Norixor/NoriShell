@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { registerToolWindowExit, type ToolWindowExitController } from "../tool-window-exit";
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { onSecureWindowCloseRequested, secureInvoke } from "../secure-transport";
 import { onMounted, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import NvxHostEditor from "../components/hosts/NvxHostEditor.vue";
@@ -29,11 +28,11 @@ async function saved() {
 }
 onMounted(async () => {
   try {
-    unlisten = await getCurrentWindow().onCloseRequested((event) => { event.preventDefault(); void close(); });
+    unlisten = await onSecureWindowCloseRequested(() => { void close(); });
     if (disposed) { unlisten(); return; }
     exitController = await registerToolWindowExit({ requestClose: () => editor.value?.requestClose() ?? Promise.resolve(true), isBusy: () => !target.value || !!editor.value?.busy, close: closeToolWindow, onError: () => { failed.value = true; } });
     if (disposed) { exitController.dispose(); return; }
-    target.value = await invoke<ToolTarget>("tool_window_get");
+    target.value = await secureInvoke<ToolTarget>("tool_window_get");
   } catch { failed.value = true; }
 });
 onBeforeUnmount(() => { disposed = true; unlisten?.(); exitController?.dispose(); });

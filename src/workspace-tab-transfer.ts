@@ -1,3 +1,4 @@
+import { workspaceHostMode } from "./platform-host";
 import {
   closeWorkspaceWindow, closeEmptyWorkspaceWindow,
   moveWorkspaceTabView, openWorkspaceWindow, snapshotWorkspaceTabs,
@@ -5,6 +6,11 @@ import {
 } from "./workspace-tab-windows";
 
 const moveInFlight = new Set<string>();
+
+/** Moving a Tab between windows reparents a native Tab WebView; a single document has none. */
+function requireNativeTabs(): void {
+  if (workspaceHostMode() !== "nativeTabs") throw new Error("workspace_tab.native_views_unsupported");
+}
 const openingNewWindow = new Set<string>();
 
 /** Core rechecks emptiness before destroying the child window. */
@@ -17,6 +23,7 @@ export async function closeChildWorkspaceWindowIfEmpty(): Promise<void> {
 export async function moveWorkspaceTab(
   id: string, target: string, closeSourceWhenEmpty = true,
 ): Promise<boolean> {
+  requireNativeTabs();
   const source = workspaceWindowLabel();
   if (source === target || moveInFlight.has(id)) return false;
   moveInFlight.add(id);
@@ -35,6 +42,7 @@ export async function moveWorkspaceTab(
 export async function moveWorkspaceTabToNewWindow(
   id: string, position?: { x: number; y: number },
 ): Promise<void> {
+  requireNativeTabs();
   if (moveInFlight.has(id) || openingNewWindow.has(id)) return;
   openingNewWindow.add(id);
   let target: string | null = null;

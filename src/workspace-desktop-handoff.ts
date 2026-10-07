@@ -52,6 +52,23 @@ export function filterDesktopSessions<T extends { id: string }>(
   return owned ? sessions.filter((session) => session.id === nativeSessionId) : [];
 }
 
+/**
+ * A single document (Android) hosts its Desktop Tabs itself. Core records each one as
+ * `desktop:<sessionId>` owned by this document with the exact session handle, so only
+ * sessions this document opened, at their current generation, are shown.
+ */
+export function filterSingleDocumentDesktopSessions<T extends { id: string; generation: string }>(
+  sessions: readonly T[],
+  ownership: WorkspaceTabSnapshot,
+): T[] {
+  return sessions.filter((session) => ownership.owned.some((tab) => {
+    if (tab.kind !== "desktop" || tab.id !== `desktop:${session.id}`) return false;
+    const handle = parseDesktopHandoff(tab.payload, tab.id);
+    return handle !== null && "sessionId" in handle
+      && handle.sessionId === session.id && handle.generation === session.generation;
+  }));
+}
+
 function controller(store: WorkspaceTabsStore): Promise<DesktopHeaderController> {
   return whenAvailable(() => {
     const current = store.desktopController;

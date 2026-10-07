@@ -1,11 +1,39 @@
 import { mount } from "@vue/test-utils";
 import { createPinia } from "pinia";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { i18n } from "../../locales";
 import NvxSftpPaneActionsMenu from "./NvxSftpPaneActionsMenu.vue";
 
+const host = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
+
 describe("NvxSftpPaneActionsMenu", () => {
+  afterEach(() => { host.mobile = false; document.body.innerHTML = ""; });
+
+  it("hides the folder picker and every add-Pane or split entry on the phone shell and keeps the other local actions", async () => {
+    host.mobile = true;
+    i18n.global.locale.value = "en";
+    const wrapper = mount(NvxSftpPaneActionsMenu, {
+      attachTo: document.body,
+      props: { paneId: "pane-1", kind: "local", ready: true, hasSelection: false, singleSelection: false, pending: false, showHidden: false, foldersFirst: true, canSplitHorizontal: true, canSplitVertical: true, canClose: false },
+      global: { plugins: [i18n, createPinia()], stubs: { NvxPluginContributionSlot: true } },
+    });
+    await wrapper.get("button").trigger("click");
+    await wrapper.vm.$nextTick();
+    const items = [...document.body.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent?.trim());
+    expect(items).not.toContain("Change local folder");
+    expect(items).not.toContain("Add local pane");
+    expect(items).not.toContain("Add remote pane");
+    expect(items).not.toContain("Split file Pane to the right");
+    expect(items).not.toContain("Split file Pane below");
+    expect(items).toContain("Close current file Pane");
+    wrapper.unmount();
+  });
+
   it("keeps the menu outside a clipped pane and closes on Escape", async () => {
     const wrapper = mount(NvxSftpPaneActionsMenu, {
       attachTo: document.body,
@@ -28,7 +56,10 @@ describe("NvxSftpPaneActionsMenu", () => {
     await wrapper.get('[aria-haspopup="menu"]').trigger("click");
     const menu = document.querySelector<HTMLElement>('.sftp-pane-actions-menu__popover');
     expect(menu?.parentElement).toBe(document.body);
-    expect(menu?.querySelectorAll('[role="menuitem"]')).toHaveLength(6);
+    // Local panes also offer the file actions Core supports inside their capability.
+    expect(menu?.querySelectorAll('[role="menuitem"]')).toHaveLength(9);
+    expect(menu?.textContent).toContain("New folder");
+    expect(menu?.textContent).not.toContain("Upload");
     expect(menu?.textContent).toContain("Add local pane");
     expect(menu?.textContent).toContain("Add remote pane");
 

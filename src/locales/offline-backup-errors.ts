@@ -3,6 +3,7 @@ export const offlineBackupErrorsZhCN = {
   tooManyOpen: "已打开的备份数量达到上限，请先关闭一个再重试。",
   secureExpired: "安全确认已过期，请重新发起操作。",
   snapshotChanged: "导出期间本机数据发生变化；未写入备份文件，请重新导出。",
+  writeIncomplete: "备份写入中断，目标文件可能不完整，请勿用它恢复；请重新导出。",
 };
 
 export const offlineBackupErrorsEn = {
@@ -10,4 +11,5 @@ export const offlineBackupErrorsEn = {
   tooManyOpen: "Too many backups are open. Close one before retrying.",
   secureExpired: "The secure approval expired. Start the operation again.",
   snapshotChanged: "Local data changed during export. No backup was written; export again.",
+  writeIncomplete: "Writing the backup was interrupted; the target file may be incomplete. Do not restore from it; export again.",
 };

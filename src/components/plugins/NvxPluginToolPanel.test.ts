@@ -8,6 +8,12 @@ import NvxPluginToolPanel from "./NvxPluginToolPanel.vue";
 import NvxPluginUiDocument from "./NvxPluginUiDocument.vue";
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
+const host = vi.hoisted(() => ({ mobile: false }));
+vi.mock("../../platform-host", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../platform-host")>()),
+  isMobileLayout: () => host.mobile,
+}));
+import { handleMobileBack, mobileOverlayDepth, resetMobileOverlaysForTests } from "../../mobile-overlays";
 
 function fixtures(context: PluginExtensionTargetContext): PluginUiContribution[] {
   return ["Docker", "Disk", "Network", "Processes", "Services", "Crontab", "Logs", "Nginx", "Tunnels"].map((name) => ({
@@ -73,6 +79,48 @@ describe("single terminal plugin panel", () => {
     expect(localStorage.getItem("norishell.pluginTools.width.v1")).toBe("720");
     await wrapper.get("[role=separator]").trigger("keydown", { key: "ArrowLeft" });
     expect(wrapper.get("[role=separator]").attributes("aria-valuenow")).toBe("720");
+    wrapper.unmount();
+  });
+  it("registers as a phone overlay so the Android back key closes the picker, then the sheet", async () => {
+    host.mobile = true;
+    resetMobileOverlaysForTests();
+    try {
+      setupStore();
+      const container = document.createElement("div");
+      container.style.contain = "layout paint";
+      document.body.appendChild(container);
+      const wrapper = mount(NvxPluginToolPanel, { attachTo: container, props: { modelValue: true, targetId: "terminal.tools", instanceKey: "host|pane|ssh|session|1", contextLabel: "Production SSH" }, global: { plugins: [i18n] } });
+      await flushPromises();
+      expect(mobileOverlayDepth()).toBe(1);
+      // The sheet and its scrim are hosted under body, outside the contained ancestor.
+      const panel = document.body.querySelector<HTMLElement>(".plugin-tool-panel")!;
+      expect(panel.parentElement).toBe(document.body);
+      expect(container.contains(panel)).toBe(false);
+      expect(document.body.querySelector(".plugin-tool-panel__scrim")?.parentElement).toBe(document.body);
+      panel.querySelector<HTMLElement>("[data-plugin-picker-trigger]")!.click();
+      await flushPromises();
+      expect(panel.querySelectorAll("[role=option]").length).toBeGreaterThan(0);
+      expect(handleMobileBack()).toBe(true);
+      await flushPromises();
+      expect(panel.querySelectorAll("[role=option]")).toHaveLength(0);
+      expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+      expect(handleMobileBack()).toBe(true);
+      expect(wrapper.emitted("update:modelValue")).toEqual([[false]]);
+      await wrapper.setProps({ modelValue: false });
+      expect(mobileOverlayDepth()).toBe(0);
+      wrapper.unmount();
+      container.remove();
+    } finally {
+      host.mobile = false;
+      resetMobileOverlaysForTests();
+    }
+  });
+  it("keeps the desktop panel out of the phone overlay stack", async () => {
+    resetMobileOverlaysForTests();
+    setupStore();
+    const wrapper = mount(NvxPluginToolPanel, { props: { modelValue: true, targetId: "terminal.tools", instanceKey: "host|pane|ssh|session|1", contextLabel: "Production SSH" }, global: { plugins: [i18n] } });
+    await flushPromises();
+    expect(mobileOverlayDepth()).toBe(0);
     wrapper.unmount();
   });
 });

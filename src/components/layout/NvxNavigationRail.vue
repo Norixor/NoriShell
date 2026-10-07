@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { isTauri } from "@tauri-apps/api/core";
 import {
   Check,
   CircleAlert,
@@ -34,6 +33,7 @@ import { useI18n } from "vue-i18n";
 import { useRoute } from "vue-router";
 
 import type { PluginNavigationItem } from "../../core-api/generated/core-api";
+import { hasTauriIpc, workspaceHostMode } from "../../platform-host";
 import { usePluginExtensionsStore } from "../../stores/pluginExtensions";
 import { useAppUpdateStore } from "../../stores/appUpdate";
 import { showWorkspaceTabFailure } from "../../workspace-tab-errors";
@@ -114,7 +114,7 @@ const activePath = computed(() => {
 const isActive = (to: string) => activePath.value === to;
 
 function openItem(item: Pick<RailItem, "plugin">, event: MouseEvent, navigate: (event?: MouseEvent) => unknown) {
-  if (!isTauri()) {
+  if (workspaceHostMode() !== "nativeTabs") {
     void navigate(event);
     return;
   }
@@ -132,7 +132,7 @@ function openItem(item: Pick<RailItem, "plugin">, event: MouseEvent, navigate: (
     .catch(() => { if (!navigated) void navigate(); });
 }
 onMounted(() => {
-  if (!isTauri()) return;
+  if (!hasTauriIpc()) return;
   void extensions.loadNavigation().catch(() => undefined);
   void appUpdate.loadPackagedVersion();
 });

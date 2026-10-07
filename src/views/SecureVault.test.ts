@@ -102,6 +102,55 @@ describe("isolated Vault interaction", () => {
     expect((wrapper.find('input[type="text"]').element as HTMLInputElement).value).toBe("");
     wrapper.unmount();
   });
+  it("stays on the unlock prompt after an incorrect password and allows a retry", async () => {
+    mocks.get.mockResolvedValue({ id: "fixture", kind: "unlock", canReset: false });
+    mocks.submit.mockRejectedValueOnce({
+      code: "vault.authentication_failed",
+      category: "validation",
+      retryStrategy: "waitForUser",
+      messageKey: "secureWindow.vault.incorrectPassword",
+      params: {},
+      requestId: null,
+      diagnosticId: null,
+      conflict: null,
+    });
+    const wrapper = mount(SecureVault, { global: { plugins: [i18n] } });
+    await flushPromises();
+    const input = wrapper.find('input[type="password"]');
+    await input.setValue("wrong-password");
+    await wrapper.find("form").trigger("submit");
+    await flushPromises();
+    expect(wrapper.text()).toContain(i18n.global.t("secureWindow.vault.incorrectPassword"));
+    expect(wrapper.text()).not.toContain("8 characters");
+    expect((input.element as HTMLInputElement).disabled).toBe(false);
+    expect((input.element as HTMLInputElement).value).toBe("");
+    mocks.submit.mockResolvedValueOnce(undefined);
+    await input.setValue("correct-password");
+    await wrapper.find("form").trigger("submit");
+    expect(mocks.submit).toHaveBeenLastCalledWith("", "correct-password", "", false);
+    expect(mocks.submit).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+  it("shows a distinct Core reason when the prompt ends with a non-retryable failure", async () => {
+    mocks.get.mockResolvedValue({ id: "fixture", kind: "unlock", canReset: false });
+    mocks.submit.mockRejectedValueOnce({
+      code: "vault.requires_reload",
+      category: "needsReconciliation",
+      retryStrategy: "reconcile",
+      messageKey: "secureWindow.vault.requiresReload",
+      params: {},
+      requestId: null,
+      diagnosticId: null,
+      conflict: null,
+    });
+    const wrapper = mount(SecureVault, { global: { plugins: [i18n] } });
+    await flushPromises();
+    await wrapper.find('input[type="password"]').setValue("any-password");
+    await wrapper.find("form").trigger("submit");
+    await flushPromises();
+    expect(wrapper.text()).toContain(i18n.global.t("secureWindow.vault.requiresReload"));
+    wrapper.unmount();
+  });
   it("does not offer reset outside an eligible unlock prompt", async () => {
     mocks.get.mockResolvedValue({ id: "fixture", kind: "unlock", canReset: false });
     const wrapper = render();

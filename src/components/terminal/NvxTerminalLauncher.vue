@@ -13,6 +13,7 @@ import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import type { HostSummary } from "../../core-api/generated/core-api";
+import { isMobileLayout } from "../../platform-host";
 import { NvxButton, NvxIcon, NvxInput } from "../ui";
 
 export interface TerminalLauncherHost {
@@ -35,6 +36,8 @@ const emit = defineEmits<{
 }>();
 
 const { locale, t } = useI18n();
+// The import dialog parses pasted text; phones have no ~/.ssh/config to point at.
+const mobileLayout = isMobileLayout();
 const quickTarget = ref("");
 const relativeTimeFormatter = computed(() => new Intl.RelativeTimeFormat(locale.value, {
   numeric: "auto",
@@ -161,7 +164,7 @@ function submitQuickConnect() {
           </span>
           <span class="terminal-launcher__method-copy">
             <strong>{{ t("sshTerminal.importSshConfig") }}</strong>
-            <small>{{ t("sshTerminal.importSshConfigDescription") }}</small>
+            <small>{{ t(mobileLayout ? "mobile.settings.importSshConfigHint" : "sshTerminal.importSshConfigDescription") }}</small>
           </span>
           <NvxIcon
             :icon="ChevronRight"

@@ -43,6 +43,8 @@ import {
 import NvxTerminalPaneControls from "./NvxTerminalPaneControls.vue";
 import NvxTerminalView from "./NvxTerminalView.vue";
 import { createFencedTerminalResize } from "./fencedTerminalResize";
+import { keepTerminalFocusOnPointerDown } from "./mobileToolbarPointer";
+import { useTerminalPaneImmersive } from "./useTerminalPaneImmersive";
 import NvxTerminalTools from "./NvxTerminalTools.vue";
 import type { ShortcutCommandId } from "../../shortcuts";
 import type { TerminalOutputGeometryMarker } from "../../terminal-output-geometry";
@@ -91,6 +93,8 @@ const emit = defineEmits<{
 }>();
 
 const { t, te } = useI18n();
+// Landscape + soft keyboard on phones: the toolbar collapses to a state strip so the terminal keeps its rows.
+const immersive = useTerminalPaneImmersive();
 const terminalView = ref<TerminalViewExpose | null>(null);
 const session = ref<PluginTerminalSessionSummary | null>(props.existingSession);
 const attachment = ref<PluginTerminalSessionAttachment | null>(null);
@@ -683,7 +687,14 @@ onBeforeUnmount(() => {
     class="plugin-terminal-pane"
     @pointerdown="activateTerminalSurface"
   >
-    <header class="plugin-terminal-pane__toolbar">
+    <header
+      class="plugin-terminal-pane__toolbar"
+      :class="{ 'plugin-terminal-pane__toolbar--immersive': immersive }"
+      :data-tone="immersive ? (state === 'running' ? 'success' : state === 'failed' ? 'danger' : 'neutral') : undefined"
+      :role="immersive ? 'status' : undefined"
+      :aria-label="immersive ? stateLabel : undefined"
+      @pointerdown="keepTerminalFocusOnPointerDown"
+    >
       <span class="plugin-terminal-pane__identity">
         <NvxIcon
           :icon="Network"
@@ -798,4 +809,26 @@ onBeforeUnmount(() => {
 .plugin-terminal-pane__identity small { color: var(--nvx-color-text-secondary); }
 .plugin-terminal-pane__risk { margin: 8px 8px 0; }
 .plugin-terminal-pane__terminal { min-height: 0; }
+
+/* Phone immersive mode: a 4px strip keeps the Session state visible (the status role and label carry it for assistive tech). */
+.plugin-terminal-pane__toolbar--immersive {
+  min-height: 0;
+  height: 4px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--nvx-color-text-tertiary);
+}
+
+.plugin-terminal-pane__toolbar--immersive > * {
+  display: none !important;
+}
+
+.plugin-terminal-pane__toolbar--immersive[data-tone="success"] {
+  background: var(--nvx-color-success);
+}
+
+.plugin-terminal-pane__toolbar--immersive[data-tone="danger"] {
+  background: var(--nvx-color-danger);
+}
 </style>

@@ -1,4 +1,5 @@
 import { createPinia } from "pinia";
+import { useWorkspaceTabsStore } from "../../stores/workspaceTabs";
 import { flushPromises, mount } from "@vue/test-utils";
 import { defineComponent, h } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +49,11 @@ vi.mock("../../core-api/client", async (importOriginal) => {
   return { ...actual, ...client };
 });
 
+const mobileHost = vi.hoisted(() => ({ value: false }));
+vi.mock("../../platform-host", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../platform-host")>(),
+  isMobileLayout: () => mobileHost.value,
+}));
 vi.mock("../../core-api/secure-ssh-challenge-client", () => ({ requestSecureSshChallenge: client.secureChallenge }));
 
 import NvxSshTerminalPane from "./NvxSshTerminalPane.vue";
@@ -1515,6 +1521,95 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     wrapper.unmount();
   });
 
+  it("lets phones collapse the failure banner while the header keeps the failed state", async () => {
+    vi.useFakeTimers();
+    mobileHost.value = true;
+    try {
+      const reason: SshSessionFailureReason = {
+        code: "connectionLost",
+        stage: "shell",
+        routeStage: null,
+        algorithmNegotiation: null,
+        retryStrategy: "retryOpen",
+        messageKey: "errors.sshSession.connectionLost",
+        diagnosticId: null,
+      } as unknown as SshSessionFailureReason;
+      const failed = summary("failed", { failureReason: reason });
+      client.getSshSession.mockResolvedValue(details(failed));
+      client.attachSshSession.mockResolvedValue({
+        stateRevision: failed.stateRevision,
+        attachmentRevision: "3",
+        attachment: attachment({ channelId: null }),
+        replay: [],
+      });
+      const wrapper = mountPane(failed);
+      await flushPromises();
+      expect(wrapper.find(".ssh-terminal-pane__failure").exists()).toBe(true);
+      await wrapper.get(".ssh-terminal-pane__failure-dismiss").trigger("click");
+      expect(wrapper.find(".ssh-terminal-pane__failure").exists()).toBe(false);
+      const toggle = wrapper.get(".ssh-terminal-pane__state-toggle");
+      expect(toggle.text()).toBe(wrapper.get(".ssh-terminal-pane__state").text());
+      await toggle.trigger("click");
+      expect(wrapper.find(".ssh-terminal-pane__failure").exists()).toBe(true);
+      wrapper.unmount();
+    } finally {
+      mobileHost.value = false;
+      vi.useRealTimers();
+    }
+  });
+
+  it("collapses the toolbar to a state strip in phone immersive mode and restores it when the keyboard closes", async () => {
+    mobileHost.value = true;
+    const viewport = new EventTarget() as EventTarget & { height: number };
+    viewport.height = 175;
+    vi.stubGlobal("visualViewport", viewport);
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
+    try {
+      const reason = {
+        code: "connectionLost", stage: "shell", routeStage: null, algorithmNegotiation: null,
+        retryStrategy: "retryOpen", messageKey: "errors.sshSession.connectionLost", diagnosticId: null,
+      } as unknown as SshSessionFailureReason;
+      const failed = summary("failed", { failureReason: reason });
+      client.getSshSession.mockResolvedValue(details(failed));
+      client.attachSshSession.mockResolvedValue({
+        stateRevision: failed.stateRevision, attachmentRevision: "3", attachment: attachment({ channelId: null }), replay: [],
+      });
+      const wrapper = mountPane(failed);
+      useWorkspaceTabsStore().terminalTabs = [{ tabId: "tab-1" } as never];
+      await flushPromises();
+      const header = wrapper.get(".ssh-terminal-pane__status");
+      expect(header.classes()).toContain("ssh-terminal-pane__status--immersive");
+      // A dangerous state stays perceivable: red strip plus an accessible status.
+      expect(header.attributes("data-tone")).toBe("danger");
+      expect(header.attributes("role")).toBe("status");
+      expect(header.attributes("aria-label")).toBe(wrapper.get(".ssh-terminal-pane__state").text());
+      viewport.height = 380;
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(wrapper.get(".ssh-terminal-pane__status").classes()).not.toContain("ssh-terminal-pane__status--immersive");
+      wrapper.unmount();
+    } finally {
+      mobileHost.value = false;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the desktop failure banner without a dismiss control", async () => {
+    const failed = summary("failed", { failureReason: {
+      code: "connectionLost", stage: "shell", routeStage: null, algorithmNegotiation: null,
+      retryStrategy: "retryOpen", messageKey: "errors.sshSession.connectionLost", diagnosticId: null,
+    } as unknown as SshSessionFailureReason });
+    client.getSshSession.mockResolvedValue(details(failed));
+    client.attachSshSession.mockResolvedValue({
+      stateRevision: failed.stateRevision, attachmentRevision: "3", attachment: attachment({ channelId: null }), replay: [],
+    });
+    const wrapper = mountPane(failed);
+    await flushPromises();
+    expect(wrapper.find(".ssh-terminal-pane__failure").exists()).toBe(true);
+    expect(wrapper.find(".ssh-terminal-pane__failure-dismiss").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("shows the structured algorithm negotiation category and candidate summaries", async () => {
     const reason: SshSessionFailureReason = {
       code: "algorithmNegotiationFailed",
@@ -1718,6 +1813,61 @@ describe("NvxSshTerminalPane Core IPC contract", () => {
     expect(wrapper.emitted(recovery === "credential" ? "requestCredential" : "requestVaultUnlock")).toEqual([[paneId, target]]);
     expect(client.reconnectSshSession).not.toHaveBeenCalled();
     expect(client.sendSshInput).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("waits for a foreground re-attach before using an explicit credential instead of dropping it", async () => {
+    const failed = summary("failed");
+    const reconnected = summary("connecting", { generation: "3", stateRevision: "9" });
+    client.getSshSession.mockResolvedValue(details(failed));
+    client.attachSshSession.mockResolvedValue({
+      stateRevision: failed.stateRevision, attachmentRevision: "3", attachment: attachment({ channelId: null }), replay: [],
+    });
+    client.reconnectSshSession.mockResolvedValue(details(reconnected, {
+      attachments: [attachment({ generation: "3", stateRevision: "9", channelId: null })],
+    }));
+    const wrapper = mountPane(failed);
+    await flushPromises();
+    // Returning from the secure credential prompt: Core reaped this renderer's attachment.
+    client.getSshSession.mockResolvedValue(details(failed, { attachments: [] }));
+    let releaseAttach!: () => void;
+    client.attachSshSession.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseAttach = () => resolve({
+        stateRevision: "8", attachmentRevision: "4",
+        attachment: attachment({ attachmentId: "019d0000-0000-7000-8000-000000000431", channelId: null, stateRevision: "8" }),
+        replay: [],
+      });
+    }));
+    const exposed = wrapper.vm as unknown as { reconcileAfterForeground(): Promise<void>; reconnectWithCredential(id: string): Promise<void> };
+    void exposed.reconcileAfterForeground();
+    const reconnecting = exposed.reconnectWithCredential("019d0000-0000-7000-8000-000000000499");
+    await flushPromises();
+    expect(client.reconnectSshSession).not.toHaveBeenCalled();
+    releaseAttach();
+    await reconnecting;
+    expect(client.reconnectSshSession).toHaveBeenCalledWith(expect.objectContaining({
+      attachmentId: "019d0000-0000-7000-8000-000000000431",
+      credentialRefId: "019d0000-0000-7000-8000-000000000499",
+    }));
+    wrapper.unmount();
+  });
+
+  it("rejects an explicit credential reconnect that cannot start and shows the failure", async () => {
+    const failed = summary("failed");
+    client.getSshSession.mockResolvedValue(details(failed));
+    client.attachSshSession.mockResolvedValue({
+      stateRevision: failed.stateRevision, attachmentRevision: "3", attachment: attachment({ channelId: null }), replay: [],
+    });
+    const wrapper = mountPane(failed);
+    await flushPromises();
+    client.getSshSession.mockResolvedValue(details(failed, { attachments: [] }));
+    client.attachSshSession.mockRejectedValue(new Error("attach failed"));
+    const exposed = wrapper.vm as unknown as { reconcileAfterForeground(): Promise<void>; reconnectWithCredential(id: string): Promise<void> };
+    await exposed.reconcileAfterForeground();
+    await expect(exposed.reconnectWithCredential("019d0000-0000-7000-8000-000000000499")).rejects.toThrow("noAttachment");
+    await flushPromises();
+    expect(client.reconnectSshSession).not.toHaveBeenCalled();
+    expect(wrapper.find(".ssh-terminal-pane__failure").text()).toContain("Could not reconnect");
     wrapper.unmount();
   });
 

@@ -6,6 +6,7 @@ import { useI18n } from "vue-i18n";
 import { aboutVersions } from "../../about-versions";
 import appIconUrl from "../../assets/branding/norishell-app-icon.png";
 import { useAppUpdateStore } from "../../stores/appUpdate";
+import { isMobileLayout } from "../../platform-host";
 import { NvxButton, NvxDialog, NvxInlineNotice, NvxStatusLabel } from "../ui";
 
 const PROJECT_PAGE = "https://github.com/Norixor/NoriShell";
@@ -13,6 +14,8 @@ const RELEASES_PAGE = "https://github.com/Norixor/NoriShell/releases";
 
 const { t } = useI18n();
 const updates = useAppUpdateStore();
+// Android hands the verified APK to the system installer, so the install copy names that flow.
+const installCopy = isMobileLayout() ? "mobile.settings.update" : "releases.install";
 const currentVersion = computed(() => updates.currentVersion);
 const status = computed(() => updates.status);
 const latestVersion = computed(() => updates.latestVersion);
@@ -106,7 +109,7 @@ onBeforeUnmount(() => {
         <h2 id="about-settings-title">
           NoriShell
         </h2>
-        <p>{{ t('releases.aboutDescription') }}</p>
+        <p>{{ t(isMobileLayout() ? 'mobile.settings.aboutDescription' : 'releases.aboutDescription') }}</p>
         <span class="about-settings__version">
           {{ currentVersion ? t('releases.currentVersion', { version: currentVersion }) : t('releases.versionUnavailable') }}
         </span>
@@ -204,7 +207,7 @@ onBeforeUnmount(() => {
             :disabled="updates.installStatus === 'checking' || updates.installStatus === 'downloading' || updates.installStatus === 'installing' || updates.installStatus === 'restartNeeded' || updates.installStatus === 'restartRequired'"
             @click="confirmOpen = true"
           >
-            {{ t('releases.install.action') }}
+            {{ t(`${installCopy}.action`) }}
           </NvxButton>
           <NvxButton
             v-if="status === 'updateAvailable'"
@@ -288,12 +291,12 @@ onBeforeUnmount(() => {
     </section>
     <NvxDialog
       v-model="confirmOpen"
-      :title="t('releases.install.confirmTitle')"
-      :description="t('releases.install.confirmDescription')"
+      :title="t(`${installCopy}.confirmTitle`)"
+      :description="t(`${installCopy}.confirmDescription`)"
       :close-label="t('releases.install.cancel')"
       size="md"
     >
-      <p>{{ t('releases.install.confirmBody') }}</p>
+      <p>{{ t(`${installCopy}.confirmBody`) }}</p>
       <template #actions>
         <NvxButton
           variant="secondary"
@@ -305,7 +308,7 @@ onBeforeUnmount(() => {
           variant="primary"
           @click="installUpdate"
         >
-          {{ t('releases.install.action') }}
+          {{ t(`${installCopy}.action`) }}
         </NvxButton>
       </template>
     </NvxDialog>

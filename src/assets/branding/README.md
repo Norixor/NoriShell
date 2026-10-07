@@ -11,3 +11,5 @@ pnpm tauri icon src/assets/branding/norishell-app-icon.png --output src-tauri/ic
 ```
 
 Tauri 配置继续消费 `src-tauri/icons` 中的 PNG、ICNS 和 ICO。Header 独立使用 `src/assets/norishell-mark.svg`。
+
+Android（`src-tauri/gen/android/app/src/main/res`）不直接使用 `tauri icon` 的前景图：该前景把整块底座铺到 108dp 画布的 95dp，会被自适应蒙版裁掉圆角。Android 自适应图标以底座瓷白色作背景，前景只取母版中的 N（坐标 `(212, 190, 812, 812)`）缩放到 60dp 居中；旧版 `ic_launcher.png` / `ic_launcher_round.png` 直接复制 `tauri icon` 的 Android 输出；`monochrome` 层与通知小图标用 `norishell-mark.svg` 的轮廓。

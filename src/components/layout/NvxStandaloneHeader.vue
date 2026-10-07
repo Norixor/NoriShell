@@ -1,11 +1,20 @@
 <script setup lang="ts">
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { ArrowLeft } from "lucide-vue-next";
+import { useI18n } from "vue-i18n";
 import { detectDesktopPlatform } from "../../platform";
+import { isMobileLayout } from "../../platform-host";
+import { requestSecureWindowClose } from "../../secure-transport";
+import { NvxIcon, NvxIconButton } from "../ui";
 import NvxAppHeader from "./NvxAppHeader.vue";
 import NvxWindowFrame from "./NvxWindowFrame.vue";
 import { secondaryWindowZoom } from "../../secure-window";
 
+const { t } = useI18n();
 const platform = detectDesktopPlatform();
+// Android surfaces are full-screen Activities, not windows: a phone app bar replaces
+// the desktop brand/title chrome. Decided by platform, never by viewport width.
+const mobile = isMobileLayout();
 let doubleClickStart: { x: number; y: number } | undefined;
 
 function isCaption(event: MouseEvent) {
@@ -38,7 +47,26 @@ function onMouseUp(event: MouseEvent) {
 </script>
 
 <template>
+  <header
+    v-if="mobile"
+    class="nvx-standalone-header nvx-standalone-header--mobile"
+  >
+    <NvxIconButton
+      class="nvx-standalone-header__back"
+      :label="t('mobile.closeSurface')"
+      @click="requestSecureWindowClose"
+    >
+      <NvxIcon
+        :icon="ArrowLeft"
+        :size="22"
+      />
+    </NvxIconButton>
+    <div class="nvx-standalone-header__title">
+      <slot />
+    </div>
+  </header>
   <NvxWindowFrame
+    v-else
     class="nvx-standalone-header"
     :zoom="secondaryWindowZoom"
   >
@@ -76,5 +104,31 @@ function onMouseUp(event: MouseEvent) {
   font-size: var(--nvx-font-size-sm);
   font-weight: var(--nvx-font-weight-semibold);
   user-select: none;
+}
+
+/* Phone app bar: 52px like the main window's mobile header (insets are native padding). */
+.nvx-standalone-header--mobile {
+  display: flex;
+  align-items: center;
+  gap: var(--nvx-space-1);
+  height: 52px;
+  min-height: 52px;
+  padding-inline: var(--nvx-space-1) var(--nvx-space-3);
+  border-bottom: var(--nvx-border-width) solid var(--nvx-color-border);
+  background: var(--nvx-color-bg-surface);
+  color: var(--nvx-color-text-primary);
+}
+
+.nvx-standalone-header__back {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+
+.nvx-standalone-header--mobile .nvx-standalone-header__title {
+  flex: 1;
+  padding-inline: var(--nvx-space-1);
+  font-size: var(--nvx-font-size-md);
 }
 </style>

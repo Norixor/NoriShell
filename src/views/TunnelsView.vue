@@ -6,7 +6,7 @@ import { useRouter } from "vue-router";
 
 import { NvxPageHeader } from "../components/layout";
 import { NvxPluginExtensionTarget } from "../components/plugins";
-import { NvxButton, NvxDialog, NvxField, NvxIcon, NvxInlineNotice, NvxInput, NvxSelect, NvxStatusLabel } from "../components/ui";
+import { NvxButton, NvxDialog, NvxField, NvxIcon, NvxIconButton, NvxInlineNotice, NvxInput, NvxSelect, NvxStatusLabel } from "../components/ui";
 import {
   canUseDesktopCore, createForwardRule, deleteForwardRule, fetchForwardSessionSnapshot,
   listForwardRules, listHosts, preflightForwardRule, retainForwardCleanupForExitOnce,
@@ -17,6 +17,8 @@ import type {
   ForwardFailureCode, ForwardRulePreflightResponse, ForwardRuleSummary, ForwardSessionEvent,
   ForwardSessionState, ForwardSessionSummary, HostSummary, PortForwardRule,
 } from "../core-api/generated/core-api";
+import { pushMobileBackTarget, type MobileOverlayHandle } from "../mobile-overlays";
+import { isMobileLayout } from "../platform-host";
 import { useTipsStore } from "../stores/tips";
 import { useRouteReveal } from "../routeReveal";
 import { openWorkspaceTerminalHost } from "../workspace-tab-shell-action";
@@ -55,7 +57,20 @@ const hostFilter = ref("all");
 const kindFilter = ref<"all" | ForwardKind>("all");
 const stateFilter = ref<StateFilter>("all");
 const selectedKey = ref<string | null>(null);
-const editorOpen = ref(true);
+// Desktop docks the editor beside the list from the start; the phone shows the list first and
+// opens the editor as a full-height layer (mobile.css) that the Android back key closes.
+const mobileLayout = isMobileLayout();
+const editorOpen = ref(!mobileLayout);
+let editorBackTarget: MobileOverlayHandle | null = null;
+watch(editorOpen, (open) => {
+  if (!mobileLayout) return;
+  if (open && !editorBackTarget) {
+    editorBackTarget = pushMobileBackTarget(() => { editorOpen.value = false; return true; });
+  } else if (!open && editorBackTarget) {
+    editorBackTarget.release();
+    editorBackTarget = null;
+  }
+}, { immediate: true });
 const editingRuleId = ref<string | null>(null);
 const ruleLabel = ref("");
 const draft = reactive<ForwardRuleDraft>({ hostId: "", kind: "local", bindAddress: "127.0.0.1", listenPort: "8022", targetHost: "127.0.0.1", targetPort: "22" });
@@ -177,8 +192,31 @@ function uptime(session: ForwardSessionSummary) {
   if (seconds < 3600) return t("tunnels.uptime.minutes", { value: Math.floor(seconds / 60) });
   return t("tunnels.uptime.hours", { value: Math.floor(seconds / 3600) });
 }
+/**
+ * Highest (generation, stateRevision) seen per session, kept after Core drops a stopped session from its snapshot.
+ * Channel events and command replies travel on separate IPC paths, so a "stopping" event may land after the stop
+ * reply and the following refresh; it must not resurrect the row or roll its state back.
+ */
+const latestSessionFacts = new Map<string, { generation: bigint; stateRevision: bigint }>();
+function recordSessionFact(session: ForwardSessionSummary) {
+  const known = latestSessionFacts.get(session.sessionId);
+  const generation = BigInt(session.generation); const stateRevision = BigInt(session.stateRevision);
+  if (!known || generation > known.generation || (generation === known.generation && stateRevision > known.stateRevision)) {
+    latestSessionFacts.set(session.sessionId, { generation, stateRevision });
+  }
+}
+function isStaleSessionFact(session: ForwardSessionSummary, present: boolean) {
+  const known = latestSessionFacts.get(session.sessionId);
+  if (!known) return false;
+  const generation = BigInt(session.generation); const stateRevision = BigInt(session.stateRevision);
+  if (generation !== known.generation) return generation < known.generation;
+  // Equal revisions carry cleanup progress for a listed session, but never re-add a removed one.
+  return stateRevision < known.stateRevision || (stateRevision === known.stateRevision && !present);
+}
 function applyEvent(event: ForwardSessionEvent) {
   const index = sessions.value.findIndex((session) => session.sessionId === event.session.sessionId);
+  if (isStaleSessionFact(event.session, index >= 0)) return;
+  recordSessionFact(event.session);
   if (index < 0) sessions.value.push(event.session); else sessions.value.splice(index, 1, event.session);
   reportSessionFailure(event.session);
   selectedKey.value = `session:${event.session.sessionId}`;
@@ -359,6 +397,7 @@ async function refresh() {
   if (!canUseDesktopCore()) return;
   const [nextHosts, nextRules, snapshot] = await Promise.all([listHosts(), listForwardRules(), fetchForwardSessionSnapshot()]);
   hosts.value = nextHosts; savedRules.value = nextRules.rules; sessions.value = snapshot.sessions;
+  snapshot.sessions.forEach(recordSessionFact);
   snapshot.sessions.forEach(reportSessionFailure);
   if (!draft.hostId || !nextHosts.some((host) => host.hostId === draft.hostId)) draft.hostId = nextHosts[0]?.hostId ?? "";
 }
@@ -400,7 +439,12 @@ onMounted(async () => {
   try { await refresh(); } catch { showOperationError(); } finally { loading.value = false; revealRoute(); }
   if (!disposed) refreshTimer = window.setInterval(() => void refresh().catch(() => undefined), 2_000);
 });
-onBeforeUnmount(() => { disposed = true; if (refreshTimer !== null) window.clearInterval(refreshTimer); });
+onBeforeUnmount(() => {
+  disposed = true;
+  if (refreshTimer !== null) window.clearInterval(refreshTimer);
+  editorBackTarget?.release();
+  editorBackTarget = null;
+});
 </script>
 
 <template>
@@ -419,7 +463,19 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer !== null) window.clear
             target-id="tunnels.toolbar"
             instance-key="global"
           />
+          <NvxIconButton
+            v-if="mobileLayout"
+            :label="t('tunnels.refresh')"
+            :disabled="loading"
+            @click="refresh"
+          >
+            <NvxIcon
+              :icon="RefreshCw"
+              :size="20"
+            />
+          </NvxIconButton>
           <NvxButton
+            v-else
             variant="secondary"
             size="sm"
             :disabled="loading"

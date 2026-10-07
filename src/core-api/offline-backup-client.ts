@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { secureInvoke } from "../secure-transport";
 
 export interface OfflineBackupSelection {
   ssh: boolean;
@@ -71,10 +72,10 @@ export interface SecureBackupPrompt {
 }
 
 export const secureBackupClient = {
-  get: (id: string) => invoke<SecureBackupPrompt>("offline_backup_secure_get", { id }),
+  get: (id: string) => secureInvoke<SecureBackupPrompt>("offline_backup_secure_get", { id }),
   submit: (id: string, password: string, passwordConfirmation: string, confirmed: boolean) =>
-    invoke<void>("offline_backup_secure_submit", { id, password, passwordConfirmation, confirmed }),
-  cancel: (id: string) => invoke<void>("offline_backup_secure_cancel", { id }),
+    secureInvoke<void>("offline_backup_secure_submit", { id, password, passwordConfirmation, confirmed }),
+  cancel: (id: string) => secureInvoke<void>("offline_backup_secure_cancel", { id }),
 };
 
 export function discardOfflineBackup(handle: string): Promise<void> {

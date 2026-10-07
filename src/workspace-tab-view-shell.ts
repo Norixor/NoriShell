@@ -18,6 +18,8 @@ import type { WorkspaceTabShellAction, WorkspaceTabShellActionEvent } from "./wo
 import { closeChildWorkspaceWindowIfEmpty } from "./workspace-tab-transfer";
 import { requestReply, SHELL_ACTION_TIMEOUT_MS, VIEW_REPLY_TIMEOUT_MS } from "./workspace-tab-reply";
 import { markTabBoot } from "./workspace-tab-boot-trace";
+import { workspaceHostMode } from "./platform-host";
+import { focusSingleDocumentTerminalSession, performSingleDocumentShellAction } from "./single-document-workspace";
 import { afterNextPaint } from "./workspace-tab-paint";
 import {
   closeWorkspaceTabView,
@@ -157,7 +159,7 @@ async function openHostsInMain(query: Record<string, string> | undefined): Promi
 }
 
 const t = (key: string, values?: Record<string, unknown>) => values ? i18n.global.t(key, values) : i18n.global.t(key);
-const paneState = (state: string, count: number) => `${state} · ${t("sshTerminal.paneCount", { count })}`;
+const paneState = (state: string, count: number) => `${state} · ${i18n.global.t("sshTerminal.paneCount", count)}`;
 
 /** A generic localized title for a Tab whose content has not reported its own summary yet. */
 function fallbackSummary(id: string, kind: WorkspaceTabKind, viewLabel: string, route?: string): WorkspaceTabViewSummary {
@@ -213,7 +215,17 @@ async function restoreOrphanTab(record: WorkspaceTabRecord): Promise<void> {
   }
 }
 
+/**
+ * Native Tab WebViews exist only on desktop. A single document (Android, browser
+ * preview) must never reach their commands; its call sites either use the
+ * single-document path or are not reachable there, and this guard fails closed.
+ */
+function requireNativeTabs(): void {
+  if (workspaceHostMode() !== "nativeTabs") throw new Error("workspace_tab.native_views_unsupported");
+}
+
 function applyVisibility(): Promise<void> {
+  if (workspaceHostMode() !== "nativeTabs") return Promise.resolve();
   // Native show/hide calls for successive Tab selections must not overtake
   // each other. Read the active Tab only when this batch reaches the queue.
   visibilityWrite = visibilityWrite.catch(() => undefined).then(async () => {
@@ -358,6 +370,7 @@ async function activateWorkspaceTabViewNow(id: string): Promise<void> {
 }
 
 export function activateWorkspaceTabView(id: string): Promise<void> {
+  try { requireNativeTabs(); } catch (error) { return Promise.reject(error); }
   return queueActivation(() => activateWorkspaceTabViewNow(id));
 }
 
@@ -444,6 +457,7 @@ function restoreClosingView(id: string): Promise<void> {
 }
 
 export function deactivateWorkspaceTabView(): Promise<void> {
+  try { requireNativeTabs(); } catch (error) { return Promise.reject(error); }
   return queueActivation(async () => {
     if (!activeWorkspaceTabViewId.value) return;
     await releaseActiveWorkspaceTabView();
@@ -501,6 +515,7 @@ async function requestCloseWorkspaceTabViewNow(id: string, batch: boolean): Prom
 }
 
 export function requestCloseWorkspaceTabView(id: string, batch = false): Promise<boolean> {
+  try { requireNativeTabs(); } catch (error) { return Promise.reject(error); }
   const existing = pendingCloseRequests.get(id);
   if (existing) return existing;
   const pending = requestCloseWorkspaceTabViewNow(id, batch);
@@ -526,6 +541,8 @@ export async function createManagedWorkspaceTab(
   initial: InitialSummary | null = null,
   placement: WorkspaceTabPlacement = {},
 ): Promise<void> {
+  // Android and the browser preview host Tabs in one document; there is no native manager to wait for.
+  requireNativeTabs();
   return queueActivation(async () => {
     await awaitShellStarted();
     // An existing Tab is only selected; switching between Tabs never uses a placeholder.
@@ -614,6 +631,7 @@ export async function createManagedTerminalTab(
   behavior: "welcome" | "local" = "welcome", placement: WorkspaceTabPlacement = {},
   intent: TerminalOpenIntent | null = null, initialSummary: InitialSummary | null = null,
 ): Promise<string> {
+  requireNativeTabs();
   const id = createUuidV7();
   const seed = behavior === "local" ? { behavior, initialLocalOpen: {
     paneId: createUuidV7(), openAttemptId: createUuidV7(), operationId: createUuidV7(),
@@ -646,6 +664,7 @@ export async function createManagedTerminalForHost(
   query: { hostId: string; source?: string; connectOperationId?: string; pluginAuthorizationToken?: string },
   placement: WorkspaceTabPlacement = {},
 ): Promise<string> {
+  requireNativeTabs();
   return createManagedTerminalTab("welcome", placement, {
     type: "open-host", hostId: query.hostId, source: query.source,
     connectOperationId: query.connectOperationId ?? createUuidV7(),
@@ -656,6 +675,7 @@ export async function createManagedTerminalForHost(
 export async function createManagedTerminalForDirectory(
   hostId: string, pathBytes: number[], placement: WorkspaceTabPlacement = {},
 ): Promise<string> {
+  requireNativeTabs();
   return createManagedTerminalTab("welcome", placement, {
     type: "open-host", hostId, source: "sftpDirectory", connectOperationId: createUuidV7(), directoryPathBytes: pathBytes,
   }, await hostTerminalSummary(hostId));
@@ -665,6 +685,7 @@ export async function createManagedFileTab(
   kind: "local" | "remote", hostId: string | null = null, label = "", pluginNavigation?: unknown,
   placement: WorkspaceTabPlacement = {},
 ): Promise<string> {
+  requireNativeTabs();
   const id = `file:${crypto.randomUUID()}`;
   const session = (pluginNavigation as { sftpSession?: { sessionId?: unknown; generation?: unknown; hostId?: unknown } } | null)
     ?.sftpSession;
@@ -686,6 +707,7 @@ export async function createManagedFileTab(
 }
 
 export async function createManagedFileForFocus(query: Record<string, string>): Promise<string> {
+  requireNativeTabs();
   const id = await createManagedFileTab(query.focusSessionId ? "remote" : "local");
   await activateOwnedTab(id, workspaceWindowLabel(), { type: "open-route", path: "/sftp", query });
   return id;
@@ -693,6 +715,7 @@ export async function createManagedFileForFocus(query: Record<string, string>): 
 
 /** Opens a plugin page as its native Page Tab, or focuses the window whose Tab already shows it. */
 export async function openManagedPluginPage(item: PluginNavigationItem): Promise<void> {
+  requireNativeTabs();
   const tab = pluginPageTab(item);
   const owner = (await snapshotWorkspaceTabs()).others.find((record) => record.id === tab.groupId)?.owner;
   if (owner) await focusWorkspaceWindowTarget(owner);
@@ -705,6 +728,7 @@ export async function createManagedPageTab(tab: WorkspacePageTab): Promise<void>
 }
 
 async function createPageForRoute(route: string): Promise<boolean> {
+  requireNativeTabs();
   const tab = workspacePageTabForRoute(route);
   if (!tab) return false;
   if (tab.pageType === "newPage") {
@@ -733,6 +757,7 @@ export function createManagedPageForRoute(route: string): Promise<boolean> {
 export async function createManagedDesktopForProfile(
   profile: { id: string; label: string }, placement: WorkspaceTabPlacement = {},
 ): Promise<string> {
+  requireNativeTabs();
   const id = `desktop:${createUuidV7()}`;
   const snapshot: DesktopTabHandoffSnapshot = { schemaVersion: 1, tabId: id, profileId: profile.id };
   await createManagedWorkspaceTab(id, "desktop", "/desktop", snapshot, snapshot,
@@ -747,6 +772,7 @@ export async function createManagedDesktopForProfile(
 }
 
 export async function createManagedPluginProtocolLaunch(launch: PluginProtocolLaunchSummary): Promise<void> {
+  requireNativeTabs();
   if (launch.claimed || launch.expiresAtUnixMs <= Date.now()) return;
   await createManagedWorkspaceTab(launch.tabId, "terminal", "/terminal",
     { behavior: "pluginProtocol", launchId: launch.launchId, revision: launch.revision, paneId: launch.paneId },
@@ -754,6 +780,7 @@ export async function createManagedPluginProtocolLaunch(launch: PluginProtocolLa
 }
 
 export async function createManagedApprovedPluginChannel(payload: PluginApprovedTerminalChannelLaunch): Promise<void> {
+  requireNativeTabs();
   const id = createUuidV7();
   await createManagedWorkspaceTab(id, "terminal", "/terminal",
     { behavior: "pluginApprovedChannel", payload },
@@ -761,6 +788,7 @@ export async function createManagedApprovedPluginChannel(payload: PluginApproved
 }
 
 async function activateOwnedTab(id: string, owner: string, action: unknown): Promise<void> {
+  requireNativeTabs();
   const operationId = createUuidV7();
   await requestReply<{ id: string; operationId: string; code?: string }>({
     replyEvent: "workspace-tab-activate-owned-result",
@@ -791,12 +819,15 @@ function matchingTerminalTab(action: Extract<NativeTrayAction, { kind: "focusTer
 }
 
 export async function focusManagedTerminalSession(action: Extract<NativeTrayAction, { kind: "focusTerminal" | "focusSshSession" | "focusLocalSession" | "focusTelnet" }>): Promise<void> {
+  // Overview reaches this on Android too: there the Pane lives in this document.
+  if (workspaceHostMode() !== "nativeTabs") return focusSingleDocumentTerminalSession(action);
   const tab = matchingTerminalTab(action, await snapshotWorkspaceTabs());
   if (!tab) throw new Error("workspace_tab.session_unavailable");
   await activateOwnedTab(tab.id, tab.owner, { type: "focus-terminal", action });
 }
 
 export async function focusManagedDesktopSession(sessionId: string, generation: string): Promise<void> {
+  requireNativeTabs();
   const live = (await desktopClient.snapshot()).find((session) => session.id === sessionId && session.generation === generation);
   if (!live) throw new Error("workspace_tab.session_unavailable");
   const snapshot = await snapshotWorkspaceTabs();
@@ -823,6 +854,7 @@ function matchingFileTab(sessionId: string, generation: string,
 }
 
 export async function focusManagedFileSession(sessionId: string, generation: string): Promise<void> {
+  requireNativeTabs();
   const query = { focusSessionId: sessionId, focusGeneration: generation, focusOperation: createUuidV7() };
   const tab = matchingFileTab(sessionId, generation, await snapshotWorkspaceTabs());
   if (tab) await activateOwnedTab(tab.id, tab.owner, { type: "open-route", path: "/sftp", query });
@@ -830,6 +862,7 @@ export async function focusManagedFileSession(sessionId: string, generation: str
 }
 
 export async function openManagedTransferTarget(query: Record<string, string>, target: NativeTransferNavigationTarget | null): Promise<void> {
+  requireNativeTabs();
   const snapshot = await snapshotWorkspaceTabs();
   const fences = target?.kind === "legacy" ? [{ sessionId: target.sessionId, generation: target.generation }]
     : target?.kind === "intent" ? [target.source, target.target].flatMap((fence) =>
@@ -860,6 +893,10 @@ export async function createManagedTelnet(): Promise<void> {
 export async function performWorkspaceTabShellAction(
   action: WorkspaceTabShellAction, placement: WorkspaceTabPlacement = {},
 ): Promise<string | null> {
+  if (workspaceHostMode() !== "nativeTabs") {
+    await performSingleDocumentShellAction(action);
+    return null;
+  }
   if (action.type === "navigate") {
     if (!SHELL_ROUTES.includes(action.path)) throw new Error("workspace_tab.invalid_route");
     if (action.path === "/terminal" && action.query?.hostId) {
@@ -892,6 +929,7 @@ export async function performWorkspaceTabShellAction(
 }
 
 export async function startWorkspaceTabViewShell(router: Router): Promise<() => void> {
+  requireNativeTabs();
   shellRouter = router;
   const unlisteners: UnlistenFn[] = [];
   const invalidatedPluginTabs = new Set<string>();
