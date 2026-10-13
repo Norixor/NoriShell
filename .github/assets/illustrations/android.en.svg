@@ -106,9 +106,9 @@
 <circle cx="468" cy="250" r="4.5" fill="#55b978"/>
 <text x="480" y="254.5" font-size="13" fill="#f2f4f7" font-weight="650">prod-web</text>
 <text x="480" y="271" font-size="10" fill="#55b978" font-weight="500">Connected<tspan fill="#8c97a8"> · 2s</tspan></text>
-<rect x="606" y="241" width="92" height="24" rx="12" fill="#1f5fd2"/>
-<g transform="translate(615 246) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
-<text x="633" y="257" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
+<rect x="584" y="241" width="114" height="24" rx="12" fill="#1f5fd2"/>
+<g transform="translate(595 246) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="613" y="257" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
 <text x="468" y="288" font-size="9.5" fill="#8c97a8" font-weight="500">CPU</text>
 <text x="518" y="288" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">38%</text>
 <rect x="468" y="294" width="50" height="4" rx="2" fill="#2c323d"/><rect x="468" y="294" width="19.0" height="4" rx="2" fill="#55b978"/>
@@ -125,9 +125,9 @@
 <circle cx="468" cy="346" r="4.5" fill="#55b978"/>
 <text x="480" y="350.5" font-size="13" fill="#f2f4f7" font-weight="650">db-01</text>
 <text x="480" y="367" font-size="10" fill="#55b978" font-weight="500">Connected<tspan fill="#8c97a8"> · 2s</tspan></text>
-<rect x="606" y="337" width="92" height="24" rx="12" fill="#1f5fd2"/>
-<g transform="translate(615 342) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
-<text x="633" y="353" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
+<rect x="584" y="337" width="114" height="24" rx="12" fill="#1f5fd2"/>
+<g transform="translate(595 342) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="613" y="353" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
 <text x="468" y="384" font-size="9.5" fill="#8c97a8" font-weight="500">CPU</text>
 <text x="518" y="384" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">12%</text>
 <rect x="468" y="390" width="50" height="4" rx="2" fill="#2c323d"/><rect x="468" y="390" width="6.0" height="4" rx="2" fill="#55b978"/>
@@ -144,9 +144,9 @@
 <circle cx="468" cy="442" r="4.5" fill="#55b978"/>
 <text x="480" y="446.5" font-size="13" fill="#f2f4f7" font-weight="650">staging-api</text>
 <text x="480" y="463" font-size="10" fill="#55b978" font-weight="500">Connected<tspan fill="#8c97a8"> · 2s</tspan></text>
-<rect x="606" y="433" width="92" height="24" rx="12" fill="#1f5fd2"/>
-<g transform="translate(615 438) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
-<text x="633" y="449" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
+<rect x="584" y="433" width="114" height="24" rx="12" fill="#1f5fd2"/>
+<g transform="translate(595 438) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="613" y="449" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
 <text x="468" y="480" font-size="9.5" fill="#8c97a8" font-weight="500">CPU</text>
 <text x="518" y="480" font-size="9.5" fill="#f2f4f7" font-weight="600" text-anchor="end">4%</text>
 <rect x="468" y="486" width="50" height="4" rx="2" fill="#2c323d"/><rect x="468" y="486" width="2.0" height="4" rx="2" fill="#55b978"/>
@@ -163,9 +163,9 @@
 <circle cx="468" cy="538" r="4.5" fill="#8c97a8"/>
 <text x="480" y="542.5" font-size="13" fill="#f2f4f7" font-weight="650">edge-eu</text>
 <text x="480" y="559" font-size="10" fill="#8c97a8" font-weight="500">Disconnected</text>
-<rect x="606" y="529" width="92" height="24" rx="12" fill="#1f5fd2"/>
-<g transform="translate(615 534) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
-<text x="633" y="545" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
+<rect x="584" y="529" width="114" height="24" rx="12" fill="#1f5fd2"/>
+<g transform="translate(595 534) scale(0.5833)" fill="none" stroke="#ffffff" stroke-width="3.43" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="m7 15 3-3-3-3M12 15h5"/></g>
+<text x="613" y="545" font-size="10.5" fill="#ffffff" font-weight="650">New Terminal</text>
 <text x="468" y="578" font-size="10" fill="#8c97a8" font-weight="500">Monitoring off</text>
 <rect x="468" y="586" width="224" height="4" rx="2" fill="#2c323d" stroke="#414958" stroke-width=".6" stroke-dasharray="3 3"/>
 <rect x="440" y="630" width="280" height="66" fill="#171a20"/>
