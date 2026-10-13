@@ -5,6 +5,8 @@
 //! channel on an existing user SSH transport. Login automation never enters this module.
 
 mod file_utilities;
+#[cfg(test)]
+mod future_size_guard;
 mod local_capability;
 pub(crate) mod local_mutation;
 mod plugin_access;
@@ -1858,7 +1860,10 @@ impl SftpDirectoryClient {
         let mut bytes = Vec::with_capacity(maximum_bytes.min(64 * 1024));
         // The byte cap remains global, while each protocol read gets its own
         // timeout so a valid large ZIP input does not fail after 20 seconds.
-        let mut chunk = [0_u8; TRANSFER_CHUNK_BYTES];
+        // The chunk lives on the heap: a 64 KiB array held across `.await` would
+        // be embedded in this future, and every Tauri command that awaits it
+        // copies the future by value onto a 1 MiB thread stack.
+        let mut chunk = vec![0_u8; TRANSFER_CHUNK_BYTES];
         loop {
             let count = self.bounded_protocol(limited.read(&mut chunk)).await?;
             if count == 0 {

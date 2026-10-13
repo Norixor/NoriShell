@@ -283,7 +283,7 @@ where
     Fut: Future<Output = ()>,
 {
     let mut copied = 0_u64;
-    let mut buffer = [0_u8; TRANSFER_CHUNK_BYTES];
+    let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
     loop {
         let read =
             bounded_transfer_io(source.read(&mut buffer), TransferFailureCode::Protocol).await?;
