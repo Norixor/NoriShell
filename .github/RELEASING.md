@@ -20,4 +20,4 @@
 
 ## 发布核对
 
-草稿 Release 的 tag、包内版本、架构、签名、文件名和下载链接必须一致。上传后从 GitHub 下载到独立目录核对资产清单与 SHA-256，再发布为 Latest；随后检查两份 README 的 13 个直达链接（8 个 macOS / Windows + 4 个 Linux 预览版 + 1 个 Android 预览版）及 Release 正文链接都能访问。发布文案只陈述实际交付的内容，不把构建通过写成平台运行验收。
+草稿 Release 的 tag、包内版本、架构、签名、文件名和下载链接必须一致。上传后用 Release API 核对 19 个资产均已完成上传（`uploaded`），大小和 SHA-256 摘要与本地暂存目录一致，不再下载回来验证；确认后发布为 Latest；随后检查两份 README 的 13 个直达链接（8 个 macOS / Windows + 4 个 Linux 预览版 + 1 个 Android 预览版）及 Release 正文链接都能访问。发布文案只陈述实际交付的内容，不把构建通过写成平台运行验收。
