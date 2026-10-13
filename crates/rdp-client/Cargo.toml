@@ -12,7 +12,7 @@ ironrdp-egfx = { path = "../../vendor/ironrdp-upstream/crates/ironrdp-egfx", fea
 ironrdp-rdpeudp-tokio = { path = "../../vendor/ironrdp-upstream/crates/ironrdp-rdpeudp-tokio", features = ["rustls-ring"] }
 ironrdp-rdpeudp = { path = "../../vendor/ironrdp-upstream/crates/ironrdp-rdpeudp" }
 ironrdp-tls = { path = "../../vendor/ironrdp-upstream/crates/ironrdp-tls", default-features = false, features = ["rustls-ring"] }
-cpal = "=0.17.3"
+cpal = "=0.18.2"
 tokio.workspace = true
 zeroize.workspace = true
 sha2.workspace = true
