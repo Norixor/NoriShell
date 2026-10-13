@@ -9,6 +9,7 @@ export default tseslint.config(
       "dist/**",
       "coverage/**",
       "target/**",
+      "output/**",
       "src-tauri/target/**",
       "src/core-api/generated/**",
       "src-tauri/gen/**",
