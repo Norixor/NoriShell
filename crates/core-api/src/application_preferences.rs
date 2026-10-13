@@ -136,8 +136,48 @@ fn hex_color(value: &Value) -> bool {
     })
 }
 
+/// Fixed local-terminal shell ids resolved by the desktop Core from trusted
+/// platform locations. Any other selection must use the `path:` form.
+pub const LOCAL_TERMINAL_SHELL_FIXED_IDS: [&str; 5] = [
+    "default",
+    "cmd",
+    "windowsPowerShell",
+    "powershell7",
+    "gitBash",
+];
+/// Prefix of a user-chosen executable path in `localTerminalShell`.
+pub const LOCAL_TERMINAL_SHELL_PATH_PREFIX: &str = "path:";
+/// Upper bound of the path part, in UTF-16 code units like other text preferences.
+pub const LOCAL_TERMINAL_SHELL_PATH_MAX_UTF16: usize = 1024;
+
+/// A parsed `localTerminalShell` value. The path variant is only syntactically
+/// checked here; existence and executability are verified when a shell starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalTerminalShellPreference<'a> {
+    Fixed(&'a str),
+    Path(&'a str),
+}
+
+/// Parses the single-string `localTerminalShell` grammar shared by validation
+/// and the launcher, so a stored value can never be valid for one and not the other.
+pub fn parse_local_terminal_shell(value: &str) -> Option<LocalTerminalShellPreference<'_>> {
+    if let Some(id) = LOCAL_TERMINAL_SHELL_FIXED_IDS
+        .iter()
+        .find(|id| **id == value)
+    {
+        return Some(LocalTerminalShellPreference::Fixed(id));
+    }
+    let path = value.strip_prefix(LOCAL_TERMINAL_SHELL_PATH_PREFIX)?;
+    let valid = !path.is_empty()
+        && utf16_length(path) <= LOCAL_TERMINAL_SHELL_PATH_MAX_UTF16
+        && path == path.trim()
+        && !path.chars().any(char::is_control);
+    valid.then_some(LocalTerminalShellPreference::Path(path))
+}
+
 fn validate_application(value: &Value) -> bool {
-    exact(
+    // `localTerminalShell` is optional so values saved before it existed stay valid.
+    optional_exact(
         value,
         &[
             "themePreference",
@@ -147,6 +187,7 @@ fn validate_application(value: &Value) -> bool {
             "newTerminalBehavior",
             "singlePaneTabCloseBehavior",
         ],
+        &["localTerminalShell"],
     ) && choice(&value["themePreference"], &["light", "dark", "system"])
         && choice(&value["locale"], &["system", "zh-CN", "en"])
         && value["uiZoom"]
@@ -165,6 +206,9 @@ fn validate_application(value: &Value) -> bool {
             &value["singlePaneTabCloseBehavior"],
             &["confirm", "closeDirectly"],
         )
+        && value
+            .get("localTerminalShell")
+            .is_none_or(|shell| shell.as_str().and_then(parse_local_terminal_shell).is_some())
 }
 
 const TERMINAL_COLORS: &[&str] = &[
@@ -598,6 +642,56 @@ fn validate_files(value: &Value) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn local_terminal_shell_is_optional_and_follows_the_shared_grammar() {
+        let base = json!({
+            "themePreference":"system", "locale":"en", "uiZoom":100,
+            "terminalStartupBehavior":"welcome", "newTerminalBehavior":"welcome",
+            "singlePaneTabCloseBehavior":"confirm"
+        });
+        let accepts = |shell: Option<serde_json::Value>| {
+            let mut value = base.clone();
+            if let Some(shell) = shell {
+                value["localTerminalShell"] = shell;
+            }
+            validate_application_preference_value(ApplicationPreferenceGroupId::Application, &value)
+                .is_ok()
+        };
+        // Values saved before the field existed remain valid.
+        assert!(accepts(None));
+        for id in LOCAL_TERMINAL_SHELL_FIXED_IDS {
+            assert!(accepts(Some(json!(id))), "{id}");
+        }
+        assert!(accepts(Some(json!("path:/bin/bash"))));
+        assert!(accepts(Some(json!(
+            "path:C:\\Program Files\\Git\\bin\\bash.exe"
+        ))));
+        let too_long = format!("path:/{}", "a".repeat(LOCAL_TERMINAL_SHELL_PATH_MAX_UTF16));
+        for invalid in [
+            json!(""),
+            json!("Default"),
+            json!("powershell"),
+            json!("path:"),
+            json!("path: /bin/bash"),
+            json!("path:/bin/bash "),
+            json!("path:/bin/ba\nsh"),
+            json!(too_long),
+            json!(null),
+            json!(1),
+        ] {
+            assert!(!accepts(Some(invalid.clone())), "{invalid}");
+        }
+        assert_eq!(
+            parse_local_terminal_shell("gitBash"),
+            Some(LocalTerminalShellPreference::Fixed("gitBash"))
+        );
+        assert_eq!(
+            parse_local_terminal_shell("path:/opt/fish"),
+            Some(LocalTerminalShellPreference::Path("/opt/fish"))
+        );
+        assert_eq!(parse_local_terminal_shell("cmd.exe"), None);
+    }
 
     #[test]
     fn each_group_rejects_unregistered_or_local_only_fields() {

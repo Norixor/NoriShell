@@ -1762,7 +1762,7 @@ export type LocalSessionState = "starting" | "running" | "stopping" | "exited" |
 
 export type LocalSessionExit = { "kind": "exitStatus", exitStatus: number, } | { "kind": "exitSignal", signalName: string, };
 
-export type LocalSessionFailureCode = "accountLookupFailed" | "invalidDefaultShell" | "invalidHomeDirectory" | "ptySpawnFailed" | "ptyReadFailed" | "ptyWriteFailed" | "ptyResizeFailed" | "processCleanupFailed";
+export type LocalSessionFailureCode = "accountLookupFailed" | "invalidDefaultShell" | "shellUnavailable" | "invalidHomeDirectory" | "ptySpawnFailed" | "ptyReadFailed" | "ptyWriteFailed" | "ptyResizeFailed" | "processCleanupFailed";
 
 export type LocalSessionFailureReason = { code: LocalSessionFailureCode, messageKey: string, diagnosticId: string | null, };
 

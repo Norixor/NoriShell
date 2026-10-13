@@ -130,6 +130,7 @@ commands.allow = [
   "local_terminal_input",
   "local_terminal_input_lease_renew",
   "local_terminal_open",
+  "local_terminal_shell_catalog",
   "local_terminal_resize",
   "local_terminal_snapshot",
   "local_terminal_terminate",

@@ -28,6 +28,7 @@ use crate::{
         LocalPtyExit, LocalPtyMetadata, LocalPtyProcess, LocalPtySpawnError, LocalPtySpawnFailure,
         LocalPtyWriter,
     },
+    local_terminal_shell::LocalShellSelection,
     ssh_operation_ledger::{SshOperationLedger, SshOperationLookup, StoredSshOperationResult},
 };
 
@@ -435,6 +436,7 @@ impl LocalSessions {
         &mut self,
         request: LocalSessionOpenRequest,
         events: Channel<LocalSessionEvent>,
+        shell: LocalShellSelection,
         actor_tx: mpsc::Sender<Message>,
     ) -> ActorResult<LocalSessionOpenResponse> {
         if request.idempotency_key.trim().is_empty() || request.rows == 0 || request.cols == 0 {
@@ -454,7 +456,7 @@ impl LocalSessions {
             return result;
         }
 
-        let result = self.open_once(request, events, actor_tx);
+        let result = self.open_once(request, events, shell, actor_tx);
         record_operation(
             &mut self.open_operations,
             operation_id,
@@ -469,6 +471,7 @@ impl LocalSessions {
         &mut self,
         request: LocalSessionOpenRequest,
         events: Channel<LocalSessionEvent>,
+        shell: LocalShellSelection,
         actor_tx: mpsc::Sender<Message>,
     ) -> ActorResult<LocalSessionOpenResponse> {
         let request_id = request.meta.request_id.clone();
@@ -543,7 +546,7 @@ impl LocalSessions {
         let cols = request.cols;
         if std::thread::Builder::new()
             .name(format!("local-pty-spawn-{}", session_id.as_str()))
-            .spawn(move || match LocalPtyProcess::spawn(rows, cols) {
+            .spawn(move || match spawn_selected_shell(rows, cols, &shell) {
                 Ok((metadata, process)) => {
                     let _ = actor_tx.blocking_send(Message::LocalProcessReady {
                         session_id: session_id_text,
@@ -2264,6 +2267,17 @@ fn failure(
     }
 }
 
+/// Resolves the selected shell on the spawn thread (it touches the file
+/// system) and starts it; resolution failures never fall back to another shell.
+fn spawn_selected_shell(
+    rows: u16,
+    cols: u16,
+    shell: &LocalShellSelection,
+) -> Result<(LocalPtyMetadata, LocalPtyProcess), LocalPtySpawnError> {
+    let launch = crate::local_terminal_shell::resolve(shell)?;
+    LocalPtyProcess::spawn(rows, cols, launch.as_ref())
+}
+
 fn spawn_failure(error: LocalPtySpawnError) -> LocalSessionFailureReason {
     let (code, message_key) = match error.failure {
         LocalPtySpawnFailure::AccountLookupFailed => (
@@ -2273,6 +2287,10 @@ fn spawn_failure(error: LocalPtySpawnError) -> LocalSessionFailureReason {
         LocalPtySpawnFailure::InvalidDefaultShell => (
             LocalSessionFailureCode::InvalidDefaultShell,
             "errors.localTerminal.invalidDefaultShell",
+        ),
+        LocalPtySpawnFailure::ShellUnavailable => (
+            LocalSessionFailureCode::ShellUnavailable,
+            "errors.localTerminal.shellUnavailable",
         ),
         LocalPtySpawnFailure::InvalidHomeDirectory => (
             LocalSessionFailureCode::InvalidHomeDirectory,
@@ -2717,7 +2735,8 @@ mod tests {
     async fn backpressured_writer_does_not_block_owner_or_exit_blocker_cleanup() {
         let (session_id, live_sessions, mut sessions) =
             session_fixture(LocalSessionState::Running, None, true);
-        let (metadata, process) = LocalPtyProcess::spawn(24, 80).expect("spawn backpressure PTY");
+        let (metadata, process) =
+            LocalPtyProcess::spawn(24, 80, None).expect("spawn backpressure PTY");
         let (actor_tx, mut actor_rx) = mpsc::channel(8);
         let (commands, command_rx) =
             std_mpsc::sync_channel::<LocalProcessCommand>(LOCAL_PROCESS_MAILBOX_CAPACITY);
@@ -2804,7 +2823,8 @@ mod tests {
 
     #[test]
     fn owner_spawn_cleanup_failure_retries_the_same_orphan_until_proven_exit() {
-        let (_metadata, process) = LocalPtyProcess::spawn(24, 80).expect("spawn orphan test PTY");
+        let (_metadata, process) =
+            LocalPtyProcess::spawn(24, 80, None).expect("spawn orphan test PTY");
         let (session_id, live_sessions, mut sessions) =
             session_fixture(LocalSessionState::Starting, None, false);
         sessions.process_owner_spawn_failed(

@@ -1482,6 +1482,20 @@ export const en = {
           sftpWelcome: "Show SFTP welcome page",
           localTerminal: "Open local terminal",
         },
+        localTerminalShell: "Local terminal shell",
+        localTerminalShellDescription: "Choose the shell used for new local terminals. Terminals that are already running are not affected.",
+        localTerminalShellDefault: "System default ({name})",
+        localTerminalShellDefaultUnknown: "System default",
+        localTerminalShellCustom: "Custom path...",
+        localTerminalShellUnavailableOption: "{id} (unavailable on this device)",
+        localTerminalShellUnavailable: "The current selection is unavailable on this device. Opening a local terminal will fail; choose another shell.",
+        localTerminalShellPath: "Shell executable path",
+        localTerminalShellPathPlaceholder: "Absolute path to the shell executable",
+        localTerminalShellPathErrors: {
+          empty: "Enter the path of a shell executable.",
+          tooLong: "The path is too long (at most 1024 characters).",
+          controlCharacter: "The path cannot contain control characters.",
+        },
         singlePaneTabCloseBehavior: "When disconnecting and closing a tab",
         singlePaneTabCloseBehaviorDescription: "Choose how disconnected single-Pane tabs are closed.",
         singlePaneTabCloseBehaviors: {
@@ -2556,6 +2570,9 @@ export const en = {
       connectionTest: {
         hostKeyUntrusted: "This server identity is not trusted yet. Save the Host, verify its fingerprint during a normal connection, then test the account and password.",
         cleanupTimedOut: "The account and password were accepted, but cleanup timed out. The test connection was stopped; try again shortly.",
+      },
+      localTerminal: {
+        shellUnavailable: "The selected local terminal shell is unavailable. Choose another one in Settings.",
       },
       telnet: {
         validation: "The Telnet request is invalid or the cleartext connection risks were not fully accepted.",

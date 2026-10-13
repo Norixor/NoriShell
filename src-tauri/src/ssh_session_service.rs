@@ -1951,19 +1951,48 @@ pub async fn local_terminal_open(
     on_event: Channel<LocalSessionEvent>,
     service: State<'_, SshSessionService>,
     lifecycle: State<'_, crate::lifecycle::LifecycleState>,
+    hosts: State<'_, crate::host_service::HostService>,
 ) -> CoreResult<LocalSessionOpenResponse> {
     let request_id = request.meta.request_id.clone();
     let _creation_permit = lifecycle.acquire_resource_creation(request_id.clone())?;
+    // A preference problem fails this open with a typed code; it must never
+    // fall back to launching a shell the user did not choose.
+    let shell = crate::local_terminal_shell::load_selection(&hosts)
+        .map_err(|error| local_shell_preference_error(request_id.clone(), error))?;
     service
         .request(
             |reply| Message::LocalOpen {
                 request,
                 events: on_event,
+                shell,
                 reply,
             },
             request_id,
         )
         .await
+}
+
+fn local_shell_preference_error(
+    request_id: RequestId,
+    error: crate::local_terminal_shell::SelectionReadError,
+) -> Box<CoreApiError> {
+    use crate::local_terminal_shell::SelectionReadError;
+
+    let (code, category, retry, key) = match error {
+        SelectionReadError::Unavailable => (
+            "local_terminal.preferences_unavailable",
+            ErrorCategory::Unavailable,
+            RetryStrategy::AfterMilliseconds(1_000),
+            "errors.localTerminal.preferencesUnavailable",
+        ),
+        SelectionReadError::Invalid => (
+            "local_terminal.preferences_invalid",
+            ErrorCategory::NeedsReconciliation,
+            RetryStrategy::Reconcile,
+            "errors.localTerminal.preferencesInvalid",
+        ),
+    };
+    crate::core_api_error::core_error(request_id, code, category, retry, key)
 }
 
 #[tauri::command]
@@ -2518,6 +2547,8 @@ enum Message {
     LocalOpen {
         request: LocalSessionOpenRequest,
         events: Channel<LocalSessionEvent>,
+        /// Shell chosen in preferences, read by the command before the actor runs.
+        shell: crate::local_terminal_shell::LocalShellSelection,
         reply: oneshot::Sender<ActorResult<LocalSessionOpenResponse>>,
     },
     LocalSnapshot {
@@ -3177,10 +3208,11 @@ impl Actor {
             Message::LocalOpen {
                 request,
                 events,
+                shell,
                 reply,
             } => {
                 let tx = self.tx.clone();
-                let _ = reply.send(self.local_sessions.open(request, events, tx));
+                let _ = reply.send(self.local_sessions.open(request, events, shell, tx));
             }
             Message::LocalSnapshot { reply } => {
                 let _ = reply.send(Ok(self.local_sessions.snapshot()));
@@ -9761,6 +9793,7 @@ mod tests {
                 |reply| Message::LocalOpen {
                     request,
                     events: Channel::new(|_| Ok(())),
+                    shell: crate::local_terminal_shell::LocalShellSelection::Default,
                     reply,
                 },
                 request_id,
@@ -9839,6 +9872,7 @@ mod tests {
                 |reply| Message::LocalOpen {
                     request: open_request,
                     events: Channel::new(|_| Ok(())),
+                    shell: crate::local_terminal_shell::LocalShellSelection::Default,
                     reply,
                 },
                 request_id,
@@ -15004,6 +15038,7 @@ mod tests {
                 |reply| Message::LocalOpen {
                     request,
                     events: Channel::new(|_| Ok(())),
+                    shell: crate::local_terminal_shell::LocalShellSelection::Default,
                     reply,
                 },
                 request_id,

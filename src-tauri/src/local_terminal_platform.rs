@@ -1,13 +1,14 @@
 //! Platform-owned local pseudo-terminal process.
 //!
-//! M1 intentionally exposes no launch customization: the current account's
-//! default interactive shell always starts in that account's real home
-//! directory, with the platform PTY owning its raw byte stream and process
-//! tree.
+//! The platform default (the current account's interactive shell) or a shell
+//! already resolved and validated from application preferences always starts
+//! in that account's real home directory, with the platform PTY owning its raw
+//! byte stream and process tree. This module never reads preferences itself;
+//! callers pass a [`LocalShellLaunch`] or `None` for the platform default.
 
 #[cfg(test)]
 use std::time::Duration;
-use std::{io, path::PathBuf};
+use std::{ffi::OsString, io, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalPtySpawnFailure {
@@ -15,6 +16,8 @@ pub(crate) enum LocalPtySpawnFailure {
     #[cfg_attr(target_os = "android", allow(dead_code))]
     AccountLookupFailed,
     InvalidDefaultShell,
+    /// The shell selected in preferences cannot be launched on this machine.
+    ShellUnavailable,
     InvalidHomeDirectory,
     PtySpawnFailed,
 }
@@ -26,9 +29,18 @@ pub(crate) struct LocalPtySpawnError {
 }
 
 impl LocalPtySpawnError {
-    fn new(failure: LocalPtySpawnFailure, source: io::Error) -> Self {
+    pub(crate) fn new(failure: LocalPtySpawnFailure, source: io::Error) -> Self {
         Self { failure, source }
     }
+}
+
+/// A shell chosen from preferences, already resolved to an existing absolute
+/// executable plus the fixed arguments that make it interactive. `None` at the
+/// spawn boundary means the platform default account shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalShellLaunch {
+    pub(crate) program: PathBuf,
+    pub(crate) args: Vec<OsString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +84,7 @@ fn shell_name(shell_path: &std::path::Path) -> io::Result<String> {
 #[cfg(unix)]
 mod platform {
     use std::{
+        ffi::OsString,
         fs::File,
         io::{self, Write},
         os::unix::{
@@ -93,7 +106,7 @@ mod platform {
     use crate::process_control::{ManagedProcessGroup, TerminationPolicy};
 
     use super::{
-        LocalPtyExit, LocalPtyMetadata, LocalPtySpawnError, LocalPtySpawnFailure,
+        LocalPtyExit, LocalPtyMetadata, LocalPtySpawnError, LocalPtySpawnFailure, LocalShellLaunch,
         checked_dimensions, shell_name,
     };
 
@@ -129,13 +142,17 @@ mod platform {
         pub(crate) fn spawn(
             rows: u16,
             cols: u16,
+            launch: Option<&LocalShellLaunch>,
         ) -> Result<(LocalPtyMetadata, Self), LocalPtySpawnError> {
             checked_dimensions(rows, cols).map_err(|error| {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::PtySpawnFailed, error)
             })?;
             let account = current_account()?;
-            let shell = account.shell;
             let home = account.home;
+            let (shell, shell_args) = match launch {
+                Some(launch) => (launch.program.clone(), launch.args.clone()),
+                None => (account.shell, vec![OsString::from("-i")]),
+            };
             let shell_name = shell_name(&shell).map_err(|error| {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidDefaultShell, error)
             })?;
@@ -158,7 +175,7 @@ mod platform {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidHomeDirectory, error)
             })?;
             command
-                .arg("-i")
+                .args(&shell_args)
                 .current_dir(&home)
                 // The desktop process may itself start with TERM=dumb.  The
                 // child owns a real PTY, so advertise its actual xterm
@@ -173,6 +190,11 @@ mod platform {
                 .stdin(Stdio::from(slave))
                 .stdout(Stdio::from(slave_stdout))
                 .stderr(Stdio::from(slave_stderr));
+            // Tools started inside an explicitly chosen shell should see that
+            // shell as $SHELL; the platform default keeps the inherited value.
+            if launch.is_some() {
+                command.env("SHELL", &shell);
+            }
 
             // SAFETY: only async-signal-safe libc calls run between fork and
             // exec. The standard library has already installed fd 0 from the
@@ -307,6 +329,12 @@ mod platform {
             self.exit = Some(exit);
             Ok(exit)
         }
+    }
+
+    /// The shell the platform would start without a preference, for display
+    /// in the shell catalog. Lookup failures stay with the spawn path.
+    pub(crate) fn default_shell_path() -> Option<PathBuf> {
+        current_account().ok().map(|account| account.shell)
     }
 
     fn unix_exit(status: ExitStatus) -> LocalPtyExit {
@@ -539,7 +567,7 @@ mod platform {
     use crate::windows_process_control::{ManagedConPtyProcess, TerminationPolicy};
 
     use super::{
-        LocalPtyExit, LocalPtyMetadata, LocalPtySpawnError, LocalPtySpawnFailure,
+        LocalPtyExit, LocalPtyMetadata, LocalPtySpawnError, LocalPtySpawnFailure, LocalShellLaunch,
         checked_dimensions, shell_name,
     };
 
@@ -551,6 +579,12 @@ mod platform {
         Duration::from_millis(500),
         Duration::from_secs(1),
     );
+
+    /// The shell the platform would start without a preference (`COMSPEC`),
+    /// for display in the shell catalog.
+    pub(crate) fn default_shell_path() -> Option<PathBuf> {
+        required_absolute_file_env("COMSPEC", "default Windows shell").ok()
+    }
 
     pub(crate) struct LocalPtyProcess {
         process: ManagedConPtyProcess,
@@ -574,13 +608,25 @@ mod platform {
         pub(crate) fn spawn(
             rows: u16,
             cols: u16,
+            launch: Option<&LocalShellLaunch>,
         ) -> Result<(LocalPtyMetadata, Self), LocalPtySpawnError> {
             checked_dimensions(rows, cols).map_err(|error| {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::PtySpawnFailed, error)
             })?;
-            let shell = required_absolute_file_env("COMSPEC", "default Windows shell").map_err(
-                |error| LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidDefaultShell, error),
-            )?;
+            let (shell, arguments) = match launch {
+                Some(launch) => (launch.program.clone(), launch.args.clone()),
+                None => (
+                    required_absolute_file_env("COMSPEC", "default Windows shell").map_err(
+                        |error| {
+                            LocalPtySpawnError::new(
+                                LocalPtySpawnFailure::InvalidDefaultShell,
+                                error,
+                            )
+                        },
+                    )?,
+                    Vec::<OsString>::new(),
+                ),
+            };
             let home = required_absolute_directory_env("USERPROFILE", "current user profile")
                 .map_err(|error| {
                     LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidHomeDirectory, error)
@@ -588,7 +634,6 @@ mod platform {
             let shell_name = shell_name(&shell).map_err(|error| {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidDefaultShell, error)
             })?;
-            let arguments: Vec<OsString> = Vec::new();
             let process = ManagedConPtyProcess::spawn(&shell, &arguments, Some(&home), rows, cols)
                 .map_err(|error| {
                     LocalPtySpawnError::new(LocalPtySpawnFailure::PtySpawnFailed, error)
@@ -738,7 +783,7 @@ fn configured_home() -> Option<&'static PathBuf> {
     ANDROID_HOME.get()
 }
 
-pub(crate) use platform::{LocalPtyProcess, LocalPtyWriter};
+pub(crate) use platform::{LocalPtyProcess, LocalPtyWriter, default_shell_path};
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -749,7 +794,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{LocalPtyExit, LocalPtyProcess};
+    use super::{LocalPtyExit, LocalPtyProcess, LocalShellLaunch};
 
     fn write_input(process: &LocalPtyProcess, bytes: &[u8]) -> io::Result<()> {
         process.try_clone_writer()?.write_input(bytes)
@@ -757,7 +802,8 @@ mod tests {
 
     #[test]
     fn default_shell_starts_in_real_home_and_preserves_terminal_bytes() {
-        let (metadata, mut process) = LocalPtyProcess::spawn(24, 80).expect("spawn local PTY");
+        let (metadata, mut process) =
+            LocalPtyProcess::spawn(24, 80, None).expect("spawn local PTY");
         assert!(metadata.shell_path.is_absolute());
         assert!(metadata.shell_path.is_file());
         assert!(metadata.home_directory.is_absolute());
@@ -810,8 +856,39 @@ mod tests {
     }
 
     #[test]
+    fn explicit_shell_launch_replaces_the_account_shell_and_exports_shell() {
+        let launch = LocalShellLaunch {
+            program: "/bin/sh".into(),
+            args: vec!["-i".into()],
+        };
+        let (metadata, mut process) =
+            LocalPtyProcess::spawn(24, 80, Some(&launch)).expect("spawn selected shell");
+        assert_eq!(metadata.shell_path, launch.program);
+        assert_eq!(metadata.shell_name, "sh");
+        let output = collect_output(&process);
+        write_input(
+            &process,
+            b"printf '__NVX_SHELL__:%s\\n' \"$SHELL\"; exit 0\r",
+        )
+        .expect("write shell commands");
+        assert_eq!(
+            process
+                .wait_for_exit(Duration::from_secs(8))
+                .expect("wait for shell"),
+            Some(LocalPtyExit {
+                code: Some(0),
+                signal: None,
+            })
+        );
+        drop(process);
+        let output = output.finish();
+        let text = String::from_utf8_lossy(&output);
+        assert!(text.contains("__NVX_SHELL__:/bin/sh"), "{text}");
+    }
+
+    #[test]
     fn raw_input_round_trips_without_utf8_coercion() {
-        let (_, mut process) = LocalPtyProcess::spawn(24, 80).expect("spawn local PTY");
+        let (_, mut process) = LocalPtyProcess::spawn(24, 80, None).expect("spawn local PTY");
         let output = collect_output(&process);
         write_input(&process, b"stty raw -echo; printf '__NVX_RAW_READY__'; dd bs=1 count=4 2>/dev/null | od -An -t x1; stty sane; exit 0\r")
             .expect("configure raw reader");
@@ -841,7 +918,7 @@ mod tests {
 
     #[test]
     fn resize_updates_the_live_slave_dimensions() {
-        let (_, mut process) = LocalPtyProcess::spawn(24, 80).expect("spawn local PTY");
+        let (_, mut process) = LocalPtyProcess::spawn(24, 80, None).expect("spawn local PTY");
         let output = collect_output(&process);
         process.resize(41, 101).expect("resize PTY");
         write_input(&process, b"printf '__NVX_SIZE__:'; stty size; exit 0\r")
@@ -865,7 +942,7 @@ mod tests {
 
     #[test]
     fn exited_root_reaps_its_remaining_process_group_before_reporting() {
-        let (_, mut process) = LocalPtyProcess::spawn(24, 80).expect("spawn local PTY");
+        let (_, mut process) = LocalPtyProcess::spawn(24, 80, None).expect("spawn local PTY");
         let output = collect_output(&process);
         write_input(
             &process,
@@ -889,7 +966,7 @@ mod tests {
 
     #[test]
     fn terminate_is_idempotent_and_drop_guarded() {
-        let (_, mut process) = LocalPtyProcess::spawn(24, 80).expect("spawn local PTY");
+        let (_, mut process) = LocalPtyProcess::spawn(24, 80, None).expect("spawn local PTY");
         let first = process.terminate().expect("terminate local PTY");
         let second = process.terminate().expect("repeat termination");
         assert_eq!(second, first);
@@ -897,7 +974,8 @@ mod tests {
         assert!(write_input(&process, b"rejected").is_err());
         assert!(process.resize(25, 81).is_err());
 
-        let (metadata, process) = LocalPtyProcess::spawn(24, 80).expect("spawn guarded local PTY");
+        let (metadata, process) =
+            LocalPtyProcess::spawn(24, 80, None).expect("spawn guarded local PTY");
         drop(process);
         assert!(
             !process_exists(i32::try_from(metadata.process_id).expect("Unix PID")),
@@ -908,12 +986,12 @@ mod tests {
 
     #[test]
     fn zero_dimensions_are_rejected() {
-        assert!(LocalPtyProcess::spawn(0, 80).is_err());
-        assert!(LocalPtyProcess::spawn(24, 0).is_err());
+        assert!(LocalPtyProcess::spawn(0, 80, None).is_err());
+        assert!(LocalPtyProcess::spawn(24, 0, None).is_err());
     }
 
     fn run_exit(code: i32) -> LocalPtyExit {
-        let (_, mut process) = LocalPtyProcess::spawn(24, 80).expect("spawn local PTY");
+        let (_, mut process) = LocalPtyProcess::spawn(24, 80, None).expect("spawn local PTY");
         let output = collect_output(&process);
         write_input(&process, format!("exit {code}\r").as_bytes()).expect("write exit");
         let exit = process

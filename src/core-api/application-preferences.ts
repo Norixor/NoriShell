@@ -6,6 +6,7 @@ import type {
 } from "./generated/core-api";
 import { preferenceValuesEqual } from "../preferences-transfer";
 import { parseCoreApiError } from "./client";
+import { normalizeApplicationPreferences } from "../ui-transfer";
 
 export type ApplicationPreferenceFailure =
   | "conflict" | "invalidInput" | "persistenceUnavailable" | "unsupportedSchema" | "requiresReconciliation" | "unknown";
@@ -44,7 +45,14 @@ export function replaceApplicationPreferences(
 }
 
 export function installApplicationPreferencesSnapshot(snapshot: ApplicationPreferencesSnapshot) {
-  snapshots.set(snapshot.group, snapshot);
+  snapshots.set(snapshot.group, normalizeSnapshot(snapshot));
+}
+
+// Core stores the shell choice as optional; the client always compares against the filled-in shape.
+function normalizeSnapshot(snapshot: ApplicationPreferencesSnapshot): ApplicationPreferencesSnapshot {
+  const value = snapshot.value;
+  if (snapshot.group !== "application" || value === null || typeof value !== "object" || Array.isArray(value)) return snapshot;
+  return { ...snapshot, value: normalizeApplicationPreferences(value as { localTerminalShell?: unknown }) };
 }
 
 export function currentApplicationPreferencesValue(group: ApplicationPreferenceGroupId): unknown | null {
@@ -64,6 +72,6 @@ export async function saveApplicationPreferences(
   if (next.group !== group || !preferenceValuesEqual(next.value, value) || next.revision === null) {
     throw new ApplicationPreferenceClientError("application_preferences.requires_reconciliation", "errors.applicationPreferences.requiresReconciliation");
   }
-  snapshots.set(group, next);
+  snapshots.set(group, normalizeSnapshot(next));
   return true;
 }
