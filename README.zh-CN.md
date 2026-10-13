@@ -42,14 +42,14 @@
 
 ## 安装与快速开始
 
-当前版本：**[v0.1.8](https://github.com/Norixor/NoriShell/releases/tag/v0.1.8)**。按设备选择安装包或免安装 ZIP；Linux 预览版安装包与 Android 预览版 APK 见下方。
+当前版本：**[v0.1.9](https://github.com/Norixor/NoriShell/releases/tag/v0.1.9)**。按设备选择安装包或免安装 ZIP；Linux 预览版安装包与 Android 预览版 APK 见下方。
 
 | 平台 | 架构 | 安装包 | 免安装 ZIP |
 | --- | --- | --- | --- |
-| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_arm64.zip) |
-| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_macos_x64.zip) |
-| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_x64.zip) |
-| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_windows_arm64.zip) |
+| macOS 13 及以上 | Apple Silicon（ARM64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_macos_arm64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_macos_arm64.zip) |
+| macOS 13 及以上 | Intel（x64） | [下载 DMG](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_macos_x64.dmg) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_macos_x64.zip) |
+| Windows | x64（Intel / AMD） | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_windows_x64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_windows_x64.zip) |
+| Windows | ARM64 | [下载安装包](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_windows_arm64-setup.exe) | [下载 ZIP](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_windows_arm64.zip) |
 
 使用 macOS 安装包时，将 NoriShell 拖入“应用程序”；Windows 安装包按向导安装。ZIP 版使用同样的本机配置与数据目录，运行前请完整解压。Windows ZIP 版需要系统已安装 WebView2 Runtime。
 
@@ -57,8 +57,8 @@
 
 | 平台 | 架构 | AppImage | deb |
 | --- | --- | --- | --- |
-| Linux（预览版） | x64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_x64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_x64.deb) |
-| Linux（预览版） | ARM64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_arm64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_linux_arm64.deb) |
+| Linux（预览版） | x64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_linux_x64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_linux_x64.deb) |
+| Linux（预览版） | ARM64 | [下载 AppImage](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_linux_arm64.AppImage) | [下载 deb](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_linux_arm64.deb) |
 
 Linux 版为预览版，目前仅在 Ubuntu 22.04（GNOME、Wayland）上验证。Linux 上尚未实现托盘、原生通知和系统钥匙串自动解锁。只有 AppImage 支持应用内更新，deb 为手动下载。
 
@@ -66,7 +66,7 @@ Linux 版为预览版，目前仅在 Ubuntu 22.04（GNOME、Wayland）上验证�
 
 | 平台 | 架构 | APK |
 | --- | --- | --- |
-| Android 10 或更高版本（预览版） | ARM64 | [下载 NoriShell_0.1.8_android_arm64.apk](https://github.com/Norixor/NoriShell/releases/download/v0.1.8/NoriShell_0.1.8_android_arm64.apk) |
+| Android 10 或更高版本（预览版） | ARM64 | [下载 NoriShell_0.1.9_android_arm64.apk](https://github.com/Norixor/NoriShell/releases/download/v0.1.9/NoriShell_0.1.9_android_arm64.apk) |
 
 Android 版为预览版，目前仅在 Android 模拟器（API 36、arm64）上验证，尚未经真机验收。NoriShell 不在应用商店上架：在手机上打开 APK，系统提示时允许该来源（例如浏览器或文件管理器）安装应用即可。APK 为正式签名的 release 构建；后续版本可按提示在应用内更新，由于每个版本使用同一签名，覆盖安装会保留已有数据。
 
