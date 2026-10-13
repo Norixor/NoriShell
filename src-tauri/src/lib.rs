@@ -18,6 +18,7 @@ mod lifecycle;
 #[cfg(target_os = "linux")]
 mod linux_window_shape;
 mod local_terminal_platform;
+mod local_terminal_shell;
 mod metrics_session_service;
 mod native_notification_service;
 mod native_notifications;
@@ -205,6 +206,7 @@ macro_rules! production_invoke_handler {
             ssh_session_service::ssh_terminal_reconnect,
             ssh_session_service::ssh_terminal_disconnect,
             ssh_session_service::local_terminal_open,
+            local_terminal_shell::local_terminal_shell_catalog,
             ssh_session_service::local_terminal_snapshot,
             ssh_session_service::local_terminal_get,
             ssh_session_service::local_terminal_attach,

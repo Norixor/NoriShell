@@ -24,6 +24,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import NvxAppThemeSettings from "../components/settings/NvxAppThemeSettings.vue";
+import NvxLocalTerminalShellSelect from "../components/settings/NvxLocalTerminalShellSelect.vue";
 import NvxTerminalInteractionSettings from "../components/settings/NvxTerminalInteractionSettings.vue";
 import NvxPreferenceTransferSettings from "../components/settings/NvxPreferenceTransferSettings.vue";
 import NvxDesktopPreferencesSettings from "../components/settings/NvxDesktopPreferencesSettings.vue";
@@ -506,6 +507,10 @@ function setTerminalStartupBehavior(value: string) {
 
 function setNewTerminalBehavior(value: string) {
   void saveApplicationPreference(() => ui.setNewTerminalBehavior(value as NewTerminalBehavior));
+}
+
+function setLocalTerminalShell(value: string) {
+  void saveApplicationPreference(() => ui.setLocalTerminalShell(value));
 }
 
 function setSinglePaneTabCloseBehavior(value: string) {
@@ -1048,6 +1053,26 @@ async function saveCustomScheme() {
                 :options="newTerminalBehaviorOptions"
                 :aria-label="t('sshSettings.applicationPreferences.newTerminalBehavior')"
                 @update:model-value="setNewTerminalBehavior"
+              />
+            </div>
+            <div
+              v-if="!mobileLayout"
+              class="application-preference"
+            >
+              <span class="application-preference__identity">
+                <NvxIcon
+                  :icon="SquareTerminal"
+                  :size="20"
+                />
+                <span class="application-preference__copy">
+                  <strong>{{ t("sshSettings.applicationPreferences.localTerminalShell") }}</strong>
+                  <small>{{ t("sshSettings.applicationPreferences.localTerminalShellDescription") }}</small>
+                </span>
+              </span>
+              <NvxLocalTerminalShellSelect
+                :model-value="ui.localTerminalShell"
+                :aria-label="t('sshSettings.applicationPreferences.localTerminalShell')"
+                @update:model-value="setLocalTerminalShell"
               />
             </div>
             <div class="application-preference">

@@ -1482,6 +1482,20 @@ export const zhCN = {
           sftpWelcome: "显示 SFTP 欢迎页面",
           localTerminal: "打开本地终端",
         },
+        localTerminalShell: "本地终端 Shell",
+        localTerminalShellDescription: "选择新打开的本地终端使用的 Shell，已在运行的终端不受影响。",
+        localTerminalShellDefault: "系统默认（{name}）",
+        localTerminalShellDefaultUnknown: "系统默认",
+        localTerminalShellCustom: "自定义路径…",
+        localTerminalShellUnavailableOption: "{id}（本机不可用）",
+        localTerminalShellUnavailable: "当前选择在本机不可用，打开本地终端将失败，请重新选择。",
+        localTerminalShellPath: "Shell 可执行文件路径",
+        localTerminalShellPathPlaceholder: "Shell 可执行文件的绝对路径",
+        localTerminalShellPathErrors: {
+          empty: "请输入 Shell 可执行文件的路径。",
+          tooLong: "路径过长（最多 1024 个字符）。",
+          controlCharacter: "路径不能包含控制字符。",
+        },
         singlePaneTabCloseBehavior: "断开并关闭标签页时",
         singlePaneTabCloseBehaviorDescription: "选择关闭已断开连接标签页时的处理方式。",
         singlePaneTabCloseBehaviors: {
@@ -2556,6 +2570,9 @@ export const zhCN = {
       connectionTest: {
         hostKeyUntrusted: "尚未信任此服务器身份。请先保存主机并在正式连接中核对指纹，再测试账号和密码。",
         cleanupTimedOut: "账号和密码已通过认证，但测试连接清理超时。连接已停止，请稍后重试。",
+      },
+      localTerminal: {
+        shellUnavailable: "所选的本地终端 Shell 不可用，请在设置中重新选择。",
       },
       telnet: {
         validation: "Telnet 请求无效，或尚未确认全部明文连接风险。",

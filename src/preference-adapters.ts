@@ -17,7 +17,7 @@ import { DEFAULT_HIGHLIGHT_RULES, validateHighlightConfiguration } from "./termi
 import { DEFAULT_TERMINAL_INTERACTION, validateInteractionPreferences } from "./terminal/interaction-preferences";
 import {
   DEFAULT_APPLICATION_PREFERENCES, defaultAppearancePreferences, exactPreferenceKeys,
-  validateAppearancePreferences, validateApplicationPreferences,
+  normalizeApplicationPreferences, validateAppearancePreferences, validateApplicationPreferences,
   type ApplicationPreferences, type AppearancePreferences,
 } from "./ui-transfer";
 
@@ -72,7 +72,7 @@ export function createPreferenceAdapters(): PreferenceGroupAdapter[] {
       defaults: () => ({ ...DEFAULT_APPLICATION_PREFERENCES }),
       apply: async (value, expected) => {
         if (!validateApplicationPreferences(value) || !validateApplicationPreferences(expected)
-          || !preferenceValuesEqual(ui.applicationPreferences(), expected)) return false;
+          || !preferenceValuesEqual(ui.applicationPreferences(), normalizeApplicationPreferences(expected))) return false;
         const localeChanged = value.locale !== expected.locale && isTauri();
         if (localeChanged) await setPluginLocale(resolveLocale(value.locale));
         const success = await ui.replaceApplicationPreferences(value, expected as ApplicationPreferences);

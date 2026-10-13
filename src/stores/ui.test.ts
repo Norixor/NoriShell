@@ -137,3 +137,37 @@ describe("after-startup preference", () => {
     store.$dispose();
   });
 });
+
+describe("local terminal shell preference", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("defaults to the system shell, persists a valid choice and falls back for invalid input", async () => {
+    setActivePinia(createPinia());
+    const store = useUiStore();
+    expect(store.localTerminalShell).toBe("default");
+    expect(await store.setLocalTerminalShell("path:/bin/bash")).toBe(true);
+    expect(store.localTerminalShell).toBe("path:/bin/bash");
+    expect(JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY)!).localTerminalShell).toBe("path:/bin/bash");
+
+    setActivePinia(createPinia());
+    expect(useUiStore().localTerminalShell).toBe("path:/bin/bash");
+
+    expect(await store.setLocalTerminalShell("not a shell")).toBe(true);
+    expect(store.localTerminalShell).toBe("default");
+    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify({ localTerminalShell: "path:" }));
+    setActivePinia(createPinia());
+    expect(useUiStore().localTerminalShell).toBe("default");
+  });
+
+  it("treats a Core snapshot without the field as the system default and always writes it back", () => {
+    setActivePinia(createPinia());
+    const store = useUiStore();
+    store.hydrateCorePreferences({ ...DEFAULT_APPLICATION_PREFERENCES, localTerminalShell: "cmd" }, store.appearancePreferences());
+    expect(store.localTerminalShell).toBe("cmd");
+    const legacy: Record<string, unknown> = { ...DEFAULT_APPLICATION_PREFERENCES };
+    delete legacy.localTerminalShell;
+    store.hydrateCorePreferences(legacy as never, store.appearancePreferences());
+    expect(store.localTerminalShell).toBe("default");
+    expect(store.applicationPreferences().localTerminalShell).toBe("default");
+  });
+});

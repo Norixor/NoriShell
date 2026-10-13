@@ -1,6 +1,6 @@
 # Generated Tauri handler and main-window ACL directory
 
-Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the trusted-main allowlist in `src-tauri/permissions/app.toml`. It lists **309 registered command handlers**. Registration does not grant plugin access. Handlers marked with a platform exist only in builds for that platform.
+Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the trusted-main allowlist in `src-tauri/permissions/app.toml`. It lists **310 registered command handlers**. Registration does not grant plugin access. Handlers marked with a platform exist only in builds for that platform.
 
 | Handler | Stable Core symbol | Main-window ACL |
 | --- | --- | --- |
@@ -114,6 +114,7 @@ Generated from `production_invoke_handler!` in `src-tauri/src/lib.rs` and the tr
 | `ssh_terminal_reconnect` | `COMMAND_SSH_TERMINAL_RECONNECT` | allowed |
 | `ssh_terminal_disconnect` | `COMMAND_SSH_TERMINAL_DISCONNECT` | allowed |
 | `local_terminal_open` | `COMMAND_LOCAL_TERMINAL_OPEN` | allowed |
+| `local_terminal_shell_catalog` | internal | allowed |
 | `local_terminal_snapshot` | `COMMAND_LOCAL_TERMINAL_SNAPSHOT` | allowed |
 | `local_terminal_get` | `COMMAND_LOCAL_TERMINAL_GET` | allowed |
 | `local_terminal_attach` | `COMMAND_LOCAL_TERMINAL_ATTACH` | allowed |

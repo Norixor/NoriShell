@@ -38,6 +38,9 @@ pub enum LocalSessionExit {
 pub enum LocalSessionFailureCode {
     AccountLookupFailed,
     InvalidDefaultShell,
+    /// The shell selected in application preferences cannot be launched on
+    /// this machine; distinct from a broken account default shell.
+    ShellUnavailable,
     InvalidHomeDirectory,
     PtySpawnFailed,
     PtyReadFailed,

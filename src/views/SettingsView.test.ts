@@ -32,6 +32,8 @@ vi.mock("../core-api/client", async (importOriginal) => ({
   listKnownHosts: client.listKnownHosts,
 }));
 vi.mock("../core-api/secure-vault-client", () => ({ requestSecureVault: client.secureVault }));
+const shells = vi.hoisted(() => ({ catalog: vi.fn() }));
+vi.mock("../core-api/local-terminal-shells", () => ({ getLocalTerminalShellCatalog: shells.catalog }));
 vi.mock("../terminal-fonts", () => ({ detectInstalledTerminalFonts: vi.fn(async () => []) }));
 const host = vi.hoisted(() => ({ mobile: false }));
 vi.mock("../platform-host", async (importOriginal) => ({
@@ -80,6 +82,13 @@ describe("Settings", () => {
     client.listIdentities.mockResolvedValue([]);
     client.listCredentialRefs.mockResolvedValue([]);
     client.listKnownHosts.mockResolvedValue([]);
+    shells.catalog.mockReset().mockResolvedValue({
+      defaultShellName: "zsh",
+      options: [
+        { id: "path:/bin/bash", name: "bash", path: "/bin/bash" },
+        { id: "path:/bin/zsh", name: "zsh", path: "/bin/zsh" },
+      ],
+    });
   });
 
   it("hides desktop-only controls on the phone shell and names Android Keystore for auto-unlock", async () => {
@@ -390,6 +399,83 @@ describe("Settings", () => {
       singlePaneTabCloseBehavior: "closeDirectly",
     });
     wrapper.unmount();
+  });
+
+  describe("local terminal shell", () => {
+    const shellSelect = (wrapper: Awaited<ReturnType<typeof mountSettings>>) => wrapper.get('[aria-label="Local terminal shell"]');
+    const optionLabels = () => Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).map((option) => option.textContent?.trim());
+    const choose = async (label: string) => {
+      Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find((option) => option.textContent?.includes(label))?.click();
+      await flushPromises();
+    };
+    const storedShell = () => JSON.parse(localStorage.getItem("norishell.ui.preferences.v1") ?? "{}").localTerminalShell;
+
+    it("lists the system default, detected shells and a custom path, and saves a catalog choice immediately", async () => {
+      const wrapper = await mountSettings();
+      const select = shellSelect(wrapper);
+      expect(select.text()).toContain("System default (zsh)");
+      await select.trigger("click");
+      expect(optionLabels()).toEqual(["System default (zsh)", "bash", "zsh", "Custom path..."]);
+      await choose("bash");
+      expect(useUiStore().localTerminalShell).toBe("path:/bin/bash");
+      expect(storedShell()).toBe("path:/bin/bash");
+      wrapper.unmount();
+    });
+
+    it("saves a trimmed custom path on Enter and rejects empty or control-character input without saving", async () => {
+      const wrapper = await mountSettings();
+      await shellSelect(wrapper).trigger("click");
+      await choose("Custom path...");
+      expect(storedShell()).toBe("default");
+      const input = wrapper.get('input[aria-label="Shell executable path"]');
+
+      await input.trigger("keydown", { key: "Enter" });
+      expect(wrapper.text()).toContain("Enter the path of a shell executable.");
+      await input.setValue("/opt/a\u0007b");
+      await input.trigger("keydown", { key: "Enter" });
+      expect(wrapper.text()).toContain("cannot contain control characters");
+      expect(storedShell()).toBe("default");
+
+      await input.setValue("  /opt/fish/bin/fish  ");
+      await input.trigger("keydown", { key: "Enter" });
+      await flushPromises();
+      expect(useUiStore().localTerminalShell).toBe("path:/opt/fish/bin/fish");
+      expect(storedShell()).toBe("path:/opt/fish/bin/fish");
+      wrapper.unmount();
+    });
+
+    it("shows a saved path outside the catalog as a custom path with its value prefilled", async () => {
+      localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ locale: "en", localTerminalShell: "path:/opt/custom/sh" }));
+      const wrapper = await mountSettings();
+      expect(shellSelect(wrapper).text()).toContain("Custom path...");
+      expect((wrapper.get('input[aria-label="Shell executable path"]').element as HTMLInputElement).value).toBe("/opt/custom/sh");
+      wrapper.unmount();
+    });
+
+    it("keeps a fixed id the machine does not offer selected and warns that it is unavailable", async () => {
+      localStorage.setItem("norishell.ui.preferences.v1", JSON.stringify({ locale: "en", localTerminalShell: "cmd" }));
+      const wrapper = await mountSettings();
+      expect(shellSelect(wrapper).text()).toContain("cmd (unavailable on this device)");
+      expect(wrapper.text()).toContain("Opening a local terminal will fail");
+      wrapper.unmount();
+    });
+
+    it("falls back to an empty catalog when it cannot be read and hides the row on the phone shell", async () => {
+      shells.catalog.mockResolvedValue({ defaultShellName: "", options: [] });
+      const wrapper = await mountSettings();
+      await shellSelect(wrapper).trigger("click");
+      expect(optionLabels()).toEqual(["System default", "Custom path..."]);
+      wrapper.unmount();
+
+      host.mobile = true;
+      try {
+        const phone = await mountSettings();
+        await phone.get('nav button[data-section="application"]').trigger("click");
+        await flushPromises();
+        expect(phone.find('[aria-label="Local terminal shell"]').exists()).toBe(false);
+        phone.unmount();
+      } finally { host.mobile = false; }
+    });
   });
 
   it("offers follow-system as the third application theme preference", async () => {

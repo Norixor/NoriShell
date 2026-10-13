@@ -7,7 +7,8 @@ import { corePreferencesEnabled, saveApplicationPreferences } from "../core-api/
 import { parseCoreApiError } from "../core-api/client";
 import { publishSecureWindowAppearance } from "../secure-window-appearance";
 import {
-  DEFAULT_TERMINAL_STARTUP_BEHAVIOR, isTerminalStartupBehavior, validateApplicationPreferences, validateAppearancePreferences,
+  DEFAULT_LOCAL_TERMINAL_SHELL, DEFAULT_TERMINAL_STARTUP_BEHAVIOR, isLocalTerminalShell, isTerminalStartupBehavior,
+  normalizeApplicationPreferences, validateApplicationPreferences, validateAppearancePreferences,
   type ApplicationPreferences, type AppearancePreferences, type TerminalStartupBehavior,
 } from "../ui-transfer";
 import { applyUiZoom, isUiZoom, type UiZoom } from "../ui-zoom";
@@ -58,6 +59,7 @@ interface StoredUiPreferences {
   locale?: unknown;
   terminalStartupBehavior?: unknown;
   newTerminalBehavior?: unknown;
+  localTerminalShell?: unknown;
   singlePaneTabCloseBehavior?: unknown;
   terminalThemeMode?: unknown;
   terminalFontFamily?: unknown;
@@ -124,6 +126,9 @@ export const useUiStore = defineStore("ui", () => {
     stored.newTerminalBehavior === "terminalWelcome" || stored.newTerminalBehavior === "sftpWelcome"
       || stored.newTerminalBehavior === "localTerminal" ? stored.newTerminalBehavior : "welcome",
   );
+  const localTerminalShell = ref<string>(
+    isLocalTerminalShell(stored.localTerminalShell) ? stored.localTerminalShell : DEFAULT_LOCAL_TERMINAL_SHELL,
+  );
   const singlePaneTabCloseBehavior = ref<SinglePaneTabCloseBehavior>(
     stored.singlePaneTabCloseBehavior === "closeDirectly" ? "closeDirectly" : "confirm",
   );
@@ -162,6 +167,7 @@ export const useUiStore = defineStore("ui", () => {
       locale: localePreference.value,
       terminalStartupBehavior: terminalStartupBehavior.value,
       newTerminalBehavior: newTerminalBehavior.value,
+      localTerminalShell: localTerminalShell.value,
       singlePaneTabCloseBehavior: singlePaneTabCloseBehavior.value,
       terminalThemeMode: terminalThemeMode.value,
       terminalFontFamily: terminalFontFamily.value,
@@ -212,6 +218,7 @@ export const useUiStore = defineStore("ui", () => {
     uiZoom.value = application.uiZoom;
     terminalStartupBehavior.value = application.terminalStartupBehavior;
     newTerminalBehavior.value = application.newTerminalBehavior;
+    localTerminalShell.value = isLocalTerminalShell(application.localTerminalShell) ? application.localTerminalShell : DEFAULT_LOCAL_TERMINAL_SHELL;
     singlePaneTabCloseBehavior.value = application.singlePaneTabCloseBehavior;
     terminalThemeMode.value = appearance.terminalThemeMode;
     terminalFontFamily.value = appearance.terminalFontFamily;
@@ -305,7 +312,7 @@ export const useUiStore = defineStore("ui", () => {
   function applicationPreferences(): ApplicationPreferences {
     return { themePreference: themePreference.value, locale: localePreference.value, uiZoom: uiZoom.value,
       terminalStartupBehavior: terminalStartupBehavior.value, newTerminalBehavior: newTerminalBehavior.value,
-      singlePaneTabCloseBehavior: singlePaneTabCloseBehavior.value };
+      singlePaneTabCloseBehavior: singlePaneTabCloseBehavior.value, localTerminalShell: localTerminalShell.value };
   }
 
   function legacyApplicationPreferences(): ApplicationPreferences {
@@ -322,8 +329,11 @@ export const useUiStore = defineStore("ui", () => {
       appTheme: appTheme.appThemePreferences() };
   }
 
-  async function replaceApplicationPreferences(next: unknown, expected: ApplicationPreferences) {
-    if (!validateApplicationPreferences(next) || uiZoomBusy.value
+  async function replaceApplicationPreferences(nextValue: unknown, expectedValue: ApplicationPreferences) {
+    if (!validateApplicationPreferences(nextValue)) return false;
+    const next = normalizeApplicationPreferences(nextValue);
+    const expected = normalizeApplicationPreferences(expectedValue);
+    if (uiZoomBusy.value
       || JSON.stringify(applicationPreferences()) !== JSON.stringify(expected)) return false;
     uiZoomBusy.value = true;
     const previousZoom = appliedUiZoom.value;
@@ -341,6 +351,7 @@ export const useUiStore = defineStore("ui", () => {
       uiZoom.value = next.uiZoom;
       terminalStartupBehavior.value = next.terminalStartupBehavior;
       newTerminalBehavior.value = next.newTerminalBehavior;
+      localTerminalShell.value = next.localTerminalShell;
       singlePaneTabCloseBehavior.value = next.singlePaneTabCloseBehavior;
       syncSystemThemeListener();
       applyDocumentPreferences();
@@ -402,6 +413,13 @@ export const useUiStore = defineStore("ui", () => {
   async function setNewTerminalBehavior(value: NewTerminalBehavior) {
     if (!await commitApplication({ ...applicationPreferences(), newTerminalBehavior: value })) return false;
     newTerminalBehavior.value = value;
+    return true;
+  }
+
+  async function setLocalTerminalShell(value: string) {
+    const next = isLocalTerminalShell(value) ? value : DEFAULT_LOCAL_TERMINAL_SHELL;
+    if (!await commitApplication({ ...applicationPreferences(), localTerminalShell: next })) return false;
+    localTerminalShell.value = next;
     return true;
   }
 
@@ -485,6 +503,7 @@ export const useUiStore = defineStore("ui", () => {
     localePreference,
     terminalStartupBehavior,
     newTerminalBehavior,
+    localTerminalShell,
     singlePaneTabCloseBehavior,
     terminalThemeMode,
     terminalFontFamily,
@@ -503,6 +522,7 @@ export const useUiStore = defineStore("ui", () => {
     setLocale,
     setTerminalStartupBehavior,
     setNewTerminalBehavior,
+    setLocalTerminalShell,
     setSinglePaneTabCloseBehavior,
     setTheme,
     setThemePreference,
