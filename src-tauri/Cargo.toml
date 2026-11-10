@@ -83,7 +83,7 @@ libc.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSError", "NSString", "NSNotification", "NSOperation", "block2"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSError", "NSLocale", "NSString", "NSNotification", "NSOperation", "block2"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger"] }
 apple-native-keyring-store = { version = "1.0.2", default-features = false, features = ["keychain", "protected"] }
 keyring-core = "1.0.0"
@@ -108,6 +108,7 @@ windows-sys = { workspace = true, features = [
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_System_Console",
+  "Win32_System_Environment",
   "Win32_System_JobObjects",
   "Win32_System_Pipes",
   "Win32_System_Power",

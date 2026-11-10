@@ -417,15 +417,15 @@ impl ManagedJobProcess {
 }
 
 impl ManagedConPtyProcess {
-    /// Starts an exact executable inside a new ConPTY. The pseudo-console and
-    /// Job Object attributes are installed on the same STARTUPINFOEX before
-    /// CreateProcessW, so the root cannot escape between spawn and assignment.
+    /// Starts an exact executable inside a new ConPTY with a complete UTF-16
+    /// `environment` block (`None` inherits). ConPTY and Job attributes share
+    /// one STARTUPINFOEX, so the root cannot escape before Job assignment.
     pub fn spawn(
         executable: &Path,
         arguments: &[OsString],
         current_directory: Option<&Path>,
-        rows: u16,
-        cols: u16,
+        environment: Option<&[u16]>,
+        (rows, cols): (u16, u16),
     ) -> io::Result<Self> {
         validate_launch_inputs(executable, current_directory)?;
         let dimensions = conpty_dimensions(rows, cols)?;
@@ -484,7 +484,7 @@ impl ManagedConPtyProcess {
                 EXTENDED_STARTUPINFO_PRESENT
                     | CREATE_NEW_PROCESS_GROUP
                     | CREATE_UNICODE_ENVIRONMENT,
-                null(),
+                environment.map_or(null(), |block| block.as_ptr().cast()),
                 directory_pointer,
                 (&raw const startup.StartupInfo).cast(),
                 &raw mut process,
@@ -1094,7 +1094,7 @@ mod tests {
     fn conpty_resize_is_observed_by_a_child_owned_from_process_creation() {
         let executable = current_test_executable();
         let args = test_arguments("windows_conpty_child_reports_dimensions");
-        let mut process = ManagedConPtyProcess::spawn(&executable, &args, None, 24, 80)
+        let mut process = ManagedConPtyProcess::spawn(&executable, &args, None, None, (24, 80))
             .expect("spawn ConPTY child in Job Object at creation");
         let mut reader = process.try_clone_reader().expect("clone ConPTY reader");
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -1125,7 +1125,7 @@ mod tests {
     fn conpty_child_can_explicitly_break_away_from_its_job() {
         let executable = current_test_executable();
         let args = test_arguments("windows_conpty_child_explicitly_breaks_away");
-        let mut process = ManagedConPtyProcess::spawn(&executable, &args, None, 24, 80)
+        let mut process = ManagedConPtyProcess::spawn(&executable, &args, None, None, (24, 80))
             .expect("spawn ConPTY child in terminal Job");
         let mut reader = process.try_clone_reader().expect("clone ConPTY reader");
         let (sender, receiver) = std::sync::mpsc::channel();

@@ -17,6 +17,7 @@ mod json_export;
 mod lifecycle;
 #[cfg(target_os = "linux")]
 mod linux_window_shape;
+mod local_terminal_env;
 mod local_terminal_platform;
 mod local_terminal_shell;
 mod metrics_session_service;

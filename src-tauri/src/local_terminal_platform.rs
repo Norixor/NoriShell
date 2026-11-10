@@ -118,8 +118,6 @@ mod platform {
         Duration::from_millis(500),
         Duration::from_secs(1),
     );
-    const LOCAL_TERMINAL_TYPE: &str = "xterm-256color";
-    const LOCAL_TERMINAL_COLOR_MODE: &str = "truecolor";
 
     pub(crate) struct LocalPtyProcess {
         process: ManagedProcessGroup,
@@ -167,34 +165,21 @@ mod platform {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::PtySpawnFailed, error)
             })?;
             let mut command = Command::new(&shell);
-            // App-UID processes on Android inherit a loader/runtime-specific
-            // environment; start from an empty one and pass only what the
-            // shell needs.
-            #[cfg(target_os = "android")]
-            apply_android_environment(&mut command, &home).map_err(|error| {
+            crate::local_terminal_env::apply_unix_environment(
+                &mut command,
+                &shell,
+                &home,
+                launch.is_some(),
+            )
+            .map_err(|error| {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidHomeDirectory, error)
             })?;
             command
                 .args(&shell_args)
                 .current_dir(&home)
-                // The desktop process may itself start with TERM=dumb.  The
-                // child owns a real PTY, so advertise its actual xterm
-                // compatibility instead of inheriting that non-terminal hint.
-                .env("TERM", LOCAL_TERMINAL_TYPE)
-                .env("COLORTERM", LOCAL_TERMINAL_COLOR_MODE)
-                .env("TERM_PROGRAM", "NoriShell")
-                // The host may be launched by an automation environment that
-                // sets this process-wide opt-out. A user-facing PTY must not
-                // pass that host-only rendering decision to interactive CLIs.
-                .env_remove("NO_COLOR")
                 .stdin(Stdio::from(slave))
                 .stdout(Stdio::from(slave_stdout))
                 .stderr(Stdio::from(slave_stderr));
-            // Tools started inside an explicitly chosen shell should see that
-            // shell as $SHELL; the platform default keeps the inherited value.
-            if launch.is_some() {
-                command.env("SHELL", &shell);
-            }
 
             // SAFETY: only async-signal-safe libc calls run between fork and
             // exec. The standard library has already installed fd 0 from the
@@ -376,50 +361,9 @@ mod platform {
                 |error| LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidHomeDirectory, error),
             )?;
         }
-        let shell = PathBuf::from(ANDROID_SHELL);
+        let shell = PathBuf::from(crate::local_terminal_env::ANDROID_SHELL);
         validate_account_paths(&shell, &home)?;
         Ok(CurrentAccount { shell, home })
-    }
-
-    #[cfg(target_os = "android")]
-    const ANDROID_SHELL: &str = "/system/bin/sh";
-    #[cfg(target_os = "android")]
-    const ANDROID_PATH: &str = "/product/bin:/apex/com.android.runtime/bin:\
-        /apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:\
-        /odm/bin:/vendor/bin:/vendor/xbin";
-    /// Platform locations the system shell and its tools need; they are set
-    /// by zygote/init for the app process and carry no user data.
-    #[cfg(target_os = "android")]
-    const ANDROID_PASSTHROUGH_ENV: &[&str] = &[
-        "ANDROID_DATA",
-        "ANDROID_ROOT",
-        "ANDROID_ART_ROOT",
-        "ANDROID_I18N_ROOT",
-        "ANDROID_TZDATA_ROOT",
-        "BOOTCLASSPATH",
-    ];
-
-    #[cfg(target_os = "android")]
-    fn apply_android_environment(command: &mut Command, home: &std::path::Path) -> io::Result<()> {
-        use std::os::unix::fs::DirBuilderExt;
-
-        let tmp = home.join("tmp");
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&tmp)?;
-        command
-            .env_clear()
-            .env("HOME", home)
-            .env("TMPDIR", &tmp)
-            .env("PATH", ANDROID_PATH)
-            .env("SHELL", ANDROID_SHELL);
-        for name in ANDROID_PASSTHROUGH_ENV {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        Ok(())
     }
 
     #[cfg(not(target_os = "android"))]
@@ -634,10 +578,18 @@ mod platform {
             let shell_name = shell_name(&shell).map_err(|error| {
                 LocalPtySpawnError::new(LocalPtySpawnFailure::InvalidDefaultShell, error)
             })?;
-            let process = ManagedConPtyProcess::spawn(&shell, &arguments, Some(&home), rows, cols)
-                .map_err(|error| {
-                    LocalPtySpawnError::new(LocalPtySpawnFailure::PtySpawnFailed, error)
-                })?;
+            let spawn_failed =
+                |error| LocalPtySpawnError::new(LocalPtySpawnFailure::PtySpawnFailed, error);
+            let environment =
+                crate::local_terminal_env::windows_environment_block().map_err(spawn_failed)?;
+            let process = ManagedConPtyProcess::spawn(
+                &shell,
+                &arguments,
+                Some(&home),
+                Some(&environment),
+                (rows, cols),
+            )
+            .map_err(spawn_failed)?;
             let metadata = LocalPtyMetadata {
                 process_id: process.process_id(),
                 shell_path: shell,
@@ -853,6 +805,28 @@ mod tests {
                 .any(|window| window == b"\x1b[31m__NVX_ANSI__\x1b[0m")
         );
         assert!(text.contains("__NVX_UTF8__:中文"), "{text}");
+    }
+
+    /// macOS starts the default shell as a login shell (argv[0] `-name`), so
+    /// `/etc/zprofile` and `~/.zprofile` set up PATH as Terminal.app does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_shell_is_a_login_shell_with_a_locale() {
+        let (metadata, mut process) =
+            LocalPtyProcess::spawn(24, 80, None).expect("spawn local PTY");
+        let output = collect_output(&process);
+        write_input(
+            &process,
+            b"printf '__NVX_LOGIN__:%s|%s\\n' \"$0\" \"${LANG:+set}\"; exit 0\r",
+        )
+        .expect("write shell commands");
+        process
+            .wait_for_exit(Duration::from_secs(8))
+            .expect("wait for shell");
+        drop(process);
+        let text = String::from_utf8_lossy(&output.finish()).into_owned();
+        let expected = format!("__NVX_LOGIN__:-{}|set", metadata.shell_name);
+        assert!(text.contains(&expected), "{text}");
     }
 
     #[test]
