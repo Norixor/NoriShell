@@ -2,6 +2,8 @@
 # glibc / WebKitGTK baseline low so the AppImage and deb run on newer distros.
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
+# The build host reaches the mirrors through a flaky proxy; retry single package downloads.
+RUN echo 'Acquire::Retries "10";' > /etc/apt/apt.conf.d/80-retries
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config curl wget file ca-certificates git rsync xz-utils \
       libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \

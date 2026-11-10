@@ -3,7 +3,7 @@
 # Requires the one-time setup: tools/linux-release/wsl-setup.sh in an Ubuntu-22.04 WSL distro (kept on D:).
 # Usage: tools/linux-release/build-wsl.sh   (output matches build.sh x64)
 set -euo pipefail
-WIN=admin@100.70.54.15
+WIN="${NORISHELL_WSL_HOST:-Administrator@100.82.20.114}"
 DISTRO=Ubuntu-22.04
 arch=x64
 root="$(cd "$(dirname "$0")/../.." && pwd)"
