@@ -65,7 +65,7 @@ zeroize.workspace = true
 zip.workspace = true
 tauri-plugin-updater = "2.12.0"
 # Same verifier crate (and version) the vendored updater uses; Android reuses it for APKs.
-minisign-verify = "0.2"
+minisign-verify = "0.3"
 tauri-plugin-process = "2.3.1"
 
 [dev-dependencies]
